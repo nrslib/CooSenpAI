@@ -1,0 +1,18 @@
+@import "../theme.css";
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; background: transparent; }
+body { padding: 8px; color: var(--color-text); }
+button, textarea { color: inherit; font: inherit; }
+.speech-card { display: grid; min-height: 100%; gap: 10px; padding: 14px 15px 12px; background: var(--color-surface); border: 1px solid var(--color-line-strong); border-radius: var(--radius-bubble); }
+header { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.recording-dot { width: 8px; height: 8px; background: var(--color-muted); border-radius: 50%; }
+.recording-dot.active { background: var(--color-error-ink); animation: pulse 1.25s ease-in-out infinite; }
+.transcript, .listening { min-height: 40px; margin: 0; color: var(--color-text); white-space: pre-wrap; line-height: 1.45; }
+.listening { color: var(--color-muted); }
+textarea { min-height: 62px; resize: none; padding: 9px; background: var(--color-base); border: 1px solid var(--color-line-strong); border-radius: var(--radius-control); }
+footer { display: flex; justify-content: flex-end; gap: 7px; }
+button { padding: 6px 10px; color: var(--color-muted); background: transparent; border: 1px solid var(--color-line-strong); border-radius: var(--radius-control); cursor: pointer; }
+button.primary { color: var(--color-text); background: var(--color-accent-face); border-color: var(--color-accent-ink); }
+.error { margin: 0; color: var(--color-error-ink); font-size: 11px; }
+@keyframes pulse { 50% { opacity: .45; transform: scale(.82); } }

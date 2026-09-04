@@ -1,0 +1,25 @@
+[package]
+name = "coosenpai-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+chrono.workspace = true
+image.workspace = true
+iana-time-zone.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+rustix.workspace = true
+uuid.workspace = true
+unicode-normalization.workspace = true

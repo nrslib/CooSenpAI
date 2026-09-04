@@ -1,0 +1,22 @@
+@import "../theme.css";
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; background: transparent; }
+body { padding: 8px; color: var(--color-text); }
+button, input, select { color: inherit; font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .48; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--color-accent-ink); outline-offset: 2px; }
+.model-popup-shell { display: grid; min-height: 100%; }
+.model-popup-card { display: grid; align-content: start; gap: 8px; min-height: 100%; padding: 13px 14px 11px; background: var(--color-surface); border: 1px solid var(--color-line-strong); border-radius: var(--radius-bubble); box-shadow: 0 8px 24px rgb(0 0 0 / 14%); }
+.model-popup-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.model-popup-title { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.model-popup-title > div { display: grid; min-width: 0; gap: 1px; }
+.model-popup-title span { color: var(--color-text); font-size: 13px; font-weight: 650; }
+.model-popup-title small { color: var(--color-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-popup-close { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; padding: 5px; color: var(--color-muted); background: transparent; border-radius: var(--radius-control); }
+.model-popup-close:hover { color: var(--color-text); background: var(--color-accent-face); }
+.model-popup-close .line-icon { width: 17px; height: 17px; }
+.model-popup-card .companion-model-controls { padding: 2px 0 0; background: transparent; border-bottom: 0; }
+.model-popup-status, .model-popup-error { margin: 0; color: var(--color-muted); font-size: 12px; line-height: 1.45; }
+.model-popup-error { color: var(--color-error-ink); }

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">CooSenpAI</title>
+  <desc id="desc">クリーム色のCooマークと炭色の二つの目</desc>
+  <path
+    fill="#FAF9F5"
+    d="M512 32C281 32 164 32 98 98S32 281 32 512s0 348 66 414 183 66 414 66 348 0 414-66 66-183 66-414 0-348-66-414S743 32 512 32Z"
+  />
+  <g transform="translate(95 95) scale(8.34)">
+    <g fill="#EFEAD8">
+      <g transform="rotate(135 50 50)">
+        <path d="M76 19C67 10 55 7 43 9C23 12 9 29 9 50C9 71 23 88 44 91C58 93 70 89 79 80C86 73 84 62 75 60C71 59 67 61 63 65C58 70 52 73 45 72C34 70 27 61 27 50C27 38 34 30 45 28C53 27 59 29 64 35C68 39 72 41 76 40C85 38 86 27 76 19Z" />
+      </g>
+    </g>
+    <ellipse cx="20" cy="81" rx="9.5" ry="6" fill="#EFEAD8" />
+    <ellipse cx="7.5" cy="92" rx="5" ry="3.2" fill="#EFEAD8" />
+    <g fill="#3A382F"><circle cx="44" cy="42" r="6.5" /><circle cx="62" cy="42" r="6.5" /></g>
+  </g>
+</svg>

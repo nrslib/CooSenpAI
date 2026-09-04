@@ -1,0 +1,27 @@
+[package]
+name = "coosenpai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "coosenpai"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+clap.workspace = true
+coosenpai-core = { path = "../core" }
+coosenpai-platform-macos = { path = "../platform-macos" }
+serde_json.workspace = true
+sha2.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+rustix.workspace = true

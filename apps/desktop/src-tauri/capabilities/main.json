@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "CooSenpAI main panel permissions",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

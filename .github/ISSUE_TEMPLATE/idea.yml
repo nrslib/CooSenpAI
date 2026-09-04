@@ -1,0 +1,24 @@
+name: アイデア
+description: ほしい機能や改善案を聞かせてください
+title: "[アイデア] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        コードではなく再現手順やアイデアを書いてください。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 困りごと
+      description: どんなときに困っているかを書いてください。
+      placeholder: 例：作業中に画面を何度も切り替える必要があります。
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 欲しい振る舞い
+      description: どうなってほしいかを書いてください。
+      placeholder: 例：作業中の画面からそのままAIに聞けるとうれしいです。
+    validations:
+      required: true

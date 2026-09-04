@@ -1,0 +1,43 @@
+import type { Provider, ProviderCapabilities } from "./types.js";
+
+export const PROVIDER_CAPABILITIES: Readonly<Record<Provider, ProviderCapabilities>> = {
+  codex: {
+    defaultModel: "default",
+    modelCandidates: ["default"],
+    imageInput: true,
+    nativeStructuredOutput: true,
+    effectiveStructuredOutput: true,
+    streaming: true,
+    cancellation: true,
+    sessionResume: true,
+    sessionCompact: false,
+    effort: true,
+    midTurnInput: false,
+  },
+  claude: {
+    defaultModel: "default",
+    modelCandidates: ["default"],
+    imageInput: true,
+    nativeStructuredOutput: true,
+    effectiveStructuredOutput: true,
+    streaming: true,
+    cancellation: true,
+    sessionResume: true,
+    sessionCompact: false,
+    effort: true,
+    midTurnInput: true,
+  },
+  opencode: {
+    defaultModel: "opencode/big-pickle",
+    modelCandidates: ["opencode/big-pickle"],
+    imageInput: true,
+    nativeStructuredOutput: false,
+    effectiveStructuredOutput: true,
+    streaming: true,
+    cancellation: true,
+    sessionResume: true,
+    sessionCompact: false,
+    effort: true,
+    midTurnInput: false,
+  },
+};

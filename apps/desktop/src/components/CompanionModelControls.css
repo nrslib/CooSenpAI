@@ -1,0 +1,8 @@
+.companion-model-controls { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: end; gap: 6px 8px; padding: 7px 12px; background: var(--color-surface); border-bottom: 1px solid var(--color-line); }
+.companion-model-control { display: grid; min-width: 88px; gap: 3px; }
+.companion-model-control-model { min-width: min(190px, 42vw); flex: 1 1 150px; }
+.companion-model-control label { color: var(--color-faint); font-size: 10px; letter-spacing: .03em; }
+.companion-model-control input, .companion-model-control select { min-width: 0; padding: 4px 7px; color: var(--color-text); background: var(--color-surface-step); border: 1px solid var(--color-line); border-radius: var(--radius-control); font-size: 12px; }
+.companion-model-reload { align-self: end; padding: 5px 7px; color: var(--color-muted); background: transparent; border: 1px solid var(--color-line); border-radius: var(--radius-control); font-size: 11px; }
+.companion-model-reload:hover { color: var(--color-text); background: var(--color-accent-face); }
+.companion-model-help { align-self: center; color: var(--color-faint); font-size: 10px; line-height: 1.3; }

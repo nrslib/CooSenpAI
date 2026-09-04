@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "capture-popup-window",
+  "description": "CooSenpAI capture send popup permissions",
+  "windows": ["capture-popup"],
+  "permissions": ["core:default"]
+}

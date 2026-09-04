@@ -1,0 +1,52 @@
+[package]
+name = "coosenpai-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[lib]
+name = "coosenpai_desktop"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "coosenpai-desktop"
+path = "src/main.rs"
+
+[[test]]
+name = "desktop_config_entry"
+path = "tests/desktop_config_entry.rs"
+harness = false
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+coosenpai-core = { path = "../../../crates/core" }
+coosenpai-platform-macos = { path = "../../../crates/platform-macos" }
+image = { workspace = true, features = ["jpeg"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tauri = { version = "2.11.5", default-features = false, features = ["wry", "tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tauri = { version = "2.11.5", default-features = false, features = ["wry", "tray-icon", "image-png", "macos-private-api", "test"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow"] }

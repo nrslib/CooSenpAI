@@ -1,0 +1,118 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CooSenpAI",
+  "version": "0.1.0",
+  "identifier": "dev.nrslib.coosenpai",
+  "build": {
+    "beforeDevCommand": "../../tools/ocr-helper/build.sh && ../../tools/speech-helper/build.sh && ../../tools/hearing-helper/build.sh && npm run frontend:dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "CooSenpAI",
+        "url": "index.html",
+        "width": 420,
+        "height": 700,
+        "minWidth": 380,
+        "minHeight": 520,
+        "visible": false
+      },
+      {
+        "label": "bubble",
+        "create": false,
+        "title": "CooSenpAI",
+        "url": "bubble.html",
+        "width": 390,
+        "height": 112,
+        "x": 20,
+        "y": 50,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "acceptFirstMouse": true,
+        "visible": false,
+        "resizable": false,
+        "shadow": false
+      },
+      {
+        "label": "capture-popup",
+        "title": "CooSenpAI",
+        "url": "capture-popup.html",
+        "width": 380,
+        "height": 390,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": true,
+        "visible": false,
+        "resizable": false,
+        "shadow": false
+      },
+      {
+        "label": "speech-popup",
+        "title": "CooSenpAI",
+        "url": "speech-popup.html",
+        "width": 360,
+        "height": 190,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "visible": false,
+        "resizable": false,
+        "shadow": false
+      },
+      {
+        "label": "model-popup",
+        "title": "モデル変更",
+        "url": "model-popup.html",
+        "width": 330,
+        "height": 250,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": true,
+        "visible": false,
+        "resizable": false,
+        "shadow": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "Productivity",
+    "icon": ["icons/icon.icns"],
+    "resources": {
+      "../../../builtins/prompts/facets/": "prompts/facets/",
+      "../../../builtins/tutorial/tutorial.md": "tutorial/tutorial.md",
+      "../../../tools/provider-bridge/dist/bridge.js": "provider-bridge/bridge.js"
+    },
+    "externalBin": [
+      "../../../target/helpers/coosenpai-ocr",
+      "../../../target/helpers/coosenpai-speech",
+      "../../../target/helpers/coosenpai-hearing"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "Developer ID Application: Masanobu Naruse (MUFAV5XYJD)",
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
+    }
+  }
+}
