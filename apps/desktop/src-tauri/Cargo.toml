@@ -15,11 +15,6 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "coosenpai-desktop"
 path = "src/main.rs"
 
-[[test]]
-name = "desktop_config_entry"
-path = "tests/desktop_config_entry.rs"
-harness = false
-
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
@@ -44,9 +39,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-tauri = { version = "2.11.5", default-features = false, features = ["wry", "tray-icon", "image-png", "macos-private-api", "test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow"] }

@@ -8,7 +8,11 @@ impl CompanionAgent {
             return Ok(());
         };
         let date = crate::config::local_date_at(self.clock.now());
-        if self.last_proactive_limit_log_date.as_deref() == Some(date.as_str()) {
+        let should_log = match &self.storage {
+            Some(storage) => storage.try_record_limit_notice(&date)?,
+            None => self.last_proactive_limit_log_date.as_deref() != Some(date.as_str()),
+        };
+        if !should_log {
             return Ok(());
         }
         if let Some(logger) = &self.logger {
@@ -17,7 +21,9 @@ impl CompanionAgent {
                 &format!("相棒の自発呼び出しが一日上限に達しました: limit={}", limit),
             )?;
         }
-        self.last_proactive_limit_log_date = Some(date);
+        if self.storage.is_none() {
+            self.last_proactive_limit_log_date = Some(date);
+        }
         Ok(())
     }
 

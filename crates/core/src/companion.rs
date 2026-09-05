@@ -972,9 +972,10 @@ impl CompanionAgent {
     }
 
     pub(crate) fn proactive_limit_reached(&self) -> bool {
-        self.config
-            .daily_proactive_limit
-            .is_some_and(|limit| self.proactive_calls_today >= limit)
+        crate::usage::is_proactive_limit_reached(
+            self.proactive_calls_today,
+            self.config.daily_proactive_limit,
+        )
     }
 
     fn commit_call_side_effects(

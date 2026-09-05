@@ -17,7 +17,7 @@ interface Props extends SettingsCategoryProps {
   readonly onEditPersona: () => void;
 }
 
-export function GeneralSettings({ form, snapshot, advanced, saving, update, errorFor, personas, avatarInputRef, onSelectAvatar, onResetAvatar, onReloadPersona, onEditPersona }: Props): ReactElement {
+export function GeneralSettings({ form, snapshot, saving, update, errorFor, personas, avatarInputRef, onSelectAvatar, onResetAvatar, onReloadPersona, onEditPersona }: Props): ReactElement {
   return <>
     <fieldset id="settings-companion" className={tutorialSettingsHighlight(snapshot.onboarding, "persona") ? "tutorial-highlight" : undefined}>
       <legend>性格</legend>
@@ -30,11 +30,6 @@ export function GeneralSettings({ form, snapshot, advanced, saving, update, erro
       <div className="button-row"><button type="button" disabled={saving} onClick={onReloadPersona}>性格を再読込</button><button type="button" onClick={onEditPersona}>性格を編集</button></div>
       <SelectInput label="積極性" path="companion.assertiveness" value={form.assertiveness} options={["low", "normal", "high"]} update={(value) => update("assertiveness", value as FormState["assertiveness"])} />
       <p className="field-help">ふだんの基準です。メイン画面のチップで一時的に変えられます。</p>
-      {advanced ? <>
-        <label><span>今日のふりかえり時刻</span><input id="setting-companion-reviewTime" type="time" value={form.reviewTime} onChange={(event) => update("reviewTime", event.target.value)} /><small>空欄にすると無効です。</small></label>
-        <ReminderEditor value={form.reminders} update={(value) => update("reminders", value)} />
-        <label><span>考え中の送信（既定: 順番待ち）</span><select id="setting-chat-whileThinking" value={form.whileThinking} onChange={(event) => update("whileThinking", event.target.value as FormState["whileThinking"])}><option value="queue">順番待ち</option><option value="append">言い足し</option></select><small>言い足しでは、考え中に送った発言も含めて一つの返事にまとめます。</small></label>
-      </> : null}
     </fieldset>
 
     <fieldset id="settings-appearance"><legend>見た目</legend>
@@ -43,25 +38,29 @@ export function GeneralSettings({ form, snapshot, advanced, saving, update, erro
       <label><span>フォント名（自由入力）</span><input value={fontPreset(form.uiFont) === "custom" ? form.uiFont : ""} placeholder="例: A-OTF UD新ゴ Pr6N" onChange={(event) => update("uiFont", event.target.value)} /></label>
     </fieldset>
 
-    <fieldset id="settings-language"><legend>言語</legend>
-      {advanced ? <TextInput label="認識ロケール（既定: system）" path="speech.locale" value={form.speechLocale} update={(value) => update("speechLocale", value)} /> : <p className="field-help">音声認識・文字起こしの言語は「詳細」で変更できます。</p>}
-    </fieldset>
-
     <fieldset id="settings-memory"><legend>記憶</legend>
       <BooleanInput label="記憶を有効にする" path="memory.enabled" value={form.memoryEnabled} update={(value) => update("memoryEnabled", value)} />
       <BooleanInput label="昨日までの会話と観察の要約を AI に渡す" path="memory.providerConsent" value={form.memoryProviderConsent} update={(value) => update("memoryProviderConsent", value)} />
       <p className="field-help">前日の記録から要約を作り、以後の会話に添付します。</p>
-      {advanced ? <>
-        <NumberInput label="日付変更後の待ち時間（分）" path="memory.graceMinutes" value={form.memoryGraceMinutes} update={(value) => update("memoryGraceMinutes", value)} errorFor={errorFor} />
-        <NumberInput label="日次要約の保持日数" path="memory.dailyRetentionDays" value={form.memoryDailyRetentionDays} update={(value) => update("memoryDailyRetentionDays", value)} errorFor={errorFor} />
-        <NumberInput label="週次要約の保持週数" path="memory.weeklyRetentionWeeks" value={form.memoryWeeklyRetentionWeeks} update={(value) => update("memoryWeeklyRetentionWeeks", value)} errorFor={errorFor} />
-        <NumberInput label="文脈の再注入間隔" path="companion.contextRefreshCalls" value={form.contextRefreshCalls} update={(value) => update("contextRefreshCalls", value)} errorFor={errorFor} />
-        <NumberInput label="覚える候補を聞く1日の上限" path="memory.factPromptDailyLimit" value={form.factPromptDailyLimit} update={(value) => update("factPromptDailyLimit", value)} errorFor={errorFor} />
-      </> : null}
     </fieldset>
     <MemoryPanel status={snapshot.memoryStatus} />
 
-    {advanced ? <fieldset id="settings-debug"><legend>デバッグ</legend><BooleanInput label="デバッグ記録を残す" path="debug.enabled" value={form.debugEnabled} update={(value) => update("debugEnabled", value)} /><p className="field-help">有効時は送信画像、OCR、プロンプト、AI 応答を最大 3 日・200 MiB 保存します。</p></fieldset> : null}
     <fieldset id="settings-app"><legend>アプリ</legend><BooleanInput label="更新の確認" path="app.checkForUpdates" value={form.checkForUpdates} update={(value) => update("checkForUpdates", value)} /><p className="field-help">GitHub へ版の確認だけを送ります。</p><BooleanInput label="ログイン時に起動する" path="app.launchAtLogin" value={form.launchAtLogin} update={(value) => update("launchAtLogin", value)} /></fieldset>
+
+    <fieldset id="settings-general-detail"><legend>詳細</legend>
+      <h3>性格</h3>
+      <label><span>今日のふりかえり時刻</span><input id="setting-companion-reviewTime" type="time" value={form.reviewTime} onChange={(event) => update("reviewTime", event.target.value)} /><small>空欄にすると無効です。</small></label>
+      <ReminderEditor value={form.reminders} update={(value) => update("reminders", value)} />
+      <label><span>考え中の送信（既定: 順番待ち）</span><select id="setting-chat-whileThinking" value={form.whileThinking} onChange={(event) => update("whileThinking", event.target.value as FormState["whileThinking"])}><option value="queue">順番待ち</option><option value="append">言い足し</option></select><small>言い足しでは、考え中に送った発言も含めて一つの返事にまとめます。</small></label>
+      <h3>言語</h3>
+      <TextInput label="認識ロケール（既定: system）" path="speech.locale" value={form.speechLocale} update={(value) => update("speechLocale", value)} />
+      <h3>記憶</h3>
+      <NumberInput label="日付変更後の待ち時間（分）" path="memory.graceMinutes" value={form.memoryGraceMinutes} update={(value) => update("memoryGraceMinutes", value)} errorFor={errorFor} />
+      <NumberInput label="日次要約の保持日数" path="memory.dailyRetentionDays" value={form.memoryDailyRetentionDays} update={(value) => update("memoryDailyRetentionDays", value)} errorFor={errorFor} />
+      <NumberInput label="週次要約の保持週数" path="memory.weeklyRetentionWeeks" value={form.memoryWeeklyRetentionWeeks} update={(value) => update("memoryWeeklyRetentionWeeks", value)} errorFor={errorFor} />
+      <NumberInput label="文脈の再注入間隔" path="companion.contextRefreshCalls" value={form.contextRefreshCalls} update={(value) => update("contextRefreshCalls", value)} errorFor={errorFor} />
+      <NumberInput label="覚える候補を聞く1日の上限" path="memory.factPromptDailyLimit" value={form.factPromptDailyLimit} update={(value) => update("factPromptDailyLimit", value)} errorFor={errorFor} />
+      <fieldset id="settings-debug"><legend>デバッグ</legend><BooleanInput label="デバッグ記録を残す" path="debug.enabled" value={form.debugEnabled} update={(value) => update("debugEnabled", value)} /><p className="field-help">有効時は送信画像、OCR、プロンプト、AI 応答を最大 3 日・200 MiB 保存します。</p></fieldset>
+    </fieldset>
   </>;
 }

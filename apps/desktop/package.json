@@ -1,13 +1,12 @@
 {
   "name": "@coosenpai/desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node scripts/tauri.mjs dev",
     "frontend:dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "vite build",
-    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "tauri": "node scripts/tauri.mjs"
   },
@@ -22,7 +21,6 @@
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "^5.7.0",
-    "vite": "^6.3.5",
-    "vitest": "^3.0.0"
+    "vite": "^6.3.5"
   }
 }

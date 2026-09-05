@@ -155,7 +155,7 @@ pub(crate) struct DesktopState {
     pub logger: Arc<FileLogger>,
     pub own_bounds: Arc<TauriOwnWindowBounds>,
     conversation_sync: Mutex<()>,
-    screen_permission: Mutex<coosenpai_core::ports::ScreenCapturePermission>,
+    screen_permission: Mutex<permission::ScreenPermissionCache>,
     #[cfg(test)]
     screen_permission_override: Mutex<Option<coosenpai_core::ports::ScreenCapturePermission>>,
     snapshot: Mutex<AppSnapshot>,
@@ -163,6 +163,7 @@ pub(crate) struct DesktopState {
     bubble_delivery_log_state: Mutex<BubbleDeliveryLogState>,
     watch_control: Mutex<WatchControl>,
     pub(crate) watch_intent_lock: Mutex<()>,
+    popup_focus_gate: Mutex<()>,
     runtime_active: AtomicBool,
     shutting_down: AtomicBool,
     presence_startup_pending: AtomicBool,
@@ -225,6 +226,10 @@ impl DesktopState {
 
     pub(crate) fn set_bubble_focused(&self, focused: bool) {
         self.bubble_focus.send_replace(focused);
+    }
+
+    pub(crate) fn popup_focus_gate(&self) -> &Mutex<()> {
+        &self.popup_focus_gate
     }
 
     pub(crate) async fn input_popup_kind(&self) -> Option<crate::input_popup::InputPopupKind> {
@@ -432,12 +437,8 @@ impl DesktopState {
         let observer_calls = coosenpai_core::usage::today_observer_usage(&paths.usage)
             .map(|usage| usage.ai_calls)
             .unwrap_or(0);
-        let companion_calls = coosenpai_core::usage::load_companion(
-            &paths.companion_usage,
-            &coosenpai_core::config::local_date(),
-        )
-        .map(|usage| usage.total_calls)
-        .unwrap_or(0);
+        let (companion_calls, companion_limit_reached) =
+            companion_usage_summary(&paths, config.companion.daily_proactive_limit);
         let permission = crate::platform::screen_capture_permission();
         let speech_permissions = permission::current_speech_permissions(logger.as_ref());
         let speech = Arc::new(crate::speech::SpeechController::new(&paths));
@@ -448,6 +449,7 @@ impl DesktopState {
         let speech_input_devices = speech.input_devices();
         let initial_avatar =
             crate::avatar::load_with_status(&paths, config.ui.avatar_path.as_deref());
+        let config_revision = config.revision;
         let (capture_popup_focus, _) = watch::channel(false);
         let (bubble_focus, _) = watch::channel(false);
         logger.write(
@@ -457,7 +459,10 @@ impl DesktopState {
         let state = Arc::new(Self {
             own_bounds: Arc::new(TauriOwnWindowBounds::new(app.clone())),
             conversation_sync: Mutex::new(()),
-            screen_permission: Mutex::new(permission),
+            screen_permission: Mutex::new(permission::ScreenPermissionCache::new(
+                permission,
+                Instant::now(),
+            )),
             #[cfg(test)]
             screen_permission_override: Mutex::new(None),
             app,
@@ -495,6 +500,7 @@ impl DesktopState {
                     companion_calls,
                     signed_build(),
                 );
+                snapshot.companion.proactive_limit_reached = companion_limit_reached;
                 snapshot.avatar_image_png = initial_avatar.image_png;
                 snapshot.avatar_image_load_failed = initial_avatar.failed;
                 snapshot.last_error = runtime_error;
@@ -502,7 +508,7 @@ impl DesktopState {
                 snapshot.speech.input_devices = speech_input_devices;
                 snapshot
             }),
-            config_update: ConfigUpdateCoordinator::default(),
+            config_update: ConfigUpdateCoordinator::new(config_revision),
             bubble_delivery_log_state: Mutex::new(BubbleDeliveryLogState::default()),
             watch_control: Mutex::new(WatchControl {
                 lifecycle: WatchLifecycle::Stopped,
@@ -512,6 +518,7 @@ impl DesktopState {
                 start_commit_barrier: None,
             }),
             watch_intent_lock: Mutex::new(()),
+            popup_focus_gate: Mutex::new(()),
             runtime_active: AtomicBool::new(runtime_active),
             shutting_down: AtomicBool::new(false),
             presence_startup_pending: AtomicBool::new(true),
@@ -621,16 +628,13 @@ impl DesktopState {
         let _conversation_sync = self.conversation_sync.lock().await;
         let config = self.runtime.config();
         let storage = CompanionStorage::from_paths(&self.paths, config.retention.conversation_days);
+        let (calls, limit_reached) =
+            companion_usage_summary(&self.paths, config.companion.daily_proactive_limit);
         if let Ok(conversation) = storage.load_conversation() {
-            let calls = coosenpai_core::usage::load_companion(
-                &self.paths.companion_usage,
-                &coosenpai_core::config::local_date(),
-            )
-            .map(|usage| usage.total_calls)
-            .unwrap_or(0);
             self.publish(|snapshot| {
                 snapshot.conversation = conversation;
                 snapshot.companion.total_calls_today = calls;
+                snapshot.companion.proactive_limit_reached = limit_reached;
             })
             .await;
         }
@@ -676,6 +680,23 @@ impl DesktopState {
             .logger
             .write("INFO", "CooSenpAI desktop runtimeを停止しました。");
     }
+}
+
+fn companion_usage_summary(paths: &ConfigPaths, proactive_limit: Option<u32>) -> (u32, bool) {
+    coosenpai_core::usage::load_companion(
+        &paths.companion_usage,
+        &coosenpai_core::config::local_date(),
+    )
+    .map(|usage| {
+        (
+            usage.total_calls,
+            coosenpai_core::usage::is_proactive_limit_reached(
+                usage.proactive_calls,
+                proactive_limit,
+            ),
+        )
+    })
+    .unwrap_or((0, false))
 }
 
 fn refresh_avatar_snapshot(snapshot: &mut AppSnapshot, paths: &ConfigPaths) {

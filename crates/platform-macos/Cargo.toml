@@ -27,6 +27,3 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["N
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
 objc2-speech = { version = "0.3.2", default-features = false, features = ["std", "SFSpeechRecognizer", "block2"] }
 objc2-vision = { version = "0.3.2", default-features = false, features = ["VNObservation", "VNRecognizeTextRequest", "VNRequest", "VNRequestHandler", "VNTypes", "objc2-core-foundation", "objc2-core-graphics"] }
-
-[dev-dependencies]
-tempfile.workspace = true

@@ -18,6 +18,7 @@ export interface ProviderApiKeyStatus { readonly codex: boolean; readonly claude
 
 export interface CooSenpaiConfig {
   readonly configVersion: number;
+  readonly revision: number;
   readonly app: { readonly launchAtLogin: boolean; readonly checkForUpdates: boolean };
   readonly watch: {
     readonly enabled: boolean;

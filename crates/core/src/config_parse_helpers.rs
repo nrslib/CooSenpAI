@@ -88,6 +88,25 @@ pub(super) fn nonnegative_u32(
     }
 }
 
+pub(super) fn nonnegative_u64(
+    object: &Map<String, Value>,
+    key: &str,
+    default: u64,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> u64 {
+    let Some(value) = object.get(key) else {
+        return default;
+    };
+    match value.as_u64() {
+        Some(value) => value,
+        None => {
+            issues.push(issue(path, "0以上の整数で指定してください。"));
+            default
+        }
+    }
+}
+
 pub(super) fn optional_nonnegative_u32(
     object: &Map<String, Value>,
     key: &str,

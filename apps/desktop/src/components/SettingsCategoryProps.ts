@@ -4,7 +4,6 @@ import type { FormState, SettingsErrorFor, SettingsUpdate } from "../settings-fo
 export interface SettingsCategoryProps {
   readonly form: FormState;
   readonly snapshot: AppSnapshot;
-  readonly advanced: boolean;
   readonly saving: boolean;
   readonly update: SettingsUpdate;
   readonly errorFor: SettingsErrorFor;

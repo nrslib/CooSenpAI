@@ -1,10 +1,24 @@
 use crate::command_guard::DesktopCommand;
-use crate::commands::{IpcError, IpcResult};
+use crate::commands::{authorize_window, CommandOrigin, IpcError, IpcResult, TauriIpcResult};
 use coosenpai_core::config::{
-    parse_config, Config, ConfigError, ConfigValidationIssue, NUMERIC_CONFIG_PATHS,
+    load_config, parse_config, Config, ConfigError, ConfigValidationIssue, NUMERIC_CONFIG_PATHS,
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::Arc;
+use tauri::{State, WebviewWindow};
+
+#[tauri::command]
+pub(super) async fn config_get_persisted(
+    window: WebviewWindow,
+    state: State<'_, Arc<crate::state::DesktopState>>,
+) -> TauriIpcResult<Config> {
+    authorize_window(&window, CommandOrigin::Main)?;
+    Ok(match load_config(&state.paths) {
+        Ok(config) => IpcResult::success(config),
+        Err(error) => config_failure(error),
+    })
+}
 
 pub(super) fn validate_numeric_patch(patch: &Value) -> Result<(), ConfigError> {
     let issues = NUMERIC_CONFIG_PATHS

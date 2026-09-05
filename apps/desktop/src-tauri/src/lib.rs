@@ -337,6 +337,7 @@ pub fn run() -> anyhow::Result<()> {
             commands::chat_cancel,
             commands::chat_retry,
             commands::config_get,
+            commands_config::config_get_persisted,
             commands::config_update,
             commands::model_popup_open,
             commands::model_popup_close,

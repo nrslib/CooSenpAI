@@ -261,7 +261,8 @@ impl DesktopState {
         {
             return Ok(());
         }
-        transaction.commit()?;
+        transaction.commit_config(self.runtime.config().revision)?;
+        self.publish(|_| {}).await;
         self.emit_tutorial_intro_sequence(true).await?;
         Ok(())
     }

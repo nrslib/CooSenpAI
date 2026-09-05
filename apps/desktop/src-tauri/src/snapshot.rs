@@ -281,6 +281,7 @@ impl AppSnapshot {
         companion_calls: u32,
         signed_build: bool,
     ) -> Self {
+        let config_revision = config.revision;
         let memory_status = MemoryStatus {
             enabled: config.memory.enabled,
             provider_consent: config.memory.provider_consent,
@@ -288,7 +289,7 @@ impl AppSnapshot {
         };
         Self {
             revision: 1,
-            config_revision: 0,
+            config_revision,
             observer_running: false,
             watch_intent_active: false,
             observer: ObserverView {

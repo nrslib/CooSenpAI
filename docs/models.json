@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "codex": {
+    "models": [
+      "default",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna"
+    ],
+    "efforts": [
+      "default",
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "modelEfforts": {
+      "gpt-5.6-luna": [
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    }
+  },
+  "claude": {
+    "models": [
+      "default",
+      "opus",
+      "sonnet",
+      "haiku"
+    ],
+    "efforts": [
+      "default",
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "modelEfforts": {}
+  },
+  "opencode": {
+    "efforts": [
+      "default",
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "modelEfforts": {}
+  }
+}

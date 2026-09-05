@@ -29,11 +29,7 @@ impl CompanionStorage {
         prune_conversation: bool,
     ) -> Result<CursorSnapshot, PersistenceError> {
         if prune_conversation {
-            crate::persistence::prune_daily_jsonl(
-                &self.conversation_directory,
-                self.retention_days,
-                u64::MAX,
-            )?;
+            self.prune_retention_at(chrono::Utc::now())?;
         }
         let conversation = self.load_all_conversation()?;
         let unanswered = unanswered_user_entries(&conversation);

@@ -319,6 +319,7 @@ export function App(): ReactElement {
       focusSection={settingsFocus}
       onClose={() => { setSettingsOpen(false); setSettingsFocus(undefined); }}
       onSave={(patch, avatarImage, baseConfigRevision) => handle(desktopApi.updateConfig(patch, avatarImage, baseConfigRevision))}
+      onReloadConfig={() => handle(desktopApi.getPersistedConfig())}
       onReloadPersona={reloadPersona}
       onGetPersona={(id) => desktopApi.getPersona(id)}
       onSavePersona={async (id, displayName, body) => { const result = await handle(desktopApi.savePersona(id, displayName, body)); await refreshPersonas(); return result; }}

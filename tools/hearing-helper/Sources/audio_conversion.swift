@@ -260,6 +260,10 @@ enum MonoAudioBufferConversionError: LocalizedError {
     }
 }
 
+func normalizedAudioBufferForAppend(from source: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
+    try monoFloat32AudioBuffer(from: source)
+}
+
 func monoFloat32AudioBuffer(from source: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
     guard source.frameLength > 0 else {
         throw MonoAudioBufferConversionError.emptyBuffer

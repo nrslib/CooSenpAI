@@ -18,8 +18,21 @@ impl DesktopState {
         let shortcut_version = transaction.base_revision.saturating_add(1);
         let previous = self.runtime.config();
         let avatar_updated = staged_avatar.is_some();
-        let persisted =
-            persist_config_update(&self.paths, &self.runtime, &previous, update, staged_avatar)?;
+        let persisted = match persist_config_update(
+            &self.paths,
+            &self.runtime,
+            &previous,
+            update,
+            staged_avatar,
+            expected_revision,
+        ) {
+            Ok(persisted) => persisted,
+            Err(error @ coosenpai_core::config::ConfigError::RevisionConflict { actual, .. }) => {
+                self.config_update.observe_config_revision(actual);
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let requested = persisted.requested.ok_or_else(|| {
             ConfigCommitError::Runtime(RuntimeError::Factory(
                 "設定候補を構築できませんでした".to_owned(),
@@ -70,7 +83,7 @@ impl DesktopState {
             return Err(error);
         }
         if watch_enabled_is_only_difference {
-            transaction.commit()?;
+            transaction.commit_config(staged.revision)?;
             self.activate_runtime();
             self.publish(|snapshot| snapshot.apply_config(staged.clone()))
                 .await;
@@ -96,10 +109,12 @@ impl DesktopState {
             Ok(()) if requested.keymap != staged.keymap => {
                 let keymap_base = persisted_before.clone();
                 let keymap_candidate = requested.clone();
-                match coosenpai_core::config::patch_config(&self.paths, None, move |mut current| {
-                    apply_keymap_changes(&mut current, &keymap_base, &keymap_candidate);
-                    Ok(current)
-                }) {
+                match persist_keymap_patch(
+                    &self.paths,
+                    staged.revision,
+                    &keymap_base,
+                    &keymap_candidate,
+                ) {
                     Ok(config) => (config, Vec::new()),
                     Err(error) => {
                         let restore = crate::capture::sync_shortcuts(
@@ -109,6 +124,22 @@ impl DesktopState {
                         )
                         .await
                         .err();
+                        if let coosenpai_core::config::ConfigError::RevisionConflict {
+                            actual,
+                            ..
+                        } = &error
+                        {
+                            if let Some(restore) = restore.as_deref() {
+                                let _ = self.logger.write(
+                                    "WARN",
+                                    &format!(
+                                        "設定競合後のショートカット復元に失敗しました: {restore}"
+                                    ),
+                                );
+                            }
+                            self.config_update.observe_config_revision(*actual);
+                            return Err(error.into());
+                        }
                         let message = restore.map_or_else(
                             || error.format_for_user(),
                             |restore| format!("{}; {restore}", error.format_for_user()),
@@ -132,7 +163,7 @@ impl DesktopState {
                 return Err(error);
             }
         }
-        transaction.commit()?;
+        transaction.commit_config(config.revision)?;
         record_companion_model_history(
             &self.paths,
             &persisted_before,
@@ -226,6 +257,9 @@ impl DesktopState {
                 Ok(config)
             })?;
         if previous == persona {
+            transaction.commit_config(config.revision)?;
+            self.publish(|snapshot| snapshot.apply_config(config.clone()))
+                .await;
             return Ok(config);
         }
         let tutorial_provider = self.tutorial.lock().await.provider();
@@ -250,7 +284,7 @@ impl DesktopState {
             self.finish_config_degraded_state(&error).await;
             return Err(error);
         }
-        transaction.commit()?;
+        transaction.commit_config(config.revision)?;
         self.publish(|snapshot| {
             snapshot.apply_config(config.clone());
             snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle;
@@ -320,6 +354,7 @@ fn persist_config_update<F>(
     recovery: &Config,
     update: F,
     mut staged_avatar: Option<crate::avatar::StagedAvatar>,
+    expected_revision: Option<u64>,
 ) -> Result<PersistedConfigUpdate, coosenpai_core::config::ConfigError>
 where
     F: FnOnce(Config) -> Result<Config, coosenpai_core::config::ConfigError>,
@@ -327,35 +362,37 @@ where
     let mut persisted_before = recovery.clone();
     let mut requested = None;
     let mut avatar_cleanup_errors = Vec::new();
-    let (staged, provider_start_gate) = coosenpai_core::config::patch_config_before_save(
-        paths,
-        Some(recovery),
-        |current| {
-            let keymap_base = current.clone();
-            let audio_was_enabled = current.audio.enabled;
-            let mut config = update(current)?;
-            coosenpai_core::config::normalize_audio_sources_on_enable(
-                audio_was_enabled,
-                &mut config,
-            );
-            let staged = stage_without_keymap(&config, &keymap_base);
-            requested = Some(config);
-            Ok(staged)
-        },
-        |current, staged| {
-            if let Err(error) = crate::avatar::cleanup_stale_backups(paths) {
-                avatar_cleanup_errors.push(format!("保存前: {error}"));
-            }
-            if let Some(avatar) = staged_avatar.as_mut() {
-                avatar
-                    .install()
-                    .map_err(coosenpai_core::config::ConfigError::Io)?;
-            }
-            persisted_before = current.clone();
-            Ok(invalidates_running_operations(current, staged)
-                .then(|| runtime.block_provider_starts_for_config_update()))
-        },
-    )?;
+    let (staged, provider_start_gate) =
+        coosenpai_core::config::patch_config_before_save_if_revision(
+            paths,
+            Some(recovery),
+            expected_revision,
+            |current| {
+                let keymap_base = current.clone();
+                let audio_was_enabled = current.audio.enabled;
+                let mut config = update(current)?;
+                coosenpai_core::config::normalize_audio_sources_on_enable(
+                    audio_was_enabled,
+                    &mut config,
+                );
+                let staged = stage_without_keymap(&config, &keymap_base);
+                requested = Some(config);
+                Ok(staged)
+            },
+            |current, staged| {
+                if let Err(error) = crate::avatar::cleanup_stale_backups(paths) {
+                    avatar_cleanup_errors.push(format!("保存前: {error}"));
+                }
+                if let Some(avatar) = staged_avatar.as_mut() {
+                    avatar
+                        .install()
+                        .map_err(coosenpai_core::config::ConfigError::Io)?;
+                }
+                persisted_before = current.clone();
+                Ok(invalidates_running_operations(current, staged)
+                    .then(|| runtime.block_provider_starts_for_config_update()))
+            },
+        )?;
     if let Some(error) = staged_avatar
         .as_mut()
         .and_then(|avatar| avatar.finalize().err())
@@ -378,9 +415,29 @@ fn stage_without_keymap(requested: &Config, previous: &Config) -> Config {
     staged
 }
 
+fn persist_keymap_patch(
+    paths: &ConfigPaths,
+    expected_revision: u64,
+    keymap_base: &Config,
+    keymap_candidate: &Config,
+) -> Result<Config, coosenpai_core::config::ConfigError> {
+    coosenpai_core::config::patch_config_before_save_if_revision(
+        paths,
+        None,
+        Some(expected_revision),
+        |mut current| {
+            apply_keymap_changes(&mut current, keymap_base, keymap_candidate);
+            Ok(current)
+        },
+        |_, _| Ok(()),
+    )
+    .map(|(config, ())| config)
+}
+
 fn watch_enabled_is_only_difference(current: &Config, next: &Config) -> bool {
     let mut current_without_intent = current.clone();
     let mut next_without_intent = next.clone();
+    current_without_intent.revision = next_without_intent.revision;
     current_without_intent.watch.enabled = false;
     next_without_intent.watch.enabled = false;
     current_without_intent == next_without_intent

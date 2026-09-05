@@ -870,24 +870,36 @@ pub async fn bubble_focus(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Bubble)?;
-    let main = state
-        .app
-        .get_webview_window("main")
-        .ok_or_else(|| "吹き出しをキーボード操作できる状態にできません".to_owned())?;
-    let focus_events = state.bubble_focus_events();
-    window
-        .set_focusable(true)
-        .map_err(|_| "吹き出しをキーボード操作できる状態にできません".to_owned())?;
-    let focused = crate::windows::activate_and_focus_window(&main, &window, focus_events)
-        .await
-        .map_err(|_| "吹き出しをキーボード操作できる状態にできません".to_owned())?;
-    if focused {
+    let focus_result = crate::windows::focus_bubble_if_capture_popup_idle(
+        state.popup_focus_gate(),
+        || async { state.capture_popup_read().await.can_focus() },
+        || {
+            window
+                .set_focusable(true)
+                .map_err(|_| "吹き出しをキーボード操作できる状態にできません".to_owned())
+        },
+        || async {
+            let main = state
+                .app
+                .get_webview_window("main")
+                .ok_or_else(|| "吹き出しをキーボード操作できる状態にできません".to_owned())?;
+            crate::windows::activate_and_focus_window(&main, &window, state.bubble_focus_events())
+                .await
+                .map_err(|error| error.message)
+        },
+    )
+    .await
+    .map_err(|_| "吹き出しをキーボード操作できる状態にできません".to_owned())?;
+    let Some(focus_result) = focus_result else {
+        return Ok(IpcResult::success(()));
+    };
+    if focus_result.focused {
         let _ = state
             .logger
             .write("INFO", "吹き出しのキーボードフォーカスを確認しました");
         return Ok(IpcResult::success(()));
     }
-    let details = crate::windows::focus_failure_details(&window);
+    let details = crate::windows::focus_failure_details(&window, focus_result);
     crate::windows::log_focus_failure(state.logger.as_ref(), "吹き出し", &details);
     Err("吹き出しをキーボード操作できる状態にできません".to_owned())
 }
@@ -898,18 +910,28 @@ pub async fn bubble_passthrough(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Bubble)?;
+    if state.capture_popup_read().await.can_focus() {
+        return Ok(IpcResult::success(()));
+    }
     let generation = BUBBLE_PASSTHROUGH_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     window
         .set_ignore_cursor_events(true)
         .map_err(|_| "吹き出しのクリック透過を有効にできません".to_owned())?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let record_count = state.bubbles.lock().await.snapshot().records.len();
-        if BUBBLE_PASSTHROUGH_GENERATION.load(Ordering::Relaxed) == generation
-            && crate::bubbles::accepts_pointer(record_count)
-        {
-            let _ = window.set_ignore_cursor_events(false);
+        loop {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if BUBBLE_PASSTHROUGH_GENERATION.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            if state.capture_popup_read().await.can_focus() {
+                continue;
+            }
+            let record_count = state.bubbles.lock().await.snapshot().records.len();
+            if crate::bubbles::accepts_pointer(record_count) {
+                let _ = window.set_ignore_cursor_events(false);
+            }
+            return;
         }
     });
     Ok(IpcResult::success(()))

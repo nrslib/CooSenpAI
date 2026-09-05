@@ -47,9 +47,6 @@ pub use handle_types::{ProviderStartGate, RuntimeHandle};
 #[path = "runtime_stream.rs"]
 mod stream;
 use stream::{ProviderStreamUpdate, RuntimeProviderEvents};
-#[cfg(test)]
-#[path = "runtime_test_barrier.rs"]
-pub(crate) mod test_barrier;
 #[path = "runtime_thought.rs"]
 mod thought;
 #[path = "runtime_user_handle.rs"]

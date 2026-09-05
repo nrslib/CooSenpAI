@@ -1,22 +1,30 @@
 use crate::command_guard::{CommandSource, DesktopCommand, GenerationStamp};
 use crate::input_popup::{self, InputPopupKind, InputPopupStartAction};
-use crate::snapshot::AppSnapshot;
 use crate::state::DesktopState;
 use coosenpai_core::attachments::BoundedTextAttachment;
 use coosenpai_core::ports::{ForegroundApplication, InteractiveCapturePort, RuntimeLogger};
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 const MAX_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
-static NEXT_SHORTCUT_ERROR_ID: AtomicU64 = AtomicU64::new(1);
 #[path = "capture_helpers.rs"]
 mod helpers;
 use helpers::{capture_origin, close_capture_popup, normalize_message, validate_captured_file};
 #[path = "capture_text.rs"]
 mod text;
-use text::prepare_selected_text_attachment;
+use text::{prepare_selected_text_attachment, SelectedTextAttachmentError};
+#[path = "capture_shortcut_errors.rs"]
+mod shortcut_errors;
+use shortcut_errors::{
+    clear_shortcut_error_if_current, clear_speech_shortcut_error_if_current,
+    current_shortcut_error_token, fail_if_current, publish_capture_transient_shortcut_error,
+    publish_shortcut_error, publish_speech_shortcut_error, reset_if_current,
+};
+pub(crate) use shortcut_errors::{
+    publish_speech_transient_shortcut_error, publish_transient_shortcut_error,
+};
 #[path = "capture_shortcuts.rs"]
 mod shortcuts;
 pub use shortcuts::{
@@ -51,6 +59,14 @@ pub(crate) struct ReadyCapture {
     origin: CaptureOrigin,
     accessibility_permission_required: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturePopupReadyAction {
+    Emit,
+    Discard,
+    Keep,
+}
+
 impl CapturePopupState {
     pub(crate) fn kind(&self) -> Option<CaptureKind> {
         match self {
@@ -62,6 +78,19 @@ impl CapturePopupState {
 
     pub(crate) fn can_focus(&self) -> bool {
         matches!(self, Self::Ready(_) | Self::Sending { .. })
+    }
+
+    fn is_ready_for(&self, capture_id: &str) -> bool {
+        matches!(self, Self::Ready(ready) if ready.id == capture_id)
+    }
+
+    fn reset_capturing_if_current(&mut self, generation: GenerationStamp) -> bool {
+        if matches!(self, Self::Capturing { generation: current, .. } if *current == generation) {
+            *self = Self::Idle;
+            true
+        } else {
+            false
+        }
     }
 
     fn cancel(&mut self) -> Result<Option<CaptureOrigin>, String> {
@@ -76,6 +105,17 @@ impl CapturePopupState {
                 Err("範囲選択を送信中です".to_owned())
             }
             Self::Idle => Ok(None),
+        }
+    }
+
+    fn discard_ready(&mut self, capture_id: &str) -> Option<CaptureOrigin> {
+        let current = std::mem::take(self);
+        match current {
+            Self::Ready(ready) if ready.id == capture_id => Some(ready.origin.clone()),
+            current => {
+                *self = current;
+                None
+            }
         }
     }
 
@@ -100,6 +140,67 @@ impl CapturePopupState {
         }
         *self = retry.map_or(Self::Idle, Self::Ready);
         true
+    }
+}
+
+const SELECTED_TEXT_CAPTURE_FAILURE_MESSAGE: &str = "選択した文章を取得できませんでした";
+const SELECTED_TEXT_COPY_EVENT_FAILURE_MESSAGE: &str = "選択した文章をコピーできませんでした";
+
+enum TextCapturePreparationDecision {
+    Prepared(text::PreparedSelectedTextAttachment),
+    Stopped,
+    Failed {
+        capture_shortcut_error: &'static str,
+        log_message: String,
+    },
+}
+
+fn finish_text_capture_preparation(
+    capture: &mut CapturePopupState,
+    generation: GenerationStamp,
+    prepared: Result<Option<text::PreparedSelectedTextAttachment>, SelectedTextAttachmentError>,
+    cancelled: bool,
+) -> TextCapturePreparationDecision {
+    if cancelled {
+        capture.reset_capturing_if_current(generation);
+        return TextCapturePreparationDecision::Stopped;
+    }
+
+    match prepared {
+        Ok(Some(prepared)) => TextCapturePreparationDecision::Prepared(prepared),
+        Ok(None) => {
+            capture.reset_capturing_if_current(generation);
+            TextCapturePreparationDecision::Stopped
+        }
+        Err(error) => {
+            if !capture.reset_capturing_if_current(generation) {
+                return TextCapturePreparationDecision::Stopped;
+            }
+            let (capture_shortcut_error, log_message) = match error {
+                SelectedTextAttachmentError::ReleaseTimeout => (
+                    SELECTED_TEXT_CAPTURE_FAILURE_MESSAGE,
+                    "選択した文章を取得できませんでした: reason=release-timeout".to_owned(),
+                ),
+                SelectedTextAttachmentError::ClipboardUnchanged => (
+                    SELECTED_TEXT_CAPTURE_FAILURE_MESSAGE,
+                    "選択した文章を取得できませんでした: reason=clipboard-unchanged".to_owned(),
+                ),
+                SelectedTextAttachmentError::CopyEvent(error) => (
+                    SELECTED_TEXT_COPY_EVENT_FAILURE_MESSAGE,
+                    format!("コピー操作を送出できませんでした: reason=copy-event error={error}"),
+                ),
+                SelectedTextAttachmentError::ClipboardRead(error) => (
+                    "クリップボードを読み取れませんでした",
+                    format!(
+                        "クリップボードを読み取れませんでした: reason=clipboard-read error={error}"
+                    ),
+                ),
+            };
+            TextCapturePreparationDecision::Failed {
+                capture_shortcut_error,
+                log_message,
+            }
+        }
     }
 }
 
@@ -163,6 +264,29 @@ pub(super) fn begin_text(app: &AppHandle) {
 enum PopupRequest {
     Image,
     Text,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveCaptureOutcome {
+    Completed,
+    Cancelled,
+    ExecutionFailed,
+}
+
+impl InteractiveCaptureOutcome {
+    fn invalidates_screen_permission_cache(self) -> bool {
+        matches!(self, Self::ExecutionFailed)
+    }
+}
+
+fn classify_interactive_capture(
+    result: Result<bool, coosenpai_core::ports::PortError>,
+) -> InteractiveCaptureOutcome {
+    match result {
+        Ok(true) => InteractiveCaptureOutcome::Completed,
+        Ok(false) => InteractiveCaptureOutcome::Cancelled,
+        Err(_) => InteractiveCaptureOutcome::ExecutionFailed,
+    }
 }
 
 impl PopupRequest {
@@ -254,12 +378,7 @@ async fn run_capture(
     cancellation: tokio_util::sync::CancellationToken,
 ) {
     let origin = capture_origin(&state);
-    let permission = state.request_screen_permission_for_watch().await;
-    if permission.presentation().status != "granted" {
-        reset_if_current(&state, generation).await;
-        crate::windows::show_main(&state.app);
-        return;
-    }
+    let tempdir_started = Instant::now();
     let directory = match tempfile::Builder::new()
         .prefix("coosenpai-selection-")
         .tempdir()
@@ -275,26 +394,45 @@ async fn run_capture(
             return;
         }
     };
+    let tempdir_elapsed = tempdir_started.elapsed();
+    let permission_started = Instant::now();
+    let permission = state.request_screen_permission_for_watch().await;
+    let permission_elapsed = permission_started.elapsed();
+    if permission.presentation().status != "granted" {
+        reset_if_current(&state, generation).await;
+        crate::windows::show_main(&state.app);
+        return;
+    }
     let path = directory.path().join("capture.png");
+    let screencapture_started = Instant::now();
     let output = crate::platform::MacInteractiveCapture
         .capture_interactive(&path, cancellation.clone())
         .await;
+    let screencapture_elapsed = screencapture_started.elapsed();
     if cancellation.is_cancelled() || state.cancellation.is_cancelled() {
         reset_if_current(&state, generation).await;
         return;
     }
-    if !matches!(output, Ok(true)) {
+    let outcome = classify_interactive_capture(output);
+    if outcome.invalidates_screen_permission_cache() {
+        state.invalidate_screen_permission_cache().await;
+    }
+    if !matches!(outcome, InteractiveCaptureOutcome::Completed) {
         reset_if_current(&state, generation).await;
         return;
     }
+    state.record_screen_capture_result(true).await;
+    let validation_started = Instant::now();
     let validation_path = path.clone();
     let valid = tokio::task::spawn_blocking(move || validate_captured_file(&validation_path))
         .await
         .is_ok_and(|valid| valid);
+    let validation_elapsed = validation_started.elapsed();
     if !valid {
         fail_if_current(&state, generation, "選択した画像を読み込めませんでした").await;
         return;
     }
+    let ready_started = Instant::now();
     let id = uuid::Uuid::new_v4().to_string();
     {
         let Ok(mut capture) = state.capture_popup_for_event(generation).await else {
@@ -314,7 +452,24 @@ async fn run_capture(
             accessibility_permission_required: false,
         }));
     }
-    show_popup(&state, &id).await;
+    let ready_elapsed = ready_started.elapsed();
+    let presentation = show_popup(&state, &id).await;
+    let (show_elapsed, focus_elapsed) = presentation.as_ref().map_or((0, 0), |value| {
+        (value.show.as_millis(), value.focus.as_millis())
+    });
+    let _ = state.logger.write(
+        "INFO",
+        &format!(
+            "範囲選択: permission={}ms screencapture={}ms validate={}ms show={}ms focus={}ms ready={}ms tempdir={}ms",
+            permission_elapsed.as_millis(),
+            screencapture_elapsed.as_millis(),
+            validation_elapsed.as_millis(),
+            show_elapsed,
+            focus_elapsed,
+            ready_elapsed.as_millis(),
+            tempdir_elapsed.as_millis(),
+        ),
+    );
 }
 
 async fn run_text_capture(
@@ -336,21 +491,32 @@ async fn run_text_capture(
         &cancellation,
     )
     .await;
-    let prepared = match prepared {
-        Ok(Some(prepared)) => prepared,
-        Ok(None) => {
-            reset_if_current(&state, generation).await;
+    let decision = {
+        let Ok(mut capture) = state.capture_popup_for_event(generation).await else {
             return;
-        }
-        Err(_) => {
+        };
+        finish_text_capture_preparation(
+            &mut capture,
+            generation,
+            prepared,
+            cancellation.is_cancelled() || state.cancellation.is_cancelled(),
+        )
+    };
+    let prepared = match decision {
+        TextCapturePreparationDecision::Prepared(prepared) => prepared,
+        TextCapturePreparationDecision::Stopped => return,
+        TextCapturePreparationDecision::Failed {
+            capture_shortcut_error,
+            log_message,
+        } => {
             if cancellation.is_cancelled() || state.cancellation.is_cancelled() {
-                reset_if_current(&state, generation).await;
                 return;
             }
-            reset_if_current(&state, generation).await;
-            publish_transient_shortcut_error(
+            let _ = state.logger.write("WARN", &log_message);
+            publish_capture_transient_shortcut_error(
                 state.clone(),
-                "クリップボードを読み取れませんでした".to_owned(),
+                generation,
+                capture_shortcut_error.to_owned(),
             )
             .await;
             return;
@@ -394,28 +560,72 @@ async fn run_text_capture(
     clear_shortcut_error_if_current(&state, previous_error).await;
 }
 
-async fn show_popup(state: &DesktopState, id: &str) {
-    if let Some(window) = state.app.get_webview_window("capture-popup") {
-        match crate::windows::show_capture_popup(state, &window).await {
-            Ok(true) => {}
-            Ok(false) => {
-                let details = crate::windows::focus_failure_details(&window);
-                crate::windows::log_focus_failure(
-                    state.logger.as_ref(),
-                    "送信ポップアップ",
-                    &details,
-                );
-            }
-            Err(error) => {
-                let _ = state.logger.write(
-                    "WARN",
-                    &format!("送信ポップアップを表示できませんでした: {error}"),
-                );
-            }
-        }
+async fn show_popup(
+    state: &DesktopState,
+    id: &str,
+) -> Option<crate::windows::CapturePopupPresentation> {
+    let Some(window) = state.app.get_webview_window("capture-popup") else {
         let _ = state
-            .app
-            .emit_to("capture-popup", "coosenpai:capture-popup:ready", id);
+            .logger
+            .write("WARN", "送信ポップアップのウィンドウがありません");
+        discard_unshown_capture(state, id).await;
+        return None;
+    };
+    let presentation_result = crate::windows::show_capture_popup(state, &window).await;
+    let presentation = match &presentation_result {
+        Ok(presentation) if presentation.focused => Some(*presentation),
+        Ok(presentation) => {
+            let details =
+                crate::windows::focus_failure_details(&window, presentation.focus_result());
+            crate::windows::log_focus_failure(state.logger.as_ref(), "送信ポップアップ", &details);
+            Some(*presentation)
+        }
+        Err(error) => {
+            let _ = state.logger.write(
+                "WARN",
+                &format!("送信ポップアップを表示できませんでした: {}", error.message),
+            );
+            None
+        }
+    };
+    let ready_action = {
+        let capture = state.capture_popup_read().await;
+        capture_popup_ready_action(&capture, id, &presentation_result)
+    };
+    match ready_action {
+        CapturePopupReadyAction::Emit => {
+            let _ = state
+                .app
+                .emit_to("capture-popup", "coosenpai:capture-popup:ready", id);
+        }
+        CapturePopupReadyAction::Discard => discard_unshown_capture(state, id).await,
+        CapturePopupReadyAction::Keep => {}
+    }
+    presentation
+}
+
+fn capture_popup_ready_action(
+    capture: &CapturePopupState,
+    capture_id: &str,
+    result: &Result<crate::windows::CapturePopupPresentation, crate::windows::FocusRequestError>,
+) -> CapturePopupReadyAction {
+    if !capture.is_ready_for(capture_id) {
+        return CapturePopupReadyAction::Keep;
+    }
+    match result {
+        Ok(_) => CapturePopupReadyAction::Emit,
+        Err(error) if error.window_show_requested() => CapturePopupReadyAction::Emit,
+        Err(_) => CapturePopupReadyAction::Discard,
+    }
+}
+
+async fn discard_unshown_capture(state: &DesktopState, id: &str) {
+    let origin = {
+        let mut capture = state.capture_popup_read().await;
+        capture.discard_ready(id)
+    };
+    if let Some(origin) = origin {
+        close_capture_popup(state, &origin);
     }
 }
 
@@ -426,9 +636,9 @@ async fn focus_existing_popup(state: &DesktopState) {
     }
     if let Some(window) = state.app.get_webview_window("capture-popup") {
         match crate::windows::focus_capture_popup(state, &window).await {
-            Ok(true) => {}
-            Ok(false) => {
-                let details = crate::windows::focus_failure_details(&window);
+            Ok(result) if result.focused => {}
+            Ok(result) => {
+                let details = crate::windows::focus_failure_details(&window, result);
                 crate::windows::log_focus_failure(
                     state.logger.as_ref(),
                     "送信ポップアップ",
@@ -438,7 +648,7 @@ async fn focus_existing_popup(state: &DesktopState) {
             Err(error) => {
                 let _ = state.logger.write(
                     "WARN",
-                    &format!("送信ポップアップを表示できませんでした: {error}"),
+                    &format!("送信ポップアップを表示できませんでした: {}", error.message),
                 );
             }
         }
@@ -566,7 +776,6 @@ pub(super) async fn send(
             if completed {
                 close_capture_popup(state, &ready.origin);
             }
-            state.refresh_conversation().await;
             Ok(id)
         }
         Err(error) => {
@@ -667,205 +876,6 @@ fn replace_shortcuts(
         active: ShortcutBindings(active),
         error: None,
         accepted: true,
-    }
-}
-
-async fn publish_shortcut_error(state: &DesktopState, error: String) -> AppSnapshot {
-    let error_id = next_shortcut_error_id();
-    state
-        .publish(|snapshot| {
-            set_shortcut_error(snapshot, error_id, Some(error), None);
-        })
-        .await
-}
-
-async fn publish_speech_shortcut_error(
-    state: &DesktopState,
-    lifecycle_revision: u64,
-    error: String,
-) -> AppSnapshot {
-    let error_id = next_shortcut_error_id();
-    state
-        .publish(|snapshot| {
-            if state
-                .shortcut_coordinator
-                .accepts_speech_revision(lifecycle_revision)
-            {
-                set_shortcut_error(snapshot, error_id, Some(error), None);
-            }
-        })
-        .await
-}
-
-async fn clear_shortcut_error_if_current(state: &DesktopState, expected: ShortcutErrorToken) {
-    state
-        .publish(|snapshot| {
-            if can_clear_shortcut_error(snapshot, expected) {
-                set_shortcut_error(snapshot, next_shortcut_error_id(), None, None);
-            }
-        })
-        .await;
-}
-
-async fn clear_speech_shortcut_error_if_current(
-    state: &DesktopState,
-    lifecycle_revision: u64,
-    expected: ShortcutErrorToken,
-) {
-    state
-        .publish(|snapshot| {
-            if state
-                .shortcut_coordinator
-                .accepts_speech_revision(lifecycle_revision)
-                && can_clear_shortcut_error(snapshot, expected)
-            {
-                set_shortcut_error(snapshot, next_shortcut_error_id(), None, None);
-            }
-        })
-        .await;
-}
-
-pub(crate) async fn publish_transient_shortcut_error(state: Arc<DesktopState>, message: String) {
-    let error_id = next_shortcut_error_id();
-    state
-        .publish(|snapshot| {
-            set_shortcut_error(snapshot, error_id, Some(message.clone()), None);
-        })
-        .await;
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        clear_transient_shortcut_error(&state, error_id, None, &message).await;
-    });
-}
-
-pub(crate) async fn publish_speech_transient_shortcut_error(
-    state: Arc<DesktopState>,
-    generation: u64,
-    message: String,
-) {
-    let error_id = next_shortcut_error_id();
-    let snapshot = state
-        .publish(|snapshot| {
-            if state.speech_accepts_transient_shortcut_error(generation)
-                && snapshot.speech.generation == generation
-            {
-                set_shortcut_error(snapshot, error_id, Some(message.clone()), Some(generation));
-            }
-        })
-        .await;
-    if snapshot.capture_shortcut_error_id != error_id {
-        return;
-    }
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        clear_transient_shortcut_error(&state, error_id, Some(generation), &message).await;
-    });
-}
-
-fn next_shortcut_error_id() -> u64 {
-    NEXT_SHORTCUT_ERROR_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ShortcutErrorToken {
-    id: u64,
-    speech_generation: Option<u64>,
-}
-
-fn shortcut_error_token(snapshot: &AppSnapshot) -> ShortcutErrorToken {
-    ShortcutErrorToken {
-        id: snapshot.capture_shortcut_error_id,
-        speech_generation: snapshot.capture_shortcut_error_speech_generation,
-    }
-}
-
-fn can_clear_shortcut_error(snapshot: &AppSnapshot, expected: ShortcutErrorToken) -> bool {
-    can_clear_shortcut_error_token(
-        shortcut_error_token(snapshot),
-        snapshot.capture_shortcut_error.is_some(),
-        expected,
-    )
-}
-
-fn can_clear_shortcut_error_token(
-    current: ShortcutErrorToken,
-    has_error: bool,
-    expected: ShortcutErrorToken,
-) -> bool {
-    has_error && current == expected
-}
-
-async fn current_shortcut_error_token(state: &DesktopState) -> ShortcutErrorToken {
-    shortcut_error_token(&state.snapshot().await)
-}
-
-fn set_shortcut_error(
-    snapshot: &mut AppSnapshot,
-    error_id: u64,
-    error: Option<String>,
-    speech_generation: Option<u64>,
-) {
-    snapshot.capture_shortcut_error_id = error_id;
-    snapshot.capture_shortcut_error = error;
-    snapshot.capture_shortcut_error_speech_generation = speech_generation;
-}
-
-async fn clear_transient_shortcut_error(
-    state: &DesktopState,
-    error_id: u64,
-    speech_generation: Option<u64>,
-    message: &str,
-) {
-    state
-        .publish(|snapshot| {
-            if is_current_shortcut_error(
-                snapshot.capture_shortcut_error_id,
-                error_id,
-                snapshot.capture_shortcut_error_speech_generation,
-                speech_generation,
-                snapshot.capture_shortcut_error.as_deref(),
-                message,
-            ) {
-                set_shortcut_error(snapshot, next_shortcut_error_id(), None, None);
-            }
-        })
-        .await;
-}
-
-fn is_current_shortcut_error(
-    current_id: u64,
-    expected_id: u64,
-    current_generation: Option<u64>,
-    expected_generation: Option<u64>,
-    current_message: Option<&str>,
-    expected_message: &str,
-) -> bool {
-    current_id == expected_id
-        && current_generation == expected_generation
-        && current_message == Some(expected_message)
-}
-
-async fn fail_if_current(state: &DesktopState, generation: GenerationStamp, message: &str) {
-    if reset_if_current(state, generation).await {
-        if state.ensure_command_generation(generation).is_ok() {
-            publish_shortcut_error(state, message.to_owned()).await;
-        }
-        if state.ensure_command_generation(generation).is_ok() {
-            crate::windows::show_main(&state.app);
-        }
-    }
-}
-
-async fn reset_if_current(state: &DesktopState, generation: GenerationStamp) -> bool {
-    let Ok(mut capture) = state.capture_popup_for_event(generation).await else {
-        return false;
-    };
-    if matches!(*capture, CapturePopupState::Capturing { generation: current, .. } if current == generation)
-    {
-        *capture = CapturePopupState::Idle;
-        true
-    } else {
-        false
     }
 }
 

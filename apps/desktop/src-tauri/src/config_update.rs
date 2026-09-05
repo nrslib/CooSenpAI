@@ -13,26 +13,41 @@ pub(crate) struct ConfigUpdateOutcome {
 pub(crate) struct ConfigUpdateCoordinator {
     pub(crate) serial: Mutex<()>,
     revision: AtomicU64,
+    config_revision: AtomicU64,
 }
 
 pub(crate) struct ConfigUpdateTransaction<'a> {
     coordinator: &'a ConfigUpdateCoordinator,
     _guard: tokio::sync::MutexGuard<'a, ()>,
     pub(crate) base_revision: u64,
+    pub(crate) base_config_revision: u64,
 }
 
 impl ConfigUpdateCoordinator {
+    pub(crate) fn new(config_revision: u64) -> Self {
+        Self {
+            serial: Mutex::new(()),
+            revision: AtomicU64::new(0),
+            config_revision: AtomicU64::new(config_revision),
+        }
+    }
+
     pub(crate) async fn begin(&self) -> ConfigUpdateTransaction<'_> {
         let guard = self.serial.lock().await;
         ConfigUpdateTransaction {
             coordinator: self,
             _guard: guard,
             base_revision: self.revision.load(Ordering::Acquire),
+            base_config_revision: self.config_revision.load(Ordering::Acquire),
         }
     }
 
     pub(crate) fn current_revision(&self) -> u64 {
-        self.revision.load(Ordering::Acquire)
+        self.config_revision.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn observe_config_revision(&self, revision: u64) {
+        self.config_revision.store(revision, Ordering::Release);
     }
 }
 
@@ -41,15 +56,20 @@ impl ConfigUpdateTransaction<'_> {
         &self,
         expected: Option<u64>,
     ) -> Result<(), ConfigCommitError> {
-        if expected.is_some_and(|expected| expected != self.base_revision) {
-            return Err(ConfigCommitError::Runtime(RuntimeError::Factory(
-                "設定が更新されたため、最新の設定を確認してから再度反映してください".to_owned(),
-            )));
+        if let Some(expected) = expected {
+            if expected != self.base_config_revision {
+                return Err(ConfigCommitError::Storage(
+                    coosenpai_core::config::ConfigError::RevisionConflict {
+                        expected,
+                        actual: self.base_config_revision,
+                    },
+                ));
+            }
         }
         Ok(())
     }
 
-    pub(crate) fn commit(self) -> Result<(), ConfigCommitError> {
+    fn commit_generation(&self) -> Result<(), ConfigCommitError> {
         self.coordinator
             .revision
             .compare_exchange(
@@ -64,6 +84,18 @@ impl ConfigUpdateTransaction<'_> {
                     "設定の revision が競合しました".to_owned(),
                 ))
             })
+    }
+
+    pub(crate) fn commit(self) -> Result<(), ConfigCommitError> {
+        self.commit_generation()
+    }
+
+    pub(crate) fn commit_config(self, config_revision: u64) -> Result<(), ConfigCommitError> {
+        self.commit_generation()?;
+        self.coordinator
+            .config_revision
+            .store(config_revision, Ordering::Release);
+        Ok(())
     }
 }
 

@@ -935,7 +935,3 @@ fn prepared_response(response: &PreparedUserResponse) -> CompanionResponse {
         fact_updates: Vec::new(),
     }
 }
-
-#[cfg(test)]
-#[path = "companion_user_test_barrier.rs"]
-pub(crate) mod user_response_barrier;

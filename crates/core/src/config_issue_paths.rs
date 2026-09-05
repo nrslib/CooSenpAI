@@ -96,6 +96,7 @@ const FIXED_ISSUE_PATH_PATTERNS: &[&str] = &[
     "retention",
     "retention.conversationDays",
     "retention.observationDays",
+    "revision",
     "speech",
     "speech.confirmBeforeSend",
     "speech.inputDevice",

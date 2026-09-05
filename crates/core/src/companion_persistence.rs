@@ -124,6 +124,7 @@ impl CompanionAgent {
         if let Some(summary) = storage.load_summary()? {
             self.previous_summary = Some(summary);
         }
+        self.refresh_usage(true)?;
         if self.delivery_ownership == DeliveryOwnership::None {
             self.storage_loaded = true;
             return Ok(());

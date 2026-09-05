@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io;
 pub use storage::{
-    ensure_layout, load_config, patch_config, patch_config_before_save, save_config,
+    ensure_layout, load_config, patch_config, patch_config_before_save,
+    patch_config_before_save_if_revision, save_config,
 };
 use thiserror::Error;
 pub use validate::validate_config;
@@ -85,6 +86,8 @@ pub const NUMERIC_CONFIG_PATHS: &[&str] = &[
 pub struct Config {
     pub config_version: u8,
     #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
     pub watch: WatchConfig,
     #[serde(default)]
     pub observer: AgentConfig,
@@ -119,6 +122,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             config_version: CONFIG_VERSION,
+            revision: 0,
             watch: WatchConfig::default(),
             observer: AgentConfig::default_observer(),
             companion: CompanionConfig::default(),
@@ -665,6 +669,8 @@ pub enum ConfigError {
     Validation(Vec<ConfigValidationIssue>),
     #[error("設定バージョン {0} は未対応です")]
     UnsupportedVersion(u64),
+    #[error("設定が別の場所で変更されました。読み直してください")]
+    RevisionConflict { expected: u64, actual: u64 },
     #[error("設定の lock を取得できません: {0}")]
     Persistence(#[from] PersistenceError),
 }
