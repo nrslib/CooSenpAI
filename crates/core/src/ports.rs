@@ -24,8 +24,13 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
+pub const SELECTED_TEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+pub const SELECTED_TEXT_POLL_TIMEOUT: Duration = Duration::from_millis(1000);
+
 pub trait ClipboardReader: Send + Sync {
     fn read_text(&self) -> Result<Option<String>, PortError>;
+
+    fn change_count(&self) -> Result<i64, PortError>;
 }
 
 pub trait ClipboardWriter: Send + Sync {
@@ -36,8 +41,18 @@ pub trait ClipboardWriter: Send + Sync {
 
 #[async_trait]
 pub trait SelectedTextCopyPort: Send + Sync {
-    /// `Ok(true)` は Cmd+C を送出済み、`Ok(false)` はアクセシビリティ未許可を表す。
-    async fn synthesize_copy(&self) -> Result<bool, PortError>;
+    async fn synthesize_copy(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<SelectedTextCopyOutcome, PortError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectedTextCopyOutcome {
+    Sent { change_count_before_post: i64 },
+    PermissionDenied,
+    Cancelled,
+    ReleaseTimeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

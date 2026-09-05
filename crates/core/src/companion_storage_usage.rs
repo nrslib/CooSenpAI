@@ -6,6 +6,10 @@ impl CompanionStorage {
         self.with_usage_recovery(|| crate::usage::load_companion(&self.usage_path, date))
     }
 
+    pub(crate) fn try_record_limit_notice(&self, date: &str) -> Result<bool, UsageError> {
+        self.with_usage_recovery(|| crate::usage::try_record_limit_notice(&self.usage_path, date))
+    }
+
     pub(crate) fn record_companion_attempt(
         &self,
         date: &str,

@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use coosenpai_core::ports::ForegroundApplication;
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWindow, NSWorkspace};
+use objc2::MainThreadMarker;
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationOptions, NSRunningApplication, NSWindow, NSWorkspace,
+};
 use std::{ffi::c_void, ptr::NonNull};
 
 pub fn frontmost_application_identity() -> Option<ForegroundApplication> {
@@ -20,9 +23,21 @@ pub fn activate_application(identity: &ForegroundApplication) -> Result<()> {
     activate_running_application(&application, "元の前面アプリを再アクティブ化できません")
 }
 
-pub fn activate_current_application() -> Result<()> {
+pub fn activate_current_application() -> Result<bool> {
+    let marker = MainThreadMarker::new().context("AppKitのメインスレッドではありません")?;
+    if objc2::available!(macos = 14.0) {
+        let application = NSApplication::sharedApplication(marker);
+        application.activate();
+        // macOS 14 以降の activate は完了状態を返さないため、直後の状態を診断値にする。
+        return Ok(application.isActive());
+    }
+
+    // macOS 13 を引き続きサポートするため、14 未満だけ旧 API を使う。
     let application = NSRunningApplication::currentApplication();
-    activate_running_application(&application, "自アプリを前面にできません")
+    #[allow(deprecated)]
+    let _ =
+        application.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+    Ok(application.isActive())
 }
 
 /// アプリ自体を再 activate せず、対象ウィンドウだけを表示して key 化する。

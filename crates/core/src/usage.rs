@@ -22,6 +22,8 @@ pub struct CompanionUsage {
     #[serde(default)]
     pub proactive_emit_ids: Vec<String>,
     pub session_summaries: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_limit_notice_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +41,10 @@ pub enum UsageError {
     Json(#[from] serde_json::Error),
     #[error("usage の lock を取得できません: {0}")]
     Lock(#[from] PersistenceError),
+}
+
+pub fn is_proactive_limit_reached(proactive_calls: u32, limit: Option<u32>) -> bool {
+    limit.is_some_and(|limit| proactive_calls >= limit)
 }
 
 pub fn load_observer(path: &Path, date: &str) -> Result<ObserverUsage, UsageError> {
@@ -117,6 +123,23 @@ pub fn load_companion(path: &Path, date: &str) -> Result<CompanionUsage, UsageEr
     let next = companion_for_date(current, date);
     write_snapshot(path, &next)?;
     Ok(next)
+}
+
+pub fn try_record_limit_notice(path: &Path, date: &str) -> Result<bool, UsageError> {
+    let lock_path = lock_path(path);
+    let _lock = SiblingLock::acquire(&lock_path)?;
+    let current = read_companion(path)?;
+    let day_changed = current.date != date;
+    let mut next = companion_for_date(current, date);
+    if next.last_limit_notice_date.as_deref() == Some(date) {
+        if day_changed {
+            write_snapshot(path, &next)?;
+        }
+        return Ok(false);
+    }
+    next.last_limit_notice_date = Some(date.to_owned());
+    write_snapshot(path, &next)?;
+    Ok(true)
 }
 
 pub fn record_companion_attempt(
@@ -236,6 +259,7 @@ fn empty_companion(date: &str) -> CompanionUsage {
         proactive_calls: 0,
         proactive_emit_ids: Vec::new(),
         session_summaries: 0,
+        last_limit_notice_date: None,
     }
 }
 
@@ -244,6 +268,7 @@ fn companion_for_date(current: CompanionUsage, date: &str) -> CompanionUsage {
         return current;
     }
     CompanionUsage {
+        last_limit_notice_date: current.last_limit_notice_date,
         proactive_emit_ids: current.proactive_emit_ids,
         ..empty_companion(date)
     }

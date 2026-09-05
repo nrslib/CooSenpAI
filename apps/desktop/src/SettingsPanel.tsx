@@ -15,11 +15,11 @@ import { TutorialPersonaSettings } from "./components/TutorialPersonaSettings.js
 import { VisionSettings } from "./components/VisionSettings.js";
 import { CloseIcon } from "./components/LineIcons.js";
 import { PersonaEditor } from "./components/PersonaEditor.js";
-import { modelAfterProviderChange, settingsIssueHeading, settingsIssueTarget, unavailableProviderMessage } from "./settings-model.js";
+import { CONFIG_REVISION_CONFLICT_MESSAGE, isConfigRevisionConflict, modelAfterProviderChange, settingsIssueHeading, settingsIssueTarget, unavailableProviderMessage } from "./settings-model.js";
 import { createSettingsEscapeListener, focusFirstSettingsControl, shouldCloseSettingsDraft } from "./settings-keyboard.js";
 import { isTutorialPersonaSettings, settingsCategoryForFocus, settingsCategoryForIssue, type SettingsCategory } from "./settings-categories.js";
 import { appearancePreview, defaultTuningForm, hasDraftChanges, toForm, toPatch, type FormState, type SettingsAppearancePreview } from "./settings-form.js";
-import { changedConfigPatch } from "./settings-save.js";
+import { changedConfigPaths, changedConfigPatch, mergeConfigPatch } from "./settings-save.js";
 
 export type { SettingsAppearancePreview } from "./settings-form.js";
 export { resetShortcutToDefault, shortcutFromKeyboardEvent } from "./components/ShortcutsSettings.js";
@@ -37,6 +37,7 @@ interface Props {
   readonly focusSection?: "watch";
   readonly onClose: () => void;
   readonly onSave: (patch: ConfigPatch, avatarImage?: readonly number[], baseConfigRevision?: number) => Promise<IpcResult<CooSenpaiConfig>>;
+  readonly onReloadConfig: () => Promise<IpcResult<CooSenpaiConfig>>;
   readonly onReloadPersona: () => Promise<IpcResult<null>>;
   readonly onGetPersona: (id: string) => Promise<IpcResult<PersonaDocument>>;
   readonly onSavePersona: (id: string, displayName: string, body: string) => Promise<IpcResult<unknown>>;
@@ -57,17 +58,17 @@ export { SettingsDiscardDialog } from "./components/SettingsDiscardDialog.js";
 
 type SettingsConfirmation = "tuning" | "conversation-reset" | undefined;
 
-export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, onClose, onSave, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenSpeechSettings, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
+export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, onClose, onSave, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenSpeechSettings, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
   const [form, setForm] = useState(() => toForm(snapshot.config, snapshot.avatarImageLoadFailed));
   const [issues, setIssues] = useState<readonly ConfigIssue[]>(snapshot.lastError?.kind === "config" ? snapshot.lastError.issues ?? [] : []);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [externalChanges, setExternalChanges] = useState<readonly string[]>();
   const [dirty, setDirty] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<SettingsConfirmation>();
   const [recordingShortcut, setRecordingShortcut] = useState<string>();
   const [personaDocument, setPersonaDocument] = useState<PersonaDocument>();
-  const [advanced, setAdvanced] = useState(false);
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>(() => settingsCategoryForFocus(focusSection, snapshot.onboarding.settingsHighlight) ?? "general");
   const formRef = useRef(form);
   const savedConfigRef = useRef(snapshot.config);
@@ -131,7 +132,9 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
   const applyResult = (result: IpcResult<CooSenpaiConfig>, avatarImageLoadFailed: boolean): boolean => {
     if (result.ok) {
       setIssues(result.issues ?? []);
+      setExternalChanges(undefined);
       savedConfigRef.current = result.value;
+      savedConfigRevisionRef.current = result.value.revision;
       const canonical = toForm(result.value, avatarImageLoadFailed);
       setForm(canonical);
       formRef.current = canonical;
@@ -143,6 +146,29 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
       setIssues(result.error.issues ?? [{ path: "config", message: result.error.message }]);
     }
     return result.ok;
+  };
+  const reloadConflictedDraft = async (draft: FormState, localPatch: ConfigPatch): Promise<void> => {
+    const result = await onReloadConfig();
+    if (!result.ok) {
+      setIssues([{ path: "config", message: `${CONFIG_REVISION_CONFLICT_MESSAGE} ${result.error.message}` }]);
+      return;
+    }
+    const latest = result.value;
+    const changed = changedConfigPaths(savedConfigRef.current, latest);
+    const rebased = mergeConfigPatch(latest, localPatch);
+    const rebasedForm = toForm(rebased, false);
+    const next = draft.avatarImage === undefined
+      ? rebasedForm
+      : { ...rebasedForm, avatarImage: draft.avatarImage, avatarFileName: draft.avatarFileName };
+    savedConfigRef.current = latest;
+    savedConfigRevisionRef.current = latest.revision;
+    formRef.current = next;
+    setForm(next);
+    const nextDirty = hasDraftChanges(latest, next);
+    dirtyRef.current = nextDirty;
+    setDirty(nextDirty);
+    setExternalChanges(changed);
+    setIssues([{ path: "config", message: CONFIG_REVISION_CONFLICT_MESSAGE }]);
   };
   const applySettings = async (): Promise<boolean> => {
     if (!dirtyRef.current || saving) return true;
@@ -164,9 +190,11 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
       result,
       draft.avatarImage === undefined && draft.avatarPath !== null
         ? snapshot.avatarImageLoadFailed
-        : false,
+      : false,
     );
-    if (success && hasChanges) savedConfigRevisionRef.current = baseConfigRevision + 1;
+    if (!success && !result.ok && isConfigRevisionConflict(result.error.message)) {
+      await reloadConflictedDraft(draft, patch);
+    }
     setSaving(false);
     return success;
   };
@@ -276,7 +304,6 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
   const focusIssue = (path: string): void => {
     const target = settingsIssueTarget(path);
     setActiveCategory(settingsCategoryForIssue(path));
-    if (target.revealAdvanced) setAdvanced(true);
     const reveal = (): void => {
       const element = document.getElementById(target.id);
       element?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -287,7 +314,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     window.setTimeout(reveal, 0);
   };
   const errorFor = (path: string): string | undefined => issues.find((issue) => issue.path === path)?.message;
-  const categoryProps = { form, snapshot, advanced, saving, update, errorFor };
+  const categoryProps = { form, snapshot, saving, update, errorFor };
   const generalProps: ComponentProps<typeof GeneralSettings> = { ...categoryProps, personas, avatarInputRef, onSelectAvatar: (event) => { void selectAvatar(event); }, onResetAvatar: resetAvatar, onReloadPersona: () => { void onReloadPersona(); }, onEditPersona: editPersona };
   const providerProps: ComponentProps<typeof ProviderSettings> = { ...categoryProps, providerModels, providerApiKeys, providerApiKeysError, onChangeProvider: changeProvider, onSaveProviderApiKey, onDeleteProviderApiKey };
   const showTutorialPersonaSettings = isTutorialPersonaSettings(snapshot.onboarding);
@@ -314,8 +341,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
 
   return <div className="settings-overlay"><section ref={panelRef} className="settings-panel" aria-label="設定">
     <div className="settings-heading"><div><span>設定</span><h2>CooSenpAI</h2></div><div className="settings-heading-actions"><span className={issues.length > 0 ? "save-state error-text" : "save-state"}>{saving ? "反映中…" : issues.length > 0 ? "反映できていません" : dirty ? "未反映の変更があります" : saved ? "反映しました" : ""}</span><button className="icon-button" type="button" aria-label="設定を閉じる" onClick={() => void requestClose()}><CloseIcon /></button></div></div>
-    <div className="settings-levels" role="tablist" aria-label="設定の表示範囲"><button type="button" role="tab" aria-selected={!advanced} onClick={() => setAdvanced(false)}>基本</button><button type="button" role="tab" aria-selected={advanced} onClick={() => setAdvanced(true)}>詳細</button></div>
-    {issues.length === 0 && snapshot.lastError?.message === undefined ? null : <div className="settings-error-summary" role="alert"><strong>{settingsIssueHeading(issues.length > 0)}</strong><span>{issues[0]?.message ?? snapshot.lastError?.message}</span>{issues[0] === undefined ? null : <button type="button" onClick={() => focusIssue(issues[0]?.path ?? "config")}>該当する項目を確認</button>}</div>}
+    {issues.length === 0 && snapshot.lastError?.message === undefined && externalChanges === undefined ? null : <div className="settings-error-summary" role="alert"><strong>{settingsIssueHeading(issues.length > 0)}</strong><span>{issues[0]?.message ?? snapshot.lastError?.message}</span>{externalChanges === undefined ? null : <span>別の場所で変更された項目: {externalChanges.length === 0 ? "設定値の差分はありません" : externalChanges.join("、")}</span>}{issues[0] === undefined ? null : <button type="button" onClick={() => focusIssue(issues[0]?.path ?? "config")}>該当する項目を確認</button>}</div>}
     <div className="settings-layout">
       <SettingsTabs activeCategory={activeCategory} onSelect={setActiveCategory} />
       <div id={`settings-category-${activeCategory}`} className="settings-category-panel" role="tabpanel" aria-labelledby={`settings-tab-${activeCategory}`}>

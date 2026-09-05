@@ -1,18 +1,25 @@
 use coosenpai_core::attachments::{bound_text_attachment, BoundedTextAttachment};
-use coosenpai_core::ports::{ClipboardReader, PortError, RuntimeLogger, SelectedTextCopyPort};
-use std::time::Duration;
+use coosenpai_core::ports::{
+    ClipboardReader, PortError, RuntimeLogger, SelectedTextCopyOutcome, SelectedTextCopyPort,
+    SELECTED_TEXT_POLL_INTERVAL, SELECTED_TEXT_POLL_TIMEOUT,
+};
 use tokio_util::sync::CancellationToken;
-
-const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const CLIPBOARD_POLL_TIMEOUT: Duration = Duration::from_millis(1000);
 
 pub(super) struct PreparedSelectedTextAttachment {
     pub attachment: Option<BoundedTextAttachment>,
     pub accessibility_permission_required: bool,
 }
 
+#[derive(Debug)]
+pub(super) enum SelectedTextAttachmentError {
+    ReleaseTimeout,
+    ClipboardUnchanged,
+    CopyEvent(PortError),
+    ClipboardRead(PortError),
+}
+
 enum ClipboardPollResult {
-    Changed(Option<String>),
+    Changed,
     Unchanged,
     Cancelled,
 }
@@ -22,30 +29,49 @@ pub(super) async fn prepare_selected_text_attachment(
     reader: &dyn ClipboardReader,
     logger: &dyn RuntimeLogger,
     cancellation: &CancellationToken,
-) -> Result<Option<PreparedSelectedTextAttachment>, PortError> {
+) -> Result<Option<PreparedSelectedTextAttachment>, SelectedTextAttachmentError> {
     if cancellation.is_cancelled() {
         return Ok(None);
     }
-    let previous = reader.read_text()?;
+    let previous = reader
+        .read_text()
+        .map_err(SelectedTextAttachmentError::ClipboardRead)?;
     if cancellation.is_cancelled() {
         return Ok(None);
     }
-    let copy_result = copier.synthesize_copy().await;
+    let copy_outcome = copier
+        .synthesize_copy(cancellation)
+        .await
+        .map_err(SelectedTextAttachmentError::CopyEvent)?;
+    let change_count_before_post = match copy_outcome {
+        SelectedTextCopyOutcome::Cancelled => return Ok(None),
+        SelectedTextCopyOutcome::ReleaseTimeout => {
+            return Err(SelectedTextAttachmentError::ReleaseTimeout)
+        }
+        SelectedTextCopyOutcome::PermissionDenied => {
+            let _ = logger.write(
+                "INFO",
+                "アクセシビリティ未許可のため既存クリップボードを使用しました",
+            );
+            return Ok(Some(prepared_text_attachment(previous.as_deref(), true)));
+        }
+        SelectedTextCopyOutcome::Sent {
+            change_count_before_post,
+        } => change_count_before_post,
+    };
     if cancellation.is_cancelled() {
-        let _ = wait_for_clipboard_change(reader, previous.as_deref(), cancellation).await?;
+        let _ = wait_for_clipboard_change(reader, change_count_before_post, cancellation).await?;
         return Ok(None);
-    }
-    let copy_allowed = copy_result?;
-    if !copy_allowed {
-        let _ = logger.write(
-            "INFO",
-            "アクセシビリティ未許可のため既存クリップボードを使用しました",
-        );
-        return Ok(Some(prepared_text_attachment(previous.as_deref(), true)));
     }
 
-    match wait_for_clipboard_change(reader, previous.as_deref(), cancellation).await? {
-        ClipboardPollResult::Changed(text) => {
+    match wait_for_clipboard_change(reader, change_count_before_post, cancellation).await? {
+        ClipboardPollResult::Changed => {
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            let text = reader
+                .read_text()
+                .map_err(SelectedTextAttachmentError::ClipboardRead)?;
             if cancellation.is_cancelled() {
                 return Ok(None);
             }
@@ -56,11 +82,7 @@ pub(super) async fn prepare_selected_text_attachment(
             if cancellation.is_cancelled() {
                 return Ok(None);
             }
-            let _ = logger.write(
-                "INFO",
-                "クリップボード変化なしのため既存クリップボードを使用しました",
-            );
-            Ok(Some(prepared_text_attachment(previous.as_deref(), false)))
+            Err(SelectedTextAttachmentError::ClipboardUnchanged)
         }
         ClipboardPollResult::Cancelled => Ok(None),
     }
@@ -68,32 +90,35 @@ pub(super) async fn prepare_selected_text_attachment(
 
 async fn wait_for_clipboard_change(
     reader: &dyn ClipboardReader,
-    previous: Option<&str>,
+    previous_change_count: i64,
     cancellation: &CancellationToken,
-) -> Result<ClipboardPollResult, PortError> {
-    let result = tokio::time::timeout(CLIPBOARD_POLL_TIMEOUT, async {
+) -> Result<ClipboardPollResult, SelectedTextAttachmentError> {
+    let result = tokio::time::timeout(SELECTED_TEXT_POLL_TIMEOUT, async {
         let mut cancelled = cancellation.is_cancelled();
         loop {
-            let current = match reader.read_text() {
+            let current_change_count = match reader.change_count() {
                 Ok(current) => current,
                 Err(_error) if cancelled || cancellation.is_cancelled() => {
                     cancelled = true;
-                    tokio::time::sleep(CLIPBOARD_POLL_INTERVAL).await;
+                    tokio::time::sleep(SELECTED_TEXT_POLL_INTERVAL).await;
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(SelectedTextAttachmentError::ClipboardRead(error)),
             };
-            if !cancelled && !cancellation.is_cancelled() && current.as_deref() != previous {
-                return Ok(ClipboardPollResult::Changed(current));
+            if !cancelled
+                && !cancellation.is_cancelled()
+                && current_change_count != previous_change_count
+            {
+                return Ok(ClipboardPollResult::Changed);
             }
             cancelled |= cancellation.is_cancelled();
             if cancelled {
                 // キャンセル後も Cmd+C の遅延反映を排出するため、監視窓の終端まで待つ。
-                tokio::time::sleep(CLIPBOARD_POLL_INTERVAL).await;
+                tokio::time::sleep(SELECTED_TEXT_POLL_INTERVAL).await;
             } else {
                 tokio::select! {
                     () = cancellation.cancelled() => cancelled = true,
-                    () = tokio::time::sleep(CLIPBOARD_POLL_INTERVAL) => {}
+                    () = tokio::time::sleep(SELECTED_TEXT_POLL_INTERVAL) => {}
                 }
             }
         }

@@ -14,6 +14,14 @@ private func monotonicNanoseconds() -> UInt64 {
     DispatchTime.now().uptimeNanoseconds
 }
 
+private struct EnqueuedAudioBufferAppendTarget: AudioBufferAppendTarget {
+    let enqueue: (AVAudioPCMBuffer, Double) -> Void
+
+    func append(_ buffer: AVAudioPCMBuffer, rms: Double) {
+        enqueue(buffer, rms)
+    }
+}
+
 private func emit(_ value: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: value) else { return }
     outputLock.lock()
@@ -65,7 +73,7 @@ private enum RecognitionCancellationTimeoutStage {
     case graceExpired
 }
 
-private final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private let locale: Locale
     private let inputDevice: String
     private let sources: Set<AudioSource>
@@ -898,7 +906,8 @@ private final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, 
             processReceivedAudioBuffer(
                 buffer,
                 for: .speaker,
-                frameCount: frameCount
+                frameCount: frameCount,
+                appendTo: enqueuedAudioBufferAppendTarget(for: .speaker)
             )
         } catch {
             recordReceivedBuffer(for: .speaker, frameCount: frameCount, volume: nil)
@@ -1821,65 +1830,75 @@ private final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, 
         sourceLock.unlock()
     }
 
+    private func enqueuedAudioBufferAppendTarget(
+        for source: AudioSource
+    ) -> EnqueuedAudioBufferAppendTarget {
+        EnqueuedAudioBufferAppendTarget { [weak self] buffer, rms in
+            self?.enqueue(buffer, for: source, rms: rms)
+        }
+    }
+
     private func receive(_ buffer: AVAudioPCMBuffer, for source: AudioSource) {
         guard !isTerminal(), isSourceActive(source) else { return }
         processReceivedAudioBuffer(
             buffer,
             for: source,
-            frameCount: UInt64(buffer.frameLength)
+            frameCount: UInt64(buffer.frameLength),
+            appendTo: enqueuedAudioBufferAppendTarget(for: source)
         )
     }
 
-    private func processReceivedAudioBuffer(
+    func processReceivedAudioBuffer(
         _ buffer: AVAudioPCMBuffer,
         for source: AudioSource,
-        frameCount: UInt64
+        frameCount: UInt64,
+        appendTo target: AudioBufferAppendTarget
     ) {
         guard !isTerminal(), isSourceActive(source) else { return }
-        let ownedBuffer: AVAudioPCMBuffer
+        let processed: ReceivedAudioBufferProcessingResult
         do {
-            ownedBuffer = try deepCopyAudioBuffer(buffer)
-        } catch {
-            recordReceivedBuffer(for: source, frameCount: frameCount, volume: nil)
-            reportAudioBufferCopyError(error, for: source)
-            return
-        }
-        reportReceivedFormat(ownedBuffer.format, for: source)
-        let normalizedBuffer: AVAudioPCMBuffer
-        if ownedBuffer.format.channelCount > 1 {
-            do {
-                normalizedBuffer = try monoFloat32AudioBuffer(from: ownedBuffer)
-            } catch {
+            processed = try ReceivedAudioBufferProcessor.processReceivedAudioBuffer(
+                buffer,
+                appendTo: target
+            )
+        } catch let error as ReceivedAudioBufferProcessingError {
+            switch error {
+            case let .copy(error):
+                recordReceivedBuffer(for: source, frameCount: frameCount, volume: nil)
+                reportAudioBufferCopyError(error, for: source)
+            case let .normalization(error):
                 recordReceivedBuffer(for: source, frameCount: frameCount, volume: nil)
                 reportAudioMonoConversionError(error, for: source)
-                return
+            case let .volumeUnavailable(format):
+                recordReceivedBuffer(for: source, frameCount: frameCount, volume: nil)
+                reportAudioVolumeError(for: source, format: format)
             }
-        } else {
-            normalizedBuffer = ownedBuffer
+            return
+        } catch {
+            recordReceivedBuffer(for: source, frameCount: frameCount, volume: nil)
+            reportAudioVolumeError(for: source, format: buffer.format)
+            return
         }
-        let rawVolume = audioVolume(from: normalizedBuffer)
-        let clampSummary = clampAudioSamples(in: normalizedBuffer)
-        if rawVolume?.peak ?? 0 > 1 || clampSummary.hasAnomaly {
+        reportReceivedFormat(processed.receivedFormat, for: source)
+        if processed.rawVolume.peak > 1 || processed.clampSummary.hasAnomaly {
             reportAudioScaleWarning(
                 for: source,
-                peak: rawVolume?.peak ?? 0,
-                format: normalizedBuffer.format,
-                buffer: normalizedBuffer,
-                summary: clampSummary
+                peak: processed.rawVolume.peak,
+                format: processed.buffer.format,
+                buffer: processed.buffer,
+                summary: processed.clampSummary
             )
         }
-        guard let volume = rawVolume else {
-            recordReceivedBuffer(for: source, frameCount: frameCount, volume: nil)
-            reportAudioVolumeError(for: source, format: normalizedBuffer.format)
-            return
-        }
         recordAudioInputSuccess(for: source)
-        recordReceivedBuffer(for: source, frameCount: frameCount, volume: volume)
-        guard let clampedVolume = audioVolume(from: normalizedBuffer) else {
-            reportAudioVolumeError(for: source, format: normalizedBuffer.format)
+        recordReceivedBuffer(
+            for: source,
+            frameCount: frameCount,
+            volume: processed.rawVolume
+        )
+        guard processed.clampedVolume != nil else {
+            reportAudioVolumeError(for: source, format: processed.buffer.format)
             return
         }
-        enqueue(normalizedBuffer, for: source, rms: clampedVolume.rms)
     }
 
     private func enqueue(_ buffer: AVAudioPCMBuffer, for source: AudioSource, rms: Double) {
@@ -2289,7 +2308,7 @@ private enum HearingError: LocalizedError {
     }
 }
 
-private struct Arguments {
+struct Arguments {
     let locale: Locale
     let inputDevice: String
     let sources: Set<AudioSource>
@@ -2298,7 +2317,7 @@ private struct Arguments {
     let debugRequestAuth: Bool
 }
 
-private func parseArguments() -> Arguments {
+func parseArguments() -> Arguments {
     let arguments = Array(CommandLine.arguments.dropFirst())
     guard arguments.count >= 6,
           arguments[0] == "--locale",
@@ -2449,26 +2468,3 @@ private func coreAudioDeviceID(uniqueID: String) -> AudioDeviceID? {
     }
     return nil
 }
-
-private let arguments = parseArguments()
-private let session = HearingSession(
-    locale: arguments.locale,
-    inputDevice: arguments.inputDevice,
-    sources: arguments.sources,
-    debugInputWavPath: arguments.debugInputWavPath,
-    debugDumpAppendedPath: arguments.debugDumpAppendedPath,
-    debugRequestAuth: arguments.debugRequestAuth
-)
-DispatchQueue.global(qos: .userInitiated).async {
-    while let line = readLine() {
-        guard let data = line.data(using: .utf8),
-              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let operation = value["op"] as? String else {
-            continue
-        }
-        if operation == "cancel" { session.cancel() }
-    }
-    session.cancel()
-}
-DispatchQueue.main.async { session.authorizeAndStart() }
-RunLoop.main.run()

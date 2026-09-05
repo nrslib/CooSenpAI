@@ -35,6 +35,31 @@ mod attachments;
 #[path = "companion_storage_usage.rs"]
 mod usage_recovery;
 
+fn log_provider_retention(
+    log_path: &Path,
+    report: &crate::provider_storage::ProviderRetentionReport,
+) {
+    let providers = report.by_provider();
+    if providers.iter().all(|(_, stats)| stats.deleted_files == 0) {
+        return;
+    }
+    let Ok(logger) = FileLogger::new(log_path.to_owned()) else {
+        return;
+    };
+    for (provider, stats) in providers {
+        if stats.deleted_files == 0 {
+            continue;
+        }
+        let _ = logger.write(
+            "INFO",
+            &format!(
+                "provider 内部記録を削除しました: provider={provider} files={} bytes={}",
+                stats.deleted_files, stats.deleted_bytes
+            ),
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CompanionStorage {
     pub state_directory: PathBuf,
@@ -49,6 +74,7 @@ pub struct CompanionStorage {
     pub turn_commit_quarantine_path: PathBuf,
     pub log_path: PathBuf,
     pub conversation_directory: PathBuf,
+    pub provider_directory: PathBuf,
     pub attachments_directory: PathBuf,
     frame_buffer: FrameBuffer,
     pub retention_days: u64,
@@ -75,6 +101,7 @@ impl CompanionStorage {
                 .join("failed/companion-active-turn-commits.jsonl"),
             log_path: paths.log.clone(),
             conversation_directory: paths.conversation.clone(),
+            provider_directory: paths.provider.clone(),
             attachments_directory: paths.attachments.clone(),
             frame_buffer: FrameBuffer::new(paths.frame_buffer.clone()),
             retention_days,
@@ -187,12 +214,7 @@ impl CompanionStorage {
         let path = self.conversation_directory.join(format!("{date}.jsonl"));
         let value = conversation_storage_value(entry, self.conversation_generation()?)?;
         crate::persistence::JsonlStore::new(path).append(&value)?;
-        crate::persistence::prune_daily_jsonl_at(
-            &self.conversation_directory,
-            self.retention_days,
-            u64::MAX,
-            now,
-        )?;
+        self.prune_retention_at(now)?;
         Ok(())
     }
 
@@ -229,14 +251,28 @@ impl CompanionStorage {
             },
         )?;
         if prune_conversation {
-            crate::persistence::prune_daily_jsonl_at(
-                &self.conversation_directory,
-                self.retention_days,
-                u64::MAX,
-                now,
-            )?;
+            self.prune_retention_at(now)?;
         }
         Ok(appended)
+    }
+
+    pub(crate) fn prune_retention_at(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), PersistenceError> {
+        crate::persistence::prune_daily_jsonl_at(
+            &self.conversation_directory,
+            self.retention_days,
+            u64::MAX,
+            now,
+        )?;
+        let report = crate::provider_storage::prune_provider_storage(
+            &self.provider_directory,
+            self.retention_days,
+            now,
+        )?;
+        log_provider_retention(&self.log_path, &report);
+        Ok(())
     }
 
     pub fn load_summary(&self) -> Result<Option<String>, PersistenceError> {

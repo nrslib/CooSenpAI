@@ -29,6 +29,7 @@ mod prompt_json;
 pub mod prompts;
 pub mod provider;
 pub mod provider_api_keys;
+pub mod provider_storage;
 pub mod recent_observations;
 pub mod runtime;
 pub mod state;

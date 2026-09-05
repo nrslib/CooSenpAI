@@ -14,13 +14,34 @@ done
 
 desktop_dir="$repo_root/apps/desktop"
 
+# 署名 identity を選ぶ。アドホック署名はビルドごとに cdhash が変わり、画面収録や
+# アクセシビリティの許可が旧ビルドに残ったまま効かなくなる（システム設定ではオンに見える）。
+# Apple 発行の証明書なら許可条件が識別子とチームに基づくため、ビルドを重ねても許可が持続する。
+identities=$(security find-identity -v -p codesigning 2>/dev/null || true)
+pick_identity() {
+  printf '%s\n' "$identities" | grep -o "\"$1[^\"]*\"" | head -n 1 | tr -d '"'
+}
+if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+  signing_identity=$APPLE_SIGNING_IDENTITY
+elif identity=$(pick_identity 'Developer ID Application:') && [ -n "$identity" ]; then
+  signing_identity=$identity
+elif identity=$(pick_identity 'Apple Development:') && [ -n "$identity" ]; then
+  signing_identity=$identity
+else
+  signing_identity=-
+fi
+
 if [ "${1:-}" != "--skip-build" ]; then
   if [ ! -d "$desktop_dir/node_modules" ]; then
     printf 'install-local: デスクトップの依存を入れます\n'
     (cd "$desktop_dir" && npm ci)
   fi
-  printf 'install-local: ビルドします（アドホック署名）\n'
-  (cd "$desktop_dir" && APPLE_SIGNING_IDENTITY=- npm run tauri build)
+  if [ "$signing_identity" = - ]; then
+    printf 'install-local: ビルドします（アドホック署名）\n'
+  else
+    printf 'install-local: ビルドします（署名: %s）\n' "$signing_identity"
+  fi
+  (cd "$desktop_dir" && APPLE_SIGNING_IDENTITY="$signing_identity" npm run tauri -- build --bundles app)
 fi
 
 [ -d "$bundle" ] || { printf 'install-local: ビルド成果物がありません: %s\n' "$bundle" >&2; exit 1; }
@@ -36,14 +57,23 @@ if pgrep -f "$dest/Contents/MacOS/" >/dev/null 2>&1; then
   sleep 3
 fi
 
-# アドホック署名はビルドごとに cdhash が変わり、画面収録やアクセシビリティの許可が
-# 旧ビルドに残ったまま効かなくなる（システム設定ではオンに見える）。
-# 許可をリセットしておき、起動後の要求ダイアログで許可し直せるようにする。
+# 署名者が前回の配置と変わるときだけ許可をリセットし、起動後の要求ダイアログで許可し直せるようにする。
+# 同じ Apple 発行の証明書で署名している限り、許可はビルドを跨いで持続する。
+signer_of() {
+  codesign -dvv "$1" 2>&1 | grep -m 1 '^Authority=' || printf 'adhoc\n'
+}
+new_signer=$(signer_of "$bundle")
+previous_signer=
+[ -d "$dest" ] && previous_signer=$(signer_of "$dest")
 bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist")
-for service in ScreenCapture Accessibility; do
-  printf 'install-local: %s の許可をリセットします (%s)\n' "$service" "$bundle_id"
-  tccutil reset "$service" "$bundle_id"
-done
+if [ "$new_signer" = adhoc ] || [ "$new_signer" != "$previous_signer" ]; then
+  for service in ScreenCapture Accessibility; do
+    printf 'install-local: %s の許可をリセットします (%s)\n' "$service" "$bundle_id"
+    tccutil reset "$service" "$bundle_id"
+  done
+else
+  printf 'install-local: 署名者が同じため許可を保持します (%s)\n' "$new_signer"
+fi
 
 if [ -d "$dest" ]; then
   printf 'install-local: 旧アプリを削除します\n'

@@ -4,6 +4,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 temporary_path=$(mktemp /tmp/coosenpai-hearing-test.XXXXXX)
+temporary_object_path="${temporary_path}.o"
 module_cache_dir="$script_dir/../../target/helpers/test-module-cache"
 e2e_root="$repository_dir/target/helpers/hearing-e2e"
 e2e_directory="$e2e_root/data"
@@ -27,24 +28,32 @@ stop_e2e_runner() {
 
 cleanup() {
   stop_e2e_runner
-  rm -f "$temporary_path"
+  rm -f "$temporary_path" "$temporary_object_path"
   rm -rf "$e2e_directory"
   rm -f "$e2e_config"
 }
 trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$module_cache_dir"
+sdk_path=$(xcrun --sdk macosx --show-sdk-path)
+clang -isysroot "$sdk_path" -fobjc-arc -c \
+  "$script_dir/Sources/audio_tap_installer.m" -o "$temporary_object_path"
 swiftc \
+  -parse-as-library \
   -module-cache-path "$module_cache_dir" \
+  -import-objc-header "$script_dir/Sources/audio_tap_installer.h" \
   "$script_dir/Sources/audio_stats.swift" \
   "$script_dir/Sources/audio_scaling.swift" \
   "$script_dir/Sources/audio_buffer_copy.swift" \
   "$script_dir/Sources/audio_conversion.swift" \
+  "$script_dir/Sources/audio_input_processing.swift" \
   "$script_dir/Sources/recognition_state.swift" \
   "$script_dir/Sources/segment_controller.swift" \
   "$script_dir/Sources/voice_activity.swift" \
   "$script_dir/Sources/wav_input.swift" \
   "$script_dir/Sources/appended_audio_dump.swift" \
+  "$script_dir/Sources/main.swift" \
+  "$temporary_object_path" \
   "$script_dir/Tests/audio_stats_test.swift" \
   "$script_dir/Tests/audio_scaling_test.swift" \
   "$script_dir/Tests/audio_buffer_copy_test.swift" \

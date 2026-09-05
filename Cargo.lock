@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-platform-macos"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",

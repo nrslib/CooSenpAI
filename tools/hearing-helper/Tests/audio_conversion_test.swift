@@ -144,6 +144,34 @@ private func makeStereoFloatBuffer(interleaved: Bool) -> AVAudioPCMBuffer {
     return buffer
 }
 
+private func makeMonoInt16Buffer() -> AVAudioPCMBuffer {
+    let format = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: 48_000,
+        channels: 1,
+        interleaved: false
+    )!
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 3)!
+    buffer.frameLength = 3
+    let samples = buffer.int16ChannelData![0]
+    samples[0] = 16_384
+    samples[1] = -16_384
+    samples[2] = 32_767
+    return buffer
+}
+
+private final class FakeRecognitionRequest: AudioBufferAppendTarget {
+    private(set) var appendedBuffers: [AVAudioPCMBuffer] = []
+
+    func append(_ buffer: AVAudioPCMBuffer, rms _: Double) {
+        appendedBuffers.append(buffer)
+    }
+}
+
+private final class FakeRecognizer {
+    let request = FakeRecognitionRequest()
+}
+
 private func testMonoFloat32AudioBuffer(interleaved: Bool) throws {
     let converted = try monoFloat32AudioBuffer(
         from: makeStereoFloatBuffer(interleaved: interleaved)
@@ -164,6 +192,37 @@ private func testMonoFloat32AudioBuffer(interleaved: Bool) throws {
 func testMonoFloat32AudioBufferConversion() throws {
     try testMonoFloat32AudioBuffer(interleaved: true)
     try testMonoFloat32AudioBuffer(interleaved: false)
+}
+
+func testAudioBufferIsMonoFloat32BeforeAppend() throws {
+    let recognizer = FakeRecognizer()
+    let session = HearingSession(
+        locale: Locale(identifier: "ja-JP"),
+        inputDevice: "default",
+        sources: [.microphone],
+        debugInputWavPath: nil,
+        debugDumpAppendedPath: nil,
+        debugRequestAuth: false
+    )
+    let input = makeMonoInt16Buffer()
+    session.processReceivedAudioBuffer(
+        input,
+        for: .microphone,
+        frameCount: UInt64(input.frameLength),
+        appendTo: recognizer.request
+    )
+
+    guard recognizer.request.appendedBuffers.count == 1,
+          let appended = recognizer.request.appendedBuffers.first,
+          appended.format.channelCount == 1,
+          appended.format.commonFormat == .pcmFormatFloat32,
+          !appended.format.isInterleaved,
+          let samples = appended.floatChannelData?[0] else {
+        throw TestError("append 前の音声が mono float32 ではありません")
+    }
+    assert(abs(samples[0] - 0.5) < 0.000_001)
+    assert(abs(samples[1] + 0.5) < 0.000_001)
+    assert(abs(samples[2] - Float(32_767) / 32_768) < 0.000_001)
 }
 
 func testAudioConversion() throws {
@@ -201,4 +260,5 @@ func testAudioConversion() throws {
         }
     }
     try testMonoFloat32AudioBufferConversion()
+    try testAudioBufferIsMonoFloat32BeforeAppend()
 }

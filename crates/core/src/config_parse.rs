@@ -17,7 +17,7 @@ mod presence;
 #[path = "config_parse_watch_apps.rs"]
 mod watch_apps;
 use self::helpers::{
-    boolean, effort, enum_string, executable, frames_per_send, nonnegative_u32,
+    boolean, effort, enum_string, executable, frames_per_send, nonnegative_u32, nonnegative_u64,
     optional_nonnegative_u32, parse_audio, parse_chat, parse_debug, parse_speech, parse_ui,
     persona, positive_number, positive_u32, positive_u64, positive_usize, provider, string,
     unknown_keys,
@@ -49,6 +49,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         object,
         &[
             "configVersion",
+            "revision",
             "watch",
             "observer",
             "companion",
@@ -74,6 +75,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         &mut issues,
         parse_watch,
     );
+    let revision = nonnegative_u64(object, "revision", 0, "revision", &mut issues);
     let observer = parse_section(
         object.get("observer"),
         AgentConfig::default(),
@@ -169,6 +171,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
     (
         Config {
             config_version: 3,
+            revision,
             watch,
             observer,
             companion,

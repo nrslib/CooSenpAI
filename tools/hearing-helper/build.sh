@@ -25,36 +25,40 @@ sdk_path=$(xcrun --sdk macosx --show-sdk-path)
 if [ -n "$target_triple" ]; then
   clang -target "$swift_target" -isysroot "$sdk_path" -fobjc-arc -c \
     "$script_dir/Sources/audio_tap_installer.m" -o "$temporary_object_path"
-  swiftc -target "$swift_target" -O -module-cache-path "$module_cache_dir" \
+  swiftc -target "$swift_target" -O -parse-as-library -module-cache-path "$module_cache_dir" \
     -import-objc-header "$script_dir/Sources/audio_tap_installer.h" \
     "$script_dir/Sources/audio_stats.swift" \
     "$script_dir/Sources/audio_scaling.swift" \
     "$script_dir/Sources/audio_buffer_copy.swift" \
     "$script_dir/Sources/audio_conversion.swift" \
+    "$script_dir/Sources/audio_input_processing.swift" \
     "$script_dir/Sources/recognition_state.swift" \
     "$script_dir/Sources/segment_controller.swift" \
     "$script_dir/Sources/voice_activity.swift" \
     "$script_dir/Sources/wav_input.swift" \
     "$script_dir/Sources/appended_audio_dump.swift" \
     "$script_dir/Sources/main.swift" \
+    "$script_dir/Sources/entrypoint.swift" \
     "$temporary_object_path" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$script_dir/Info.plist" \
     -o "$temporary_path"
 else
   clang -isysroot "$sdk_path" -fobjc-arc -c \
     "$script_dir/Sources/audio_tap_installer.m" -o "$temporary_object_path"
-  swiftc -O -module-cache-path "$module_cache_dir" \
+  swiftc -O -parse-as-library -module-cache-path "$module_cache_dir" \
     -import-objc-header "$script_dir/Sources/audio_tap_installer.h" \
     "$script_dir/Sources/audio_stats.swift" \
     "$script_dir/Sources/audio_scaling.swift" \
     "$script_dir/Sources/audio_buffer_copy.swift" \
     "$script_dir/Sources/audio_conversion.swift" \
+    "$script_dir/Sources/audio_input_processing.swift" \
     "$script_dir/Sources/recognition_state.swift" \
     "$script_dir/Sources/segment_controller.swift" \
     "$script_dir/Sources/voice_activity.swift" \
     "$script_dir/Sources/wav_input.swift" \
     "$script_dir/Sources/appended_audio_dump.swift" \
     "$script_dir/Sources/main.swift" \
+    "$script_dir/Sources/entrypoint.swift" \
     "$temporary_object_path" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$script_dir/Info.plist" \
     -o "$temporary_path"

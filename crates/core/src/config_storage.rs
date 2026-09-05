@@ -33,13 +33,27 @@ pub fn patch_config<F>(
 where
     F: FnOnce(Config) -> Result<Config, ConfigError>,
 {
-    patch_config_before_save(paths, malformed_recovery_base, patch, |_, _| Ok(()))
+    patch_config_before_save_if_revision(paths, malformed_recovery_base, None, patch, |_, _| Ok(()))
         .map(|(config, ())| config)
 }
 
 pub fn patch_config_before_save<F, B, T>(
     paths: &ConfigPaths,
     malformed_recovery_base: Option<&Config>,
+    patch: F,
+    before_save: B,
+) -> Result<(Config, T), ConfigError>
+where
+    F: FnOnce(Config) -> Result<Config, ConfigError>,
+    B: FnOnce(&Config, &Config) -> Result<T, ConfigError>,
+{
+    patch_config_before_save_if_revision(paths, malformed_recovery_base, None, patch, before_save)
+}
+
+pub fn patch_config_before_save_if_revision<F, B, T>(
+    paths: &ConfigPaths,
+    malformed_recovery_base: Option<&Config>,
+    expected_revision: Option<u64>,
     patch: F,
     before_save: B,
 ) -> Result<(Config, T), ConfigError>
@@ -58,9 +72,18 @@ where
         },
         Err(error) => return Err(error),
     };
+    if let Some(expected_revision) = expected_revision {
+        if current.revision != expected_revision {
+            return Err(ConfigError::RevisionConflict {
+                expected: expected_revision,
+                actual: current.revision,
+            });
+        }
+    }
     let previous = current.clone();
     let mut updated = super::normalize_config(patch(current)?);
     super::normalize_audio_sources_on_enable(previous.audio.enabled, &mut updated);
+    updated.revision = previous.revision.saturating_add(1);
     validate_config(&updated)?;
     validate_executable_overrides(&updated)?;
     let before_save_result = before_save(&previous, &updated)?;
@@ -89,6 +112,7 @@ pub fn ensure_layout(paths: &ConfigPaths) -> Result<(), ConfigError> {
         &paths.personas,
         &paths.mailbox,
         &paths.state,
+        &paths.provider,
         &paths.archive,
         &paths.outbox,
         &outbox_pending,
