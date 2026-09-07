@@ -875,28 +875,14 @@
     </section>
 
     <div class="features" aria-label="CooSenpAIでできること">
-      <section class="feature-group" aria-labelledby="see-title">
+      <section class="feature-group" aria-labelledby="input-title">
         <div class="feature-group-heading">
           <div class="container">
-            <h2 class="value-heading" id="see-title">コピペやスクショで、その場で聞く</h2>
+            <h2 class="value-heading" id="input-title">こちらから聞く</h2>
           </div>
         </div>
 
         <div class="feature-group-items">
-          <section class="feature-section" aria-labelledby="feature-capture-title">
-            <div class="container feature-layout">
-              <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="capture.gif"> をこの figure の中に置き、figure-bubble を外す -->
-              <figure class="feature-figure" id="gif-capture" data-gif="capture.gif">
-                <img class="feature-gif" src="media/kun/capture.gif" alt="範囲を選んでスクショを送り、Coo が答える様子" loading="lazy">
-              </figure>
-              <div class="feature-copy">
-                <span class="feature-number" aria-hidden="true"></span>
-                <h3 id="feature-capture-title">スクショする</h3>
-                <p class="feature-description">⌥⇧4 を押して、見せたいところを囲む。開いた小窓で「これどうすればいい？」と聞けます。エラーや図の説明に、スクショをそのまま使えます。</p>
-                <p class="shortcut"><span class="shortcut-label">キー</span><kbd>⌥</kbd><kbd>⇧</kbd><kbd>4</kbd></p>
-              </div>
-            </div>
-          </section>
           <section class="feature-section" aria-labelledby="feature-text-title">
             <div class="container feature-layout">
               <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="text.gif"> をこの figure の中に置き、figure-bubble を外す -->
@@ -911,29 +897,17 @@
               </div>
             </div>
           </section>
-        </div>
-      </section>
-
-      <section class="feature-group" aria-labelledby="hear-title">
-        <div class="feature-group-heading">
-          <div class="container">
-            <h2 class="value-heading" id="hear-title">会話を聞いてもらう。声で質問する。</h2>
-          </div>
-        </div>
-
-        <div class="feature-group-items">
-          <section class="feature-section" aria-labelledby="feature-listen-title">
+          <section class="feature-section" aria-labelledby="feature-capture-title">
             <div class="container feature-layout">
-              <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="listen.gif"> をこの figure の中に置き、figure-bubble を外す -->
-              <figure class="feature-figure" id="gif-listen" data-gif="listen.gif">
-                <img class="feature-gif" src="media/kun/listen.gif" alt="スピーカーの音声を聞いたあとに締切を聞き返す様子" loading="lazy">
+              <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="capture.gif"> をこの figure の中に置き、figure-bubble を外す -->
+              <figure class="feature-figure" id="gif-capture" data-gif="capture.gif">
+                <img class="feature-gif" src="media/kun/capture.gif" alt="範囲を選んでスクショを送り、Coo が答える様子" loading="lazy">
               </figure>
               <div class="feature-copy">
                 <span class="feature-number" aria-hidden="true"></span>
-                <h3 id="feature-listen-title">音を聞く</h3>
-                <p class="feature-description">Hearing AI を ON にすると、スピーカーから流れる音声を文字にします。会議や動画で聞き逃したところも、「さっきの締切、いつだっけ？」と聞き返せます。</p>
-                <p class="feature-note">文字起こしは Mac の中で行い、確定したテキストだけを AI に送ります。Hearing AI はいつでも OFF にできます。</p>
-                <p class="shortcut"><span class="shortcut-label">起動</span><span class="shortcut-text">メニューバーから Hearing AI を ON</span></p>
+                <h3 id="feature-capture-title">スクショする</h3>
+                <p class="feature-description">⌥⇧4 を押して、見せたいところを囲む。開いた小窓で「これどうすればいい？」と聞けます。エラーや図の説明に、スクショをそのまま使えます。</p>
+                <p class="shortcut"><span class="shortcut-label">キー</span><kbd>⌥</kbd><kbd>⇧</kbd><kbd>4</kbd></p>
               </div>
             </div>
           </section>
@@ -952,10 +926,6 @@
               </div>
             </div>
           </section>
-        </div>
-      </section>
-
-      <div class="feature-group-items">
           <section class="feature-section" aria-labelledby="feature-chat-title">
             <div class="container feature-layout">
               <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="chat.gif"> をこの figure の中に置き、figure-bubble を外す -->
@@ -970,12 +940,13 @@
               </div>
             </div>
           </section>
-      </div>
+        </div>
+      </section>
 
-      <section class="feature-group" aria-labelledby="notice-title">
+      <section class="feature-group" aria-labelledby="watch-title">
         <div class="feature-group-heading">
           <div class="container">
-            <h2 class="value-heading" id="notice-title">同じ画面を見ながら、作業を一緒に</h2>
+            <h2 class="value-heading" id="watch-title">見守ってもらう</h2>
           </div>
         </div>
 
@@ -991,6 +962,21 @@
                 <h3 id="feature-notice-title">画面を見る</h3>
                 <p class="feature-description">Vision AI を ON にすると、選んだアプリの画面を AI が見ます。同じエラーで止まっているときや、テストが通ったときなど、気づいたことがあれば吹き出しで声をかけます。</p>
                 <p class="shortcut"><span class="shortcut-label">起動</span><span class="shortcut-text">メニューバーから Vision AI を ON</span></p>
+              </div>
+            </div>
+          </section>
+          <section class="feature-section" aria-labelledby="feature-listen-title">
+            <div class="container feature-layout">
+              <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="listen.gif"> をこの figure の中に置き、figure-bubble を外す -->
+              <figure class="feature-figure" id="gif-listen" data-gif="listen.gif">
+                <img class="feature-gif" src="media/kun/listen.gif" alt="スピーカーの音声を聞いたあとに締切を聞き返す様子" loading="lazy">
+              </figure>
+              <div class="feature-copy">
+                <span class="feature-number" aria-hidden="true"></span>
+                <h3 id="feature-listen-title">音を聞く</h3>
+                <p class="feature-description">Hearing AI を ON にすると、スピーカーから流れる音声を文字にします。会議や動画で聞き逃したところも、「さっきの締切、いつだっけ？」と聞き返せます。</p>
+                <p class="feature-note">文字起こしは Mac の中で行い、確定したテキストだけを AI に送ります。Hearing AI はいつでも OFF にできます。</p>
+                <p class="shortcut"><span class="shortcut-label">起動</span><span class="shortcut-text">メニューバーから Hearing AI を ON</span></p>
               </div>
             </div>
           </section>
