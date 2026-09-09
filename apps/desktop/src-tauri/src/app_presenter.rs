@@ -503,7 +503,11 @@ impl AppPresenter {
             return vec![];
         }
         self.view.watch_changing = self.watch.running;
-        self.view.audio_changing = self.audio.running;
+        self.view.audio_changing = self.audio.running
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.audio.phase == "starting");
         let mut effects = vec![];
         if let Some(snapshot) = &self.snapshot {
             self.view.screen = if snapshot.onboarding.finish_pending {

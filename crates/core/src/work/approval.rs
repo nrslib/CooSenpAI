@@ -22,7 +22,7 @@ pub enum ApprovalStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRequest {
     pub id: String,
@@ -74,6 +74,10 @@ impl WorkApprovals {
 
     pub fn snapshot(&self) -> Option<ApprovalRequest> {
         self.state.lock().expect("work approvals").request.clone()
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     pub fn mode(&self) -> ApprovalMode {
@@ -282,6 +286,9 @@ impl WorkApprovals {
                             continue;
                         }
                         state.request.as_mut().expect("request").status = ApprovalStatus::Reviewing;
+                        self.changes.send_replace(state.revision);
+                        // 自分の Reviewing 通知で審査を中断しない。外部変更はロック解放後に受け取る。
+                        changes.borrow_and_update();
                     }
                     let review_cancel = cancellation.child_token();
                     let review = reviewer.review(&request, review_cancel.clone());

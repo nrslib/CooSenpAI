@@ -22,7 +22,7 @@ pub(crate) enum WorkPhase {
 }
 
 /// 実行ごとの記録。cwd、許可ルート、承認の種類、出力の要約、変更ファイルを残す。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WorkRecord {
     id: String,
@@ -38,7 +38,7 @@ pub(crate) struct WorkRecord {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkSnapshot {
     task: Option<WorkRecord>,
@@ -80,6 +80,35 @@ pub(crate) struct WorkController {
 }
 
 impl WorkController {
+    pub(crate) async fn notify_changes(
+        self: Arc<Self>,
+        ui: crate::ui_root::UiHandle,
+        cancellation: CancellationToken,
+    ) {
+        let mut approvals = self.approvals.subscribe();
+        let mut completion = self.completion.subscribe();
+        let mut previous = WorkSnapshot::default();
+        loop {
+            let snapshot = self.snapshot();
+            if snapshot != previous {
+                previous = snapshot.clone();
+                ui.input(
+                    crate::ui_events::UiView::Application,
+                    crate::ui_events::UiEvent::WorkApproval(
+                        crate::work_approval_presenter::WorkApprovalEvent::Changed(Box::new(
+                            snapshot,
+                        )),
+                    ),
+                );
+            }
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                changed = approvals.changed() => if changed.is_err() { break; },
+                changed = completion.changed() => if changed.is_err() { break; },
+            }
+        }
+    }
+
     pub fn new(path: PathBuf, home: PathBuf, mode: ApprovalMode) -> Self {
         let (record, load_error) = match Self::restore(&path) {
             Ok(record) => (record, None),

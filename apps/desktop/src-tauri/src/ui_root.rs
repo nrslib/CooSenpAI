@@ -102,6 +102,8 @@ struct ActiveOperation {
 
 pub(crate) struct UiRoot<P: UiPort> {
     model: UiModel,
+    event_counts: std::collections::BTreeMap<String, u64>,
+    diagnostics_at: tokio::time::Instant,
     activation: crate::activation_policy::ActivationPolicy,
     tray: crate::tray_presenter::TrayPresenter,
     snapshot: Option<crate::snapshot_presenter::SnapshotPresenter>,
@@ -232,6 +234,8 @@ impl<P: UiPort> UiRoot<P> {
         .collect();
         Self {
             model: UiModel::default(),
+            event_counts: Default::default(),
+            diagnostics_at: tokio::time::Instant::now() + std::time::Duration::from_secs(60),
             activation,
             tray: Default::default(),
             snapshot: None,
@@ -251,7 +255,27 @@ impl<P: UiPort> UiRoot<P> {
     async fn run(mut self) {
         let mut jobs = tokio::task::JoinSet::new();
         let mut ready = std::collections::VecDeque::new();
-        while let Some(message) = self.receiver.recv().await {
+        if let Err(error) = self
+            .port
+            .execute(UiEffect::Log(
+                "ui: event-diagnostics started period-seconds=60".into(),
+            ))
+            .await
+        {
+            eprintln!("ui: event-diagnostics log failed: {error}");
+        }
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(self.diagnostics_at) => {
+                    self.log_diagnostics_if_due().await;
+                    continue;
+                }
+                message = self.receiver.recv() => match message {
+                    Some(message) => message,
+                    None => break,
+                },
+            };
             match message {
                 RootMessage::Input(envelope) => {
                     let pipeline = Pipeline::new(envelope);
@@ -284,6 +308,33 @@ impl<P: UiPort> UiRoot<P> {
         }
     }
 
+    async fn log_diagnostics_if_due(&mut self) {
+        let now = tokio::time::Instant::now();
+        if now < self.diagnostics_at {
+            return;
+        }
+        let period = std::time::Duration::from_secs(60);
+        let elapsed = period + now.duration_since(self.diagnostics_at);
+        self.diagnostics_at = now + period;
+        let counts = std::mem::take(&mut self.event_counts);
+        let root_total: u64 = counts
+            .iter()
+            .filter(|(kind, _)| kind.starts_with("Root."))
+            .map(|(_, count)| count)
+            .sum();
+        let deliveries_total: u64 = counts.values().sum();
+        let publications = self
+            .snapshot
+            .as_mut()
+            .map(|snapshot| snapshot.take_publication_counts());
+        if let Err(error) = self.port.execute(UiEffect::Log(format!(
+            "ui: event-counts period-seconds=60 elapsed-ms={} root-total={root_total} deliveries-total={deliveries_total} queued={} counts={counts:?} snapshot-sources={publications:?}",
+            elapsed.as_millis(), self.receiver.len(),
+        ))).await {
+            eprintln!("ui: event-counts log failed: {error}");
+        }
+    }
+
     async fn complete(
         &mut self,
         pipeline: Pipeline,
@@ -313,6 +364,7 @@ impl<P: UiPort> UiRoot<P> {
         jobs: &mut tokio::task::JoinSet<()>,
     ) -> Option<(Pipeline, Result<Option<String>, String>)> {
         while let Some(next) = pipeline.pending.pop_front() {
+            self.log_diagnostics_if_due().await;
             let (mut presenter, mut event) = match next {
                 Pending::Effect(UiEffect::Deliver { child, event }) => {
                     pipeline.pending.push_front(Pending::Event(child, event));
@@ -479,6 +531,33 @@ impl<P: UiPort> UiRoot<P> {
             let mut notices = Vec::new();
             let effects = loop {
                 let label = event.label();
+                let kind = match &event {
+                    UiEvent::SnapshotResult(input) => {
+                        format!("SnapshotResult({})", input.event.source())
+                    }
+                    UiEvent::SnapshotCompleted(event) => {
+                        format!("SnapshotCompleted({})", event.source())
+                    }
+                    UiEvent::StatusDeadline(crate::status_presenter::StatusDeadline::Presence(
+                        _,
+                    )) => "StatusDeadline(Presence)".to_owned(),
+                    UiEvent::StatusDeadline(crate::status_presenter::StatusDeadline::Thought(
+                        _,
+                    )) => "StatusDeadline(Thought)".to_owned(),
+                    UiEvent::Tutorial(_) | UiEvent::Panel { .. } => label.clone(),
+                    UiEvent::CaptureCompleted(event) => format!(
+                        "CaptureCompleted({})",
+                        format!("{event:?}")
+                            .split('(')
+                            .next()
+                            .expect("capture event label")
+                    ),
+                    _ => label.split('(').next().expect("event label").to_owned(),
+                };
+                *self
+                    .event_counts
+                    .entry(format!("{presenter:?}.{kind}"))
+                    .or_default() += 1;
                 let handling = match presenter {
                     PresenterId::Root => self.handle(source, event),
                     PresenterId::Chat => self.chat.handle(event),
@@ -1173,3 +1252,4 @@ async fn run_task(port: &impl UiPort, task: UiTask) -> Result<EffectResult, Stri
         task => port.run(task).await,
     }
 }
+

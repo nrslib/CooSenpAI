@@ -40,10 +40,10 @@ pub(crate) enum WorkAction {
 #[derive(Debug)]
 pub(crate) enum WorkApprovalEvent {
     Input(WorkApprovalInput),
-    Deadline(u64),
-    Loaded {
+    Changed(Box<WorkSnapshot>),
+    Decided {
         generation: u64,
-        result: Box<IpcResult<WorkSnapshot>>,
+        result: Box<IpcResult<()>>,
     },
     Configured {
         generation: u64,
@@ -52,8 +52,6 @@ pub(crate) enum WorkApprovalEvent {
 }
 #[derive(Debug)]
 pub(crate) enum WorkApprovalTask {
-    Poll(u64),
-    Delay(u64),
     Decide {
         generation: u64,
         id: String,
@@ -81,16 +79,23 @@ pub(crate) struct WorkApprovalView {
 pub(crate) struct WorkApprovalPresenter {
     view: WorkApprovalView,
     generation: u64,
-    in_flight: bool,
+    snapshot: WorkSnapshot,
     config: WorkConfig,
     config_revision: u64,
     allow_after_save: Option<String>,
 }
 impl WorkApprovalPresenter {
-    pub(crate) fn observe(&mut self, snapshot: &AppSnapshot) {
+    pub(crate) fn observe(&mut self, snapshot: &AppSnapshot) -> Vec<UiEffect> {
         self.config = snapshot.config.work.clone();
         self.config_revision = snapshot.config_revision;
-        self.view.manual = self.config.approval_mode == ApprovalMode::Manual;
+        let manual = self.config.approval_mode == ApprovalMode::Manual;
+        let changed = self.view.manual != manual;
+        self.view.manual = manual;
+        if changed && self.view.input_id.is_some() {
+            vec![self.render()]
+        } else {
+            vec![]
+        }
     }
     pub(crate) fn handle(&mut self, event: WorkApprovalEvent) -> Vec<UiEffect> {
         let mut effects = match event {
@@ -105,8 +110,8 @@ impl WorkApprovalPresenter {
                     ..Default::default()
                 };
                 self.allow_after_save = None;
-                self.in_flight = true;
-                vec![spawn(WorkApprovalTask::Poll(self.generation))]
+                self.update_view();
+                vec![]
             }
             WorkApprovalEvent::Input(WorkApprovalInput::Unmounted { input_id }) => {
                 if self.view.input_id.as_ref() != Some(&input_id) {
@@ -114,7 +119,6 @@ impl WorkApprovalPresenter {
                 }
                 self.generation += 1;
                 self.view = WorkApprovalView::default();
-                self.in_flight = false;
                 self.allow_after_save = None;
                 vec![]
             }
@@ -146,7 +150,6 @@ impl WorkApprovalPresenter {
                 };
                 self.generation += 1;
                 self.view.busy = true;
-                self.in_flight = true;
                 self.view.error = None;
                 let task = match action {
                     WorkAction::Allow | WorkAction::Deny => WorkApprovalTask::Decide {
@@ -189,44 +192,27 @@ impl WorkApprovalPresenter {
                 };
                 vec![spawn(task)]
             }
-            WorkApprovalEvent::Deadline(generation) => {
-                if generation != self.generation || self.view.input_id.is_none() || self.in_flight {
+            WorkApprovalEvent::Changed(snapshot) => {
+                if self.snapshot == *snapshot {
                     return vec![];
                 }
-                self.in_flight = true;
-                vec![spawn(WorkApprovalTask::Poll(generation))]
+                self.snapshot = *snapshot;
+                if self.view.input_id.is_none() {
+                    return vec![];
+                }
+                self.update_view();
+                vec![]
             }
-            WorkApprovalEvent::Loaded { generation, result } => {
+            WorkApprovalEvent::Decided { generation, result } => {
                 if generation != self.generation || self.view.input_id.is_none() {
                     return vec![];
                 }
-                self.in_flight = false;
-                let was_busy = self.view.busy;
                 self.view.busy = false;
                 match *result {
-                    IpcResult::Success { value, .. } => {
-                        let (visible, approval, error) =
-                            value.approval_view(self.view.input_id.as_deref().unwrap());
-                        let previous = self.view.approval.as_ref().map(|a| (&a.id, &a.status));
-                        let next = approval.as_ref().map(|a| (&a.id, &a.status));
-                        if previous != next || self.view.visible != visible {
-                            self.view.layout_request += 1;
-                        }
-                        self.view.visible = visible;
-                        self.view.approval = approval;
-                        if error.is_some() || was_busy {
-                            self.view.error = error;
-                        }
-                        self.view.awaiting = self.view.approval.as_ref().is_some_and(|a| {
-                            matches!(
-                                a.status,
-                                ApprovalStatus::AwaitingUser | ApprovalStatus::Reviewing
-                            )
-                        });
-                    }
+                    IpcResult::Success { .. } => self.view.error = None,
                     IpcResult::Failure { error, .. } => self.view.error = Some(error.message),
                 }
-                vec![spawn(WorkApprovalTask::Delay(generation))]
+                vec![]
             }
             WorkApprovalEvent::Configured { generation, result } => {
                 if generation != self.generation || self.view.input_id.is_none() {
@@ -243,15 +229,15 @@ impl WorkApprovalPresenter {
                                 decision: ApprovalDecision::Allow,
                             })]
                         } else {
-                            vec![spawn(WorkApprovalTask::Poll(generation))]
+                            self.view.busy = false;
+                            vec![]
                         }
                     }
                     IpcResult::Failure { error, .. } => {
                         self.allow_after_save = None;
-                        self.in_flight = false;
                         self.view.busy = false;
                         self.view.error = Some(error.message);
-                        vec![spawn(WorkApprovalTask::Delay(generation))]
+                        vec![]
                     }
                 }
             }
@@ -259,6 +245,30 @@ impl WorkApprovalPresenter {
         effects.insert(0, self.render());
         effects
     }
+
+    fn update_view(&mut self) {
+        let (visible, approval, error) = self.snapshot.approval_view(
+            self.view
+                .input_id
+                .as_deref()
+                .expect("mounted approval input"),
+        );
+        if self.view.approval != approval || self.view.visible != visible {
+            self.view.layout_request += 1;
+        }
+        self.view.visible = visible;
+        self.view.approval = approval;
+        if error.is_some() {
+            self.view.error = error;
+        }
+        self.view.awaiting = self.view.approval.as_ref().is_some_and(|approval| {
+            matches!(
+                approval.status,
+                ApprovalStatus::AwaitingUser | ApprovalStatus::Reviewing
+            )
+        });
+    }
+
     fn render(&self) -> UiEffect {
         UiEffect::WorkApprovalRender(Box::new(self.view.clone()))
     }
@@ -271,14 +281,6 @@ pub(crate) async fn run(
     task: WorkApprovalTask,
 ) -> UiEvent {
     let event = match task {
-        WorkApprovalTask::Poll(generation) => WorkApprovalEvent::Loaded {
-            generation,
-            result: Box::new(IpcResult::success(state.work.snapshot())),
-        },
-        WorkApprovalTask::Delay(generation) => {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            WorkApprovalEvent::Deadline(generation)
-        }
         WorkApprovalTask::Configure {
             generation,
             patch,
@@ -308,13 +310,13 @@ pub(crate) async fn run(
                 crate::command_guard::DesktopCommand::WorkApprove,
                 move |_| async move {
                     match worker.work.approvals.decide(&id, decision) {
-                        Ok(()) => IpcResult::success(worker.work.snapshot()),
+                        Ok(()) => IpcResult::success(()),
                         Err(error) => IpcResult::failure(error),
                     }
                 },
             )
             .await;
-            WorkApprovalEvent::Loaded {
+            WorkApprovalEvent::Decided {
                 generation,
                 result: Box::new(result),
             }

@@ -2,7 +2,15 @@ use crate::snapshot::AppSnapshot;
 use crate::ui_events::{PresenterId, UiEffect, UiEvent, UiTask};
 use coosenpai_core::locale::Locale;
 use coosenpai_core::ports::{ScreenCapturePermission, SpeechPermissions};
+use coosenpai_core::runtime::RuntimeSnapshot;
 use std::sync::{Arc, Mutex};
+
+pub(crate) fn runtime_view_changed(previous: &RuntimeSnapshot, next: &RuntimeSnapshot) -> bool {
+    let mut previous = previous.clone();
+    previous.revision = next.revision;
+    previous.pending_observations = next.pending_observations;
+    previous != *next
+}
 
 #[derive(Debug)]
 pub(crate) struct SnapshotInput {
@@ -71,11 +79,19 @@ pub(crate) enum SnapshotEvent {
     ScreenPermissionLoaded(ScreenCapturePermission),
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct PublicationCount {
+    pub attempted: u64,
+    pub published: u64,
+}
+
 pub(crate) struct SnapshotPresenter {
+    publications: std::collections::BTreeMap<&'static str, PublicationCount>,
     shortcut: crate::capture::ShortcutErrorPresenter,
     watch: crate::watch_presenter::WatchPresenter,
     avatar_generation: u64,
     speech: crate::speech_presenter::SpeechPresenter,
+    runtime: Option<RuntimeSnapshot>,
     snapshot: Arc<Mutex<AppSnapshot>>,
 }
 
@@ -86,16 +102,24 @@ impl SnapshotPresenter {
         coordinator: Arc<crate::capture::ShortcutCoordinator>,
     ) -> Self {
         Self {
+            publications: Default::default(),
             shortcut: crate::capture::ShortcutErrorPresenter::new(coordinator, lifecycle.clone()),
             watch: Default::default(),
             avatar_generation: 0,
             snapshot,
             speech: crate::speech_presenter::SpeechPresenter::new(lifecycle),
+            runtime: None,
         }
     }
 
     pub(crate) fn input_started(&mut self) {
         self.speech.input_started();
+    }
+
+    pub(crate) fn take_publication_counts(
+        &mut self,
+    ) -> std::collections::BTreeMap<&'static str, PublicationCount> {
+        std::mem::take(&mut self.publications)
     }
 
     pub(crate) fn current(&self) -> AppSnapshot {
@@ -115,21 +139,52 @@ impl SnapshotPresenter {
         event: SnapshotEvent,
         metadata: Option<(u64, coosenpai_core::work::WorkConfig)>,
     ) -> Vec<UiEffect> {
+        let count = self.publications.entry(event.source()).or_default();
+        count.attempted += 1;
         let mut snapshot = self.snapshot.lock().expect("snapshot lock");
+        let before = serde_json::to_value(&*snapshot).expect("snapshot serialization");
+        let previous_speech = crate::speech::SpeechPopupSnapshot::from_app(&snapshot);
         let old_avatar_path = snapshot.config.ui.avatar_path.clone();
         let mut refresh_avatar = false;
         let mut effects = Vec::new();
         match event {
             SnapshotEvent::RuntimeObserved { runtime, initial } => {
+                let refresh = initial
+                    || self.runtime.as_ref().is_none_or(|previous| {
+                        (previous.phase != runtime.phase
+                            && previous.phase != coosenpai_core::runtime::RuntimePhase::Idle)
+                            || previous.active_user_message_id != runtime.active_user_message_id
+                            || previous.cancelled_user_message_ids
+                                != runtime.cancelled_user_message_ids
+                            || previous.latest_companion_decision
+                                != runtime.latest_companion_decision
+                            || previous.pending_deliveries != runtime.pending_deliveries
+                            || previous.last_error != runtime.last_error
+                    });
+                let thought_changed = initial
+                    || self.runtime.as_ref().is_none_or(|previous| {
+                        previous.latest_companion_thought != runtime.latest_companion_thought
+                            || previous.latest_companion_thought_generation
+                                != runtime.latest_companion_thought_generation
+                    });
                 snapshot.apply_runtime(&runtime);
-                effects.push(UiEffect::Deliver {
-                    child: PresenterId::Bubble,
-                    event: UiEvent::ThoughtObserved {
-                        runtime: Box::new(runtime),
-                        initial,
-                    },
-                });
-                effects.push(UiEffect::Spawn(UiTask::RuntimeFollowup));
+                self.runtime = Some(runtime.clone());
+                if thought_changed {
+                    effects.push(UiEffect::Deliver {
+                        child: PresenterId::Bubble,
+                        event: UiEvent::ThoughtObserved {
+                            runtime: Box::new(runtime),
+                            initial,
+                        },
+                    });
+                }
+                if refresh {
+                    effects.push(UiEffect::Spawn(if snapshot.onboarding.tutorial_active {
+                        UiTask::RuntimeFollowup
+                    } else {
+                        UiTask::RefreshConversation
+                    }));
+                }
             }
             SnapshotEvent::MetadataChanged => {}
             SnapshotEvent::TutorialLoaded(tutorial) => snapshot.onboarding = tutorial.view(),
@@ -295,8 +350,15 @@ impl SnapshotPresenter {
             snapshot.config.work = work;
             snapshot.config_revision = revision;
         }
+        if before == serde_json::to_value(&*snapshot).expect("snapshot serialization") {
+            return effects;
+        }
+        count.published += 1;
+        let voice_changed = (previous_speech.speech.phase != "idle"
+            || snapshot.speech.phase != "idle")
+            && previous_speech != crate::speech::SpeechPopupSnapshot::from_app(&snapshot);
         snapshot.revision = snapshot.revision.saturating_add(1);
-        effects.extend(snapshot_effects(&snapshot));
+        effects.extend(snapshot_effects(&snapshot, voice_changed));
         effects
     }
 
@@ -309,24 +371,56 @@ impl SnapshotPresenter {
             return Vec::new();
         }
         snapshot.revision = snapshot.revision.saturating_add(1);
-        snapshot_effects(&snapshot)
+        snapshot_effects(&snapshot, snapshot.speech.phase != "idle")
     }
 }
 
-fn snapshot_effects(snapshot: &AppSnapshot) -> Vec<UiEffect> {
+fn snapshot_effects(snapshot: &AppSnapshot, speech_changed: bool) -> Vec<UiEffect> {
     let result = Arc::new(snapshot.clone());
-    vec![
-        UiEffect::Deliver {
+    let mut effects = Vec::new();
+    if speech_changed {
+        effects.push(UiEffect::Deliver {
             child: PresenterId::Capture,
             event: UiEvent::CaptureCompleted(Box::new(
                 crate::capture::CaptureEvent::VoiceProgress(Arc::new(
                     crate::speech::SpeechPopupSnapshot::from_app(&result),
                 )),
             )),
-        },
-        UiEffect::Deliver {
-            child: PresenterId::Root,
-            event: UiEvent::SnapshotUpdated(result),
-        },
-    ]
+        });
+    }
+    effects.push(UiEffect::Deliver {
+        child: PresenterId::Root,
+        event: UiEvent::SnapshotUpdated(result),
+    });
+    effects
+}
+
+impl SnapshotEvent {
+    pub(crate) fn source(&self) -> &'static str {
+        match self {
+            Self::RuntimeObserved { .. } => "RuntimeObserved",
+            Self::Runtime(_) => "Runtime",
+            Self::ConversationLoaded { .. } => "ConversationLoaded",
+            Self::DebugLoaded(_) => "DebugLoaded",
+            Self::Hearing(_) => "Hearing",
+            Self::Speech { .. } => "Speech",
+            Self::Watch { .. } => "Watch",
+            Self::MetadataChanged => "MetadataChanged",
+            Self::TutorialLoaded(_)
+            | Self::TutorialActivated { .. }
+            | Self::TutorialEnded { .. }
+            | Self::TutorialPersistenceFailed(_) => "Tutorial",
+            Self::UnreadRead | Self::UnreadAdded(_) => "Unread",
+            Self::TemporarySelected(_)
+            | Self::TemporaryExpired(_)
+            | Self::TemporaryCleared { .. } => "TemporaryAssertiveness",
+            Self::Shortcut(_) => "Shortcut",
+            Self::ConfigLoaded(_) | Self::CompanionReconfigured(_) => "Config",
+            Self::CompanionStopped | Self::CompanionFailed(_) => "Companion",
+            Self::AvatarRefresh | Self::AvatarLoaded { .. } => "Avatar",
+            Self::SpeechDevicesLoaded(_) => "SpeechDevices",
+            Self::SpeechPermissionsLoaded(_) => "SpeechPermissions",
+            Self::ScreenPermissionLoaded(_) => "ScreenPermission",
+        }
+    }
 }

@@ -47,7 +47,7 @@ pub struct SpeechController {
     shortcut_refresh_disabled: std::sync::atomic::AtomicBool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeechPopupSnapshot {
     pub revision: u64,

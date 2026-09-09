@@ -204,6 +204,11 @@ async fn monitor_process(
 ) -> ProcessOutcome {
     let control = process.control();
     let mut ready_seen = false;
+    let device_started = std::time::Instant::now();
+    let _ = logger.write(
+        "INFO",
+        &format!("hearing-start: source={source:?} stage=device-ready phase=begin"),
+    );
     loop {
         let event = tokio::select! {
             biased;
@@ -223,6 +228,7 @@ async fn monitor_process(
             Some(Ok(InteractiveProcessEvent::StdoutLine(line))) => {
                 match serde_json::from_slice::<HearingEvent>(&line) {
                     Ok(event @ HearingEvent::Ready { .. }) => {
+                        let _ = logger.write("INFO", &format!("hearing-start: source={source:?} stage=device-ready phase=end elapsed-ms={}", device_started.elapsed().as_millis()));
                         ready_seen = true;
                         if !send_source_event(
                             events,

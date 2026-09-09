@@ -50,6 +50,11 @@ impl HearingPort for MacHearing {
         let mut specs = Vec::with_capacity(sources.len());
         for source in sources {
             let args = helper_arguments(locale, input_device, source, debug_dump_dir);
+            let started = std::time::Instant::now();
+            let _ = self.logger.write(
+                "INFO",
+                &format!("hearing-start: source={source:?} stage=spawn phase=begin"),
+            );
             let initial_process = InteractiveProcess::spawn(
                 InteractiveProcessRequest {
                     executable: self.helper.clone(),
@@ -64,6 +69,7 @@ impl HearingPort for MacHearing {
                 Ok(process) => (Some(process), None),
                 Err(error) => (None, Some(process_error(error))),
             };
+            let _ = self.logger.write("INFO", &format!("hearing-start: source={source:?} stage=spawn phase=end elapsed-ms={} success={}", started.elapsed().as_millis(), initial_process.is_some()));
             specs.push(SourceProcessSpec {
                 source,
                 executable: self.helper.clone(),

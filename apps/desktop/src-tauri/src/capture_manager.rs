@@ -844,6 +844,11 @@ impl CapturePresenter {
             CaptureEvent::Ui(crate::ui_events::UiEvent::CaptureCompleted(event)) => *event,
             event => event,
         };
+        if matches!(&event, CaptureEvent::VoiceProgress(_))
+            && !matches!(self.state, CaptureState::Voice { .. })
+        {
+            return crate::ui_events::Handling::Handled(Vec::new());
+        }
         if self.closing {
             match event {
                 CaptureEvent::Activate { reply, .. } | CaptureEvent::Voice { reply, .. } => {

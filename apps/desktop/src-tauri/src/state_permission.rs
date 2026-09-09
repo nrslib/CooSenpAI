@@ -96,12 +96,13 @@ impl DesktopState {
     }
 
     pub(crate) async fn request_screen_permission_for_audio(&self) -> ScreenCapturePermission {
+        let started = Instant::now();
         let current = self.screen_permission.lock().await.permission;
-        let permission = if current.requestable {
-            crate::platform::request_screen_capture_permission()
-        } else {
-            crate::platform::screen_capture_permission()
-        };
+        let (permission, source) = resolve_audio_screen_permission(
+            current,
+            crate::platform::request_screen_capture_permission,
+            crate::platform::screen_capture_permission,
+        );
         self.publish_screen_permission(
             permission,
             ScreenPermissionCacheUpdate::CheckedAt(Instant::now()),
@@ -111,7 +112,11 @@ impl DesktopState {
             .presentation_for_locale(Locale::from_config(&self.runtime_config().ui.language));
         let _ = self.logger.write(
             "INFO",
-            &format!("耳の画面収録権限: {}", presentation.status),
+            &format!(
+                "耳の画面収録権限: {} source={source} elapsed-ms={}",
+                presentation.status,
+                started.elapsed().as_millis()
+            ),
         );
         permission
     }
@@ -156,6 +161,17 @@ impl DesktopState {
         )
         .await;
     }
+}
+
+fn resolve_audio_screen_permission(
+    current: ScreenCapturePermission,
+    request: impl FnOnce() -> ScreenCapturePermission,
+    preflight: impl FnOnce() -> ScreenCapturePermission,
+) -> (ScreenCapturePermission, &'static str) {
+    if current.kind == ScreenCapturePermissionKind::Granted && !current.requires_restart() {
+        return (current, "cache");
+    }
+    resolve_screen_permission(current, Duration::ZERO, request, preflight)
 }
 
 fn should_refresh_screen_permission(

@@ -392,6 +392,12 @@ impl DesktopState {
         state.app.manage(state.ui.clone());
         start_ui_root(state.clone(), state.snapshot().await, capture_presenter);
         Self::spawn_runtime_monitor(state.clone());
+        tauri::async_runtime::spawn(
+            state
+                .work
+                .clone()
+                .notify_changes(state.ui.clone(), state.cancellation.clone()),
+        );
         Self::spawn_notification_monitor(state.clone());
         Self::spawn_power_monitor(state.clone());
         Self::spawn_presence_monitor(state.clone());
@@ -496,16 +502,24 @@ impl DesktopState {
         if let (Ok(conversation), Ok(generations), Ok(selected_generation)) =
             (conversation, generations, selected_generation)
         {
-            self.publish_event(
-                crate::snapshot_presenter::SnapshotEvent::ConversationLoaded {
-                    conversation,
-                    generations,
-                    selected_generation,
-                    calls,
-                    limit_reached,
-                },
-            )
-            .await;
+            let snapshot = self.snapshot().await;
+            if snapshot.conversation != conversation
+                || snapshot.conversation_generations != generations
+                || snapshot.selected_conversation_generation != selected_generation
+                || snapshot.companion.total_calls_today != calls
+                || snapshot.companion.proactive_limit_reached != limit_reached
+            {
+                self.publish_event(
+                    crate::snapshot_presenter::SnapshotEvent::ConversationLoaded {
+                        conversation,
+                        generations,
+                        selected_generation,
+                        calls,
+                        limit_reached,
+                    },
+                )
+                .await;
+            }
         }
         self.refresh_debug().await;
     }
@@ -525,10 +539,12 @@ impl DesktopState {
         } else {
             coosenpai_core::debug::DebugCatalog::default()
         };
-        self.publish_event(crate::snapshot_presenter::SnapshotEvent::DebugLoaded(
-            catalog,
-        ))
-        .await;
+        if self.snapshot().await.debug_catalog != catalog {
+            self.publish_event(crate::snapshot_presenter::SnapshotEvent::DebugLoaded(
+                catalog,
+            ))
+            .await;
+        }
     }
 
     pub(crate) async fn finish_capture_cleanup(&self) {

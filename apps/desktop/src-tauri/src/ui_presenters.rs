@@ -163,10 +163,11 @@ impl ChatPresenter {
             return vec![];
         }
         self.snapshot = Some(snapshot.clone());
-        self.work_approval.observe(&snapshot);
-        let mut effects = self
-            .composer
-            .observe(&snapshot, chrono::Local::now().date_naive());
+        let mut effects = self.work_approval.observe(&snapshot);
+        effects.extend(
+            self.composer
+                .observe(&snapshot, chrono::Local::now().date_naive()),
+        );
         effects.extend(
             self.conversation
                 .observe(snapshot.clone(), self.composer.pending_sends()),
@@ -223,7 +224,10 @@ impl WindowPresenter {
             UiEvent::ModelPicker(event) if self.id == PresenterId::ModelPicker => {
                 self.model_picker.as_mut().unwrap().handle(event)
             }
-            UiEvent::Mounted(_) if self.id == PresenterId::ModelPicker => {
+            UiEvent::Mounted(_)
+                if self.id == PresenterId::ModelPicker
+                    && self.presentation.state() == PresentationState::Shown =>
+            {
                 self.model_picker.as_mut().unwrap().mount()
             }
             UiEvent::UserCommand(crate::ui_commands::UserCommand::ModelSave { patch, reply })
@@ -263,6 +267,11 @@ impl WindowPresenter {
                 vec![UiEffect::Fail(error)]
             }
             UiEvent::Window { view, event } if view == self.id => self.present(event),
+            UiEvent::Refreshed { view, .. }
+                if view == self.id && self.presentation.state() == PresentationState::Hidden =>
+            {
+                Vec::new()
+            }
             UiEvent::Refreshed { view, result } if view == self.id => match result {
                 Ok(content) => {
                     let mut effects = Vec::new();
@@ -277,6 +286,14 @@ impl WindowPresenter {
                 }
                 Err(error) => vec![UiEffect::Fail(error)],
             },
+            UiEvent::SnapshotUpdated(_)
+                if !matches!(
+                    self.presentation.state(),
+                    PresentationState::Shown | PresentationState::CloseFailed
+                ) =>
+            {
+                Vec::new()
+            }
             UiEvent::SnapshotUpdated(snapshot) => {
                 let mut effects = Vec::new();
                 if let Some(model) = &mut self.model_picker {
@@ -289,9 +306,10 @@ impl WindowPresenter {
                 });
                 effects
             }
-            UiEvent::Mounted(_) => {
+            UiEvent::Mounted(_) if self.presentation.state() == PresentationState::Shown => {
                 vec![UiEffect::Run(UiTask::Refresh(self.id))]
             }
+            UiEvent::Mounted(_) => Vec::new(),
             UiEvent::Present(command) if command == ViewCommand::FocusInput => {
                 vec![self.command(command)]
             }

@@ -232,6 +232,17 @@ impl RuntimeActor {
     }
 
     pub(super) fn publish(&self, sender: &watch::Sender<RuntimeSnapshot>) {
-        let _ = sender.send(self.snapshot());
+        let mut next = self.snapshot();
+        sender.send_if_modified(|current| {
+            let revision = next.revision;
+            next.revision = current.revision;
+            if *current == next {
+                current.revision = revision;
+                return false;
+            }
+            next.revision = revision;
+            *current = next;
+            true
+        });
     }
 }

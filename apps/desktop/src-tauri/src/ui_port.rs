@@ -416,7 +416,9 @@ impl UiPort for NativeUiPort {
             )),
             UiTask::RuntimeFollowup => {
                 state.refresh_conversation().await;
-                result.events.push(UiEvent::Tutorial(Box::new(crate::tutorial_events::TutorialEvent::Response(crate::tutorial_response_presenter::ResponseEvent::RuntimeConversationLoaded))));
+                if state.snapshot().await.onboarding.tutorial_active {
+                    result.events.push(UiEvent::Tutorial(Box::new(crate::tutorial_events::TutorialEvent::Response(crate::tutorial_response_presenter::ResponseEvent::RuntimeConversationLoaded))));
+                }
             }
             UiTask::ReadThoughtPresentation {
                 generation,

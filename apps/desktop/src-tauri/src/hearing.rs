@@ -264,12 +264,20 @@ impl HearingController {
             )
         };
         let Some(generation) = generation else { return };
+        let publication_started = std::time::Instant::now();
+        let _ = state.logger.write(
+            "INFO",
+            &format!(
+                "hearing-start: generation={generation} stage=starting-publication phase=begin"
+            ),
+        );
         state
             .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
                 HearingResult::Started(generation),
             ))
             .await;
 
+        let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=starting-publication phase=end elapsed-ms={}", publication_started.elapsed().as_millis()));
         let controller = self.clone();
         tauri::async_runtime::spawn(async move {
             controller
@@ -293,6 +301,13 @@ impl HearingController {
         initialization_completed: oneshot::Sender<()>,
     ) {
         let _initialization_completion = InitializationCompletion(Some(initialization_completed));
+        let started = std::time::Instant::now();
+        let _ = state.logger.write(
+            "INFO",
+            &format!(
+                "hearing-start: generation={generation} stage=recognition-permission phase=begin"
+            ),
+        );
         let permission_port = self.permission_port.lock().await.clone();
         let recognition = tokio::select! {
             biased;
@@ -306,6 +321,7 @@ impl HearingController {
             Ok(permission) => (permission, None),
             Err(error) => (SpeechPermissionKind::Unavailable, Some(error.to_string())),
         };
+        let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=recognition-permission phase=end elapsed-ms={} result={recognition:?}", started.elapsed().as_millis()));
         if recognition != SpeechPermissionKind::Granted {
             let locale = Locale::from_config(&state.runtime_config().ui.language);
             let key = match recognition {
@@ -341,7 +357,9 @@ impl HearingController {
         }
         let mut helper_sources = settings.sources.clone();
         if settings.sources.contains(&AudioObservationSource::Speaker) {
+            let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=screen-permission phase=begin elapsed-ms={}", started.elapsed().as_millis()));
             let permission = state.request_screen_permission_for_audio().await;
+            let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=screen-permission phase=end elapsed-ms={}", started.elapsed().as_millis()));
             if cancellation.is_cancelled() {
                 self.complete_stop(generation).await;
                 return;
@@ -389,6 +407,7 @@ impl HearingController {
             .await;
             return;
         };
+        let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=helper-start phase=begin elapsed-ms={}", started.elapsed().as_millis()));
         let session = match port
             .start(
                 &settings.locale,
@@ -418,6 +437,13 @@ impl HearingController {
                 return;
             }
         };
+        let _ = state.logger.write(
+            "INFO",
+            &format!(
+                "hearing-start: generation={generation} stage=helper-start phase=end elapsed-ms={}",
+                started.elapsed().as_millis()
+            ),
+        );
         let control = session.control();
         let attach_outcome = {
             let mut lifecycle = self.lifecycle.lock().await;

@@ -122,6 +122,7 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, snapsh
           type="button"
           role="switch"
           aria-checked={audioEnabled}
+          aria-busy={audioChanging}
           aria-label="Hearing AI"
           title="Hearing AI"
           onClick={onToggleAudio}

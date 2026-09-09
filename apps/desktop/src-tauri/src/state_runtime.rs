@@ -1,13 +1,14 @@
 use super::*;
+use crate::snapshot_presenter::runtime_view_changed;
 
 impl DesktopState {
     pub(crate) fn spawn_runtime_monitor(state: Arc<Self>) {
         let mut snapshots = state.core_runtime().subscribe_snapshots();
         tauri::async_runtime::spawn(async move {
-            let initial = snapshots.borrow_and_update().clone();
+            let mut previous = snapshots.borrow_and_update().clone();
             state
                 .publish_event(crate::snapshot_presenter::SnapshotEvent::RuntimeObserved {
-                    runtime: initial,
+                    runtime: previous.clone(),
                     initial: true,
                 })
                 .await;
@@ -17,6 +18,8 @@ impl DesktopState {
                     changed = snapshots.changed() => {
                         if changed.is_err() { break; }
                         let runtime = snapshots.borrow_and_update().clone();
+                        if !runtime_view_changed(&previous, &runtime) { continue; }
+                        previous = runtime.clone();
                         state.publish_event(crate::snapshot_presenter::SnapshotEvent::RuntimeObserved { runtime, initial: false }).await;
                     }
                 }
