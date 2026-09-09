@@ -1,3 +1,4 @@
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::ports::SpeechSessionControl;
 use tokio_util::sync::CancellationToken;
 
@@ -47,6 +48,7 @@ pub(crate) struct SpeechLifecycle {
     state: Lifecycle,
     next_generation: u64,
     revision: u64,
+    callback_completion: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,11 +78,31 @@ pub(crate) struct CancelOutcome {
     pub(crate) generation: Option<u64>,
     pub(crate) cancellation: Option<CancellationToken>,
     pub(crate) control: Option<SpeechSessionControl>,
+    #[cfg(test)]
     pub(crate) changed: bool,
     pub(crate) startup_owned: bool,
-    pub(crate) message: Option<&'static str>,
+    pub(crate) message: Option<CancelMessage>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelMessage {
+    Sending,
+    Ending,
+}
+
+impl CancelMessage {
+    pub(crate) fn text(self, locale: Locale) -> &'static str {
+        text(
+            match self {
+                Self::Sending => TextKey::SpeechSending,
+                Self::Ending => TextKey::SpeechEnding,
+            },
+            locale,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FinalOutcome {
     Composer,
     Confirm,
@@ -93,6 +115,7 @@ impl Default for SpeechLifecycle {
             state: Lifecycle::Idle,
             next_generation: 0,
             revision: 0,
+            callback_completion: None,
         }
     }
 }
@@ -107,6 +130,7 @@ impl SpeechLifecycle {
         if !matches!(self.state, Lifecycle::Idle) {
             return None;
         }
+        self.callback_completion = None;
         self.next_generation = self.next_generation.max(generation);
         self.state = Lifecycle::Starting {
             generation,
@@ -115,6 +139,10 @@ impl SpeechLifecycle {
         };
         self.bump_revision();
         Some(generation)
+    }
+
+    pub(crate) fn input_started(&mut self) {
+        self.callback_completion = None;
     }
 
     pub(crate) fn finish(&mut self) -> Option<FinishOutcome> {
@@ -154,18 +182,6 @@ impl SpeechLifecycle {
             | Lifecycle::Cancelling { .. }
             | Lifecycle::Cleaning { .. } => None,
         }
-    }
-
-    pub(crate) fn finish_generation(&mut self, generation: u64) -> Option<FinishOutcome> {
-        if !matches!(
-            self.state,
-            Lifecycle::Starting { generation: current, finish_requested: false, .. }
-                | Lifecycle::Active { generation: current, finishing: false, .. }
-                if current == generation
-        ) {
-            return None;
-        }
-        self.finish()
     }
 
     pub(crate) fn continue_start(&mut self, generation: u64) -> StartOutcome {
@@ -223,9 +239,10 @@ impl SpeechLifecycle {
                 generation: Some(self.next_generation),
                 cancellation: None,
                 control: None,
+                #[cfg(test)]
                 changed: false,
                 startup_owned: false,
-                message: Some("音声入力を送信中です"),
+                message: Some(CancelMessage::Sending),
             };
         }
         if let Lifecycle::Cancelling { .. } | Lifecycle::Cleaning { .. } = &self.state {
@@ -233,9 +250,10 @@ impl SpeechLifecycle {
                 generation: Some(self.next_generation),
                 cancellation: None,
                 control: None,
+                #[cfg(test)]
                 changed: false,
                 startup_owned: false,
-                message: Some("音声入力を終了しています"),
+                message: Some(CancelMessage::Ending),
             };
         }
         let previous = std::mem::replace(&mut self.state, Lifecycle::Idle);
@@ -251,6 +269,7 @@ impl SpeechLifecycle {
                     generation: Some(generation),
                     cancellation: Some(cancellation),
                     control: None,
+                    #[cfg(test)]
                     changed: true,
                     startup_owned: true,
                     message: None,
@@ -268,6 +287,7 @@ impl SpeechLifecycle {
                     generation: Some(generation),
                     cancellation: Some(cancellation),
                     control: Some(control),
+                    #[cfg(test)]
                     changed: true,
                     startup_owned: false,
                     message: None,
@@ -280,6 +300,7 @@ impl SpeechLifecycle {
                     generation: Some(generation),
                     cancellation: None,
                     control: None,
+                    #[cfg(test)]
                     changed: true,
                     startup_owned: false,
                     message: None,
@@ -289,6 +310,7 @@ impl SpeechLifecycle {
                 generation: None,
                 cancellation: None,
                 control: None,
+                #[cfg(test)]
                 changed: false,
                 startup_owned: false,
                 message: None,
@@ -321,11 +343,23 @@ impl SpeechLifecycle {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn claim_final(
         &mut self,
         generation: u64,
         source: SpeechSource,
         confirm_before_send: bool,
+    ) -> Option<FinalOutcome> {
+        self.claim_final_outcome(
+            generation,
+            crate::speech_presenter::final_outcome(source, confirm_before_send),
+        )
+    }
+
+    pub(crate) fn claim_final_outcome(
+        &mut self,
+        generation: u64,
+        outcome: FinalOutcome,
     ) -> Option<FinalOutcome> {
         if !matches!(
             &self.state,
@@ -336,11 +370,7 @@ impl SpeechLifecycle {
         ) {
             return None;
         }
-        let outcome = match source {
-            SpeechSource::Composer => FinalOutcome::Composer,
-            SpeechSource::Shortcut if confirm_before_send => FinalOutcome::Confirm,
-            SpeechSource::Shortcut => FinalOutcome::Send,
-        };
+        self.callback_completion = (outcome == FinalOutcome::Send).then_some(generation);
         self.state = match outcome {
             FinalOutcome::Confirm => Lifecycle::Confirming { generation },
             FinalOutcome::Send => Lifecycle::Sending { generation },
@@ -381,6 +411,17 @@ impl SpeechLifecycle {
         }
     }
 
+    pub(crate) fn accept_callback_completion(&mut self, generation: u64) -> bool {
+        if self.callback_completion != Some(generation)
+            || self.next_generation != generation
+            || !matches!(self.state, Lifecycle::Idle)
+        {
+            return false;
+        }
+        self.callback_completion = None;
+        true
+    }
+
     pub(crate) fn is_current(&self, generation: u64) -> bool {
         match self.state {
             Lifecycle::Starting {
@@ -407,13 +448,6 @@ impl SpeechLifecycle {
         }
     }
 
-    pub(crate) fn is_recording(&self) -> bool {
-        matches!(
-            self.state,
-            Lifecycle::Starting { .. } | Lifecycle::Active { .. }
-        )
-    }
-
     pub(crate) fn accepts_session_events(&self, generation: u64) -> bool {
         matches!(
             self.state,
@@ -431,18 +465,6 @@ impl SpeechLifecycle {
                 generation: current
             } if current == generation
         )
-    }
-
-    pub(crate) fn confirming_generation(&self) -> Option<u64> {
-        match self.state {
-            Lifecycle::Confirming { generation } => Some(generation),
-            Lifecycle::Idle
-            | Lifecycle::Starting { .. }
-            | Lifecycle::Active { .. }
-            | Lifecycle::Sending { .. }
-            | Lifecycle::Cancelling { .. }
-            | Lifecycle::Cleaning { .. } => None,
-        }
     }
 
     pub(crate) fn is_sending(&self, generation: u64) -> bool {

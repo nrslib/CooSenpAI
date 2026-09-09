@@ -148,6 +148,7 @@ export class BridgeHost {
         ...(request.executable === undefined ? {} : { executable: request.executable }),
         cwd: request.cwd,
         toolsDisabled: request.toolsDisabled,
+        isolateTools: request.isolateTools === true,
         signal: controller.signal,
         emitDelta: (text) => {
           const bytes = Buffer.byteLength(text, "utf8");

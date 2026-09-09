@@ -12,8 +12,7 @@ pub(super) enum ControlCommand {
         response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
     },
     AudioObservation {
-        source: crate::state::AudioObservationSource,
-        text: String,
+        observation: crate::state::AudioObservation,
         cancellation: CancellationToken,
         response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
     },
@@ -53,14 +52,23 @@ pub(super) enum UserCommand {
 }
 
 pub(super) enum PriorityCommand {
+    ResetCompanionEmotions {
+        response: oneshot::Sender<Result<(), RuntimeError>>,
+    },
     CancelUser {
+        input_id: Option<String>,
         response: oneshot::Sender<Result<(), RuntimeError>>,
     },
     RetryUser {
+        input_id: Option<String>,
         response: oneshot::Sender<Result<String, RuntimeError>>,
     },
     UpdateConfig {
         config: Box<Config>,
+        response: oneshot::Sender<Result<u64, RuntimeError>>,
+    },
+    UpdateWorkConfig {
+        work: crate::work::WorkConfig,
         response: oneshot::Sender<Result<u64, RuntimeError>>,
     },
     UpdateWatchEnabled {
@@ -85,9 +93,11 @@ pub(super) enum PriorityCommand {
 impl PriorityCommand {
     pub(super) fn cancellation_reason(&self) -> &'static str {
         match self {
+            Self::ResetCompanionEmotions { .. } => "emotion-reset",
             Self::CancelUser { .. } => "user-cancel",
             Self::RetryUser { .. } => "user-retry",
             Self::UpdateConfig { .. } | Self::ReplaceConfig { .. } => "config-update",
+            Self::UpdateWorkConfig { .. } => "work-config",
             Self::UpdateWatchEnabled { .. } => "watch-intent",
             Self::EnterDegraded { .. } => "degraded",
             Self::Quiesce { .. } => "quiesce",

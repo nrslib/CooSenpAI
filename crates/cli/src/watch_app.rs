@@ -273,6 +273,7 @@ async fn capture_application(
             ocr_text.clone(),
         ))?;
     watch.pending_frames.push(ObservationFrameInput {
+        display: None,
         scope_generation: environment.runtime.watch_scope_generation(),
         context_id,
         captured_at,

@@ -1,3 +1,4 @@
+use crate::locale::{text, Locale, TextKey};
 use crate::onboarding_notice::TutorialNoticeState;
 use crate::persistence::{atomic_write_json, PersistenceError, SiblingLock};
 use crate::provider::{
@@ -89,6 +90,12 @@ pub struct TutorialStepState {
 pub struct SetupState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub language_selected: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +152,10 @@ impl OnboardingState {
         self.setup.completed_at.is_none()
     }
 
+    pub fn needs_language_selection(&self) -> bool {
+        self.needs_setup() && !self.setup.language_selected
+    }
+
     pub fn tutorial_active(&self) -> bool {
         self.tutorial.started_at.is_some() && self.tutorial.completed_at.is_none()
     }
@@ -164,6 +175,11 @@ impl OnboardingState {
 
     pub fn complete_setup(&mut self, now: &str) {
         self.setup.completed_at = Some(now.to_owned());
+        self.setup.language_selected = true;
+    }
+
+    pub fn select_language(&mut self) {
+        self.setup.language_selected = true;
     }
 
     pub fn start_tutorial(&mut self, now: &str) {
@@ -438,12 +454,22 @@ fn insert_section(
 pub struct TutorialProvider {
     script: Arc<TutorialScript>,
     placeholders: TutorialPlaceholders,
+    locale: Locale,
 }
 impl TutorialProvider {
     pub fn new(script: TutorialScript, placeholders: TutorialPlaceholders) -> Self {
+        Self::new_with_locale(script, placeholders, Locale::Ja)
+    }
+
+    pub fn new_with_locale(
+        script: TutorialScript,
+        placeholders: TutorialPlaceholders,
+        locale: Locale,
+    ) -> Self {
         Self {
             script: Arc::new(script),
             placeholders,
+            locale,
         }
     }
 
@@ -480,7 +506,7 @@ impl ProviderClient for TutorialProvider {
         if cancellation.is_cancelled() {
             return Err(ProviderError {
                 kind: ProviderErrorKind::Retryable,
-                message: "チュートリアルを取り消しました".to_owned(),
+                message: text(TextKey::TutorialCancelled, self.locale).to_owned(),
             });
         }
         let observer_call = input.output_schema.as_ref().is_some_and(|schema| {
@@ -491,7 +517,7 @@ impl ProviderClient for TutorialProvider {
         });
         let (message, value) = if observer_call {
             let value = json!({
-                "activity": "チュートリアル中",
+                "activity": text(TextKey::TutorialObserverActivity, self.locale),
                 "outline": "", "changes": [], "events": [],
                 "guess": null, "confidence": null, "wakeCompanion": false
             });
@@ -521,7 +547,7 @@ impl ProviderClient for TutorialProvider {
                 () = tokio::time::sleep(tutorial_response_delay(&message)) => {}
                 () = cancellation.cancelled() => return Err(ProviderError {
                     kind: ProviderErrorKind::Retryable,
-                    message: "チュートリアルを取り消しました".to_owned(),
+                    message: text(TextKey::TutorialCancelled, self.locale).to_owned(),
                 }),
             }
         }
@@ -554,5 +580,20 @@ pub enum OnboardingError {
     MissingSection(String),
     #[error("{0}")]
     Invalid(String),
+}
+
+impl OnboardingError {
+    pub fn format_for_user(&self) -> String {
+        self.format_for_locale(Locale::Ja)
+    }
+
+    pub fn format_for_locale(&self, locale: Locale) -> String {
+        match self {
+            Self::Invalid(message) => crate::locale::localize_onboarding_message(message, locale),
+            Self::Persistence(_) | Self::Io(_) | Self::Json(_) | Self::MissingSection(_) => {
+                self.to_string()
+            }
+        }
+    }
 }
 

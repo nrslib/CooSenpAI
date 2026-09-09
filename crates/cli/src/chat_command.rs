@@ -3,6 +3,7 @@ use anyhow::Result;
 use coosenpai_core::companion::{CompanionAgent, DeliveryOwnership};
 use coosenpai_core::config::{Config, ConfigPaths};
 use coosenpai_core::debug::DebugStore;
+use coosenpai_core::locale::Locale;
 use coosenpai_core::logging::FileLogger;
 use coosenpai_core::memory::MemoryContext;
 use coosenpai_core::provider::resolve_login_shell_path;
@@ -43,6 +44,7 @@ pub(super) async fn run(
         None,
         DeliveryOwnership::None,
     )
+    .with_locale(Locale::from_config(&config.ui.language))
     .with_storage(paths, config.retention.conversation_days)
     .with_logger(logger.clone())
     .with_memory_context(MemoryContext::new(paths.clone(), config.memory.clone()));

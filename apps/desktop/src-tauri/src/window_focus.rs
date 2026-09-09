@@ -1,4 +1,3 @@
-use crate::state::DesktopState;
 use std::future::Future;
 #[cfg(any(target_os = "macos", test))]
 use std::sync::{
@@ -6,243 +5,118 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use tauri::Manager;
 
 const WINDOW_FOCUS_TIMEOUT: Duration = Duration::from_millis(500);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CapturePopupPresentation {
-    pub show: Duration,
-    pub focus: Duration,
-    pub focused: bool,
-    pub self_active_after_request: bool,
-}
-
-impl CapturePopupPresentation {
-    pub(crate) fn focus_result(self) -> FocusRequestResult {
-        FocusRequestResult {
-            focused: self.focused,
-            self_active_after_request: self.self_active_after_request,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FocusRequestResult {
     pub(crate) focused: bool,
     pub(crate) self_active_after_request: bool,
+    pub(crate) preempted: bool,
 }
 
 #[derive(Debug)]
 pub(crate) struct FocusRequestError {
     pub(crate) message: String,
-    window_show_requested: bool,
 }
 
 impl FocusRequestError {
-    pub(crate) fn before_window_show_request(message: String) -> Self {
-        Self {
-            message,
-            window_show_requested: false,
-        }
-    }
-
-    pub(crate) fn after_window_show_request(message: String) -> Self {
-        Self {
-            message,
-            window_show_requested: true,
-        }
-    }
-
-    pub(crate) fn window_show_requested(&self) -> bool {
-        self.window_show_requested
+    pub(crate) fn new(message: String) -> Self {
+        Self { message }
     }
 }
 
-pub(crate) async fn focus_bubble_if_capture_popup_idle<
-    CanFocus,
-    CanFocusFuture,
-    SetFocusable,
-    Focus,
-    FocusFuture,
->(
-    focus_gate: &tokio::sync::Mutex<()>,
-    mut can_focus: CanFocus,
-    set_focusable: SetFocusable,
-    focus: Focus,
-) -> Result<Option<FocusRequestResult>, String>
-where
-    CanFocus: FnMut() -> CanFocusFuture,
-    CanFocusFuture: Future<Output = bool>,
-    SetFocusable: FnOnce() -> Result<(), String>,
-    Focus: FnOnce() -> FocusFuture,
-    FocusFuture: Future<Output = Result<FocusRequestResult, String>>,
-{
-    let _focus_guard = focus_gate.lock().await;
-    if can_focus().await {
-        return Ok(None);
-    }
-    set_focusable()?;
-    if can_focus().await {
-        return Ok(None);
-    }
-    Ok(Some(focus().await?))
-}
-
-pub(crate) async fn show_capture_popup(
-    state: &DesktopState,
-    window: &tauri::WebviewWindow,
-) -> Result<CapturePopupPresentation, FocusRequestError> {
-    let _focus_guard = state.popup_focus_gate().lock().await;
-    orchestrate_capture_popup_presentation(
-        || super::position_capture_popup(window).map_err(|error| error.to_string()),
-        || window.show().map_err(|error| error.to_string()),
-        || async {
-            focus_capture_popup_unlocked(state, window)
-                .await
-                .map_err(|error| error.message)
-        },
-    )
-    .await
-}
-
-pub(crate) async fn orchestrate_capture_popup_presentation<Position, Show, Focus, FocusFuture>(
-    position: Position,
-    show: Show,
-    focus: Focus,
-) -> Result<CapturePopupPresentation, FocusRequestError>
-where
-    Position: FnOnce() -> Result<(), String>,
-    Show: FnOnce() -> Result<(), String>,
-    Focus: FnOnce() -> FocusFuture,
-    FocusFuture: Future<Output = Result<FocusRequestResult, String>>,
-{
-    position().map_err(FocusRequestError::before_window_show_request)?;
-    let show_started = std::time::Instant::now();
-    show().map_err(FocusRequestError::before_window_show_request)?;
-    let show = show_started.elapsed();
-    let focus_started = std::time::Instant::now();
-    let focus_result = focus()
-        .await
-        .map_err(FocusRequestError::after_window_show_request)?;
-    Ok(CapturePopupPresentation {
-        show,
-        focus: focus_started.elapsed(),
-        focused: focus_result.focused,
-        self_active_after_request: focus_result.self_active_after_request,
-    })
-}
-
-pub(crate) async fn focus_capture_popup(
-    state: &DesktopState,
-    window: &tauri::WebviewWindow,
-) -> Result<FocusRequestResult, FocusRequestError> {
-    let _focus_guard = state.popup_focus_gate().lock().await;
-    focus_capture_popup_unlocked(state, window).await
-}
-
-async fn focus_capture_popup_unlocked(
-    state: &DesktopState,
-    window: &tauri::WebviewWindow,
-) -> Result<FocusRequestResult, FocusRequestError> {
-    let main = state.app.get_webview_window("main").ok_or_else(|| {
-        FocusRequestError::before_window_show_request("メインウィンドウがありません".to_owned())
-    })?;
-    let focus_events = state.capture_popup_focus_events();
-    window
-        .set_focusable(true)
-        .map_err(|error| FocusRequestError::before_window_show_request(error.to_string()))?;
-    activate_and_focus_window(&main, window, focus_events).await
+fn popup_focus_requested(popup_focus_requests: &tokio::sync::watch::Receiver<u64>) -> bool {
+    matches!(popup_focus_requests.has_changed(), Ok(true))
 }
 
 pub(crate) async fn activate_and_focus_window(
     main_window: &tauri::WebviewWindow,
     window: &tauri::WebviewWindow,
     focus_events: tokio::sync::watch::Receiver<bool>,
+    popup_focus_requests: Option<tokio::sync::watch::Receiver<u64>>,
 ) -> Result<FocusRequestResult, FocusRequestError> {
     let main_was_focused = main_window
         .is_focused()
-        .map_err(|error| FocusRequestError::before_window_show_request(error.to_string()))?;
+        .map_err(|error| FocusRequestError::new(error.to_string()))?;
     request_native_focus(
         focus_events,
         WINDOW_FOCUS_TIMEOUT,
         main_was_focused,
-        || activate_current_application_on_main_thread(window),
-        || make_window_key_and_order_front(window),
+        popup_focus_requests,
+        || activate_and_make_key_on_main_thread(window),
         || order_window_back(main_window),
     )
     .await
 }
 
 #[cfg(target_os = "macos")]
-async fn activate_current_application_on_main_thread(
+async fn activate_and_make_key_on_main_thread(
     window: &tauri::WebviewWindow,
 ) -> Result<bool, String> {
-    run_native_window_action(window, |_| {
-        crate::platform::activate_current_application().map_err(|error| error.to_string())
+    // activate と key 化を 1 回のメインスレッド dispatch にまとめ、混雑時の往復待ちを減らす。
+    run_native_window_action(window, |native_window| {
+        let self_active = crate::platform::activate_current_application_unless_active()
+            .map_err(|error| error.to_string())?;
+        crate::platform::make_key_and_order_front(native_window)
+            .map_err(|error| error.to_string())?;
+        Ok(self_active)
+    })
+    .await
+}
+
+pub(crate) async fn present_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    run_native_window_action(window, |native_window| {
+        crate::platform::show_window_without_activation(native_window)
+            .map_err(|error| error.to_string())
     })
     .await
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn activate_current_application_on_main_thread(
+async fn activate_and_make_key_on_main_thread(
     _window: &tauri::WebviewWindow,
 ) -> Result<bool, String> {
     Ok(true)
 }
 
-async fn request_native_focus<
-    Activate,
-    ActivateFuture,
-    MakeKeyAndOrderFront,
-    MakeKeyAndOrderFrontFuture,
-    OrderMainBack,
-    OrderMainBackFuture,
->(
+async fn request_native_focus<NativeFocus, NativeFocusFuture, OrderMainBack, OrderMainBackFuture>(
     mut focus_events: tokio::sync::watch::Receiver<bool>,
     timeout: Duration,
     main_was_focused: bool,
-    activate: Activate,
-    make_key_and_order_front: MakeKeyAndOrderFront,
+    popup_focus_requests: Option<tokio::sync::watch::Receiver<u64>>,
+    native_focus: NativeFocus,
     order_main_back: OrderMainBack,
 ) -> Result<FocusRequestResult, FocusRequestError>
 where
-    Activate: FnOnce() -> ActivateFuture,
-    ActivateFuture: Future<Output = Result<bool, String>>,
-    MakeKeyAndOrderFront: FnOnce() -> MakeKeyAndOrderFrontFuture,
-    MakeKeyAndOrderFrontFuture: Future<Output = Result<(), String>>,
+    NativeFocus: FnOnce() -> NativeFocusFuture,
+    NativeFocusFuture: Future<Output = Result<bool, String>>,
     OrderMainBack: FnOnce() -> OrderMainBackFuture,
     OrderMainBackFuture: Future<Output = Result<(), String>>,
 {
-    let self_active_after_request = activate()
-        .await
-        .map_err(FocusRequestError::before_window_show_request)?;
-    focus_events.mark_unchanged();
-    make_key_and_order_front()
-        .await
-        .map_err(FocusRequestError::before_window_show_request)?;
-    if !main_was_focused {
-        order_main_back()
-            .await
-            .map_err(FocusRequestError::after_window_show_request)?;
+    let mut popup_focus_requests = popup_focus_requests;
+    if popup_focus_requests
+        .as_ref()
+        .is_some_and(popup_focus_requested)
+    {
+        return Ok(FocusRequestResult {
+            focused: false,
+            self_active_after_request: false,
+            preempted: true,
+        });
     }
+    focus_events.mark_unchanged();
+    let self_active_after_request = native_focus().await.map_err(FocusRequestError::new)?;
+    if !main_was_focused {
+        order_main_back().await.map_err(FocusRequestError::new)?;
+    }
+    let outcome =
+        wait_for_focus_event(&mut focus_events, popup_focus_requests.as_mut(), timeout).await;
     Ok(FocusRequestResult {
-        focused: wait_for_focus_event(&mut focus_events, timeout).await,
+        focused: matches!(outcome, FocusWaitOutcome::Focused),
         self_active_after_request,
+        preempted: matches!(outcome, FocusWaitOutcome::Preempted),
     })
-}
-
-#[cfg(target_os = "macos")]
-async fn make_window_key_and_order_front(window: &tauri::WebviewWindow) -> Result<(), String> {
-    run_native_window_action(window, |native_window| {
-        crate::platform::make_key_and_order_front(native_window).map_err(|error| error.to_string())
-    })
-    .await
-}
-
-#[cfg(not(target_os = "macos"))]
-async fn make_window_key_and_order_front(_window: &tauri::WebviewWindow) -> Result<(), String> {
-    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -350,14 +224,33 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusWaitOutcome {
+    Focused,
+    TimedOut,
+    Preempted,
+}
+
 async fn wait_for_focus_event(
     focus_events: &mut tokio::sync::watch::Receiver<bool>,
+    popup_focus_requests: Option<&mut tokio::sync::watch::Receiver<u64>>,
     timeout: Duration,
-) -> bool {
+) -> FocusWaitOutcome {
     if *focus_events.borrow() {
-        return true;
+        return FocusWaitOutcome::Focused;
     }
-    tokio::time::timeout(timeout, async {
+    let preempted = async move {
+        match popup_focus_requests {
+            Some(receiver) => {
+                if receiver.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(preempted);
+    let focused = async {
         loop {
             if focus_events.changed().await.is_err() {
                 return false;
@@ -366,30 +259,23 @@ async fn wait_for_focus_event(
                 return true;
             }
         }
-    })
-    .await
-    .unwrap_or(false)
-}
-
-pub(crate) fn focus_failure_details(
-    window: &tauri::WebviewWindow,
-    result: FocusRequestResult,
-) -> String {
-    let frontmost = crate::platform::frontmost_application()
-        .map(|application| {
-            format!(
-                "name={} bundle-id={}",
-                application.name, application.bundle_id
-            )
-        })
-        .unwrap_or_else(|| "none".to_owned());
-    let key_window = match window.is_focused() {
-        Ok(value) => value.to_string(),
-        Err(error) => format!("error:{error}"),
     };
-    format_focus_failure_details(result, &frontmost, &key_window)
+    tokio::pin!(focused);
+    tokio::select! {
+        biased;
+        focused = &mut focused => {
+            if focused {
+                FocusWaitOutcome::Focused
+            } else {
+                FocusWaitOutcome::TimedOut
+            }
+        }
+        _ = &mut preempted => FocusWaitOutcome::Preempted,
+        _ = tokio::time::sleep(timeout) => FocusWaitOutcome::TimedOut,
+    }
 }
 
+#[cfg(test)]
 fn format_focus_failure_details(
     result: FocusRequestResult,
     frontmost: &str,
@@ -401,13 +287,7 @@ fn format_focus_failure_details(
     )
 }
 
-fn focus_failure_message(target: &str, details: &str) -> String {
-    format!(
-        "{target}のキーフォーカス要求に失敗しました: focus-event-timeout-ms={} {details}",
-        WINDOW_FOCUS_TIMEOUT.as_millis()
-    )
-}
-
+#[cfg(test)]
 pub(crate) fn log_focus_failure(
     logger: &dyn coosenpai_core::ports::RuntimeLogger,
     target: &str,

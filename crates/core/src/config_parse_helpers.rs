@@ -1,6 +1,6 @@
 use super::super::{
     is_valid_avatar_path, issue, unknown_issue, AudioConfig, ChatConfig, ConfigValidationIssue,
-    DebugConfig, SpeechConfig, UiConfig,
+    DebugConfig, SpeechConfig, UiConfig, VoiceOutputConfig,
 };
 use serde_json::{Map, Value};
 use std::convert::TryFrom;
@@ -238,8 +238,8 @@ pub(super) fn parse_audio(
     ));
     AudioConfig {
         enabled: boolean(object, "enabled", false, "audio.enabled", issues),
-        mic: boolean(object, "mic", false, "audio.mic", issues),
-        speaker: boolean(object, "speaker", false, "audio.speaker", issues),
+        mic: boolean(object, "mic", true, "audio.mic", issues),
+        speaker: boolean(object, "speaker", true, "audio.speaker", issues),
         debug_dump_dir: optional_string(object, "debugDumpDir", "audio.debugDumpDir", issues),
     }
 }
@@ -308,6 +308,7 @@ pub(super) fn parse_ui(
             "avatarPath",
             "theme",
             "font",
+            "language",
             "thoughtBubble",
         ],
         "ui",
@@ -344,6 +345,14 @@ pub(super) fn parse_ui(
             issues,
         ),
         font: string(object, "font", "system", "ui.font", issues),
+        language: enum_string(
+            object,
+            "language",
+            "ja",
+            &["ja", "en"],
+            "ui.language",
+            issues,
+        ),
         thought_bubble: boolean(object, "thoughtBubble", true, "ui.thoughtBubble", issues),
     }
 }
@@ -393,13 +402,13 @@ pub(super) fn provider(
     };
     match value
         .as_str()
-        .filter(|value| matches!(*value, "codex" | "claude" | "opencode"))
+        .filter(|value| crate::provider::ProviderName::from_config_name(value).is_some())
     {
         Some(value) => value.to_owned(),
         None => {
             issues.push(issue(
                 path,
-                "codex、claude、opencode のいずれかで指定してください。",
+                "codex、claude、opencode のいずれかで指定してください。mock は E2E 専用ビルドが必要です。",
             ));
             default.to_owned()
         }
@@ -470,4 +479,54 @@ fn valid_name(value: &str) -> bool {
         && value.bytes().enumerate().all(|(index, byte)| {
             byte.is_ascii_alphanumeric() || index > 0 && matches!(byte, b'_' | b'-')
         })
+}
+
+pub(super) fn parse_voice_output(
+    object: &Map<String, Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> VoiceOutputConfig {
+    issues.extend(unknown_keys(
+        object,
+        &["enabled", "provider", "rate", "voicevoxStyleId"],
+        "voiceOutput",
+    ));
+    let defaults = VoiceOutputConfig::default();
+    let rate = positive_u32(object, "rate", defaults.rate, "voiceOutput.rate", issues);
+    if !(100..=400).contains(&rate) {
+        issues.push(issue(
+            "voiceOutput.rate",
+            "100以上400以下の整数で指定してください。",
+        ));
+    }
+    let voicevox_style_id = optional_nonnegative_u32(
+        object,
+        "voicevoxStyleId",
+        "voiceOutput.voicevoxStyleId",
+        issues,
+    );
+    if voicevox_style_id.is_some_and(|id| id > i32::MAX as u32) {
+        issues.push(issue(
+            "voiceOutput.voicevoxStyleId",
+            "0以上2147483647以下の整数または null で指定してください。",
+        ));
+    }
+    VoiceOutputConfig {
+        enabled: boolean(
+            object,
+            "enabled",
+            defaults.enabled,
+            "voiceOutput.enabled",
+            issues,
+        ),
+        provider: enum_string(
+            object,
+            "provider",
+            &defaults.provider,
+            &["system", "voicevox"],
+            "voiceOutput.provider",
+            issues,
+        ),
+        rate,
+        voicevox_style_id,
+    }
 }

@@ -104,6 +104,18 @@ impl RuntimeHandle {
         text: String,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError> {
+        let observation =
+            crate::state::AudioObservation::from_confirmed_text(source, &text, chrono::Utc::now())
+                .map_err(|_| RuntimeError::Observer(ObserverError::Output))?;
+        self.ingest_audio_observation_cancellable(observation, cancellation)
+            .await
+    }
+
+    pub async fn ingest_audio_observation_cancellable(
+        &self,
+        observation: crate::state::AudioObservation,
+        cancellation: CancellationToken,
+    ) -> Result<ObservationRecord, RuntimeError> {
         self.ensure_open()?;
         if cancellation.is_cancelled() {
             return Err(RuntimeError::Closed);
@@ -111,8 +123,7 @@ impl RuntimeHandle {
         let (response, result) = oneshot::channel();
         self.control_tx
             .send(ControlCommand::AudioObservation {
-                source,
-                text,
+                observation,
                 cancellation,
                 response,
             })

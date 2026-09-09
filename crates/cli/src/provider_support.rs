@@ -65,3 +65,4 @@ pub(super) async fn shutdown_provider_bridge() {
         bridge.shutdown().await;
     }
 }
+

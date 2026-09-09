@@ -10,20 +10,26 @@ pub(crate) enum PermitClass {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandClass {
+    Work,
     Chat,
     TextAttachment,
     ImageAttachment,
     SpeechCapture,
     Voice,
+    VoiceOutput,
     Cleanup,
     ConfigRestricted,
     ProviderCredential,
     WatchTargetConfig,
     ConfigDisplay,
     Persona,
+    SetupPersona,
     Memory,
     ConversationReset,
+    ConversationSelect,
+    EmotionsReset,
     PresentationDismiss,
+    BubbleDeck,
     TutorialInteract,
     TutorialAdvance,
     TutorialSettingsPresented,
@@ -33,6 +39,7 @@ enum CommandClass {
     SetupPrompt,
     SetupRestart,
     SettingsOpen,
+    LicenseOpen,
     WatchStart,
     WatchStop,
     WatchPower,
@@ -50,28 +57,33 @@ pub(crate) fn permit_class(command: DesktopCommand) -> PermitClass {
         | DesktopCommand::ConfigKeymapUpdate
         | DesktopCommand::WatchTargetUpdate
         | DesktopCommand::PersonaSelect
+        | DesktopCommand::SetupPersonaSelect
         | DesktopCommand::PersonaSave
         | DesktopCommand::PersonaDelete
         | DesktopCommand::PersonaRestore
         | DesktopCommand::PersonaReload
         | DesktopCommand::ConversationReset
+        | DesktopCommand::ConversationSelect
         | DesktopCommand::TutorialFinish
         | DesktopCommand::TutorialRestart
         | DesktopCommand::SetupRestart
         | DesktopCommand::TutorialInteract
         | DesktopCommand::TutorialAdvance => PermitClass::Exclusive,
-        DesktopCommand::ChatSend
+        DesktopCommand::WorkApprove
+        | DesktopCommand::WorkConfigure
+        | DesktopCommand::ChatSend
         | DesktopCommand::ChatCancel
         | DesktopCommand::ChatRetry
         | DesktopCommand::CaptureStartImage
         | DesktopCommand::CaptureStartText
         | DesktopCommand::CaptureSendImage
         | DesktopCommand::CaptureSendText
-        | DesktopCommand::CaptureCancel
         | DesktopCommand::SpeechStart
         | DesktopCommand::SpeechFinish
         | DesktopCommand::SpeechCancel
         | DesktopCommand::SpeechConfirm
+        | DesktopCommand::VoiceOutputTest
+        | DesktopCommand::VoiceOutputStop
         | DesktopCommand::SettingsAppearancePreview
         | DesktopCommand::ConfigDisplayUpdate
         | DesktopCommand::MemoryConfirm
@@ -81,12 +93,15 @@ pub(crate) fn permit_class(command: DesktopCommand) -> PermitClass {
         | DesktopCommand::MemoryDelete
         | DesktopCommand::MemoryConsolidate
         | DesktopCommand::ConversationResetDismiss
+        | DesktopCommand::CompanionEmotionsReset
         | DesktopCommand::BubbleDismiss
-        | DesktopCommand::TutorialFastForward
+        | DesktopCommand::BubbleFastForward
+        | DesktopCommand::BubbleNavigate
         | DesktopCommand::TutorialSettingsPresented
         | DesktopCommand::TutorialResume
         | DesktopCommand::SetupPrompt
         | DesktopCommand::SettingsOpen
+        | DesktopCommand::LicenseDocumentOpen
         | DesktopCommand::WatchStart
         | DesktopCommand::WatchStop
         | DesktopCommand::WatchPowerSuspend
@@ -107,6 +122,11 @@ pub(crate) fn admit_command(context: &PolicyContext, envelope: &CommandEnvelope)
     }
     if matches!(manager.transition, ExclusiveTransition::InProgress(_)) {
         return Admission::Reject(RejectReason::TransitionInProgress);
+    }
+    if envelope.command == DesktopCommand::VoiceOutputTest
+        && manager.resources.speech != ResourcePhase::Idle
+    {
+        return Admission::Reject(RejectReason::InvalidInput);
     }
     let class = command_class(envelope.command);
     match manager.onboarding {
@@ -148,21 +168,28 @@ fn accept(class: CommandClass, tutorial_response: Option<&'static str>) -> Admis
 
 fn finish_decision(class: CommandClass) -> Admission {
     match class {
-        CommandClass::PresentationDismiss | CommandClass::TutorialFinish => accept(class, None),
-        CommandClass::Chat
+        CommandClass::PresentationDismiss
+        | CommandClass::BubbleDeck
+        | CommandClass::TutorialFinish => accept(class, None),
+        CommandClass::Work
+        | CommandClass::Chat
         | CommandClass::TextAttachment
         | CommandClass::ImageAttachment
         | CommandClass::SpeechCapture
         | CommandClass::Voice
+        | CommandClass::VoiceOutput
         | CommandClass::Cleanup
         | CommandClass::ConfigRestricted
         | CommandClass::ProviderCredential
         | CommandClass::WatchTargetConfig
         | CommandClass::ConfigDisplay
         | CommandClass::Persona
+        | CommandClass::SetupPersona
         | CommandClass::Memory
         | CommandClass::ConversationReset
+        | CommandClass::ConversationSelect
         | CommandClass::TutorialInteract
+        | CommandClass::EmotionsReset
         | CommandClass::TutorialAdvance
         | CommandClass::TutorialSettingsPresented
         | CommandClass::TutorialResume
@@ -170,6 +197,7 @@ fn finish_decision(class: CommandClass) -> Admission {
         | CommandClass::SetupPrompt
         | CommandClass::SetupRestart
         | CommandClass::SettingsOpen
+        | CommandClass::LicenseOpen
         | CommandClass::WatchStart
         | CommandClass::WatchStop
         | CommandClass::WatchPower
@@ -184,26 +212,33 @@ fn setup_decision(class: CommandClass) -> Admission {
     match class {
         CommandClass::TutorialInteract
         | CommandClass::PresentationDismiss
+        | CommandClass::BubbleDeck
         | CommandClass::SetupPrompt
         | CommandClass::SetupRestart
         | CommandClass::SettingsOpen
+        | CommandClass::LicenseOpen
         | CommandClass::ProviderCredential
-        | CommandClass::AppearancePreview => accept(class, None),
+        | CommandClass::AppearancePreview
+        | CommandClass::SetupPersona => accept(class, None),
         CommandClass::Cleanup | CommandClass::WatchStop | CommandClass::WatchPower => {
             accept(class, None)
         }
-        CommandClass::Chat
+        CommandClass::Work
+        | CommandClass::Chat
         | CommandClass::TextAttachment
         | CommandClass::ImageAttachment
         | CommandClass::SpeechCapture
         | CommandClass::Voice
+        | CommandClass::VoiceOutput
         | CommandClass::ConfigRestricted
         | CommandClass::WatchTargetConfig
         | CommandClass::ConfigDisplay
         | CommandClass::Persona
         | CommandClass::Memory
         | CommandClass::ConversationReset
+        | CommandClass::ConversationSelect
         | CommandClass::TutorialAdvance
+        | CommandClass::EmotionsReset
         | CommandClass::TutorialSettingsPresented
         | CommandClass::TutorialFinish
         | CommandClass::TutorialResume
@@ -245,7 +280,14 @@ fn tutorial_decision(
         {
             accept(class, None)
         }
-        CommandClass::Persona if step == TutorialStep::Persona => accept(class, None),
+        CommandClass::LicenseOpen
+            if matches!(step, TutorialStep::Persona | TutorialStep::Watch) =>
+        {
+            accept(class, None)
+        }
+        CommandClass::Persona if matches!(step, TutorialStep::Persona | TutorialStep::Watch) => {
+            accept(class, None)
+        }
         CommandClass::TutorialSettingsPresented
             if matches!(step, TutorialStep::Persona | TutorialStep::Watch) =>
         {
@@ -264,30 +306,37 @@ fn tutorial_decision(
         | CommandClass::WatchStop
         | CommandClass::WatchPower
         | CommandClass::PresentationDismiss
+        | CommandClass::BubbleDeck
         | CommandClass::SetupRestart
         | CommandClass::Presentation
         | CommandClass::AppearancePreview => accept(class, None),
         CommandClass::TutorialFinish => accept(class, None),
+        CommandClass::EmotionsReset => accept(class, None),
         CommandClass::ProviderCredential
             if matches!(step, TutorialStep::Persona | TutorialStep::Watch) =>
         {
             accept(class, None)
         }
-        CommandClass::Chat
+        CommandClass::Work
+        | CommandClass::Chat
         | CommandClass::TextAttachment
         | CommandClass::ImageAttachment
         | CommandClass::SpeechCapture
         | CommandClass::Voice
+        | CommandClass::VoiceOutput
         | CommandClass::ConfigRestricted
         | CommandClass::ProviderCredential
         | CommandClass::WatchTargetConfig
         | CommandClass::Persona
+        | CommandClass::SetupPersona
         | CommandClass::Memory
         | CommandClass::ConversationReset
+        | CommandClass::ConversationSelect
         | CommandClass::TutorialSettingsPresented
         | CommandClass::TutorialRestart
         | CommandClass::SetupPrompt
         | CommandClass::SettingsOpen
+        | CommandClass::LicenseOpen
         | CommandClass::WatchStart
         | CommandClass::Presence
         | CommandClass::Clipboard => Admission::Reject(RejectReason::TutorialOperationNotAllowed),
@@ -296,11 +345,13 @@ fn tutorial_decision(
 
 fn normal_decision(class: CommandClass) -> Admission {
     match class {
-        CommandClass::Chat
+        CommandClass::Work
+        | CommandClass::Chat
         | CommandClass::TextAttachment
         | CommandClass::ImageAttachment
         | CommandClass::SpeechCapture
         | CommandClass::Voice
+        | CommandClass::VoiceOutput
         | CommandClass::Cleanup
         | CommandClass::ConfigRestricted
         | CommandClass::ProviderCredential
@@ -309,10 +360,14 @@ fn normal_decision(class: CommandClass) -> Admission {
         | CommandClass::Persona
         | CommandClass::Memory
         | CommandClass::ConversationReset
+        | CommandClass::ConversationSelect
         | CommandClass::PresentationDismiss
+        | CommandClass::BubbleDeck
+        | CommandClass::EmotionsReset
         | CommandClass::TutorialRestart
         | CommandClass::SetupRestart
         | CommandClass::SettingsOpen
+        | CommandClass::LicenseOpen
         | CommandClass::WatchStart
         | CommandClass::WatchStop
         | CommandClass::WatchPower
@@ -325,12 +380,14 @@ fn normal_decision(class: CommandClass) -> Admission {
         | CommandClass::TutorialFinish
         | CommandClass::TutorialResume
         | CommandClass::SetupPrompt
-        | CommandClass::Presentation => Admission::Reject(RejectReason::InvalidInput),
+        | CommandClass::Presentation
+        | CommandClass::SetupPersona => Admission::Reject(RejectReason::InvalidInput),
     }
 }
 
 fn command_class(command: DesktopCommand) -> CommandClass {
     match command {
+        DesktopCommand::WorkApprove | DesktopCommand::WorkConfigure => CommandClass::Work,
         DesktopCommand::ChatSend | DesktopCommand::ChatRetry => CommandClass::Chat,
         DesktopCommand::CaptureStartText | DesktopCommand::CaptureSendText => {
             CommandClass::TextAttachment
@@ -340,10 +397,11 @@ fn command_class(command: DesktopCommand) -> CommandClass {
         }
         DesktopCommand::SpeechStart => CommandClass::SpeechCapture,
         DesktopCommand::SpeechConfirm => CommandClass::Voice,
+        DesktopCommand::VoiceOutputTest => CommandClass::VoiceOutput,
         DesktopCommand::ChatCancel
-        | DesktopCommand::CaptureCancel
         | DesktopCommand::SpeechFinish
-        | DesktopCommand::SpeechCancel => CommandClass::Cleanup,
+        | DesktopCommand::SpeechCancel
+        | DesktopCommand::VoiceOutputStop => CommandClass::Cleanup,
         DesktopCommand::ConfigProviderUpdate | DesktopCommand::ConfigKeymapUpdate => {
             CommandClass::ConfigRestricted
         }
@@ -352,6 +410,7 @@ fn command_class(command: DesktopCommand) -> CommandClass {
             CommandClass::WatchTargetConfig
         }
         DesktopCommand::ConfigDisplayUpdate => CommandClass::ConfigDisplay,
+        DesktopCommand::SetupPersonaSelect => CommandClass::SetupPersona,
         DesktopCommand::PersonaSelect
         | DesktopCommand::PersonaSave
         | DesktopCommand::PersonaDelete
@@ -364,11 +423,15 @@ fn command_class(command: DesktopCommand) -> CommandClass {
         | DesktopCommand::MemoryDelete
         | DesktopCommand::MemoryConsolidate => CommandClass::Memory,
         DesktopCommand::ConversationReset => CommandClass::ConversationReset,
+        DesktopCommand::ConversationSelect => CommandClass::ConversationSelect,
+        DesktopCommand::CompanionEmotionsReset => CommandClass::EmotionsReset,
         DesktopCommand::ConversationResetDismiss | DesktopCommand::BubbleDismiss => {
             CommandClass::PresentationDismiss
         }
         DesktopCommand::TutorialInteract => CommandClass::TutorialInteract,
-        DesktopCommand::TutorialFastForward => CommandClass::Presentation,
+        DesktopCommand::BubbleFastForward | DesktopCommand::BubbleNavigate => {
+            CommandClass::BubbleDeck
+        }
         DesktopCommand::SettingsAppearancePreview => CommandClass::AppearancePreview,
         DesktopCommand::TutorialAdvance => CommandClass::TutorialAdvance,
         DesktopCommand::TutorialSettingsPresented => CommandClass::TutorialSettingsPresented,
@@ -378,6 +441,7 @@ fn command_class(command: DesktopCommand) -> CommandClass {
         DesktopCommand::SetupPrompt => CommandClass::SetupPrompt,
         DesktopCommand::SetupRestart => CommandClass::SetupRestart,
         DesktopCommand::SettingsOpen => CommandClass::SettingsOpen,
+        DesktopCommand::LicenseDocumentOpen => CommandClass::LicenseOpen,
         DesktopCommand::WatchStart => CommandClass::WatchStart,
         DesktopCommand::WatchStop => CommandClass::WatchStop,
         DesktopCommand::WatchPowerSuspend | DesktopCommand::WatchPowerResume => {
@@ -396,18 +460,23 @@ fn requires_runtime(command: DesktopCommand) -> bool {
         | DesktopCommand::CaptureSendImage
         | DesktopCommand::CaptureSendText
         | DesktopCommand::SpeechConfirm
+        | DesktopCommand::VoiceOutputTest
         | DesktopCommand::MemoryConsolidate
         | DesktopCommand::WatchStart
         | DesktopCommand::WatchPowerResume
         | DesktopCommand::CompanionPresence => true,
-        DesktopCommand::ChatCancel
+        DesktopCommand::CompanionEmotionsReset => true,
+        DesktopCommand::WorkApprove
+        | DesktopCommand::WorkConfigure
+        | DesktopCommand::ChatCancel
         | DesktopCommand::CaptureStartImage
         | DesktopCommand::CaptureStartText
-        | DesktopCommand::CaptureCancel
         | DesktopCommand::SpeechStart
         | DesktopCommand::SpeechFinish
         | DesktopCommand::SpeechCancel
-        | DesktopCommand::TutorialFastForward
+        | DesktopCommand::VoiceOutputStop
+        | DesktopCommand::BubbleFastForward
+        | DesktopCommand::BubbleNavigate
         | DesktopCommand::SettingsAppearancePreview
         | DesktopCommand::ConfigDisplayUpdate
         | DesktopCommand::ConfigProviderUpdate
@@ -416,6 +485,7 @@ fn requires_runtime(command: DesktopCommand) -> bool {
         | DesktopCommand::ConfigKeymapUpdate
         | DesktopCommand::WatchTargetUpdate
         | DesktopCommand::PersonaSelect
+        | DesktopCommand::SetupPersonaSelect
         | DesktopCommand::PersonaSave
         | DesktopCommand::PersonaDelete
         | DesktopCommand::PersonaRestore
@@ -426,6 +496,7 @@ fn requires_runtime(command: DesktopCommand) -> bool {
         | DesktopCommand::MemoryRejectUpdate
         | DesktopCommand::MemoryDelete
         | DesktopCommand::ConversationReset
+        | DesktopCommand::ConversationSelect
         | DesktopCommand::ConversationResetDismiss
         | DesktopCommand::BubbleDismiss
         | DesktopCommand::TutorialInteract
@@ -437,6 +508,7 @@ fn requires_runtime(command: DesktopCommand) -> bool {
         | DesktopCommand::SetupPrompt
         | DesktopCommand::SetupRestart
         | DesktopCommand::SettingsOpen
+        | DesktopCommand::LicenseDocumentOpen
         | DesktopCommand::WatchStop
         | DesktopCommand::WatchPowerSuspend
         | DesktopCommand::PresentTutorialResponse => false,
@@ -450,24 +522,31 @@ fn transition_for(class: CommandClass) -> Option<TransitionOperation> {
         | CommandClass::ProviderCredential
         | CommandClass::WatchTargetConfig
         | CommandClass::Persona
+        | CommandClass::SetupPersona
         | CommandClass::TutorialRestart
         | CommandClass::SetupRestart => Some(TransitionOperation::ReplaceConfig),
         CommandClass::ConversationReset => Some(TransitionOperation::ResetConversation),
+        CommandClass::ConversationSelect => Some(TransitionOperation::SwitchConversation),
         CommandClass::TutorialFinish => Some(TransitionOperation::FinishTutorial),
-        CommandClass::Chat
+        CommandClass::Work
+        | CommandClass::Chat
         | CommandClass::TextAttachment
         | CommandClass::ImageAttachment
         | CommandClass::SpeechCapture
         | CommandClass::Voice
+        | CommandClass::VoiceOutput
         | CommandClass::Cleanup
         | CommandClass::Memory
         | CommandClass::PresentationDismiss
+        | CommandClass::BubbleDeck
+        | CommandClass::EmotionsReset
         | CommandClass::TutorialInteract
         | CommandClass::TutorialAdvance
         | CommandClass::TutorialSettingsPresented
         | CommandClass::TutorialResume
         | CommandClass::SetupPrompt
         | CommandClass::SettingsOpen
+        | CommandClass::LicenseOpen
         | CommandClass::WatchStart
         | CommandClass::WatchStop
         | CommandClass::WatchPower
@@ -481,7 +560,8 @@ fn transition_for(class: CommandClass) -> Option<TransitionOperation> {
 
 fn completion_for(class: CommandClass) -> CompletionPoint {
     match class {
-        CommandClass::Chat
+        CommandClass::Work
+        | CommandClass::Chat
         | CommandClass::TextAttachment
         | CommandClass::ImageAttachment
         | CommandClass::Voice => CompletionPoint::DurableCoreAcceptance,
@@ -491,9 +571,12 @@ fn completion_for(class: CommandClass) -> CompletionPoint {
         | CommandClass::ConfigDisplay
         | CommandClass::SpeechCapture
         | CommandClass::Persona
+        | CommandClass::SetupPersona
         | CommandClass::Memory
         | CommandClass::ConversationReset
+        | CommandClass::ConversationSelect
         | CommandClass::TutorialInteract
+        | CommandClass::EmotionsReset
         | CommandClass::TutorialAdvance
         | CommandClass::TutorialSettingsPresented
         | CommandClass::TutorialFinish
@@ -506,10 +589,13 @@ fn completion_for(class: CommandClass) -> CompletionPoint {
         | CommandClass::Presence => CompletionPoint::DomainCommit,
         CommandClass::Cleanup
         | CommandClass::PresentationDismiss
+        | CommandClass::BubbleDeck
         | CommandClass::SetupPrompt
         | CommandClass::SettingsOpen
+        | CommandClass::LicenseOpen
         | CommandClass::Presentation
         | CommandClass::AppearancePreview
+        | CommandClass::VoiceOutput
         | CommandClass::Clipboard => CompletionPoint::HandlerReturn,
     }
 }

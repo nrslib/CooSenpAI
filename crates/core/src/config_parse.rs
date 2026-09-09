@@ -2,7 +2,7 @@ use super::{
     issue, AgentConfig, AppConfig, AudioConfig, BatteryConfig, BubbleConfig, ChatConfig,
     CompanionConfig, Config, ConfigError, ConfigValidationIssue, DebugConfig, MemoryConfig,
     NotificationConfig, OcrGateConfig, PopupConfig, RetentionConfig, SpeechConfig, TriggerConfig,
-    UiConfig, WatchConfig,
+    UiConfig, VoiceOutputConfig, WatchConfig,
 };
 #[path = "config_parse_helpers.rs"]
 mod helpers;
@@ -19,8 +19,8 @@ mod watch_apps;
 use self::helpers::{
     boolean, effort, enum_string, executable, frames_per_send, nonnegative_u32, nonnegative_u64,
     optional_nonnegative_u32, parse_audio, parse_chat, parse_debug, parse_speech, parse_ui,
-    persona, positive_number, positive_u32, positive_u64, positive_usize, provider, string,
-    unknown_keys,
+    parse_voice_output, persona, positive_number, positive_u32, positive_u64, positive_usize,
+    provider, string, unknown_keys,
 };
 use keymap::parse_keymap;
 use memory::parse_memory;
@@ -49,6 +49,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         object,
         &[
             "configVersion",
+            "work",
             "revision",
             "watch",
             "observer",
@@ -61,6 +62,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
             "debug",
             "audio",
             "speech",
+            "voiceOutput",
             "ui",
             "keymap",
             "popup",
@@ -68,6 +70,19 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         ],
         "config",
     );
+    let work = match object.get("work") {
+        None => crate::work::WorkConfig::default(),
+        Some(value) => match serde_json::from_value::<crate::work::WorkConfig>(value.clone()) {
+            Ok(work) => work,
+            Err(_) => {
+                issues.push(issue(
+                    "work",
+                    "approvalMode は manual または auto、allowedRoots は {path, read, write} の配列で指定してください。",
+                ));
+                crate::work::WorkConfig::default()
+            }
+        },
+    };
     let watch = parse_section(
         object.get("watch"),
         WatchConfig::default(),
@@ -146,6 +161,13 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         &mut issues,
         parse_speech,
     );
+    let voice_output = parse_section(
+        object.get("voiceOutput"),
+        VoiceOutputConfig::default(),
+        "voiceOutput",
+        &mut issues,
+        parse_voice_output,
+    );
     let ui = parse_section(
         object.get("ui"),
         UiConfig::default(),
@@ -170,6 +192,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
     );
     (
         Config {
+            work,
             config_version: 3,
             revision,
             watch,
@@ -183,6 +206,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
             debug,
             audio,
             speech,
+            voice_output,
             ui,
             keymap,
             popup,
@@ -532,6 +556,7 @@ fn parse_companion(
     issues.extend(unknown_keys(
         object,
         &[
+            "emotionsEnabled",
             "provider",
             "model",
             "effort",
@@ -557,6 +582,13 @@ fn parse_companion(
     let provider = provider(object, "provider", "codex", "companion.provider", issues);
     let model = string(object, "model", "default", "companion.model", issues);
     CompanionConfig {
+        emotions_enabled: boolean(
+            object,
+            "emotionsEnabled",
+            true,
+            "companion.emotionsEnabled",
+            issues,
+        ),
         provider,
         model,
         effort: effort(object, "effort", "default", "companion.effort", issues),

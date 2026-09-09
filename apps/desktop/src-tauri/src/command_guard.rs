@@ -6,6 +6,7 @@ use coosenpai_core::ports::RuntimeLogger;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
+use tokio::sync::Notify;
 use tokio::sync::RwLock;
 
 tokio::task_local! {
@@ -13,9 +14,9 @@ tokio::task_local! {
 }
 
 struct ResourceGenerations {
+    changed: Notify,
     conversation: AtomicU64,
     speech: AtomicU64,
-    capture: AtomicU64,
     bubble: AtomicU64,
     config: AtomicU64,
     finish: AtomicU64,
@@ -25,9 +26,9 @@ struct ResourceGenerations {
 impl Default for ResourceGenerations {
     fn default() -> Self {
         Self {
+            changed: Notify::new(),
             conversation: AtomicU64::new(0),
             speech: AtomicU64::new(0),
-            capture: AtomicU64::new(0),
             bubble: AtomicU64::new(0),
             config: AtomicU64::new(0),
             finish: AtomicU64::new(0),
@@ -49,10 +50,12 @@ impl ResourceGenerations {
     }
 
     fn bump(&self, resource: GenerationResource) -> GenerationStamp {
-        GenerationStamp {
+        let stamp = GenerationStamp {
             resource,
             value: self.atomic(resource).fetch_add(1, Ordering::AcqRel) + 1,
-        }
+        };
+        self.changed.notify_waiters();
+        stamp
     }
 
     fn is_current(&self, stamp: GenerationStamp) -> bool {
@@ -63,7 +66,6 @@ impl ResourceGenerations {
         match resource {
             GenerationResource::Conversation => &self.conversation,
             GenerationResource::Speech => &self.speech,
-            GenerationResource::Capture => &self.capture,
             GenerationResource::Bubble => &self.bubble,
             GenerationResource::Config => &self.config,
             GenerationResource::Finish => &self.finish,
@@ -155,11 +157,6 @@ impl CommandFirewall {
         Fut: Future<Output = Result<T, DispatchError>>,
     {
         reject_dispatch_reentry()?;
-        let _input_popup_gate = if uses_input_popup_gate(envelope.command) {
-            Some(state.input_popup_gate.lock().await)
-        } else {
-            None
-        };
         if envelope.command == DesktopCommand::SetupRestart
             && source_allows(envelope.source, envelope.command)
         {
@@ -178,7 +175,13 @@ impl CommandFirewall {
             .scope((), async {
                 match permit_class(envelope.command) {
                     PermitClass::Shared => {
-                        let _permit = self.permit.read().await;
+                        let _permit =
+                            self.read_permit(&envelope.expected)
+                                .await
+                                .map_err(|reason| {
+                                    self.log_rejection(state, &envelope, reason);
+                                    DispatchError::Rejected(reason)
+                                })?;
                         self.execute_permitted(state, envelope, watch_stop_target, handler)
                             .await
                     }
@@ -190,6 +193,27 @@ impl CommandFirewall {
                 }
             })
             .await
+    }
+
+    async fn read_permit(
+        &self,
+        expected: &GenerationFences,
+    ) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, RejectReason> {
+        loop {
+            let changed = self.generations.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if expected
+                .iter()
+                .any(|stamp| !self.generations.is_current(stamp))
+            {
+                return Err(RejectReason::StaleGeneration);
+            }
+            tokio::select! {
+                permit = self.permit.read() => return Ok(permit),
+                () = &mut changed => {},
+            }
+        }
     }
 
     async fn execute_permitted<T, F, Fut>(
@@ -225,11 +249,12 @@ impl CommandFirewall {
         for stamp in envelope.expected.iter() {
             fences.insert(stamp);
         }
+        state.prepare_command_execution(envelope.command).await?;
         let _transition = reservation
             .transition
             .map(|operation| self.enter_transition(operation));
         for stamp in self
-            .fences_for_with_state(state, envelope.command, envelope.source)
+            .fences_for_with_state(state, envelope.command)
             .await
             .iter()
         {
@@ -250,9 +275,6 @@ impl CommandFirewall {
                 context.command_id(), envelope.command, envelope.source, context.completion()
             ),
         );
-        state
-            .prepare_command_execution(envelope.command, &context)
-            .await;
         let result = handler(context).await;
         let level = if result.is_ok() { "INFO" } else { "WARN" };
         let outcome = if result.is_ok() {
@@ -288,25 +310,25 @@ impl CommandFirewall {
     fn fences_for(&self, command: DesktopCommand) -> GenerationFences {
         let mut fences = GenerationFences::default();
         match command {
-            DesktopCommand::ConversationReset => {
+            DesktopCommand::ConversationReset | DesktopCommand::ConversationSelect => {
                 self.generations.bump(GenerationResource::Bubble);
-                self.generations.bump(GenerationResource::Capture);
                 self.generations.bump(GenerationResource::Speech);
                 fences.insert(self.generations.bump(GenerationResource::Conversation));
             }
             DesktopCommand::TutorialFinish => {
                 self.generations.bump(GenerationResource::Conversation);
                 self.generations.bump(GenerationResource::Bubble);
-                self.generations.bump(GenerationResource::Capture);
                 self.generations.bump(GenerationResource::Speech);
                 self.generations.bump(GenerationResource::Watch);
                 fences.insert(self.generations.bump(GenerationResource::Finish));
             }
-            DesktopCommand::ConfigDisplayUpdate
+            DesktopCommand::WorkConfigure
+            | DesktopCommand::ConfigDisplayUpdate
             | DesktopCommand::ConfigProviderUpdate
             | DesktopCommand::ProviderApiKeyUpdate
             | DesktopCommand::ConfigKeymapUpdate
             | DesktopCommand::PersonaSelect
+            | DesktopCommand::SetupPersonaSelect
             | DesktopCommand::PersonaSave
             | DesktopCommand::PersonaDelete
             | DesktopCommand::PersonaRestore
@@ -320,10 +342,9 @@ impl CommandFirewall {
                 fences.insert(self.generations.bump(GenerationResource::Config));
                 fences.insert(self.generations.bump(GenerationResource::Watch));
             }
-            DesktopCommand::CaptureStartImage
-            | DesktopCommand::CaptureStartText
-            | DesktopCommand::CaptureCancel => {
-                fences.insert(self.generations.bump(GenerationResource::Capture));
+            DesktopCommand::CaptureStartImage | DesktopCommand::CaptureStartText => {
+                fences.insert(self.generations.stamp(GenerationResource::Conversation));
+                fences.insert(self.generations.bump(GenerationResource::Speech));
             }
             DesktopCommand::SpeechStart | DesktopCommand::SpeechCancel => {
                 fences.insert(self.generations.bump(GenerationResource::Speech));
@@ -342,12 +363,15 @@ impl CommandFirewall {
                 fences.insert(self.generations.stamp(GenerationResource::Conversation));
                 fences.insert(self.generations.stamp(GenerationResource::Bubble));
             }
-            DesktopCommand::ChatSend
+            DesktopCommand::WorkApprove
+            | DesktopCommand::ChatSend
             | DesktopCommand::ChatCancel
             | DesktopCommand::ChatRetry
             | DesktopCommand::CaptureSendImage
             | DesktopCommand::CaptureSendText
             | DesktopCommand::SpeechFinish
+            | DesktopCommand::VoiceOutputTest
+            | DesktopCommand::VoiceOutputStop
             | DesktopCommand::MemoryConfirm
             | DesktopCommand::MemoryReject
             | DesktopCommand::MemoryConfirmUpdate
@@ -355,14 +379,17 @@ impl CommandFirewall {
             | DesktopCommand::MemoryDelete
             | DesktopCommand::MemoryConsolidate
             | DesktopCommand::ConversationResetDismiss
+            | DesktopCommand::CompanionEmotionsReset
             | DesktopCommand::BubbleDismiss
-            | DesktopCommand::TutorialFastForward
+            | DesktopCommand::BubbleFastForward
+            | DesktopCommand::BubbleNavigate
             | DesktopCommand::SettingsAppearancePreview
             | DesktopCommand::TutorialAdvance
             | DesktopCommand::TutorialSettingsPresented
             | DesktopCommand::TutorialResume
             | DesktopCommand::SetupPrompt
-            | DesktopCommand::SettingsOpen => {}
+            | DesktopCommand::SettingsOpen
+            | DesktopCommand::LicenseDocumentOpen => {}
             DesktopCommand::CompanionPresence | DesktopCommand::CopyLastReply => {}
         }
         fences
@@ -372,71 +399,18 @@ impl CommandFirewall {
         &self,
         state: &DesktopState,
         command: DesktopCommand,
-        source: CommandSource,
     ) -> GenerationFences {
-        match command {
-            DesktopCommand::CaptureStartImage => {
-                self.input_start_fences(
-                    state,
-                    crate::input_popup::InputPopupKind::CaptureImage,
-                    source,
-                )
-                .await
-            }
-            DesktopCommand::CaptureStartText => {
-                self.input_start_fences(
-                    state,
-                    crate::input_popup::InputPopupKind::CaptureText,
-                    source,
-                )
-                .await
-            }
-            DesktopCommand::SpeechStart => {
-                self.input_start_fences(state, crate::input_popup::InputPopupKind::Speech, source)
-                    .await
-            }
-            _ => self.fences_for(command),
+        if command != DesktopCommand::SpeechStart {
+            return self.fences_for(command);
         }
-    }
-
-    async fn input_start_fences(
-        &self,
-        state: &DesktopState,
-        requested: crate::input_popup::InputPopupKind,
-        source: CommandSource,
-    ) -> GenerationFences {
-        let current = state.input_popup_kind().await;
-        let action = crate::input_popup::start_action(current, requested, source);
-        let mut fences = GenerationFences::default();
-        let primary = match requested {
-            crate::input_popup::InputPopupKind::Speech => GenerationResource::Speech,
-            crate::input_popup::InputPopupKind::CaptureImage
-            | crate::input_popup::InputPopupKind::CaptureText => GenerationResource::Capture,
-        };
-        let primary_stamp = if action == crate::input_popup::InputPopupStartAction::Focus {
-            self.generations.stamp(primary)
+        let action = crate::input_popup::speech_start_action(state.input_popup_kind().await);
+        let stamp = if action == crate::input_popup::InputPopupStartAction::Focus {
+            self.generations.stamp(GenerationResource::Speech)
         } else {
-            self.generations.bump(primary)
+            self.generations.bump(GenerationResource::Speech)
         };
-        fences.insert(primary_stamp);
-        if action == crate::input_popup::InputPopupStartAction::CancelThenStart {
-            let cancelled_resource = match (current, requested) {
-                (
-                    Some(crate::input_popup::InputPopupKind::Speech),
-                    crate::input_popup::InputPopupKind::CaptureImage
-                    | crate::input_popup::InputPopupKind::CaptureText,
-                ) => Some(GenerationResource::Speech),
-                (
-                    Some(crate::input_popup::InputPopupKind::CaptureImage)
-                    | Some(crate::input_popup::InputPopupKind::CaptureText),
-                    crate::input_popup::InputPopupKind::Speech,
-                ) => Some(GenerationResource::Capture),
-                _ => None,
-            };
-            if let Some(resource) = cancelled_resource {
-                fences.insert(self.generations.bump(resource));
-            }
-        }
+        let mut fences = GenerationFences::default();
+        fences.insert(stamp);
         fences
     }
 
@@ -444,21 +418,6 @@ impl CommandFirewall {
         *lock(&self.transition) = Some(operation);
         TransitionGuard { firewall: self }
     }
-}
-
-fn uses_input_popup_gate(command: DesktopCommand) -> bool {
-    matches!(
-        command,
-        DesktopCommand::CaptureStartImage
-            | DesktopCommand::CaptureStartText
-            | DesktopCommand::CaptureSendImage
-            | DesktopCommand::CaptureSendText
-            | DesktopCommand::CaptureCancel
-            | DesktopCommand::SpeechStart
-            | DesktopCommand::SpeechFinish
-            | DesktopCommand::SpeechCancel
-            | DesktopCommand::SpeechConfirm
-    )
 }
 
 fn reject_dispatch_reentry() -> Result<(), DispatchError> {

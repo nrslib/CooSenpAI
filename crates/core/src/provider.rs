@@ -12,10 +12,14 @@ mod bridge;
 mod bridge_io;
 mod bridge_provider;
 mod bridge_validation;
+mod mock_provider;
 #[path = "provider_output.rs"]
 mod provider_output;
 pub use bridge::{BridgeLaunch, ProviderBridge};
 pub use bridge_provider::BridgeProvider;
+pub use mock_provider::{
+    MockProvider, MOCK_COMPANION_RESPONSE, MOCK_MEMORY_RESPONSE, MOCK_OBSERVER_ACTIVITY,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -23,19 +27,33 @@ pub enum ProviderName {
     Codex,
     Claude,
     Opencode,
+    Mock,
 }
 
 impl ProviderName {
+    pub fn from_config_name(name: &str) -> Option<Self> {
+        match name {
+            "codex" => Some(Self::Codex),
+            "claude" => Some(Self::Claude),
+            "opencode" => Some(Self::Opencode),
+            #[cfg(feature = "e2e-fixtures")]
+            "mock" => Some(Self::Mock),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Opencode => "opencode",
+            Self::Mock => "mock",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderSession {
     pub provider: ProviderName,
     pub model: Option<String>,
@@ -46,6 +64,7 @@ pub struct ProviderSession {
 pub enum SessionRequest {
     New,
     Ephemeral,
+    Isolated,
     Resume(ProviderSession),
 }
 
@@ -74,6 +93,8 @@ pub struct ProviderCall {
     pub images: Vec<ProviderImageAttachment>,
     pub tools_disabled: bool,
     pub output_schema: Option<Value>,
+    /// 生成スキーマと受信契約が異なる場合のみ指定する。未指定なら output_schema で検証する。
+    pub output_validation_schema: Option<Value>,
     pub session: SessionRequest,
     pub model: Option<String>,
     pub effort: Option<String>,

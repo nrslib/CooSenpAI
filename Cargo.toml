@@ -4,7 +4,7 @@ exclude = ["spikes/macos-tauri-objc2"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 license = "PolyForm-Shield-1.0.0"
@@ -26,6 +26,6 @@ tempfile = "3.23.0"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full", "test-util"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
-rustix = { version = "1.1.4", features = ["process"] }
+rustix = { version = "1.1.4", features = ["process", "fs"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 unicode-normalization = "0.1.24"

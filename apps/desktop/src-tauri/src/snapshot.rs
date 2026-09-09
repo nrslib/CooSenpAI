@@ -1,5 +1,10 @@
 use coosenpai_core::config::Config;
 use coosenpai_core::debug::DebugCatalog;
+use coosenpai_core::locale::{
+    localize_audio_message, localize_capture_disposition, localize_error_message,
+    localize_screen_permission_message, localize_shortcut_message, localize_speech_message, Locale,
+    TextKey,
+};
 use coosenpai_core::memory::MemoryStatus;
 use coosenpai_core::runtime::{RuntimeLastError, RuntimeSnapshot};
 use coosenpai_core::state::{
@@ -22,10 +27,17 @@ pub struct AppSnapshot {
     pub observer_provider_label: String,
     pub companion_provider_label: String,
     pub companion_display_name: String,
+    #[serde(default)]
+    pub companion_emotions: coosenpai_core::emotion::EmotionState,
+    #[serde(skip)]
+    companion_emotions_revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temporary_assertiveness:
         Option<coosenpai_core::companion_assertiveness::TemporaryAssertivenessSelection>,
     pub conversation: Vec<ConversationEntry>,
+    pub conversation_generations:
+        Vec<coosenpai_core::conversation_archive::ConversationGenerationSummary>,
+    pub selected_conversation_generation: u64,
     pub unread_count: usize,
     pub screen_recording_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,11 +60,16 @@ pub struct AppSnapshot {
     pub(crate) capture_shortcut_error_speech_generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_user_message_id: Option<String>,
+    pub user_work_pending: bool,
     pub cancelled_user_message_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub companion_draft: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_companion_thought: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_companion_decision: Option<coosenpai_core::runtime::CompanionDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_user_interruption: Option<coosenpai_core::runtime::UserInterruption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_image_png: Option<Vec<u8>>,
     pub avatar_image_load_failed: bool,
@@ -76,6 +93,8 @@ pub struct OnboardingView {
     pub skip_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings_highlight: Option<String>,
+    #[serde(default)]
+    pub highlighted_settings: Vec<String>,
 }
 
 impl OnboardingView {
@@ -101,6 +120,7 @@ impl OnboardingView {
                 .map(|step| step.id().to_owned()),
             skip_hint: None,
             settings_highlight: None,
+            highlighted_settings: vec![],
         }
     }
 }
@@ -136,6 +156,43 @@ pub struct AudioView {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_observation: Option<AudioObservationView>,
+    #[serde(default)]
+    pub recent_events: Vec<AudioLogEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "stage", rename_all = "kebab-case")]
+pub enum AudioLogStage {
+    Recognizing,
+    NoSpeech,
+    Confirmed { text: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioLogEvent {
+    pub id: String,
+    pub created_at: String,
+    pub source: AudioObservationSource,
+    #[serde(flatten)]
+    pub stage: AudioLogStage,
+}
+
+impl AudioView {
+    pub fn push_event(&mut self, event: AudioLogEvent) {
+        const RECENT_AUDIO_EVENT_LIMIT: usize = 100;
+        if self
+            .recent_events
+            .iter()
+            .any(|existing| existing.id == event.id)
+        {
+            return;
+        }
+        self.recent_events.push(event);
+        if self.recent_events.len() > RECENT_AUDIO_EVENT_LIMIT {
+            self.recent_events.remove(0);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -272,6 +329,18 @@ pub struct SnapshotEvent {
 }
 
 impl AppSnapshot {
+    pub(crate) fn finish_watch(&mut self, failed: bool) {
+        self.observer_running = false;
+        self.watch_intent_active = false;
+        self.observer.phase = if failed {
+            ObserverViewPhase::Error
+        } else {
+            ObserverViewPhase::Stopped
+        };
+        self.observer.pending_frame_count = 0;
+        self.observer.next_send_at = None;
+    }
+
     pub fn initial(
         config: Config,
         conversation: Vec<ConversationEntry>,
@@ -282,6 +351,8 @@ impl AppSnapshot {
         signed_build: bool,
     ) -> Self {
         let config_revision = config.revision;
+        let locale = coosenpai_core::locale::Locale::from_config(&config.ui.language);
+        let permission_presentation = permission.presentation_for_locale(locale);
         let memory_status = MemoryStatus {
             enabled: config.memory.enabled,
             provider_consent: config.memory.provider_consent,
@@ -325,9 +396,11 @@ impl AppSnapshot {
             temporary_assertiveness: None,
             config,
             conversation,
+            conversation_generations: Vec::new(),
+            selected_conversation_generation: 0,
             unread_count: 0,
-            screen_recording_status: permission.presentation().status.to_owned(),
-            screen_recording_message: permission.presentation().message.map(str::to_owned),
+            screen_recording_status: permission_presentation.status.to_owned(),
+            screen_recording_message: permission_presentation.message.map(str::to_owned),
             screen_recording_restart_required: permission.requires_restart(),
             signed_build,
             last_error: None,
@@ -340,9 +413,14 @@ impl AppSnapshot {
             capture_shortcut_error_id: 0,
             capture_shortcut_error_speech_generation: None,
             active_user_message_id: None,
+            user_work_pending: false,
             cancelled_user_message_ids: Vec::new(),
             companion_draft: None,
             latest_companion_thought: None,
+            latest_companion_decision: None,
+            latest_user_interruption: None,
+            companion_emotions: Default::default(),
+            companion_emotions_revision: 0,
             avatar_image_png: None,
             avatar_image_load_failed: false,
             provider_usage: Default::default(),
@@ -362,10 +440,11 @@ impl AppSnapshot {
                 phase: "off".to_owned(),
                 microphone_permission: speech_permission_name(speech_permissions.microphone),
                 recognition_permission: speech_permission_name(speech_permissions.recognition),
-                screen_capture_permission: permission.presentation().status.to_owned(),
+                screen_capture_permission: permission_presentation.status.to_owned(),
                 warning_kind: None,
                 message: None,
                 latest_observation: None,
+                recent_events: Vec::new(),
             },
             onboarding: OnboardingView::from_state(
                 &coosenpai_core::onboarding::OnboardingState::default(),
@@ -387,9 +466,17 @@ impl AppSnapshot {
         self.companion_display_name = runtime.companion_display_name.clone();
         self.companion.proactive_limit_reached = runtime.proactive_limit_reached;
         self.active_user_message_id = runtime.active_user_message_id.clone();
+        self.user_work_pending = runtime.user_work_pending;
         self.cancelled_user_message_ids = runtime.cancelled_user_message_ids.clone();
         self.companion_draft = runtime.companion_draft.clone();
         self.latest_companion_thought = runtime.latest_companion_thought.clone();
+        self.latest_companion_decision = runtime.latest_companion_decision.clone();
+        self.latest_user_interruption = runtime.latest_user_interruption.clone();
+        // リセット応答と監視通知の到着順が逆でも、古い感情へ戻さない。
+        if runtime.revision >= self.companion_emotions_revision {
+            self.companion_emotions = runtime.companion_emotions;
+            self.companion_emotions_revision = runtime.revision;
+        }
         self.provider_usage = runtime.provider_usage.clone();
         self.companion.ready = self.last_error.is_none();
         self.companion.phase = if self.last_error.is_some() {
@@ -413,6 +500,7 @@ impl AppSnapshot {
     }
 
     pub fn apply_config(&mut self, config: Config) {
+        let locale = Locale::from_config(&config.ui.language);
         if self
             .last_error
             .as_ref()
@@ -427,6 +515,36 @@ impl AppSnapshot {
         self.observer.targets = merge_target_views(&self.observer.targets, &config);
         self.notify.mode = config.notification.mode.clone();
         self.notify.minimum_priority = config.notification.min_priority.clone();
+        self.screen_recording_message = self
+            .screen_recording_message
+            .take()
+            .map(|message| localize_screen_permission_message(&message, locale));
+        self.capture_shortcut_error = self
+            .capture_shortcut_error
+            .take()
+            .map(|message| localize_shortcut_message(&message, locale));
+        self.observer.last_capture_disposition = self
+            .observer
+            .last_capture_disposition
+            .take()
+            .map(|message| localize_capture_disposition(&message, locale));
+        self.observer.error_message =
+            self.observer.error_message.take().map(|message| {
+                localize_error_message(&message, TextKey::WatchOperationFailed, locale)
+            });
+        let speech_warning_kind = self.speech.warning_kind.clone();
+        self.speech.message = self.speech.message.take().map(|message| {
+            speech_warning_kind.as_deref().map_or_else(
+                || localize_speech_message(&message, locale),
+                |kind| localize_audio_message(kind, &message, locale),
+            )
+        });
+        let audio_warning_kind = self.audio.warning_kind.as_deref().unwrap_or_default();
+        self.audio.message = self
+            .audio
+            .message
+            .take()
+            .map(|message| localize_audio_message(audio_warning_kind, &message, locale));
         self.config = config;
     }
 }
@@ -443,9 +561,14 @@ fn speech_permission_name(permission: coosenpai_core::ports::SpeechPermissionKin
 }
 
 fn target_views(config: &Config) -> Vec<WatchTargetView> {
+    let locale = coosenpai_core::locale::Locale::from_config(&config.ui.language);
     let mut targets = vec![WatchTargetView {
         target: "fullscreen".to_owned(),
-        name: "フルスクリーン".to_owned(),
+        name: coosenpai_core::locale::text(
+            coosenpai_core::locale::TextKey::WatchFullscreenTarget,
+            locale,
+        )
+        .to_owned(),
         enabled: config.watch.fullscreen,
         foreground: true,
         last_captured_at: None,

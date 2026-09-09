@@ -32,10 +32,40 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
         ));
     }
     validate_providers(config, &mut issues);
+    validate_work(config, &mut issues);
     validate_companion(config, &mut issues);
     validate_presence(config, &mut issues);
     validate_audio(config, &mut issues);
     validate_speech(config, &mut issues);
+    if !matches!(config.voice_output.provider.as_str(), "system" | "voicevox") {
+        issues.push(issue(
+            "voiceOutput.provider",
+            "system または voicevox で指定してください。",
+        ));
+    }
+    if config.voice_output.provider == "voicevox" && config.voice_output.voicevox_style_id.is_none()
+    {
+        issues.push(issue(
+            "voiceOutput.voicevoxStyleId",
+            "VOICEVOX の声を選んでください。",
+        ));
+    }
+    if config
+        .voice_output
+        .voicevox_style_id
+        .is_some_and(|id| id > i32::MAX as u32)
+    {
+        issues.push(issue(
+            "voiceOutput.voicevoxStyleId",
+            "0以上2147483647以下の整数または null で指定してください。",
+        ));
+    }
+    if !(100..=400).contains(&config.voice_output.rate) {
+        issues.push(issue(
+            "voiceOutput.rate",
+            "100以上400以下の整数で指定してください。",
+        ));
+    }
     validate_popup(config, &mut issues);
     validate_ui(config, &mut issues);
     if !matches!(config.chat.while_thinking.as_str(), "queue" | "append") {
@@ -277,6 +307,23 @@ fn push_to_talk_key_supported(shortcut: &str) -> bool {
     )
 }
 
+fn validate_work(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
+    let mut seen = HashSet::new();
+    for (index, root) in config.work.allowed_roots.iter().enumerate() {
+        if !root.path.is_absolute() || root.path.as_os_str().len() > 4096 {
+            issues.push(issue(
+                format!("work.allowedRoots[{index}].path"),
+                "許可ルートは絶対パスで指定してください。",
+            ));
+        } else if !seen.insert(root.path.clone()) {
+            issues.push(issue(
+                format!("work.allowedRoots[{index}].path"),
+                "同じ許可ルートが重複しています。",
+            ));
+        }
+    }
+}
+
 fn validate_watch_targets(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
     let mut bundle_ids = HashSet::new();
     for (index, app) in config.watch.apps.iter().enumerate() {
@@ -309,6 +356,7 @@ fn validate_watch_targets(config: &Config, issues: &mut Vec<ConfigValidationIssu
         ("keymap.captureRegion", &config.keymap.capture_region),
         ("keymap.microphone", &config.keymap.microphone),
         ("keymap.togglePanel", &config.keymap.toggle_panel),
+        ("keymap.toggleAvatar", &config.keymap.toggle_avatar),
         ("keymap.toggleWatch", &config.keymap.toggle_watch),
         ("keymap.sendText", &config.keymap.send_text),
         ("keymap.copyLastReply", &config.keymap.copy_last_reply),
@@ -377,6 +425,9 @@ fn validate_ui(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
             "ui.font",
             "空でない制御文字を含まないフォント名で指定してください。",
         ));
+    }
+    if !matches!(config.ui.language.as_str(), "ja" | "en") {
+        issues.push(issue("ui.language", "ja または en で指定してください。"));
     }
 }
 
@@ -504,10 +555,10 @@ fn validate_providers(config: &Config, issues: &mut Vec<ConfigValidationIssue>) 
             &config.companion.effort,
         ),
     ] {
-        if !matches!(provider.as_str(), "codex" | "claude" | "opencode") {
+        if crate::provider::ProviderName::from_config_name(provider).is_none() {
             issues.push(issue(
                 format!("{name}.provider"),
-                "codex、claude、opencode のいずれかで指定してください。",
+                "codex、claude、opencode のいずれかで指定してください。mock は E2E 専用ビルドが必要です。",
             ));
         }
         if model.is_empty() {

@@ -4,6 +4,7 @@ use crate::command_guard::{
     RejectReason, ResourcePhase, ResourcePhases,
 };
 use crate::state::DesktopState;
+use coosenpai_core::locale::Locale;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -104,8 +105,11 @@ impl DesktopState {
         {
             Ok(intent) => intent,
             Err(error @ DispatchError::Rejected(_)) if show_rejection => {
-                self.show_watch_start_rejection(&error.format_for_user())
-                    .await;
+                self.show_watch_start_rejection(
+                    &error
+                        .format_for_locale(Locale::from_config(&self.runtime_config().ui.language)),
+                )
+                .await;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -183,70 +187,22 @@ impl DesktopState {
     pub(crate) async fn prepare_command_execution(
         &self,
         command: DesktopCommand,
-        _context: &CommandContext,
-    ) {
-        match command {
-            DesktopCommand::ConversationReset | DesktopCommand::TutorialFinish => {
-                crate::capture::cancel(self, _context).await;
-                self.cancel_speech_and_wait().await;
-            }
-            DesktopCommand::ChatSend
-            | DesktopCommand::ChatCancel
-            | DesktopCommand::ChatRetry
-            | DesktopCommand::CaptureStartImage
-            | DesktopCommand::CaptureStartText
-            | DesktopCommand::CaptureSendImage
-            | DesktopCommand::CaptureSendText
-            | DesktopCommand::CaptureCancel
-            | DesktopCommand::SpeechStart
-            | DesktopCommand::SpeechFinish
-            | DesktopCommand::SpeechCancel
-            | DesktopCommand::SpeechConfirm
-            | DesktopCommand::ConfigDisplayUpdate
-            | DesktopCommand::ConfigProviderUpdate
-            | DesktopCommand::ProviderApiKeyUpdate
-            | DesktopCommand::ConfigWatchUpdate
-            | DesktopCommand::ConfigKeymapUpdate
-            | DesktopCommand::WatchTargetUpdate
-            | DesktopCommand::PersonaSelect
-            | DesktopCommand::PersonaSave
-            | DesktopCommand::PersonaDelete
-            | DesktopCommand::PersonaRestore
-            | DesktopCommand::PersonaReload
-            | DesktopCommand::MemoryConfirm
-            | DesktopCommand::MemoryReject
-            | DesktopCommand::MemoryConfirmUpdate
-            | DesktopCommand::MemoryRejectUpdate
-            | DesktopCommand::MemoryDelete
-            | DesktopCommand::MemoryConsolidate
-            | DesktopCommand::ConversationResetDismiss
-            | DesktopCommand::BubbleDismiss
-            | DesktopCommand::TutorialInteract
-            | DesktopCommand::TutorialFastForward
-            | DesktopCommand::SettingsAppearancePreview
-            | DesktopCommand::TutorialAdvance
-            | DesktopCommand::TutorialSettingsPresented
-            | DesktopCommand::TutorialResume
-            | DesktopCommand::TutorialRestart
-            | DesktopCommand::SetupPrompt
-            | DesktopCommand::SetupRestart
-            | DesktopCommand::SettingsOpen
-            | DesktopCommand::WatchStart
-            | DesktopCommand::WatchStop
-            | DesktopCommand::WatchPowerSuspend
-            | DesktopCommand::WatchPowerResume
-            | DesktopCommand::PresentTutorialResponse => {}
-            DesktopCommand::CompanionPresence | DesktopCommand::CopyLastReply => {}
+    ) -> Result<(), DispatchError> {
+        if prepare_input_transition(&self.ui, command).await? {
+            self.voice_output.stop().await;
         }
+        Ok(())
     }
 
     pub(crate) async fn command_policy_context(&self) -> PolicyContext {
         let onboarding = self.onboarding_policy_phase().await;
-        let capture = match &*self.capture_popup_read().await {
-            crate::capture::CapturePopupState::Idle => ResourcePhase::Idle,
-            crate::capture::CapturePopupState::Ready(_) => ResourcePhase::Active,
-            crate::capture::CapturePopupState::Capturing { .. }
-            | crate::capture::CapturePopupState::Sending { .. } => ResourcePhase::Transitioning,
+        let capture = match self.capture.view().phase {
+            crate::capture::CapturePhase::Idle => ResourcePhase::Idle,
+            crate::capture::CapturePhase::Popup => ResourcePhase::Active,
+            crate::capture::CapturePhase::Selecting
+            | crate::capture::CapturePhase::Sending
+            | crate::capture::CapturePhase::Closing
+            | crate::capture::CapturePhase::CloseFailed => ResourcePhase::Transitioning,
         };
         let watch = self.watch_resource_phase().await;
         PolicyContext {
@@ -271,4 +227,26 @@ impl DesktopState {
             },
         }
     }
+}
+
+// ライフサイクル変更は、Rootが現入力の終了を認めた後だけ続行する。
+pub(crate) async fn prepare_input_transition(
+    ui: &crate::ui_root::UiHandle,
+    command: DesktopCommand,
+) -> Result<bool, DispatchError> {
+    if !matches!(
+        command,
+        DesktopCommand::ConversationReset
+            | DesktopCommand::ConversationSelect
+            | DesktopCommand::TutorialFinish
+    ) {
+        return Ok(false);
+    }
+    ui.request(
+        crate::ui_events::UiView::Application,
+        crate::ui_events::UiEvent::InterruptCapture(false),
+    )
+    .await
+    .map_err(DispatchError::handler)?;
+    Ok(true)
 }

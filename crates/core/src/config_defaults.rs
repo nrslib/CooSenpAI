@@ -96,6 +96,9 @@ pub(super) fn default_speech_confirm_before_send() -> bool {
 pub(super) fn default_toggle_panel_shortcut() -> Option<String> {
     Some("Alt+Shift+V".to_owned())
 }
+pub(super) fn default_toggle_avatar_shortcut() -> Option<String> {
+    Some("Alt+Shift+A".to_owned())
+}
 pub(super) fn default_toggle_watch_shortcut() -> Option<String> {
     Some("Alt+Shift+W".to_owned())
 }
@@ -149,6 +152,9 @@ pub(super) fn default_ui_theme() -> String {
 }
 pub(super) fn default_ui_font() -> String {
     "system".to_owned()
+}
+pub(super) fn default_ui_language() -> String {
+    "ja".to_owned()
 }
 pub(super) fn default_while_thinking() -> String {
     "queue".to_owned()
@@ -230,5 +236,12 @@ pub(super) fn default_memory_storage_max_bytes() -> usize {
 }
 pub(super) fn default_fact_prompt_daily_limit() -> u32 {
     3
+}
+
+pub(super) fn default_voice_output_provider() -> String {
+    "system".to_owned()
+}
+pub(super) fn default_voice_output_rate() -> u32 {
+    180
 }
 

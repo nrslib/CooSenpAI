@@ -16,11 +16,46 @@ pub fn frontmost_application_identity() -> Option<ForegroundApplication> {
     })
 }
 
+pub fn application_is_running(identity: &ForegroundApplication) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(identity.process_id).is_some_and(
+        |application| {
+            !application.isTerminated()
+                && application
+                    .bundleIdentifier()
+                    .map(|bundle| bundle.to_string())
+                    == identity.bundle_id
+        },
+    )
+}
+
 pub fn activate_application(identity: &ForegroundApplication) -> Result<()> {
     let application =
         NSRunningApplication::runningApplicationWithProcessIdentifier(identity.process_id)
             .context("元の前面アプリが終了しています")?;
     activate_running_application(&application, "元の前面アプリを再アクティブ化できません")
+}
+
+/// 自アプリから対象アプリへアクティブ状態を引き渡す。完了は呼出側で観測する。
+pub fn return_activation_to_application(identity: &ForegroundApplication) -> Result<()> {
+    let marker = MainThreadMarker::new().context("AppKitのメインスレッドではありません")?;
+    let target = NSRunningApplication::runningApplicationWithProcessIdentifier(identity.process_id)
+        .context("元の前面アプリが終了しています")?;
+    if target.isActive() && !NSApplication::sharedApplication(marker).isActive() {
+        return Ok(());
+    }
+    if objc2::available!(macos = 14.0) {
+        NSApplication::sharedApplication(marker).yieldActivationToApplication(&target);
+        anyhow::ensure!(
+            target.activateFromApplication_options(
+                &NSRunningApplication::currentApplication(),
+                NSApplicationActivationOptions::empty(),
+            ),
+            "元の前面アプリへのアクティブ状態の引渡しが拒否されました"
+        );
+        Ok(())
+    } else {
+        activate_running_application(&target, "元の前面アプリを再アクティブ化できません")
+    }
 }
 
 pub fn activate_current_application() -> Result<bool> {
@@ -38,6 +73,28 @@ pub fn activate_current_application() -> Result<bool> {
     let _ =
         application.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
     Ok(application.isActive())
+}
+
+// アクティブ済みのアプリへの NSApp.activate はそれ自体がアプリ切り替えの遷移を起こし、
+// 直後の画面撮影を遅らせる（macOS 26.5.1 実測）ため、既にアクティブなら呼ばない。
+pub fn activate_current_application_unless_active() -> Result<bool> {
+    let marker = MainThreadMarker::new().context("AppKitのメインスレッドではありません")?;
+    let is_active = NSApplication::sharedApplication(marker).isActive();
+    unless_active(is_active, activate_current_application)
+}
+
+fn unless_active(is_active: bool, activate: impl FnOnce() -> Result<bool>) -> Result<bool> {
+    if is_active {
+        Ok(true)
+    } else {
+        activate()
+    }
+}
+
+/// 自アプリが今アクティブか。AppKit のメインスレッドから呼ぶ。
+pub fn current_application_is_active() -> Result<bool> {
+    let marker = MainThreadMarker::new().context("AppKitのメインスレッドではありません")?;
+    Ok(NSApplication::sharedApplication(marker).isActive())
 }
 
 /// アプリ自体を再 activate せず、対象ウィンドウだけを表示して key 化する。
@@ -70,3 +127,4 @@ fn activate_running_application(
     }
     Ok(())
 }
+

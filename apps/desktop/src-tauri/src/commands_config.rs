@@ -3,6 +3,7 @@ use crate::commands::{authorize_window, CommandOrigin, IpcError, IpcResult, Taur
 use coosenpai_core::config::{
     load_config, parse_config, Config, ConfigError, ConfigValidationIssue, NUMERIC_CONFIG_PATHS,
 };
+use coosenpai_core::locale::Locale;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -14,9 +15,10 @@ pub(super) async fn config_get_persisted(
     state: State<'_, Arc<crate::state::DesktopState>>,
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::Main)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     Ok(match load_config(&state.paths) {
         Ok(config) => IpcResult::success(config),
-        Err(error) => config_failure(error),
+        Err(error) => config_failure_for_locale(error, locale),
     })
 }
 
@@ -25,7 +27,13 @@ pub(super) fn validate_numeric_patch(patch: &Value) -> Result<(), ConfigError> {
         .iter()
         .filter_map(|path| {
             value_at_path(patch, path)
-                .filter(|value| !value.is_number())
+                .filter(|value| {
+                    let nullable = matches!(
+                        *path,
+                        "companion.dailyProactiveLimit" | "voiceOutput.voicevoxStyleId"
+                    );
+                    !value.is_number() && !(nullable && value.is_null())
+                })
                 .map(|_| ConfigValidationIssue {
                     path: (*path).to_owned(),
                     message: "数値で指定してください。".to_owned(),
@@ -99,13 +107,33 @@ fn command_for_config_change(current: &Config, next: &Config) -> DesktopCommand 
         DesktopCommand::ConfigKeymapUpdate
     } else if invalidates_running_operations(current, next) {
         DesktopCommand::ConfigProviderUpdate
+    } else if current.work != next.work {
+        DesktopCommand::WorkConfigure
     } else {
         DesktopCommand::ConfigDisplayUpdate
     }
 }
 
+pub(crate) fn validate_work_config_change(
+    current: &Config,
+    next: &Config,
+    normal_mode: bool,
+) -> Result<(), ConfigError> {
+    if !normal_mode && current.work != next.work {
+        return Err(ConfigError::Validation(vec![ConfigValidationIssue {
+            path: "work".into(),
+            message:
+                "作業の承認方法と許可ルートはチュートリアルとセットアップの終了後に変更できます"
+                    .into(),
+        }]));
+    }
+    Ok(())
+}
+
 pub(crate) fn invalidates_running_operations(current: &Config, next: &Config) -> bool {
-    watch_runtime_settings_changed(current, next)
+    (current.work != next.work && !work_config_is_only_difference(current, next))
+        || watch_runtime_settings_changed(current, next)
+        || current.ui.language != next.ui.language
         || current.observer.provider != next.observer.provider
         || current.observer.model != next.observer.model
         || current.observer.effort != next.observer.effort
@@ -126,17 +154,29 @@ fn watch_runtime_settings_changed(current: &Config, next: &Config) -> bool {
     current_watch != next_watch
 }
 
-pub(super) fn config_failure<T: Serialize>(error: ConfigError) -> IpcResult<T> {
+pub(super) fn config_failure_for_locale<T: Serialize>(
+    error: ConfigError,
+    locale: Locale,
+) -> IpcResult<T> {
     let issues = match &error {
-        ConfigError::Validation(issues) => issues.clone(),
+        ConfigError::Validation(issues) => {
+            issues.iter().map(|issue| issue.localized(locale)).collect()
+        }
         _ => Vec::new(),
     };
     IpcResult::Failure {
         ok: false,
         error: IpcError {
-            message: error.format_for_user(),
+            message: error.format_for_locale(locale),
             issues,
         },
     }
 }
 
+/// 承認方式と許可ルートだけの変更は runtime を再構築せず、進行中の作業を中断しない。
+pub(crate) fn work_config_is_only_difference(current: &Config, next: &Config) -> bool {
+    let mut comparable = current.clone();
+    comparable.work = next.work.clone();
+    comparable.revision = next.revision;
+    comparable == *next
+}

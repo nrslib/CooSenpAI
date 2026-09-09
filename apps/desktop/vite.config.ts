@@ -11,9 +11,11 @@ export default {
       input: {
         index: fileURLToPath(new URL("./index.html", import.meta.url)),
         bubble: fileURLToPath(new URL("./bubble.html", import.meta.url)),
+        avatar: fileURLToPath(new URL("./avatar.html", import.meta.url)),
         capturePopup: fileURLToPath(new URL("./capture-popup.html", import.meta.url)),
         speechPopup: fileURLToPath(new URL("./speech-popup.html", import.meta.url)),
         modelPopup: fileURLToPath(new URL("./model-popup.html", import.meta.url)),
+        details: fileURLToPath(new URL("./details.html", import.meta.url)),
       },
     },
   },

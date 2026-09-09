@@ -1,4 +1,4 @@
-use super::super::KeymapConfig;
+use super::super::{shortcut_identity, KeymapConfig};
 use super::helpers::{enum_string, unknown_keys};
 use super::{issue, ConfigValidationIssue};
 use serde_json::{Map, Value};
@@ -20,6 +20,7 @@ pub(super) fn parse_keymap(
             "captureRegion",
             "microphone",
             "togglePanel",
+            "toggleAvatar",
             "toggleWatch",
             "sendText",
             "copyLastReply",
@@ -27,7 +28,7 @@ pub(super) fn parse_keymap(
         ],
         "keymap",
     ));
-    KeymapConfig {
+    let mut keymap = KeymapConfig {
         capture_region: optional_shortcut(
             object,
             "captureRegion",
@@ -47,6 +48,13 @@ pub(super) fn parse_keymap(
             "togglePanel",
             "Alt+Shift+V",
             "keymap.togglePanel",
+            issues,
+        ),
+        toggle_avatar: optional_shortcut(
+            object,
+            "toggleAvatar",
+            "Alt+Shift+A",
+            "keymap.toggleAvatar",
             issues,
         ),
         toggle_watch: optional_shortcut(
@@ -72,7 +80,28 @@ pub(super) fn parse_keymap(
             "keymap.sendKey",
             issues,
         ),
+    };
+    // Legacy configurations must keep their existing bindings when the new
+    // avatar shortcut's default is already occupied. Explicit values still validate.
+    if !object.contains_key("toggleAvatar") {
+        let avatar_identity = keymap.toggle_avatar.as_deref().and_then(shortcut_identity);
+        if avatar_identity.is_some()
+            && [
+                &keymap.capture_region,
+                &keymap.microphone,
+                &keymap.toggle_panel,
+                &keymap.toggle_watch,
+                &keymap.send_text,
+                &keymap.copy_last_reply,
+            ]
+            .into_iter()
+            .filter_map(|shortcut| shortcut.as_deref().and_then(shortcut_identity))
+            .any(|identity| Some(identity) == avatar_identity)
+        {
+            keymap.toggle_avatar = None;
+        }
     }
+    keymap
 }
 
 fn optional_shortcut(

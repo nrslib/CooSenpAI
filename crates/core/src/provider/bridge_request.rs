@@ -29,6 +29,7 @@ pub(super) fn send_request_value(
         "executable": executable,
         "cwd": cwd,
         "toolsDisabled": input.tools_disabled,
+        "isolateTools": matches!(input.session, SessionRequest::Isolated),
         "timeoutMs": u64::try_from(input.timeout.as_millis()).unwrap_or(u64::MAX),
     });
     remove_null_fields(&mut request);
@@ -59,7 +60,9 @@ pub(super) fn serialize_request_line(request: &Value) -> Result<Vec<u8>, Provide
 pub(super) fn send_request_fits(input: &ProviderCall) -> bool {
     let provider = match &input.session {
         SessionRequest::Resume(session) => session.provider,
-        SessionRequest::New | SessionRequest::Ephemeral => ProviderName::Opencode,
+        SessionRequest::New | SessionRequest::Ephemeral | SessionRequest::Isolated => {
+            ProviderName::Opencode
+        }
     };
     let Ok((session_mode, session_id)) =
         session_json(provider, input.model.as_deref(), &input.session)

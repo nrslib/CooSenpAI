@@ -1,6 +1,4 @@
 use super::DesktopState;
-use crate::bubbles::{self, BubbleAction, BubbleInteraction, BubbleRecord};
-use crate::tutorial::{tutorial_step_for_guide_key, TUTORIAL_SKIP_ACTION};
 use crate::tutorial_notice::{TutorialBubbleOutcome, TutorialNoticeEffects};
 use async_trait::async_trait;
 use coosenpai_core::companion_storage::CompanionStorage;
@@ -60,43 +58,17 @@ impl TutorialNoticeEffects for DesktopTutorialNoticeEffects {
         &self,
         notice: &TutorialNoticePlan,
     ) -> Result<TutorialBubbleOutcome, RuntimeError> {
-        if crate::windows::main_is_focused(&self.state.app) {
-            return Ok(TutorialBubbleOutcome::Acknowledged);
-        }
-        let config = self.state.runtime.config();
-        let record = tutorial_bubble_record(
-            &self.state,
-            notice.id.clone(),
-            &notice.key,
-            notice.created_at.clone(),
-            notice.message.clone(),
-        )
-        .await;
-        if self.require_ack {
-            bubbles::show_replacing(
-                self.state.clone(),
-                record,
-                config.notification.bubble_duration_ms,
-                &self.replaced_bubble_ids,
-                &self.transition_cancellation,
+        self.state
+            .present_tutorial_notice(
+                notice.id.clone(),
+                notice.key.clone(),
+                notice.created_at.clone(),
+                notice.message.clone(),
+                self.require_ack,
+                self.replaced_bubble_ids.clone(),
+                self.transition_cancellation.clone(),
             )
             .await
-            .map(|outcome| match outcome {
-                bubbles::BubblePresentationOutcome::Acknowledged => {
-                    TutorialBubbleOutcome::Acknowledged
-                }
-                bubbles::BubblePresentationOutcome::Dismissed => TutorialBubbleOutcome::Dismissed,
-            })
-            .map_err(|error| RuntimeError::Factory(error.to_string()))
-        } else {
-            bubbles::show_best_effort(
-                self.state.clone(),
-                record,
-                config.notification.bubble_duration_ms,
-            )
-            .await;
-            Ok(TutorialBubbleOutcome::Acknowledged)
-        }
     }
 }
 
@@ -130,49 +102,55 @@ pub(super) async fn append_tutorial_conversation(
     .await
     .map_err(|error| RuntimeError::Factory(error.to_string()))?
     .map_err(|error| RuntimeError::Factory(error.to_string()))?;
-    state.refresh_conversation().await;
+    state.ui.input(
+        crate::ui_events::UiView::Application,
+        crate::ui_events::UiEvent::Tutorial(Box::new(
+            crate::tutorial_events::TutorialEvent::Notice(
+                crate::tutorial_notice_presenter::NoticeEvent::ConversationSaved,
+            ),
+        )),
+    );
     Ok(())
-}
-
-pub(super) async fn tutorial_bubble_record(
-    state: &DesktopState,
-    id: String,
-    key: &str,
-    created_at: String,
-    message: String,
-) -> BubbleRecord {
-    let config = state.runtime.config();
-    let conversation_generation = state.bubbles.lock().await.conversation_generation();
-    BubbleRecord {
-        id,
-        created_at,
-        message,
-        message_kind: "tutorial".to_owned(),
-        notification_priority: "none".to_owned(),
-        caused_by: None,
-        display_name: config.companion.display_name,
-        persona: config.companion.persona,
-        avatar_color: config.ui.avatar_color,
-        conversation_generation,
-        persistent: true,
-        open_url: None,
-        interaction: tutorial_skip_interaction(key),
-    }
-}
-
-fn tutorial_skip_interaction(key: &str) -> Option<BubbleInteraction> {
-    tutorial_step_for_guide_key(key).map(|_| BubbleInteraction {
-        select: None,
-        actions: vec![BubbleAction {
-            id: TUTORIAL_SKIP_ACTION.to_owned(),
-            label: "この項目をスキップ".to_owned(),
-        }],
-        detail: None,
-        technical_detail: None,
-    })
 }
 
 pub(super) fn tracks_tutorial_notice_progress(key: &str) -> bool {
     !matches!(key, "later" | "finish" | "forced-finish")
 }
 
+impl DesktopState {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn present_tutorial_notice(
+        &self,
+        id: String,
+        key: String,
+        created_at: String,
+        message: String,
+        require_ack: bool,
+        replaced_bubble_ids: Vec<String>,
+        cancellation: CancellationToken,
+    ) -> Result<TutorialBubbleOutcome, RuntimeError> {
+        let config = self.runtime.config();
+        let conversation_generation = self.bubbles.lock().await.conversation_generation();
+        self.ui
+            .query(crate::ui_events::UiView::Application, |reply| {
+                crate::ui_events::UiEvent::Tutorial(Box::new(
+                    crate::tutorial_events::TutorialEvent::Notice(
+                        crate::tutorial_notice_presenter::NoticeEvent::Requested {
+                            id,
+                            key,
+                            created_at,
+                            message,
+                            config: Box::new(config),
+                            conversation_generation,
+                            require_ack,
+                            replaced_bubble_ids,
+                            cancellation,
+                            reply,
+                        },
+                    ),
+                ))
+            })
+            .await
+            .map_err(RuntimeError::Factory)?
+    }
+}

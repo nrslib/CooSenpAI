@@ -1,4 +1,31 @@
+use coosenpai_core::locale::{text, Locale, TextKey};
 pub use coosenpai_platform_macos::*;
+
+pub fn voice_output_provider(
+) -> std::sync::Arc<dyn coosenpai_core::voice_output::VoiceOutputProviderFactory> {
+    std::sync::Arc::new(DesktopVoiceOutputProviders)
+}
+
+struct DesktopVoiceOutputProviders;
+
+impl coosenpai_core::voice_output::VoiceOutputProviderFactory for DesktopVoiceOutputProviders {
+    fn create(
+        &self,
+        config: &coosenpai_core::config::VoiceOutputConfig,
+        locale: Locale,
+    ) -> Result<std::sync::Arc<dyn coosenpai_core::voice_output::VoiceOutputProvider>, String> {
+        match config.provider.as_str() {
+            "system" => Ok(std::sync::Arc::new(MacSystemVoiceProvider::default())),
+            "voicevox" => {
+                let style = config
+                    .voicevox_style_id
+                    .ok_or_else(|| text(TextKey::VoicevoxSelectVoice, locale).to_owned())?;
+                Ok(std::sync::Arc::new(VoicevoxProvider::new(style, locale)?))
+            }
+            _ => Err(text(TextKey::VoicevoxUnsupportedProvider, locale).to_owned()),
+        }
+    }
+}
 
 pub fn clipboard_reader() -> std::sync::Arc<dyn coosenpai_core::ports::ClipboardReader> {
     std::sync::Arc::new(coosenpai_platform_macos::MacClipboardReader)

@@ -1,3 +1,4 @@
+use crate::locale::{localize_config_issue_message, text, Locale, TextKey};
 use crate::persistence::PersistenceError;
 #[path = "config_issue_paths.rs"]
 mod config_issue_paths;
@@ -65,6 +66,8 @@ pub const NUMERIC_CONFIG_PATHS: &[&str] = &[
     "companion.contextRefreshCalls",
     "companion.proactiveQuietMinutes",
     "notification.bubbleDurationMs",
+    "voiceOutput.rate",
+    "voiceOutput.voicevoxStyleId",
     "bubble.maxStack",
     "retention.observationDays",
     "retention.conversationDays",
@@ -84,6 +87,8 @@ pub const NUMERIC_CONFIG_PATHS: &[&str] = &[
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub work: crate::work::WorkConfig,
     pub config_version: u8,
     #[serde(default)]
     pub revision: u64,
@@ -110,6 +115,8 @@ pub struct Config {
     #[serde(default)]
     pub speech: SpeechConfig,
     #[serde(default)]
+    pub voice_output: VoiceOutputConfig,
+    #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
     pub keymap: KeymapConfig,
@@ -121,6 +128,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            work: crate::work::WorkConfig::default(),
             config_version: CONFIG_VERSION,
             revision: 0,
             watch: WatchConfig::default(),
@@ -134,10 +142,35 @@ impl Default for Config {
             debug: DebugConfig::default(),
             audio: AudioConfig::default(),
             speech: SpeechConfig::default(),
+            voice_output: VoiceOutputConfig::default(),
             ui: UiConfig::default(),
             keymap: KeymapConfig::default(),
             popup: PopupConfig::default(),
             app: AppConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VoiceOutputConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_voice_output_provider")]
+    pub provider: String,
+    #[serde(default = "default_voice_output_rate")]
+    pub rate: u32,
+    #[serde(default)]
+    pub voicevox_style_id: Option<u32>,
+}
+
+impl Default for VoiceOutputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_voice_output_provider(),
+            rate: default_voice_output_rate(),
+            voicevox_style_id: None,
         }
     }
 }
@@ -215,17 +248,28 @@ pub struct WatchAppConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AudioConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub mic: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub speaker: bool,
     #[serde(default)]
     pub debug_dump_dir: Option<String>,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mic: true,
+            speaker: true,
+            debug_dump_dir: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -263,6 +307,8 @@ pub struct UiConfig {
     pub theme: String,
     #[serde(default = "default_ui_font")]
     pub font: String,
+    #[serde(default = "default_ui_language")]
+    pub language: String,
     #[serde(default = "default_true")]
     pub thought_bubble: bool,
 }
@@ -276,6 +322,8 @@ pub struct KeymapConfig {
     pub microphone: Option<String>,
     #[serde(default = "default_toggle_panel_shortcut")]
     pub toggle_panel: Option<String>,
+    #[serde(default = "default_toggle_avatar_shortcut")]
+    pub toggle_avatar: Option<String>,
     #[serde(default = "default_toggle_watch_shortcut")]
     pub toggle_watch: Option<String>,
     #[serde(default = "default_send_text_shortcut")]
@@ -292,6 +340,7 @@ impl Default for KeymapConfig {
             capture_region: default_capture_shortcut(),
             microphone: default_microphone_shortcut(),
             toggle_panel: default_toggle_panel_shortcut(),
+            toggle_avatar: default_toggle_avatar_shortcut(),
             toggle_watch: default_toggle_watch_shortcut(),
             send_text: default_send_text_shortcut(),
             copy_last_reply: default_copy_last_reply_shortcut(),
@@ -339,6 +388,7 @@ impl Default for UiConfig {
             avatar_path: None,
             theme: default_ui_theme(),
             font: default_ui_font(),
+            language: default_ui_language(),
             thought_bubble: true,
         }
     }
@@ -470,6 +520,8 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompanionConfig {
+    #[serde(default = "default_true")]
+    pub emotions_enabled: bool,
     #[serde(default = "default_codex")]
     pub provider: String,
     #[serde(default = "default_model")]
@@ -513,6 +565,7 @@ pub struct CompanionConfig {
 impl Default for CompanionConfig {
     fn default() -> Self {
         Self {
+            emotions_enabled: true,
             provider: default_codex(),
             model: default_model(),
             effort: default_effort(),
@@ -681,15 +734,56 @@ pub struct ConfigValidationIssue {
     pub message: String,
 }
 
+impl ConfigValidationIssue {
+    pub fn localized(&self, locale: Locale) -> Self {
+        Self {
+            path: self.path.clone(),
+            message: localize_config_issue_message(&self.message, locale),
+        }
+    }
+}
+
 impl ConfigError {
     pub fn format_for_user(&self) -> String {
+        self.format_for_locale(Locale::Ja)
+    }
+
+    pub fn format_for_locale(&self, locale: Locale) -> String {
         match self {
             Self::Validation(issues) => issues
                 .iter()
-                .map(|issue| format!("{}: {}", issue.path, issue.message))
+                .map(|issue| {
+                    let issue = issue.localized(locale);
+                    format!("{}: {}", issue.path, issue.message)
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
-            _ => self.to_string(),
+            Self::Io(_) => match locale {
+                Locale::Ja => self.to_string(),
+                Locale::En => text(TextKey::ConfigFileRead, locale).to_owned(),
+            },
+            Self::Json(_) => match locale {
+                Locale::Ja => self.to_string(),
+                Locale::En => text(TextKey::ConfigJson, locale).to_owned(),
+            },
+            Self::UnsupportedVersion(version) => text(TextKey::ConfigUnsupportedVersion, locale)
+                .replace("{version}", &version.to_string()),
+            Self::RevisionConflict { .. } => {
+                text(TextKey::ConfigRevisionConflict, locale).to_owned()
+            }
+            Self::Persistence(_) => match locale {
+                Locale::Ja => self.to_string(),
+                Locale::En => text(TextKey::ConfigLock, locale).to_owned(),
+            },
+        }
+    }
+
+    pub fn issues_for_locale(&self, locale: Locale) -> Vec<ConfigValidationIssue> {
+        match self {
+            Self::Validation(issues) => {
+                issues.iter().map(|issue| issue.localized(locale)).collect()
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -699,13 +793,13 @@ pub fn default_config() -> Config {
 }
 
 pub fn normalize_audio_sources_on_enable(audio_was_enabled: bool, config: &mut Config) {
-    if !audio_was_enabled && config.audio.enabled && !config.audio.speaker {
+    if !audio_was_enabled && config.audio.enabled && !config.audio.mic && !config.audio.speaker {
+        config.audio.mic = true;
         config.audio.speaker = true;
     }
 }
 
 pub(super) fn normalize_config(mut config: Config) -> Config {
-    config.audio.mic = false;
     for actions in [
         &mut config.popup.quick_actions.text,
         &mut config.popup.quick_actions.image,

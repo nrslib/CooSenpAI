@@ -33,6 +33,12 @@ fn parse_config_value(key: &str, raw: &str) -> Result<Value> {
         return Ok(value);
     }
     let field = key.rsplit('.').next().map_or("", |value| value);
+    if key == "voiceOutput.provider" {
+        if !matches!(raw, "system" | "voicevox") {
+            anyhow::bail!("{key} は system または voicevox で指定してください。");
+        }
+        return Ok(Value::String(raw.to_owned()));
+    }
     if field == "provider" {
         if !matches!(raw, "codex" | "claude" | "opencode") {
             anyhow::bail!("プロバイダが不正です: {raw}");
@@ -48,7 +54,11 @@ fn parse_config_value(key: &str, raw: &str) -> Result<Value> {
     if (field == "executable" || key == "audio.debugDumpDir") && raw == "null" {
         return Ok(Value::Null);
     }
-    if key == "companion.dailyProactiveLimit" && raw == "null" {
+    if matches!(
+        key,
+        "companion.dailyProactiveLimit" | "voiceOutput.voicevoxStyleId"
+    ) && raw == "null"
+    {
         return Ok(Value::Null);
     }
     if matches!(

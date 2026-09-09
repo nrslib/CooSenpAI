@@ -3,7 +3,7 @@ use chrono::Utc;
 use coosenpai_core::config::{Config, ConfigPaths};
 use coosenpai_core::debug::{ocr_preview, DebugGateRecord, DebugStore};
 use coosenpai_core::frame_buffer::FrameBuffer;
-use coosenpai_core::image_processing::{own_window_exclusions, png_dimensions, process_png};
+use coosenpai_core::image_processing::own_window_exclusions;
 use coosenpai_core::logging::FileLogger;
 use coosenpai_core::notification::NotificationConsumer;
 use coosenpai_core::observer::ObservationFrameInput;
@@ -12,6 +12,7 @@ use coosenpai_core::ports::{
     PowerEvent, PowerEventPort, RuntimeLogger, ScreenCapturePort, SystemClock,
 };
 use coosenpai_core::runtime::RuntimeActor;
+use coosenpai_core::screen_frames::prepare_screen_frames;
 use coosenpai_core::state::{ActivityTriggerKind, PendingFrameContext, StagnationObservation};
 use std::path::Path;
 use std::sync::Arc;
@@ -28,8 +29,8 @@ mod watch_config;
 use self::watch_config::ConfigReload;
 use coosenpai_core::watch_coordinator::{
     effective_max_interval_ms, evaluate_activity_poll, is_self_application,
-    next_send_seconds as shared_next_send_seconds, normalize_ocr_blocks, retain_enabled_frames,
-    watch_send_due, RetryBackoff, StagnationFingerprint, StagnationReportIntent, StagnationTracker,
+    next_send_seconds as shared_next_send_seconds, retain_enabled_frames, watch_send_due,
+    RetryBackoff, StagnationFingerprint, StagnationReportIntent, StagnationTracker,
     TriggerCoordinator, WatchStagnationStore,
 };
 #[path = "watch_status.rs"]
@@ -82,8 +83,8 @@ pub(crate) async fn run(
         &paths.root,
         active_config.watch.ocr_gate.executable.as_deref(),
     );
-    let screen_capture = platform::MacScreenCapture;
-    let application_capture = platform::MacApplicationCapture;
+    let screen_capture = platform::MacScreenCapture::default();
+    let application_capture = platform::MacApplicationCapture::default();
     let activity = platform::MacActivity;
     let ocr = platform::MacOcr::new(helper.clone());
     let clock = SystemClock;
@@ -96,7 +97,6 @@ pub(crate) async fn run(
     .with_logger(logger.clone());
     let mut power_events = platform::MacPowerEvents::new()
         .map_err(|_| anyhow::anyhow!("macOS のスリープ・ロック通知を購読できません"))?;
-    let display_geometry = platform::read_display_geometry().await;
     let capture_environment = CaptureEnvironment {
         paths,
         runtime: &runtime,
@@ -105,7 +105,6 @@ pub(crate) async fn run(
         application_capture: &application_capture,
         ocr_port: &ocr,
         own_window_bounds: &own_windows,
-        display_geometry: display_geometry.as_ref(),
         clock: &clock,
         cancellation: &cancellation,
     };
@@ -445,7 +444,6 @@ struct CaptureEnvironment<'a> {
     application_capture: &'a dyn ApplicationCapturePort,
     ocr_port: &'a dyn OcrPort,
     own_window_bounds: &'a dyn OwnWindowBoundsPort,
-    display_geometry: Option<&'a platform::DisplayGeometry>,
     clock: &'a dyn Clock,
     cancellation: &'a tokio_util::sync::CancellationToken,
 }
@@ -528,133 +526,98 @@ async fn capture_and_deliver(
         }
     };
     let directory = tempfile::tempdir()?;
-    let source = directory.path().join("screen.png");
-    let captured_path = environment
+    let captured_screens = environment
         .screen_capture
-        .capture(&source, environment.cancellation.clone())
+        .capture(
+            &directory.path().join("screens"),
+            environment.cancellation.clone(),
+        )
         .await?;
-    let bytes = tokio::fs::read(captured_path).await?;
-    let (source_width, source_height) =
-        png_dimensions(&bytes).context("撮影処理が有効な PNG の寸法を返しませんでした")?;
-    let ignored_top_pixels =
-        platform::comparison_top_pixels(environment.display_geometry, source_width, source_height);
-    let processed = process_png(
-        bytes,
-        config.watch.downscale_width,
-        ignored_top_pixels,
-        excluded.clone(),
+    let prepared = prepare_screen_frames(
+        captured_screens,
+        directory.path(),
+        config,
+        &excluded,
+        environment.ocr_port,
+        config.watch.ocr_gate.enabled && ocr_helper_available,
         environment.semaphore.clone(),
+        environment.cancellation,
     )
     .await?;
-    let provider_path = directory.path().join("provider.png");
-    tokio::fs::write(&provider_path, &processed.provider_png).await?;
-    let ocr_path = directory.path().join("ocr.png");
-    tokio::fs::write(&ocr_path, &processed.masked_png).await?;
-    let ocr = if config.watch.ocr_gate.enabled && ocr_helper_available {
-        environment
-            .ocr_port
-            .recognize(
-                &ocr_path,
-                &config.watch.ocr_gate.level,
-                Duration::from_millis(config.watch.ocr_gate.timeout_ms),
-                environment.cancellation.clone(),
-            )
-            .await
-            .ok()
-            .map(|blocks| {
-                normalize_ocr_blocks(
-                    &blocks,
-                    source_width,
-                    source_height,
-                    &excluded,
-                    ignored_top_pixels,
-                )
-            })
-    } else {
-        None
-    };
     let captured_at = Instant::now();
-    let changed_by_ocr = matches!((&ocr, &state.last_ocr_signature), (Some(_), Some(_)));
-    let changed = match (&ocr, &state.last_ocr_signature) {
-        (Some(current), Some(previous)) => current.signature != *previous,
-        _ => state.last_hash.as_deref() != Some(processed.comparison_hash.as_str()),
+    let changed_by_ocr = prepared.ocr_signature.is_some() && state.last_ocr_signature.is_some();
+    let changed = match (&prepared.ocr_signature, &state.last_ocr_signature) {
+        (Some(current), Some(previous)) => current != previous,
+        _ => state.last_hash.as_deref() != Some(prepared.comparison_hash.as_str()),
     };
-    let context_id = DebugStore::new_id();
-    let debug_id = config.debug.enabled.then(|| context_id.clone());
-    if let Some(id) = &debug_id {
-        DebugStore::from_paths(environment.paths).record_frame(
-            id,
+    let mut frames = Vec::with_capacity(prepared.frames.len());
+    for screen in prepared.frames {
+        let frame = screen.observation_frame(
+            environment.runtime.watch_scope_generation(),
             captured_at_utc,
-            &processed.provider_png,
-            ocr.as_ref().map(|value| value.text.as_str()),
-        )?;
-    }
-    state.last_capture = captured_at;
-    if !changed {
+            captured_at.duration_since(state.window_start).as_secs_f64(),
+            trigger,
+            front_app.clone(),
+            config.debug.enabled,
+        );
+        let debug_id = frame.debug_id.clone();
+        let ocr_text = frame.ocr_text.clone();
+        if let Some(id) = &debug_id {
+            DebugStore::from_paths(environment.paths).record_frame(
+                id,
+                captured_at_utc,
+                &screen.image.provider_png,
+                ocr_text.as_deref(),
+            )?;
+        }
         record_cli_gate(
             environment.paths,
             config,
             trigger,
             debug_id.as_deref(),
-            ocr.as_ref().map(|value| value.text.as_str()),
-            false,
-            if changed_by_ocr {
+            ocr_text.as_deref(),
+            changed,
+            if changed {
+                "送った"
+            } else if changed_by_ocr {
                 "OCR 一致"
             } else {
                 "画素一致"
             },
         )?;
+        frames.push(frame);
+    }
+    state.last_capture = captured_at;
+    if !changed {
         return Ok(CaptureDisposition::Unchanged);
     }
-    state.last_hash = Some(processed.comparison_hash);
-    state.last_ocr_signature = ocr.as_ref().map(|value| value.signature.clone());
-    let stagnation_hash = state.last_hash.clone().unwrap_or_default();
-    let stagnation_ocr = state.last_ocr_signature.clone();
+    anyhow::ensure!(
+        !environment.cancellation.is_cancelled(),
+        "見守りの撮影が取り消されました"
+    );
+    for frame in &frames {
+        environment
+            .runtime
+            .register_pending_frame_context(PendingFrameContext::bounded(
+                frame.context_id.clone(),
+                captured_at_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                trigger,
+                front_app.clone(),
+                None,
+                frame.target.clone(),
+                frame.ocr_text.clone(),
+            ))?;
+    }
+    state.last_hash = Some(prepared.comparison_hash.clone());
+    state.last_ocr_signature = prepared.ocr_signature.clone();
     mark_meaningful_change(
         state,
         "fullscreen",
-        stagnation_hash,
-        stagnation_ocr,
+        prepared.comparison_hash,
+        prepared.ocr_signature,
         captured_at_utc,
     )?;
-    let ocr_text = ocr.map(|value| value.text);
-    environment
-        .runtime
-        .register_pending_frame_context(PendingFrameContext::bounded(
-            context_id.clone(),
-            captured_at_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            trigger,
-            front_app.clone(),
-            None,
-            "fullscreen".to_owned(),
-            ocr_text.clone(),
-        ))?;
-    let frame = ObservationFrameInput {
-        scope_generation: environment.runtime.watch_scope_generation(),
-        context_id,
-        captured_at: captured_at_utc,
-        debug_id: debug_id.clone(),
-        relative_seconds: captured_at.duration_since(state.window_start).as_secs_f64(),
-        trigger,
-        front_app,
-        app: None,
-        target: "fullscreen".to_owned(),
-        ocr_text,
-        image_path: provider_path,
-    };
-    state.pending_frames.push(frame);
-    record_cli_gate(
-        environment.paths,
-        config,
-        trigger,
-        debug_id.as_deref(),
-        state
-            .pending_frames
-            .last()
-            .and_then(|frame| frame.ocr_text.as_deref()),
-        true,
-        "送った",
-    )?;
+    state.pending_frames.extend(frames);
     state.last_accepted = Some(captured_at);
     state.last_captured_at = Some(captured_at_utc);
     state.temporary_directories.push(directory);
@@ -728,7 +691,10 @@ async fn flush_pending(
         status.report_observation_start(config, state);
         match runtime.observe(frames.clone()).await {
             Ok(_) => {}
-            Err(coosenpai_core::runtime::RuntimeError::StaleWatchScope) => {
+            Err(
+                coosenpai_core::runtime::RuntimeError::StaleWatchScope
+                | coosenpai_core::runtime::RuntimeError::ObservationCancelled,
+            ) => {
                 state.temporary_directories.clear();
                 state.last_observation = now;
             }

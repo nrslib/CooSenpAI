@@ -1,4 +1,5 @@
 use super::*;
+use coosenpai_core::locale::Locale;
 use coosenpai_core::ports::{
     ScreenCapturePermission, ScreenCapturePermissionKind, SpeechPermissionKind,
     SpeechPermissionPort, SpeechPermissions,
@@ -10,29 +11,26 @@ const SCREEN_PERMISSION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ScreenPermissionCache {
     pub permission: ScreenCapturePermission,
-    checked_at: Option<Instant>,
+    checked_at: Instant,
 }
 
 impl ScreenPermissionCache {
     pub(super) fn new(permission: ScreenCapturePermission, checked_at: Instant) -> Self {
         Self {
             permission,
-            checked_at: Some(checked_at),
+            checked_at,
         }
     }
 
-    fn age(&self, now: Instant) -> Option<Duration> {
-        self.checked_at
-            .map(|checked_at| now.saturating_duration_since(checked_at))
+    fn age(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.checked_at)
     }
-
 }
 
 #[derive(Clone, Copy)]
 enum ScreenPermissionCacheUpdate {
     Keep,
     CheckedAt(Instant),
-    Unconfirmed,
 }
 
 pub(crate) fn current_speech_permissions(logger: &dyn RuntimeLogger) -> SpeechPermissions {
@@ -55,12 +53,9 @@ impl DesktopState {
             .await
         {
             Ok(permissions) => {
-                self.publish(|snapshot| {
-                    snapshot.speech.microphone_permission =
-                        crate::speech::permission_name(permissions.microphone);
-                    snapshot.speech.recognition_permission =
-                        crate::speech::permission_name(permissions.recognition);
-                })
+                self.publish_event(
+                    crate::snapshot_presenter::SnapshotEvent::SpeechPermissionsLoaded(permissions),
+                )
                 .await;
             }
             Err(error) => {
@@ -91,7 +86,8 @@ impl DesktopState {
             },
         )
         .await;
-        let presentation = permission.presentation();
+        let presentation = permission
+            .presentation_for_locale(Locale::from_config(&self.runtime_config().ui.language));
         let _ = self.logger.write(
             "INFO",
             &format!("画面収録権限: {} source={source}", presentation.status),
@@ -100,15 +96,6 @@ impl DesktopState {
     }
 
     pub(crate) async fn request_screen_permission_for_audio(&self) -> ScreenCapturePermission {
-        #[cfg(test)]
-        if let Some(permission) = *self.screen_permission_override.lock().await {
-            self.publish_screen_permission(
-                permission,
-                ScreenPermissionCacheUpdate::CheckedAt(Instant::now()),
-            )
-            .await;
-            return permission;
-        }
         let current = self.screen_permission.lock().await.permission;
         let permission = if current.requestable {
             crate::platform::request_screen_capture_permission()
@@ -120,7 +107,8 @@ impl DesktopState {
             ScreenPermissionCacheUpdate::CheckedAt(Instant::now()),
         )
         .await;
-        let presentation = permission.presentation();
+        let presentation = permission
+            .presentation_for_locale(Locale::from_config(&self.runtime_config().ui.language));
         let _ = self.logger.write(
             "INFO",
             &format!("耳の画面収録権限: {}", presentation.status),
@@ -145,12 +133,6 @@ impl DesktopState {
         .await;
     }
 
-    pub(crate) async fn invalidate_screen_permission_cache(&self) {
-        let permission = crate::platform::screen_capture_permission().with_capture_result(false);
-        self.publish_screen_permission(permission, ScreenPermissionCacheUpdate::Unconfirmed)
-            .await;
-    }
-
     async fn publish_screen_permission(
         &self,
         permission: ScreenCapturePermission,
@@ -162,44 +144,39 @@ impl DesktopState {
         match cache_update {
             ScreenPermissionCacheUpdate::Keep => {}
             ScreenPermissionCacheUpdate::CheckedAt(checked_at) => {
-                current.checked_at = Some(checked_at);
+                current.checked_at = checked_at;
             }
-            ScreenPermissionCacheUpdate::Unconfirmed => current.checked_at = None,
         }
         drop(current);
         if !changed {
             return;
         }
-        let presentation = permission.presentation();
-        self.publish(|snapshot| {
-            snapshot.screen_recording_status = presentation.status.to_owned();
-            snapshot.screen_recording_message = presentation.message.map(str::to_owned);
-            snapshot.screen_recording_restart_required = permission.requires_restart();
-            snapshot.audio.screen_capture_permission = presentation.status.to_owned();
-        })
+        self.publish_event(
+            crate::snapshot_presenter::SnapshotEvent::ScreenPermissionLoaded(permission),
+        )
         .await;
     }
 }
 
 fn should_refresh_screen_permission(
     permission: ScreenCapturePermission,
-    cache_age: Option<Duration>,
+    cache_age: Duration,
 ) -> bool {
     permission.kind != ScreenCapturePermissionKind::Granted
         || permission.requires_restart()
-        || cache_age.is_none_or(|age| age >= SCREEN_PERMISSION_CACHE_TTL)
+        || cache_age >= SCREEN_PERMISSION_CACHE_TTL
 }
 
 fn resolve_screen_permission(
     permission: ScreenCapturePermission,
-    cache_age: Option<Duration>,
+    cache_age: Duration,
     request: impl FnOnce() -> ScreenCapturePermission,
     preflight: impl FnOnce() -> ScreenCapturePermission,
 ) -> (ScreenCapturePermission, &'static str) {
     if !should_refresh_screen_permission(permission, cache_age) {
         return (permission, "cache");
     }
-    let use_preflight = cache_age.is_none() || !permission.requestable;
+    let use_preflight = !permission.requestable;
     let permission = if use_preflight {
         preflight()
     } else {

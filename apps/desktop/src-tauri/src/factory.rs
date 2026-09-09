@@ -3,6 +3,9 @@ use coosenpai_core::companion::{CompanionAgent, DeliveryOwnership};
 use coosenpai_core::companion_assertiveness::TemporaryAssertiveness;
 use coosenpai_core::config::{Config, ConfigPaths, ConfigValidationIssue};
 use coosenpai_core::debug::DebugStore;
+use coosenpai_core::locale::{
+    localize_config_issue_message, localize_factory_message, text, Locale, TextKey,
+};
 use coosenpai_core::logging::FileLogger;
 use coosenpai_core::mailbox::Mailbox;
 use coosenpai_core::memory::{MemoryContext, MemoryService, MemoryStore};
@@ -11,11 +14,14 @@ use coosenpai_core::onboarding::{TutorialPlaceholders, TutorialProvider, Tutoria
 use coosenpai_core::persona::{load_persona, PersonaProfile};
 use coosenpai_core::ports::{HelperResolverPort, ProviderApiKeyStore};
 use coosenpai_core::provider::{
-    resolve_executable, validate_node_version, BridgeLaunch, ProviderBridge, ProviderCall,
-    ProviderClient, ProviderName, SessionRequest,
+    resolve_executable, validate_node_version, BridgeLaunch, MockProvider, ProviderBridge,
+    ProviderCall, ProviderClient, ProviderName, SessionRequest,
 };
-use coosenpai_core::provider_api_keys::{bridge_environment, ProviderApiKeyStatus};
+use coosenpai_core::provider_api_keys::{
+    bridge_environment, bridge_environment_with_api_key, ProviderApiKeyStatus,
+};
 use coosenpai_core::runtime::{RuntimeAgents, RuntimeFactory};
+use coosenpai_core::work::{harness_environment, Harness, HarnessLaunch};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -46,11 +52,23 @@ impl DesktopFactoryError {
             },
         }
     }
+
+    pub(crate) fn format_for_locale(&self, locale: Locale) -> String {
+        let mut issue = self.issue.clone();
+        let factory_message = localize_factory_message(&issue.message, locale);
+        issue.message = if factory_message != issue.message {
+            factory_message
+        } else {
+            localize_config_issue_message(&issue.message, locale)
+        };
+        format!("{}: {}", issue.path, issue.message)
+    }
 }
 
 #[derive(Clone)]
 pub struct DesktopRuntimeFactory {
     paths: ConfigPaths,
+    pub(crate) work: Arc<crate::work::WorkController>,
     incoming: Mailbox,
     outgoing: Vec<Mailbox>,
     logger: Arc<FileLogger>,
@@ -62,7 +80,63 @@ pub struct DesktopRuntimeFactory {
     keychain: Arc<dyn ProviderApiKeyStore>,
 }
 
+/// 承認審査用のClaude bridgeと、作業を実行するハーネスの起動情報。
+/// 審査用のClaudeが使えなくても作業自体は起動し、審査失敗として手動確認へ戻す。
+pub(crate) struct WorkSession {
+    pub reviewer: Option<(ProviderBridge, Arc<dyn ProviderClient>)>,
+    pub launch: HarnessLaunch,
+}
+
 impl DesktopRuntimeFactory {
+    /// ハーネスの起動情報（必須）と承認審査用の Claude bridge（任意）を解決する。
+    pub(crate) async fn work_session(
+        &self,
+        harness: Harness,
+        cancellation: CancellationToken,
+    ) -> Result<WorkSession, DesktopFactoryError> {
+        let path_value =
+            coosenpai_core::provider::resolve_login_shell_path(cancellation.clone()).await;
+        let executable = resolve_executable(harness.executable_name(), &path_value)
+            .map_err(|error| DesktopFactoryError::new("work", error.to_string()))?;
+        let provider = match harness {
+            Harness::Claude => ProviderName::Claude,
+            Harness::Codex => ProviderName::Codex,
+        };
+        // キーチェーンの key はハーネス自身のログインを上書く場合だけ使う。読めなくても
+        // ハーネス自身の認証で動くため、読み取り失敗は起動失敗にしない。
+        let api_key = self.keychain.read(provider).ok().flatten();
+        let launch = HarnessLaunch {
+            harness,
+            executable,
+            env: harness_environment(std::env::vars(), &path_value, harness, api_key.as_deref()),
+        };
+        let reviewer = self.reviewer(&path_value);
+        Ok(WorkSession { reviewer, launch })
+    }
+
+    /// 審査は Claude で行う。claude CLI や bridge が使えない環境（Codex のみの利用者など）では
+    /// None を返し、呼び出し側は審査失敗＝手動確認へのフォールバックとして扱う。
+    fn reviewer(&self, path_value: &str) -> Option<(ProviderBridge, Arc<dyn ProviderClient>)> {
+        let resolver = crate::platform::MacHelperResolver;
+        let script = resolver.resolve_provider_bridge(
+            &self.executable_dir,
+            &self.paths.root,
+            self.resource_root.as_deref(),
+        )?;
+        let node = resolver.resolve_node(path_value)?;
+        let claude = resolve_executable("claude", path_value).ok()?;
+        let claude_key = self.keychain.read(ProviderName::Claude).ok().flatten();
+        let env = harness_environment(
+            std::env::vars(),
+            path_value,
+            Harness::Claude,
+            claude_key.as_deref(),
+        );
+        let bridge =
+            ProviderBridge::new_with_explicit_environment(BridgeLaunch { node, script, env });
+        let reviewer = Arc::new(bridge.provider(ProviderName::Claude, Some(claude)));
+        Some((bridge, reviewer))
+    }
 
     #[cfg(test)]
     pub fn new(
@@ -95,12 +169,22 @@ impl DesktopRuntimeFactory {
             .map_err(|error| error.to_string())?
             .parent()
             .map(ToOwned::to_owned)
-            .ok_or_else(|| "実行ファイルのディレクトリを取得できません".to_owned())?;
+            .ok_or_else(|| {
+                text(TextKey::FactoryExecutableDirectoryUnavailable, Locale::Ja).to_owned()
+            })?;
         let resource_root = paths
             .builtin_personas
             .as_deref()
             .and_then(resource_root_for_builtin_personas);
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| "ホームディレクトリを取得できません".to_owned())?;
         Ok(Self {
+            work: Arc::new(crate::work::WorkController::new(
+                paths.state.join("work/latest.json"),
+                home,
+                coosenpai_core::work::ApprovalMode::Manual,
+            )),
             paths,
             incoming,
             outgoing,
@@ -119,8 +203,24 @@ impl DesktopRuntimeFactory {
     }
 
     pub fn provider_api_key_status(&self) -> Result<ProviderApiKeyStatus, DesktopFactoryError> {
-        ProviderApiKeyStatus::read(self.keychain.as_ref())
-            .map_err(|_| DesktopFactoryError::new("provider.apiKey", "API キーを確認できません"))
+        ProviderApiKeyStatus::read(self.keychain.as_ref()).map_err(|_| {
+            DesktopFactoryError::new(
+                "provider.apiKey",
+                text(TextKey::FactoryApiKeyCheckFailed, Locale::Ja),
+            )
+        })
+    }
+
+    pub(crate) fn provider_api_key_value(
+        &self,
+        provider: ProviderName,
+    ) -> Result<Option<String>, DesktopFactoryError> {
+        self.keychain.read(provider).map_err(|_| {
+            DesktopFactoryError::new(
+                "provider.apiKey",
+                text(TextKey::FactoryApiKeyReadFailed, Locale::Ja),
+            )
+        })
     }
 
     pub async fn update_provider_api_key(
@@ -128,16 +228,59 @@ impl DesktopRuntimeFactory {
         provider: ProviderName,
         api_key: Option<&str>,
     ) -> Result<ProviderApiKeyStatus, DesktopFactoryError> {
+        let previous = self.provider_api_key_value(provider)?;
+        self.write_provider_api_key_value(provider, api_key)?;
+        if let Err(error) = self.refresh_bridge_environment().await {
+            return match self
+                .restore_provider_api_key(provider, previous.as_deref())
+                .await
+            {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(rollback_error),
+            };
+        }
+        match self.provider_api_key_status() {
+            Ok(status) => Ok(status),
+            Err(error) => {
+                match self
+                    .restore_provider_api_key(provider, previous.as_deref())
+                    .await
+                {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(rollback_error),
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn restore_provider_api_key(
+        &self,
+        provider: ProviderName,
+        previous: Option<&str>,
+    ) -> Result<(), DesktopFactoryError> {
+        self.write_provider_api_key_value(provider, previous)?;
+        self.refresh_bridge_environment().await
+    }
+
+    fn write_provider_api_key_value(
+        &self,
+        provider: ProviderName,
+        api_key: Option<&str>,
+    ) -> Result<(), DesktopFactoryError> {
         match api_key {
             Some(api_key) => self.keychain.write(provider, api_key).map_err(|_| {
-                DesktopFactoryError::new("provider.apiKey", "API キーを保存できません")
-            })?,
+                DesktopFactoryError::new(
+                    "provider.apiKey",
+                    text(TextKey::FactoryApiKeySaveFailed, Locale::Ja),
+                )
+            }),
             None => self.keychain.delete(provider).map_err(|_| {
-                DesktopFactoryError::new("provider.apiKey", "API キーを削除できません")
-            })?,
+                DesktopFactoryError::new(
+                    "provider.apiKey",
+                    text(TextKey::FactoryApiKeyDeleteFailed, Locale::Ja),
+                )
+            }),
         }
-        self.refresh_bridge_environment().await?;
-        self.provider_api_key_status()
     }
 
     fn bridge_environment(
@@ -150,7 +293,33 @@ impl DesktopRuntimeFactory {
             &self.paths.root,
             self.keychain.as_ref(),
         )
-        .map_err(|_| DesktopFactoryError::new("provider.apiKey", "API キーを読み込めません"))
+        .map_err(|_| {
+            DesktopFactoryError::new(
+                "provider.apiKey",
+                text(TextKey::FactoryApiKeyReadFailed, Locale::Ja),
+            )
+        })
+    }
+
+    fn bridge_environment_with_api_key(
+        &self,
+        path_value: &str,
+        provider: ProviderName,
+        api_key: &str,
+    ) -> Result<Vec<(String, String)>, DesktopFactoryError> {
+        bridge_environment_with_api_key(
+            std::env::vars(),
+            path_value,
+            &self.paths.root,
+            self.keychain.as_ref(),
+            Some((provider, api_key)),
+        )
+        .map_err(|_| {
+            DesktopFactoryError::new(
+                "provider.apiKey",
+                text(TextKey::FactoryApiKeyReadFailed, Locale::Ja),
+            )
+        })
     }
 
     async fn refresh_bridge_environment(&self) -> Result<(), DesktopFactoryError> {
@@ -162,7 +331,10 @@ impl DesktopRuntimeFactory {
                 .await;
         let environment = self.bridge_environment(&path_value)?;
         bridge.update_environment(environment).await.map_err(|_| {
-            DesktopFactoryError::new("provider.apiKey", "provider の認証設定を反映できません")
+            DesktopFactoryError::new(
+                "provider.apiKey",
+                text(TextKey::FactoryAuthApplyFailed, Locale::Ja),
+            )
         })
     }
 
@@ -175,7 +347,10 @@ impl DesktopRuntimeFactory {
         };
         let environment = self.bridge_environment(path_value)?;
         bridge.update_environment(environment).await.map_err(|_| {
-            DesktopFactoryError::new("provider.apiKey", "provider の認証設定を反映できません")
+            DesktopFactoryError::new(
+                "provider.apiKey",
+                text(TextKey::FactoryAuthApplyFailed, Locale::Ja),
+            )
         })
     }
 
@@ -185,18 +360,12 @@ impl DesktopRuntimeFactory {
         name: &str,
         override_path: Option<&str>,
         path_value: &str,
+        bridge_env: Option<Vec<(String, String)>>,
     ) -> Result<Arc<dyn coosenpai_core::provider::ProviderClient>, DesktopFactoryError> {
-        let provider = match name {
-            "codex" => ProviderName::Codex,
-            "claude" => ProviderName::Claude,
-            "opencode" => ProviderName::Opencode,
-            _ => {
-                return Err(DesktopFactoryError::new(
-                    format!("{section}.provider"),
-                    format!("provider が不正です: {name}"),
-                ))
-            }
-        };
+        let provider = parse_provider_name(section, name)?;
+        if provider == ProviderName::Mock {
+            return Ok(Arc::new(MockProvider::new()));
+        }
         let executable = resolve_executable(override_path.unwrap_or(provider.as_str()), path_value)
             .map_err(|error| {
                 DesktopFactoryError::new(
@@ -224,22 +393,25 @@ impl DesktopRuntimeFactory {
                     .ok_or_else(|| {
                         DesktopFactoryError::new(
                             format!("{section}.provider"),
-                            "provider bridge が見つかりません",
+                            text(TextKey::FactoryBridgeMissing, Locale::Ja),
                         )
                     })?;
                 let node = resolver.resolve_node(path_value).ok_or_else(|| {
                     DesktopFactoryError::new(
                         format!("{section}.provider"),
-                        "Node.js 18 以上が見つかりません",
+                        text(TextKey::FactoryNodeMissing, Locale::Ja),
                     )
                 })?;
-                let env = self.bridge_environment(path_value)?;
+                let env = match bridge_env {
+                    Some(environment) => environment,
+                    None => self.bridge_environment(path_value)?,
+                };
                 let candidate = ProviderBridge::new(BridgeLaunch { node, script, env });
                 let _ = self.bridge.set(candidate);
                 self.bridge.get().ok_or_else(|| {
                     DesktopFactoryError::new(
                         format!("{section}.provider"),
-                        "provider bridge を初期化できません",
+                        text(TextKey::FactoryBridgeInitFailed, Locale::Ja),
                     )
                 })?
             }
@@ -258,7 +430,7 @@ impl DesktopRuntimeFactory {
             .ok_or_else(|| {
                 DesktopFactoryError::new(
                     format!("{section}.provider"),
-                    "Node.js 18 以上が見つかりません",
+                    text(TextKey::FactoryNodeMissing, Locale::Ja),
                 )
             })?;
         validate_node_version(&node, path_value, cancellation)
@@ -273,18 +445,90 @@ impl DesktopRuntimeFactory {
         provider_name: &str,
         model: &str,
         executable: Option<&str>,
+        api_key: Option<&str>,
         cancellation: CancellationToken,
     ) -> Result<(), DesktopFactoryError> {
         let path_value =
             coosenpai_core::provider::resolve_login_shell_path(cancellation.clone()).await;
-        self.validate_node(&path_value, "companion", cancellation.clone())
-            .await?;
+        if provider_name != ProviderName::Mock.as_str() {
+            self.validate_node(&path_value, "companion", cancellation.clone())
+                .await?;
+        }
+        if let Some(api_key) = api_key {
+            return self
+                .check_connection_with_api_key(
+                    provider_name,
+                    model,
+                    executable,
+                    &path_value,
+                    api_key,
+                    cancellation,
+                )
+                .await;
+        }
         self.refresh_bridge_environment_for_path(&path_value)
             .await?;
-        let provider = self.provider("companion", provider_name, executable, &path_value)?;
+        let provider = self.provider("companion", provider_name, executable, &path_value, None)?;
         run_connection_check(provider, model, cancellation)
             .await
             .map_err(|message| DesktopFactoryError::new("companion.provider", message))
+    }
+
+    async fn check_connection_with_api_key(
+        &self,
+        provider_name: &str,
+        model: &str,
+        executable: Option<&str>,
+        path_value: &str,
+        api_key: &str,
+        cancellation: CancellationToken,
+    ) -> Result<(), DesktopFactoryError> {
+        let provider = parse_provider_name("companion", provider_name)?;
+        let original_environment = self.bridge_environment(path_value)?;
+        let temporary_environment =
+            self.bridge_environment_with_api_key(path_value, provider, api_key)?;
+        if let Some(bridge) = self.bridge.get() {
+            bridge
+                .update_environment(temporary_environment.clone())
+                .await
+                .map_err(|_| {
+                    DesktopFactoryError::new(
+                        "provider.apiKey",
+                        text(TextKey::FactoryAuthApplyFailed, Locale::Ja),
+                    )
+                })?;
+        }
+
+        let checked = match self.provider(
+            "companion",
+            provider_name,
+            executable,
+            path_value,
+            Some(temporary_environment),
+        ) {
+            Ok(provider) => run_connection_check(provider, model, cancellation)
+                .await
+                .map_err(|message| DesktopFactoryError::new("companion.provider", message)),
+            Err(error) => Err(error),
+        };
+        self.restore_bridge_environment(original_environment)
+            .await?;
+        checked
+    }
+
+    async fn restore_bridge_environment(
+        &self,
+        environment: Vec<(String, String)>,
+    ) -> Result<(), DesktopFactoryError> {
+        let Some(bridge) = self.bridge.get() else {
+            return Ok(());
+        };
+        bridge.update_environment(environment).await.map_err(|_| {
+            DesktopFactoryError::new(
+                "provider.apiKey",
+                text(TextKey::FactoryAuthRestoreFailed, Locale::Ja),
+            )
+        })
     }
 
     pub async fn build_tutorial_candidate(
@@ -292,21 +536,36 @@ impl DesktopRuntimeFactory {
         config: &Config,
         placeholders: TutorialPlaceholders,
     ) -> Result<(RuntimeAgents, TutorialProvider), DesktopFactoryError> {
-        let provider = self.tutorial_provider(placeholders)?;
+        let provider = self
+            .tutorial_provider_for_locale(placeholders, Locale::from_config(&config.ui.language))?;
         let agents = self.build_tutorial_agents(config, provider.clone())?;
         Ok((agents, provider))
     }
 
-    pub fn tutorial_provider(
+    pub fn tutorial_provider_for_locale(
         &self,
         placeholders: TutorialPlaceholders,
+        locale: Locale,
     ) -> Result<TutorialProvider, DesktopFactoryError> {
         let path = self.paths.builtin_tutorial.as_ref().ok_or_else(|| {
-            DesktopFactoryError::new("tutorial", "チュートリアル台本が見つかりません")
+            DesktopFactoryError::new("tutorial", text(TextKey::FactoryTutorialMissing, locale))
         })?;
+        let path = match locale {
+            Locale::Ja => path,
+            Locale::En => self.paths.builtin_tutorial_en.as_ref().ok_or_else(|| {
+                DesktopFactoryError::new(
+                    "tutorial",
+                    text(TextKey::FactoryEnglishTutorialMissing, locale),
+                )
+            })?,
+        };
         let script = TutorialScript::load(path)
             .map_err(|error| DesktopFactoryError::new("tutorial", error.to_string()))?;
-        Ok(TutorialProvider::new(script, placeholders))
+        Ok(TutorialProvider::new_with_locale(
+            script,
+            placeholders,
+            locale,
+        ))
     }
 
     pub fn build_tutorial_agents(
@@ -326,10 +585,12 @@ impl DesktopRuntimeFactory {
             None,
             DeliveryOwnership::Owner,
         )
+        .with_locale(Locale::from_config(&config.ui.language))
         .with_temporary_assertiveness(self.temporary_assertiveness.clone())
         .with_storage(&self.paths, config.retention.conversation_days)
         .with_logger(self.logger.clone());
         Ok(RuntimeAgents {
+            observation_delivery: coosenpai_core::runtime::ObservationDelivery::CallerOnly,
             observer: Some(observer),
             companion: Some(companion),
             memory: None,
@@ -364,13 +625,20 @@ impl DesktopRuntimeFactory {
         notice: Option<String>,
     ) -> Result<RuntimeAgents, DesktopFactoryError> {
         if self.cancellation.is_cancelled() {
-            return Err(DesktopFactoryError::new("config", "終了処理中です"));
+            return Err(DesktopFactoryError::new(
+                "config",
+                text(TextKey::FactoryShutdown, Locale::Ja),
+            ));
         }
         let path_value =
             coosenpai_core::provider::resolve_login_shell_path(self.cancellation.child_token())
                 .await;
-        self.validate_node(&path_value, "companion", self.cancellation.child_token())
-            .await?;
+        if config.companion.provider != ProviderName::Mock.as_str()
+            || config.observer.provider != ProviderName::Mock.as_str()
+        {
+            self.validate_node(&path_value, "companion", self.cancellation.child_token())
+                .await?;
+        }
         self.refresh_bridge_environment_for_path(&path_value)
             .await?;
         let observer_provider = self.provider(
@@ -378,13 +646,16 @@ impl DesktopRuntimeFactory {
             &config.observer.provider,
             config.observer.executable.as_deref(),
             &path_value,
+            None,
         )?;
         let companion_provider = self.provider(
             "companion",
             &config.companion.provider,
             config.companion.executable.as_deref(),
             &path_value,
+            None,
         )?;
+        let companion_provider_name = parse_provider_name("companion", &config.companion.provider)?;
         let observer = ObserverAgent::new(observer_provider, config.observer.clone())
             .with_usage_path(self.paths.usage.clone())
             .with_observation_store_without_read(&self.paths, config.retention.observation_days)
@@ -402,6 +673,7 @@ impl DesktopRuntimeFactory {
             None,
             DeliveryOwnership::Owner,
         )
+        .with_locale(Locale::from_config(&config.ui.language))
         .with_temporary_assertiveness(self.temporary_assertiveness.clone())
         .with_storage(&self.paths, config.retention.conversation_days)
         .with_incoming_mailbox(self.incoming.clone())
@@ -411,6 +683,15 @@ impl DesktopRuntimeFactory {
             self.paths.clone(),
             config.memory.clone(),
         ));
+        // 作業のハーネスは会話用providerで決める。対応providerでなければ作業能力を持たせない。
+        let companion = match Harness::from_provider(companion_provider_name) {
+            Ok(harness) => companion.with_work_executor(Arc::new(crate::work::DesktopChatWork {
+                controller: self.work.clone(),
+                factory: Arc::new(self.clone()),
+                harness,
+            })),
+            Err(_) => companion,
+        };
         let companion = match self.attachment_ocr(config) {
             Some(ocr) => companion.with_attachment_ocr(ocr),
             None => companion,
@@ -437,6 +718,7 @@ impl DesktopRuntimeFactory {
             memory
         };
         Ok(RuntimeAgents {
+            observation_delivery: coosenpai_core::runtime::ObservationDelivery::Companion,
             observer: Some(observer),
             companion: Some(companion),
             memory: Some(memory),
@@ -450,17 +732,22 @@ impl DesktopRuntimeFactory {
     ) -> Result<coosenpai_core::provider::ProviderCapabilities, DesktopFactoryError> {
         let path_value =
             coosenpai_core::provider::resolve_login_shell_path(cancellation.clone()).await;
-        self.validate_node(&path_value, "provider", cancellation.clone())
-            .await?;
+        if name != ProviderName::Mock.as_str() {
+            self.validate_node(&path_value, "provider", cancellation.clone())
+                .await?;
+        }
         self.refresh_bridge_environment_for_path(&path_value)
             .await?;
-        let provider = self.provider("provider", name, None, &path_value)?;
+        let provider = self.provider("provider", name, None, &path_value, None)?;
         provider
             .resolve_capabilities(cancellation, std::time::Duration::from_secs(10))
             .await
             .map_err(|error| DesktopFactoryError::new("provider", error.message))?
             .ok_or_else(|| {
-                DesktopFactoryError::new("provider", "provider のモデル情報がありません")
+                DesktopFactoryError::new(
+                    "provider",
+                    text(TextKey::FactoryModelInfoMissing, Locale::Ja),
+                )
             })
     }
 
@@ -509,13 +796,18 @@ impl DesktopRuntimeFactory {
         notice: Option<String>,
     ) -> Result<CompanionAgent, DesktopFactoryError> {
         if self.cancellation.is_cancelled() {
-            return Err(DesktopFactoryError::new("config", "終了処理中です"));
+            return Err(DesktopFactoryError::new(
+                "config",
+                text(TextKey::FactoryShutdown, Locale::Ja),
+            ));
         }
         let path_value =
             coosenpai_core::provider::resolve_login_shell_path(self.cancellation.child_token())
                 .await;
-        self.validate_node(&path_value, "companion", self.cancellation.child_token())
-            .await?;
+        if config.companion.provider != ProviderName::Mock.as_str() {
+            self.validate_node(&path_value, "companion", self.cancellation.child_token())
+                .await?;
+        }
         self.refresh_bridge_environment_for_path(&path_value)
             .await?;
         let provider = self.provider(
@@ -523,6 +815,7 @@ impl DesktopRuntimeFactory {
             &config.companion.provider,
             config.companion.executable.as_deref(),
             &path_value,
+            None,
         )?;
         let agent = CompanionAgent::with_persona_profile(
             provider,
@@ -531,6 +824,7 @@ impl DesktopRuntimeFactory {
             None,
             DeliveryOwnership::Owner,
         )
+        .with_locale(Locale::from_config(&config.ui.language))
         .with_temporary_assertiveness(self.temporary_assertiveness.clone())
         .with_storage(&self.paths, config.retention.conversation_days)
         .with_incoming_mailbox(self.incoming.clone())
@@ -557,15 +851,11 @@ impl DesktopRuntimeFactory {
 }
 
 pub(crate) fn available_provider_names(path_value: &str) -> Vec<String> {
-    [
-        ProviderName::Codex,
-        ProviderName::Claude,
-        ProviderName::Opencode,
-    ]
-    .into_iter()
-    .filter(|provider| resolve_executable(provider.as_str(), path_value).is_ok())
-    .map(|provider| provider.as_str().to_owned())
-    .collect()
+    [ProviderName::Codex, ProviderName::Claude]
+        .into_iter()
+        .filter(|provider| resolve_executable(provider.as_str(), path_value).is_ok())
+        .map(|provider| provider.as_str().to_owned())
+        .collect()
 }
 
 fn tutorial_provider_model_options(config: &Config) -> Vec<ProviderModelOptions> {
@@ -622,6 +912,7 @@ async fn run_connection_check(
                 images: Vec::new(),
                 tools_disabled: true,
                 output_schema: None,
+                output_validation_schema: None,
                 session: SessionRequest::Ephemeral,
                 model: Some(model.to_owned()),
                 effort: None,
@@ -633,7 +924,7 @@ async fn run_connection_check(
         .await
         .map_err(|error| error.to_string())?;
     if result.text.trim().is_empty() {
-        return Err("接続確認の応答が空でした".to_owned());
+        return Err(text(TextKey::FactoryConnectionEmpty, Locale::Ja).to_owned());
     }
     Ok(())
 }
@@ -698,6 +989,15 @@ impl RuntimeFactory for DesktopRuntimeFactory {
             bridge.shutdown().await;
         }
     }
+}
+
+fn parse_provider_name(section: &str, name: &str) -> Result<ProviderName, DesktopFactoryError> {
+    ProviderName::from_config_name(name).ok_or_else(|| {
+        DesktopFactoryError::new(
+            format!("{section}.provider"),
+            text(TextKey::FactoryProviderInvalid, Locale::Ja).replace("{name}", name),
+        )
+    })
 }
 
 pub fn bundled_persona_directory(resource_dir: PathBuf) -> PathBuf {

@@ -1,8 +1,7 @@
 use coosenpai_core::config::{is_valid_avatar_path, ConfigPaths};
-use coosenpai_core::persistence::atomic_write_bytes;
 use image::{ImageFormat, ImageReader};
 use std::fs::{self, File};
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
@@ -14,6 +13,7 @@ const MAX_ENCODED_BYTES: usize = 20 * 1024 * 1024;
 const MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SOURCE_DIMENSION: u32 = 16_384;
 const BACKUP_SUFFIX: &str = ".backup";
+const STAGING_SUFFIX: &str = ".stage";
 
 #[derive(Debug, Error)]
 pub(crate) enum AvatarError {
@@ -59,6 +59,7 @@ pub(crate) fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>, AvatarError> {
     Ok(output.into_inner())
 }
 
+#[derive(Debug)]
 pub(crate) struct AvatarLoadResult {
     pub image_png: Option<Vec<u8>>,
     pub failed: bool,
@@ -66,8 +67,9 @@ pub(crate) struct AvatarLoadResult {
 
 pub(crate) struct StagedAvatar {
     final_path: PathBuf,
-    staged_path: PathBuf,
+    staged_file: tempfile::NamedTempFile,
     backup_path: Option<PathBuf>,
+    backup_lock: Option<File>,
     installed: bool,
     finalized: bool,
 }
@@ -79,20 +81,37 @@ pub(crate) fn stage_normalized(
     if bytes.is_empty() {
         return Err(AvatarError::Empty);
     }
-    let staged_path = paths.avatar.with_file_name(format!(
-        ".{}.{}.tmp",
-        paths
-            .avatar
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("avatar.png"),
-        Uuid::new_v4()
-    ));
-    atomic_write_bytes(&staged_path, bytes)?;
+    let parent = paths
+        .avatar
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "親ディレクトリがありません"))?;
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    let directory_lock = File::open(parent)?;
+    directory_lock.lock()?;
+    let avatar_name = paths
+        .avatar
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("avatar.png");
+    let mut staged_file = tempfile::Builder::new()
+        .prefix(&format!(".{avatar_name}."))
+        .suffix(STAGING_SUFFIX)
+        .tempfile_in(parent)?;
+    // stageの所有期間はconfig transaction待ちをまたぐため、state全体ではなくfileをロックする。
+    staged_file.as_file().lock()?;
+    staged_file.write_all(bytes)?;
+    staged_file.as_file().sync_all()?;
+    directory_lock.sync_all()?;
     Ok(StagedAvatar {
         final_path: paths.avatar.clone(),
-        staged_path,
+        staged_file,
         backup_path: None,
+        backup_lock: None,
         installed: false,
         finalized: false,
     })
@@ -104,6 +123,9 @@ impl StagedAvatar {
             return Ok(());
         }
         if self.final_path.exists() {
+            // backup名がcleanupに見える前に、復元までの所有権を確保する。
+            let backup_lock = File::open(&self.final_path)?;
+            backup_lock.lock()?;
             let backup_path = self.final_path.with_file_name(format!(
                 ".{}.{}{}",
                 self.final_path
@@ -115,13 +137,20 @@ impl StagedAvatar {
             ));
             fs::rename(&self.final_path, &backup_path)?;
             self.backup_path = Some(backup_path);
+            self.backup_lock = Some(backup_lock);
         }
-        if let Err(error) = fs::rename(&self.staged_path, &self.final_path) {
+        if let Err(error) = fs::rename(self.staged_file.path(), &self.final_path) {
             self.rollback();
             return Err(error);
         }
         self.installed = true;
-        if let Err(error) = sync_parent(&self.final_path) {
+        // stage名は消えたため、次回installが旧画像をロックできるよう解放する。
+        if let Err(error) = self
+            .staged_file
+            .as_file()
+            .unlock()
+            .and_then(|()| sync_parent(&self.final_path))
+        {
             self.rollback();
             return Err(error);
         }
@@ -133,6 +162,7 @@ impl StagedAvatar {
         if let Some(backup_path) = self.backup_path.as_ref() {
             fs::remove_file(backup_path)?;
             self.backup_path = None;
+            self.backup_lock = None;
         }
         Ok(())
     }
@@ -144,8 +174,9 @@ impl StagedAvatar {
         }
         if let Some(backup_path) = self.backup_path.take() {
             let _ = fs::rename(backup_path, &self.final_path);
+            self.backup_lock = None;
         }
-        let _ = fs::remove_file(&self.staged_path);
+        let _ = fs::remove_file(self.staged_file.path());
     }
 }
 
@@ -199,13 +230,19 @@ pub(crate) fn load_with_status(
     }
 }
 
-pub(crate) fn cleanup_stale_backups(paths: &ConfigPaths) -> io::Result<()> {
+pub(crate) fn cleanup_stale_files(paths: &ConfigPaths) -> io::Result<()> {
     let parent = paths
         .avatar
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "親ディレクトリがありません"))?;
     if !parent.exists() {
         return Ok(());
+    }
+    let directory_lock = File::open(parent)?;
+    match directory_lock.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(fs::TryLockError::Error(error)) => return Err(error),
     }
     let avatar_name = paths
         .avatar
@@ -221,14 +258,37 @@ pub(crate) fn cleanup_stale_backups(paths: &ConfigPaths) -> io::Result<()> {
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        if name.starts_with(&prefix) && name.ends_with(BACKUP_SUFFIX) {
-            if let Err(error) = fs::remove_file(path) {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let result = if name.ends_with(BACKUP_SUFFIX) || name.ends_with(STAGING_SUFFIX) {
+            remove_abandoned_file(&path)
+        } else {
+            continue;
+        };
+        if let Err(error) = result {
+            if first_error.is_none() {
+                first_error = Some(error);
             }
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn remove_abandoned_file(path: &Path) -> io::Result<()> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    match file.try_lock() {
+        Ok(()) => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        },
+        Err(fs::TryLockError::WouldBlock) => Ok(()),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 

@@ -2,6 +2,7 @@ use coosenpai_core::config::{Config, ConfigError, ConfigPaths, ConfigValidationI
 use coosenpai_core::conversation_archive::{
     archive_conversation, archive_conversation_after_recovery, current_conversation_generation,
 };
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::logging::FileLogger;
 use coosenpai_core::onboarding::{OnboardingState, OnboardingStore};
 use coosenpai_core::persistence::PersistenceError;
@@ -33,7 +34,8 @@ pub(super) fn startup_config(
         Err(ConfigError::UnsupportedVersion(version)) => {
             let issue = ConfigValidationIssue {
                 path: "configVersion".to_owned(),
-                message: format!("設定バージョン {version} は未対応です。"),
+                message: text(TextKey::StartupConfigUnsupportedVersion, Locale::Ja)
+                    .replace("{version}", &version.to_string()),
             };
             let message = format_issues(std::slice::from_ref(&issue));
             (Config::default(), vec![issue], Some(message))
@@ -44,10 +46,13 @@ pub(super) fn startup_config(
     (config, error)
 }
 
-pub(super) fn onboarding_runtime_error(state: &OnboardingState) -> Option<RuntimeLastError> {
+pub(super) fn onboarding_runtime_error_for_locale(
+    state: &OnboardingState,
+    locale: Locale,
+) -> Option<RuntimeLastError> {
     if state.needs_setup() {
         Some(runtime_error(
-            "初回セットアップを待っています。".to_owned(),
+            text(TextKey::SetupWaiting, locale).to_owned(),
             Vec::new(),
         ))
     } else {
@@ -103,8 +108,19 @@ pub(super) async fn startup_runtime(
     })
 }
 
+#[cfg(test)]
 pub(super) fn startup_tutorial(
     store: OnboardingStore,
+) -> (
+    crate::tutorial::TutorialController,
+    Option<RuntimeLastError>,
+) {
+    startup_tutorial_for_locale(store, Locale::Ja)
+}
+
+pub(super) fn startup_tutorial_for_locale(
+    store: OnboardingStore,
+    locale: Locale,
 ) -> (
     crate::tutorial::TutorialController,
     Option<RuntimeLastError>,
@@ -113,22 +129,30 @@ pub(super) fn startup_tutorial(
         Ok(tutorial) => (tutorial, None),
         Err(error) => (
             crate::tutorial::TutorialController::from_state(store, OnboardingState::default()),
-            Some(persistence_runtime_error(format!(
-                "初回設定の状態を読み取れません: {error}"
-            ))),
+            Some(persistence_runtime_error(
+                text(TextKey::StartupTutorialStateReadFailed, locale)
+                    .replace("{error}", &error.to_string()),
+            )),
         ),
     }
 }
 
-pub(super) fn setup_runtime_error() -> RuntimeLastError {
-    runtime_error("初回セットアップを待っています。".to_owned(), Vec::new())
+pub(super) fn setup_runtime_error_for_locale(locale: Locale) -> RuntimeLastError {
+    runtime_error(text(TextKey::SetupWaiting, locale).to_owned(), Vec::new())
 }
 
-pub(super) fn factory_runtime_error(issue: ConfigValidationIssue) -> RuntimeLastError {
+pub(super) fn factory_runtime_error_for_locale(
+    issue: ConfigValidationIssue,
+    locale: Locale,
+) -> RuntimeLastError {
+    let issue = issue.localized(locale);
     runtime_error(format!("{}: {}", issue.path, issue.message), vec![issue])
 }
 
-pub(super) fn conversation_generation(paths: &ConfigPaths) -> (u64, Option<RuntimeLastError>) {
+pub(super) fn conversation_generation_for_locale(
+    paths: &ConfigPaths,
+    locale: Locale,
+) -> (u64, Option<RuntimeLastError>) {
     match current_conversation_generation(paths) {
         Ok(generation) => (generation, None),
         Err(error) => (
@@ -137,7 +161,10 @@ pub(super) fn conversation_generation(paths: &ConfigPaths) -> (u64, Option<Runti
                 kind: RuntimeErrorKind::Persistence,
                 occurred_at: chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                message: Some(format!("会話の世代を読み取れません: {error}")),
+                message: Some(
+                    text(TextKey::StartupConversationGenerationReadFailed, locale)
+                        .replace("{error}", &error.to_string()),
+                ),
                 issues: Vec::new(),
                 attachment_ocr: None,
             }),
@@ -189,7 +216,10 @@ pub(super) fn initialize_conversation_before_runtime(
         Ok(generation) => (generation, None),
         Err(error) => (
             current_generation,
-            Some(conversation_initialization_error(error)),
+            Some(conversation_initialization_error_for_locale(
+                error,
+                Locale::from_config(&config.ui.language),
+            )),
         ),
     }
 }
@@ -198,13 +228,17 @@ pub(super) fn initialize_conversation_on_startup_after_recovery(
     paths: &ConfigPaths,
     config: &Config,
 ) -> Result<u64, PersistenceError> {
+    let locale = Locale::from_config(&config.ui.language);
     let mut companion = coosenpai_core::companion::CompanionAgent::for_storage_recovery(
         config.companion.clone(),
         paths,
         config.retention.conversation_days,
     )
     .map_err(|error| {
-        PersistenceError::Invalid(format!("起動時の会話復旧を準備できません: {error}"))
+        PersistenceError::Invalid(
+            text(TextKey::StartupConversationRecoveryPrepareFailed, locale)
+                .replace("{error}", &error.to_string()),
+        )
     })?;
     archive_conversation_after_recovery(
         paths,
@@ -214,15 +248,24 @@ pub(super) fn initialize_conversation_on_startup_after_recovery(
             companion
                 .recover_persisted_state_before_conversation_archive()
                 .map_err(|error| {
-                    PersistenceError::Invalid(format!("起動時の会話復旧に失敗しました: {error}"))
+                    PersistenceError::Invalid(
+                        text(TextKey::StartupConversationRecoveryFailed, locale)
+                            .replace("{error}", &error.to_string()),
+                    )
                 })
         },
     )?;
     current_conversation_generation(paths)
 }
 
-pub(super) fn conversation_initialization_error(error: PersistenceError) -> RuntimeLastError {
-    persistence_runtime_error(format!("起動時に会話を初期化できません: {error}"))
+pub(super) fn conversation_initialization_error_for_locale(
+    error: PersistenceError,
+    locale: Locale,
+) -> RuntimeLastError {
+    persistence_runtime_error(
+        text(TextKey::StartupConversationInitializationFailed, locale)
+            .replace("{error}", &error.to_string()),
+    )
 }
 
 pub(super) fn persistence_runtime_error(message: String) -> RuntimeLastError {

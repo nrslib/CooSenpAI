@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState, type ReactElement } from "react";
 
 import { desktopApi } from "../ipc.js";
+import { useI18n } from "../i18n/index.js";
 import type { RunningApplication, WatchAppConfig } from "../types.js";
+import { SettingsSearchItem } from "../settings-search.js";
 
 interface Props {
   readonly fullscreen: boolean;
@@ -12,7 +14,8 @@ interface Props {
 }
 
 export function WatchTargets({ fullscreen, apps, highlight, updateFullscreen, updateApps }: Props): ReactElement {
-  const [applications, setApplications] = useState<readonly RunningApplication[]>([]);
+  const { t } = useI18n();
+ const [applications, setApplications] = useState<readonly RunningApplication[]>([]);
   const [adding, setAdding] = useState(false);
   const [query, setQuery] = useState("");
   useEffect(() => {
@@ -37,29 +40,33 @@ export function WatchTargets({ fullscreen, apps, highlight, updateFullscreen, up
   };
 
   return <fieldset id="settings-watch-targets" className={highlight ? "tutorial-highlight" : undefined}>
-    <legend>見ていいもの</legend>
-    <p className="field-help">「見ています」の間、有効な対象だけを撮影します。見守りの ON/OFF は上部スイッチで変更し、次回起動時にも引き継ぎます。</p>
-    <label className="boolean-field"><span>フルスクリーン</span><input id="setting-watch-fullscreen" type="checkbox" checked={fullscreen} onChange={(event) => updateFullscreen(event.target.checked)} /></label>
+    <legend>{t("settings.watchTargets.heading")}</legend>
+    <p className="field-help">{t("settings.watchTargets.help")}</p>
+    <SettingsSearchItem label={t("settings.watchTargets.fullscreen")} path="watch.fullscreen" description={t("settings.watchTargets.fullscreenDescription")}>
+      <label className="boolean-field"><span>{t("settings.watchTargets.fullscreen")}</span><input id="setting-watch-fullscreen" type="checkbox" checked={fullscreen} onChange={(event) => updateFullscreen(event.target.checked)} /></label>
+    </SettingsSearchItem>
     <div className="watch-target-list">
-      {apps.map((application) => <div className="watch-target" key={application.bundleId}>
-        <ApplicationIcon application={applications.find((candidate) => candidate.bundleId === application.bundleId)} fallback={application.name} />
-        <span><strong>{application.name}</strong><small>{application.bundleId}</small></span>
-        <input aria-label={`${application.name}を見る`} type="checkbox" checked={application.enabled} onChange={(event) => updateApps(apps.map((target) => target.bundleId === application.bundleId ? { ...target, enabled: event.target.checked } : target))} />
-        <button type="button" onClick={() => updateApps(apps.filter((target) => target.bundleId !== application.bundleId))}>削除</button>
-      </div>)}
-      {apps.length === 0 ? <p className="muted">アプリは追加されていません。</p> : null}
+      {apps.map((application, index) => <SettingsSearchItem key={application.bundleId} label={application.name} path={`watch.apps[${index}]`} description={application.bundleId}>
+        <div className="watch-target">
+          <ApplicationIcon application={applications.find((candidate) => candidate.bundleId === application.bundleId)} fallback={application.name} />
+          <span><strong>{application.name}</strong><small>{application.bundleId}</small></span>
+          <input aria-label={t("settings.watchTargets.watching", { name: application.name })} type="checkbox" checked={application.enabled} onChange={(event) => updateApps(apps.map((target) => target.bundleId === application.bundleId ? { ...target, enabled: event.target.checked } : target))} />
+          <button type="button" onClick={() => updateApps(apps.filter((target) => target.bundleId !== application.bundleId))}>{t("common.delete")}</button>
+        </div>
+      </SettingsSearchItem>)}
+      {apps.length === 0 ? <p className="muted">{t("settings.watchTargets.noApps")}</p> : null}
     </div>
-    <button id="watch-target-add" type="button" onClick={() => void openPicker()}>起動中のアプリから追加</button>
+    <button id="watch-target-add" type="button" onClick={() => void openPicker()}>{t("settings.watchTargets.addRunning")}</button>
     {adding ? <div className="application-picker">
-      <div className="application-picker-heading"><strong>アプリを追加</strong><button type="button" onClick={() => setAdding(false)}>閉じる</button></div>
-      <input autoFocus placeholder="アプリを検索" value={query} onChange={(event) => setQuery(event.target.value)} />
+      <div className="application-picker-heading"><strong>{t("settings.watchTargets.addHeading")}</strong><button type="button" onClick={() => setAdding(false)}>{t("settings.watchTargets.close")}</button></div>
+      <input autoFocus placeholder={t("settings.watchTargets.search")} value={query} onChange={(event) => setQuery(event.target.value)} />
       <div className="application-picker-list">{candidates.map((application) => <button type="button" key={application.bundleId} onClick={() => {
         updateApps([...apps, { bundleId: application.bundleId, name: application.name, enabled: true }]);
         setAdding(false);
       }}><ApplicationIcon application={application} fallback={application.name} /><span>{application.name}<small>{application.bundleId}</small></span></button>)}</div>
     </div> : null}
-    <div className="coming-soon"><span>マイク</span><span>近日対応</span></div>
-    <div className="coming-soon"><span>スピーカー</span><span>近日対応</span></div>
+    <div className="coming-soon"><span>{t("settings.watchTargets.microphone")}</span><span>{t("settings.watchTargets.soon")}</span></div>
+    <div className="coming-soon"><span>{t("settings.watchTargets.speaker")}</span><span>{t("settings.watchTargets.soon")}</span></div>
   </fieldset>;
 }
 

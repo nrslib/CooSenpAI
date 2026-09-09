@@ -1,19 +1,17 @@
 use crate::snapshot::SpeechView;
 pub(crate) use crate::speech_lifecycle::SpeechSource;
 use crate::speech_lifecycle::{FinalOutcome, SessionOutcome, SpeechLifecycle, StartOutcome};
+use crate::speech_presenter::SpeechResult;
 use crate::speech_transcript::SpeechTranscript;
 use crate::state::DesktopState;
 use coosenpai_core::config::ConfigPaths;
+use coosenpai_core::locale::{localize_audio_message, text as locale_text, Locale, TextKey};
 use coosenpai_core::ports::{
-    HelperResolverPort, SpeechEvent, SpeechInputDevice, SpeechInputDevicePort, SpeechKeyStatePort,
+    SpeechEvent, SpeechInputDevice, SpeechInputDevicePort, SpeechKeyStatePort,
     SpeechPermissionPort, SpeechPort,
 };
 use serde::Serialize;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
-};
-use tauri::Emitter;
+use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -21,15 +19,19 @@ use tokio_util::sync::CancellationToken;
 mod controller_state;
 #[path = "speech_devices.rs"]
 mod devices;
+#[path = "speech_diagnostics.rs"]
+pub(crate) mod diagnostics;
+#[path = "speech_helper.rs"]
+mod helper;
 #[path = "speech_runtime.rs"]
 mod runtime;
 #[path = "speech_support.rs"]
-mod support;
+pub(crate) mod support;
+use diagnostics::{log_stage, SpeechStage};
 pub(crate) use support::permission_name;
 use support::{
-    apply_confirmation_failure, apply_failure, apply_speech_completion_foreground, apply_warning,
-    denied_permission_message, hide_popup, present_speech_error, schedule_speech_failure_clear,
-    send_chat, send_chat_from_callback, show_popup, wait_for_cancel, NO_SPEECH_FAILURE_MESSAGE,
+    complete_callback_send, denied_permission_message_for_locale, present_speech_error,
+    send_chat_from_callback, wait_for_cancel,
 };
 
 pub struct SpeechController {
@@ -37,11 +39,10 @@ pub struct SpeechController {
     permission_port: Mutex<Arc<dyn SpeechPermissionPort>>,
     key_state: Arc<dyn SpeechKeyStatePort>,
     input_devices: Arc<dyn SpeechInputDevicePort>,
-    lifecycle: Mutex<SpeechLifecycle>,
+    pub(crate) lifecycle: Arc<Mutex<SpeechLifecycle>>,
     transcript: Mutex<SpeechTranscript>,
     projection: tokio::sync::Mutex<()>,
     cancel_completed: Notify,
-    failure_ids: Arc<AtomicU64>,
     #[cfg(test)]
     shortcut_refresh_disabled: std::sync::atomic::AtomicBool,
 }
@@ -54,10 +55,26 @@ pub struct SpeechPopupSnapshot {
     pub speech: SpeechView,
     pub theme: String,
     pub font: String,
+    pub language: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_image_png: Option<Vec<u8>>,
+}
+
+impl SpeechPopupSnapshot {
+    pub(crate) fn from_app(snapshot: &crate::snapshot::AppSnapshot) -> Self {
+        Self {
+            revision: snapshot.revision,
+            companion_display_name: snapshot.companion_display_name.clone(),
+            speech: snapshot.speech.clone(),
+            theme: snapshot.config.ui.theme.clone(),
+            font: snapshot.config.ui.font.clone(),
+            language: snapshot.config.ui.language.clone(),
+            avatar_color: snapshot.config.ui.avatar_color.clone(),
+            avatar_image_png: snapshot.avatar_image_png.clone(),
+        }
+    }
 }
 
 impl SpeechController {
@@ -65,19 +82,22 @@ impl SpeechController {
         let executable_dir = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(ToOwned::to_owned));
-        let helper = executable_dir.as_deref().and_then(|directory| {
-            crate::platform::MacHelperResolver.resolve_speech_helper(directory, &paths.root)
-        });
+        let helper = match helper::resolve(executable_dir.as_deref(), &paths.root) {
+            Ok(helper) => helper,
+            Err(error) => {
+                eprintln!("音声 E2E helper を拒否しました: {error}");
+                None
+            }
+        };
         Self {
             speech_port: Mutex::new(helper.map(crate::platform::speech_port)),
             permission_port: Mutex::new(Arc::new(crate::platform::MacSpeechPermissions)),
             key_state: crate::platform::speech_key_state(),
             input_devices: crate::platform::speech_input_devices(),
-            lifecycle: Mutex::new(SpeechLifecycle::default()),
+            lifecycle: Arc::new(Mutex::new(SpeechLifecycle::default())),
             transcript: Mutex::new(SpeechTranscript::default()),
             projection: tokio::sync::Mutex::new(()),
             cancel_completed: Notify::new(),
-            failure_ids: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             shortcut_refresh_disabled: std::sync::atomic::AtomicBool::new(false),
         }
@@ -93,11 +113,10 @@ impl SpeechController {
             permission_port: Mutex::new(Arc::new(crate::platform::MacSpeechPermissions)),
             key_state,
             input_devices,
-            lifecycle: Mutex::new(SpeechLifecycle::default()),
+            lifecycle: Arc::new(Mutex::new(SpeechLifecycle::default())),
             transcript: Mutex::new(SpeechTranscript::default()),
             projection: tokio::sync::Mutex::new(()),
             cancel_completed: Notify::new(),
-            failure_ids: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             shortcut_refresh_disabled: std::sync::atomic::AtomicBool::new(false),
         }
@@ -119,32 +138,35 @@ impl SpeechController {
         permit: &crate::command_guard::CommandContext,
         source: SpeechSource,
     ) -> Result<(), String> {
+        let voice_output = state.voice_output.clone();
+        let _voice_start = voice_output.start_gate.lock().await;
+        voice_output.stop().await;
+        let locale = Locale::from_config(&state.runtime_config().ui.language);
         let phase = self.lifecycle().phase();
         if phase != "idle" {
-            if source == SpeechSource::Shortcut
-                && matches!(
-                    phase,
-                    "starting" | "recording" | "finalizing" | "confirming" | "sending"
-                )
-            {
-                show_popup(&state, true);
-            }
             return match phase {
-                "cancelling" | "cleaning" => Err("音声入力を終了しています".to_owned()),
+                "cancelling" | "cleaning" => {
+                    Err(locale_text(TextKey::SpeechEnding, locale).to_owned())
+                }
                 _ => Ok(()),
             };
         }
         let cancellation = state.cancellation.child_token();
         let command_generation = permit
             .fence(crate::command_guard::GenerationResource::Speech)
-            .ok_or_else(|| "音声入力の世代がありません".to_owned())?;
+            .ok_or_else(|| locale_text(TextKey::SpeechGenerationMissing, locale).to_owned())?;
         let Some(generation) = self
             .lifecycle()
             .start_with_generation(cancellation.clone(), command_generation.value)
         else {
-            return Err("音声入力を開始できません".to_owned());
+            return Err(locale_text(TextKey::SpeechStartFailed, locale).to_owned());
         };
         self.transcript().begin(generation);
+        log_stage(
+            state.logger.as_ref(),
+            generation,
+            SpeechStage::Starting(source),
+        );
         if source == SpeechSource::Shortcut {
             let config = state.runtime_config();
             if config.speech.mode == "pushToTalk" {
@@ -175,28 +197,16 @@ impl SpeechController {
         generation: u64,
         cancellation: CancellationToken,
     ) {
+        let locale = Locale::from_config(&state.runtime_config().ui.language);
         if !self.continue_start(&state, generation).await {
             return;
         }
         state
-            .publish(|snapshot| {
-                if !self.lifecycle().is_current(generation) {
-                    return;
-                }
-                snapshot.speech.phase = "starting".to_owned();
-                snapshot.speech.generation = generation;
-                snapshot.speech.partial.clear();
-                snapshot.speech.warning_kind = None;
-                snapshot.speech.message = None;
-                snapshot.speech.source = Some(source.as_str().to_owned());
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                generation,
+                event: SpeechResult::Started(source),
             })
             .await;
-        if source == SpeechSource::Shortcut && self.lifecycle().is_current(generation) {
-            show_popup(&state, false);
-        }
-        if self.lifecycle().is_current(generation) {
-            crate::windows::sync_recording(&state.app, true);
-        }
         self.refresh_cancel_shortcut(&state).await;
         if !self.continue_start(&state, generation).await {
             return;
@@ -206,6 +216,11 @@ impl SpeechController {
             .lock()
             .expect("permission port")
             .clone();
+        log_stage(
+            state.logger.as_ref(),
+            generation,
+            SpeechStage::PermissionRequest,
+        );
         let permissions = match permission_port.request(cancellation.clone()).await {
             Ok(permissions) => permissions,
             Err(error) => {
@@ -219,35 +234,41 @@ impl SpeechController {
                 return;
             }
         };
+        log_stage(
+            state.logger.as_ref(),
+            generation,
+            SpeechStage::Permissions(permissions),
+        );
         if !self.continue_start(&state, generation).await {
             return;
         }
         state
-            .publish(|snapshot| {
-                if self.lifecycle().is_current(generation)
-                    && snapshot.speech.generation == generation
-                {
-                    snapshot.speech.microphone_permission = permission_name(permissions.microphone);
-                    snapshot.speech.recognition_permission =
-                        permission_name(permissions.recognition);
-                }
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                generation,
+                event: SpeechResult::Permissions(permissions),
             })
             .await;
-        if let Some(message) = denied_permission_message(permissions) {
+        if let Some(message) = denied_permission_message_for_locale(permissions, locale) {
             self.fail(&state, generation, message).await;
             return;
         }
         let speech = self.speech_port.lock().expect("speech port").clone();
         let Some(speech) = speech else {
-            self.fail(&state, generation, "音声認識 helper が見つかりません")
-                .await;
+            self.fail(
+                &state,
+                generation,
+                locale_text(TextKey::SpeechHelperMissing, locale),
+            )
+            .await;
             return;
         };
         let config = state.runtime_config();
-        let locale = config.speech.locale;
-        let (input_device, device_warning) = self.resolve_input_device(&config.speech.input_device);
+        let speech_locale = config.speech.locale;
+        let (input_device, device_warning) =
+            self.resolve_input_device_for_locale(&config.speech.input_device, locale);
+        log_stage(state.logger.as_ref(), generation, SpeechStage::HelperStart);
         let mut session = match speech
-            .start(&locale, &input_device, cancellation.clone())
+            .start(&speech_locale, &input_device, cancellation.clone())
             .await
         {
             Ok(session) => session,
@@ -279,15 +300,11 @@ impl SpeechController {
             }
         }
         if let Some(message) = device_warning {
+            let message = localize_audio_message("input-device-fallback", &message, locale);
             state
-                .publish(|snapshot| {
-                    if self.lifecycle().is_current(generation) {
-                        apply_warning(
-                            &mut snapshot.speech,
-                            "input-device-fallback",
-                            message.clone(),
-                        );
-                    }
+                .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                    generation,
+                    event: SpeechResult::DeviceFallback(message.clone()),
                 })
                 .await;
             crate::capture::publish_speech_transient_shortcut_error(
@@ -338,73 +355,39 @@ impl SpeechController {
         };
         let generation = outcome.generation;
         let control = outcome.control;
-        let controller = self.clone();
         tauri::async_runtime::spawn(async move {
             if let Some(control) = control {
                 let _ = control.finish().await;
             }
             state
-                .publish(|snapshot| {
-                    if controller.lifecycle().is_finalizing(generation)
-                        && snapshot.speech.generation == generation
-                    {
-                        snapshot.speech.phase = "finalizing".to_owned();
-                    }
+                .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                    generation,
+                    event: SpeechResult::FinishRequested,
                 })
                 .await;
         });
-    }
-
-    pub(super) fn cancel(
-        self: &Arc<Self>,
-        state: Arc<DesktopState>,
-        _permit: &crate::command_guard::CommandContext,
-    ) -> Result<(), String> {
-        let outcome = self.lifecycle().cancel();
-        if let Some(message) = outcome.message {
-            if let Some(generation) = outcome.generation {
-                tauri::async_runtime::spawn(
-                    crate::capture::publish_speech_transient_shortcut_error(
-                        state,
-                        generation,
-                        message.to_owned(),
-                    ),
-                );
-            }
-            return Err(message.to_owned());
-        }
-        if !outcome.changed {
-            return Ok(());
-        }
-        let Some(generation) = outcome.generation else {
-            return Ok(());
-        };
-        if let Some(cancellation) = outcome.cancellation {
-            cancellation.cancel();
-        }
-        let controller = self.clone();
-        tauri::async_runtime::spawn(async move {
-            wait_for_cancel(outcome.control).await;
-            controller.complete_cancel_owner(&state, generation).await;
-        });
-        Ok(())
-    }
-
-    pub(super) async fn cancel_and_wait(self: &Arc<Self>, state: &DesktopState) {
-        let _ = self.cancel_and_wait_for_switch(state).await;
     }
 
     pub(super) async fn cancel_and_wait_for_switch(
         self: &Arc<Self>,
         state: &DesktopState,
     ) -> Result<(), String> {
+        loop {
+            let settled = self.cancel_completed.notified();
+            if self.lifecycle().phase() != "sending" {
+                break;
+            }
+            settled.await;
+        }
         if self.lifecycle().phase() == "cleaning" {
             self.wait_for_idle().await;
             return Ok(());
         }
         let already_cancelling = self.lifecycle().cancelling_generation();
+        let locale = Locale::from_config(&state.runtime_config().ui.language);
         let outcome = self.lifecycle().cancel();
         if let Some(message) = outcome.message {
+            let message = message.text(locale);
             if let Some(generation) = already_cancelling {
                 self.wait_for_cancel_owner(generation).await;
                 return Ok(());
@@ -426,16 +409,8 @@ impl SpeechController {
         Ok(())
     }
 
-    pub(crate) fn is_recording(&self) -> bool {
-        self.lifecycle().is_recording()
-    }
-
     pub(super) fn lifecycle_generation_is_sending(&self, generation: u64) -> bool {
         self.lifecycle().is_sending(generation)
-    }
-
-    pub(super) fn confirming_generation(&self) -> Option<u64> {
-        self.lifecycle().confirming_generation()
     }
 
     pub(super) async fn complete_stale_send(&self, state: &DesktopState, generation: u64) {
@@ -447,33 +422,42 @@ impl SpeechController {
     pub(super) async fn confirm(
         &self,
         state: &Arc<DesktopState>,
-        context: &crate::command_guard::CommandContext,
+        expected_generation: u64,
         text: String,
     ) -> Result<String, String> {
-        let text = text.trim().to_owned();
-        if text.is_empty() {
-            return Err("音声入力が空です".to_owned());
+        let locale = Locale::from_config(&state.runtime_config().ui.language);
+        let input = text.trim().to_owned();
+        if input.is_empty() {
+            return Err(locale_text(TextKey::SpeechInputEmpty, locale).to_owned());
         }
-        let generation = self
-            .lifecycle()
-            .claim_confirmation()
-            .ok_or_else(|| "確認する音声入力がありません".to_owned())?;
+        let generation = state
+            .dispatch_with_fence(
+                crate::command_guard::CommandSource::IpcSpeechPopup,
+                crate::command_guard::DesktopCommand::SpeechConfirm,
+                crate::command_guard::GenerationStamp {
+                    resource: crate::command_guard::GenerationResource::Speech,
+                    value: expected_generation,
+                },
+                |_| async {
+                    self.lifecycle().claim_confirmation().ok_or_else(|| {
+                        crate::command_guard::DispatchError::handler(locale_text(
+                            TextKey::SpeechConfirmationMissing,
+                            locale,
+                        ))
+                    })
+                },
+            )
+            .await
+            .map_err(|error| error.format_for_locale(locale))?;
         state
-            .publish(|snapshot| {
-                if self.lifecycle().is_sending(generation)
-                    && snapshot.speech.generation == generation
-                {
-                    snapshot.speech.phase = "sending".to_owned();
-                    snapshot.speech.message = None;
-                }
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                generation,
+                event: SpeechResult::SubmitRequested,
             })
             .await;
         self.refresh_cancel_shortcut(state).await;
-        match send_chat(state, context, text).await {
+        match send_chat_from_callback(self, state, generation, input).await {
             Ok(id) => {
-                apply_speech_completion_foreground(true, || {
-                    crate::windows::show_main(&state.app);
-                });
                 if self.lifecycle().complete(generation) {
                     self.reset_view(state, generation).await;
                 }
@@ -490,15 +474,7 @@ impl SpeechController {
 
     pub async fn popup_snapshot(&self, state: &DesktopState) -> SpeechPopupSnapshot {
         let snapshot = state.snapshot().await;
-        SpeechPopupSnapshot {
-            revision: snapshot.revision,
-            companion_display_name: snapshot.companion_display_name,
-            speech: snapshot.speech,
-            theme: snapshot.config.ui.theme,
-            font: snapshot.config.ui.font,
-            avatar_color: snapshot.config.ui.avatar_color,
-            avatar_image_png: snapshot.avatar_image_png,
-        }
+        SpeechPopupSnapshot::from_app(&snapshot)
     }
 
     async fn continue_start(&self, state: &DesktopState, generation: u64) -> bool {
@@ -534,40 +510,43 @@ impl SpeechController {
                 microphone,
                 recognition,
             } => {
-                state
-                    .publish(|snapshot| {
-                        if self.lifecycle().accepts_session_events(generation)
-                            && snapshot.speech.generation == generation
-                            && snapshot.speech.phase != "idle"
-                        {
-                            snapshot.speech.phase = "recording".to_owned();
-                            snapshot.speech.microphone_permission = permission_name(microphone);
-                            snapshot.speech.recognition_permission = permission_name(recognition);
-                        }
+                let snapshot = state
+                    .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                        generation,
+                        event: SpeechResult::SessionStarted {
+                            microphone,
+                            recognition,
+                        },
                     })
                     .await;
+                if snapshot.speech.generation == generation
+                    && snapshot.speech.phase == "recording"
+                    && self.lifecycle().accepts_session_events(generation)
+                {
+                    log_stage(state.logger.as_ref(), generation, SpeechStage::Recording);
+                }
                 false
             }
             SpeechEvent::Partial { text } => {
                 self.transcript().remember_partial(generation, &text);
                 state
-                    .publish(|snapshot| {
-                        if self.lifecycle().accepts_session_events(generation)
-                            && snapshot.speech.generation == generation
-                            && snapshot.speech.phase != "idle"
-                        {
-                            snapshot.speech.partial = text;
-                        }
+                    .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                        generation,
+                        event: SpeechResult::Partial(text),
                     })
                     .await;
                 false
             }
             SpeechEvent::Warning { kind, message } => {
+                let locale = Locale::from_config(&state.runtime_config().ui.language);
+                let message = localize_audio_message(&kind, &message, locale);
                 state
-                    .publish(|snapshot| {
-                        if self.lifecycle().accepts_session_events(generation) {
-                            apply_warning(&mut snapshot.speech, kind.clone(), message.clone());
-                        }
+                    .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                        generation,
+                        event: SpeechResult::Warning {
+                            kind: kind.clone(),
+                            message: message.clone(),
+                        },
                     })
                     .await;
                 crate::capture::publish_speech_transient_shortcut_error(
@@ -579,25 +558,30 @@ impl SpeechController {
                 false
             }
             SpeechEvent::Final { text } => {
+                log_stage(
+                    state.logger.as_ref(),
+                    generation,
+                    SpeechStage::FinalReceived {
+                        chars: text.chars().count(),
+                    },
+                );
                 self.accept_final(state, generation, source, text).await;
                 true
             }
             SpeechEvent::Error { kind, message } => {
                 if kind == "permission-microphone" {
                     state
-                        .publish(|snapshot| {
-                            if self.lifecycle().accepts_session_events(generation) {
-                                snapshot.speech.microphone_permission = "denied".to_owned();
-                            }
+                        .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                            generation,
+                            event: SpeechResult::PermissionError(kind.clone()),
                         })
                         .await;
                 }
                 if kind == "permission-speech" {
                     state
-                        .publish(|snapshot| {
-                            if self.lifecycle().accepts_session_events(generation) {
-                                snapshot.speech.recognition_permission = "denied".to_owned();
-                            }
+                        .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                            generation,
+                            event: SpeechResult::PermissionError(kind.clone()),
                         })
                         .await;
                 }
@@ -620,21 +604,45 @@ impl SpeechController {
         text: String,
     ) {
         let Some(text) = self.transcript().resolve_final(generation, &text) else {
-            self.fail(state, generation, NO_SPEECH_FAILURE_MESSAGE)
-                .await;
+            let locale = Locale::from_config(&state.runtime_config().ui.language);
+            self.fail(
+                state,
+                generation,
+                locale_text(TextKey::SpeechNoSpeech, locale),
+            )
+            .await;
             return;
         };
         let confirm_before_send = state.runtime_config().speech.confirm_before_send;
-        let Some(outcome) = self
-            .lifecycle()
-            .claim_final(generation, source, confirm_before_send)
-        else {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        state
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                generation,
+                event: SpeechResult::FinalResolved {
+                    source,
+                    confirm_before_send,
+                    reply,
+                },
+            })
+            .await;
+        let Ok(Some(plan)) = response.await else {
             return;
         };
+        let Some(outcome) = self.lifecycle().claim_final_outcome(generation, plan) else {
+            return;
+        };
+        let chars = text.chars().count();
         match outcome {
             FinalOutcome::Composer => {
                 if self.lifecycle().can_apply_cleanup(generation) {
-                    let _ = state.app.emit("coosenpai:speech:composer-final", &text);
+                    state.ui.input(
+                        crate::ui_events::UiView::Application,
+                        crate::ui_events::UiEvent::CaptureCompleted(Box::new(
+                            crate::capture::CaptureEvent::Ui(
+                                crate::ui_events::UiEvent::SpeechTranscript { generation, text },
+                            ),
+                        )),
+                    );
                 }
                 if self.lifecycle().can_apply_cleanup(generation) {
                     self.reset_view(state, generation).await;
@@ -642,43 +650,51 @@ impl SpeechController {
             }
             FinalOutcome::Confirm => {
                 state
-                    .publish(|snapshot| {
-                        if self.lifecycle().is_confirming(generation) {
-                            snapshot.speech.phase = "confirming".to_owned();
-                            snapshot.speech.partial = text;
-                        }
+                    .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                        generation,
+                        event: SpeechResult::Confirmed(text),
                     })
                     .await;
                 if self.lifecycle().is_confirming(generation) {
-                    show_popup(state, true);
-                }
-                if self.lifecycle().is_confirming(generation) {
-                    crate::windows::sync_recording(&state.app, false);
+                    log_stage(
+                        state.logger.as_ref(),
+                        generation,
+                        SpeechStage::Confirming { chars },
+                    );
                 }
                 self.refresh_cancel_shortcut(state).await;
             }
             FinalOutcome::Send => {
                 state
-                    .publish(|snapshot| {
-                        if self.lifecycle().is_sending(generation)
-                            && snapshot.speech.generation == generation
-                        {
-                            snapshot.speech.phase = "sending".to_owned();
-                        }
+                    .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                        generation,
+                        event: SpeechResult::AutoSubmitStarted,
                     })
                     .await;
                 self.refresh_cancel_shortcut(state).await;
-                if let Err(error) = send_chat_from_callback(self, state, generation, text).await {
-                    let message = present_speech_error(state, None, &error).message;
-                    self.fail(state, generation, message).await;
-                } else {
-                    apply_speech_completion_foreground(true, || {
-                        crate::windows::show_main(&state.app);
-                    });
-                    if self.lifecycle().complete(generation) {
-                        self.reset_view(state, generation).await;
-                    }
-                }
+                let result = complete_callback_send(
+                    move || send_chat_from_callback(self, state, generation, text),
+                    |result| async move {
+                        match result {
+                            Err(error) => {
+                                let message = present_speech_error(state, None, &error).message;
+                                self.fail(state, generation, message).await;
+                            }
+                            Ok(_) => {
+                                if self.lifecycle().complete(generation) {
+                                    self.reset_view(state, generation).await;
+                                }
+                            }
+                        }
+                    },
+                )
+                .await;
+                state
+                    .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                        generation,
+                        event: SpeechResult::CallbackSent(result),
+                    })
+                    .await;
             }
         }
     }
@@ -694,8 +710,13 @@ impl SpeechController {
             if let Some(text) = fallback {
                 self.accept_final(state, generation, source, text).await;
             } else {
-                self.fail(state, generation, NO_SPEECH_FAILURE_MESSAGE)
-                    .await;
+                let locale = Locale::from_config(&state.runtime_config().ui.language);
+                self.fail(
+                    state,
+                    generation,
+                    locale_text(TextKey::SpeechNoSpeech, locale),
+                )
+                .await;
             }
         }
     }
@@ -709,64 +730,30 @@ impl SpeechController {
         if !self.lifecycle().restore_confirmation(generation) {
             return;
         }
-        let failure_id = self.next_failure_id();
-        let snapshot = state
-            .publish(|snapshot| {
-                if self.lifecycle().is_confirming(generation) {
-                    apply_confirmation_failure(&mut snapshot.speech, generation, message);
-                }
+        self.cancel_completed.notify_waiters();
+        state
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                generation,
+                event: SpeechResult::ConfirmationFailed(message.to_owned()),
             })
             .await;
-        if snapshot.speech.generation == generation
-            && snapshot.speech.phase == "confirming"
-            && snapshot.speech.message.as_deref() == Some(message)
-        {
-            schedule_speech_failure_clear(
-                state.clone(),
-                generation,
-                message.to_owned(),
-                self.failure_ids.clone(),
-                failure_id,
-            );
-        }
-    }
-
-    fn next_failure_id(&self) -> u64 {
-        self.failure_ids
-            .fetch_add(1, Ordering::AcqRel)
-            .saturating_add(1)
     }
 
     async fn fail(&self, state: &Arc<DesktopState>, generation: u64, message: &str) {
         if !self.lifecycle().complete(generation) {
             return;
         }
+        log_stage(state.logger.as_ref(), generation, SpeechStage::Failed);
         let _projection = self.projection.lock().await;
         if !self.lifecycle().can_apply_cleanup(generation) {
             return;
         }
-        let failure_id = self.next_failure_id();
         state
-            .publish(|snapshot| {
-                if !self.lifecycle().can_apply_cleanup(generation) {
-                    return;
-                }
-                apply_failure(&mut snapshot.speech, message);
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                generation,
+                event: SpeechResult::Failed(message.to_owned()),
             })
             .await;
-        schedule_speech_failure_clear(
-            state.clone(),
-            generation,
-            message.to_owned(),
-            self.failure_ids.clone(),
-            failure_id,
-        );
-        if self.lifecycle().can_apply_cleanup(generation) {
-            crate::windows::sync_recording(&state.app, false);
-        }
-        if self.lifecycle().can_apply_cleanup(generation) {
-            hide_popup(state);
-        }
         self.refresh_cancel_shortcut(state).await;
         if self.lifecycle().complete_cleanup(generation) {
             self.cancel_completed.notify_waiters();
@@ -779,25 +766,11 @@ impl SpeechController {
             return;
         }
         state
-            .publish(|snapshot| {
-                if !self.lifecycle().can_apply_cleanup(generation)
-                    || snapshot.speech.generation != generation
-                {
-                    return;
-                }
-                snapshot.speech.phase = "idle".to_owned();
-                snapshot.speech.partial.clear();
-                snapshot.speech.warning_kind = None;
-                snapshot.speech.message = None;
-                snapshot.speech.source = None;
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                generation,
+                event: SpeechResult::Cleaned,
             })
             .await;
-        if self.lifecycle().can_apply_cleanup(generation) {
-            crate::windows::sync_recording(&state.app, false);
-        }
-        if self.lifecycle().can_apply_cleanup(generation) {
-            hide_popup(state);
-        }
         self.refresh_cancel_shortcut(state).await;
         if self.lifecycle().complete_cleanup(generation) {
             self.cancel_completed.notify_waiters();

@@ -54,11 +54,12 @@ impl UserMessagePreparer {
     pub(crate) fn register_pending_frame_context(
         &self,
         context: crate::state::PendingFrameContext,
+        publication: Option<&crate::persistence::PublicationGate>,
     ) -> Result<(), CompanionError> {
         let Some(storage) = &self.storage else {
             return Ok(());
         };
-        storage.register_pending_frame_context(context)?;
+        storage.register_pending_frame_context_cancellable(context, publication)?;
         Ok(())
     }
 
@@ -155,6 +156,12 @@ impl UserMessagePreparer {
             Uuid::new_v4().to_string()
         };
         let now = self.clock.now();
+        let conversation_generation = self
+            .storage
+            .as_ref()
+            .map(crate::companion_storage::CompanionStorage::conversation_generation)
+            .transpose()?
+            .unwrap_or(0);
         let created_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let attachment_path = match (attachment_source.as_deref(), self.storage.as_ref()) {
             (Some(source), Some(storage)) => {
@@ -189,8 +196,14 @@ impl UserMessagePreparer {
         } else {
             (observations, Vec::new())
         };
+        // 確定イベントと入力の保存を直列化し、受付中に届いた Final を取り落とさない。
+        let hearing_buffer = self
+            .hearing_context
+            .lock()
+            .map_err(|_| PersistenceError::Invalid("音声文脈のロックが壊れています".to_owned()))?;
         let mut input = PendingUserMessage {
             id,
+            conversation_generation,
             user_seq: 0,
             created_at,
             message,
@@ -198,6 +211,7 @@ impl UserMessagePreparer {
             attachment_text,
             observations,
             pending_frames,
+            hearing_context: hearing_buffer.snapshot(),
             observation_in_progress,
             prepared_response: None,
             response_commit_started: false,
@@ -215,6 +229,7 @@ impl UserMessagePreparer {
         } else if persist_runtime_queue {
             self.enqueue_runtime_input(input.clone());
         }
+        drop(hearing_buffer);
         Ok(input)
     }
 

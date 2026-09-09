@@ -1,5 +1,6 @@
 use crate::factory::DesktopFactoryError;
 use coosenpai_core::config::{Config, ConfigValidationIssue};
+use coosenpai_core::locale::{localize_config_issue_message, localize_factory_message, Locale};
 use coosenpai_core::runtime::RuntimeError;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
@@ -90,6 +91,10 @@ impl ConfigUpdateTransaction<'_> {
         self.commit_generation()
     }
 
+    pub(crate) fn commit_while_holding(&self) -> Result<(), ConfigCommitError> {
+        self.commit_generation()
+    }
+
     pub(crate) fn commit_config(self, config_revision: u64) -> Result<(), ConfigCommitError> {
         self.commit_generation()?;
         self.coordinator
@@ -110,22 +115,36 @@ pub enum ConfigCommitError {
 }
 
 impl ConfigCommitError {
+    #[allow(dead_code)]
     pub fn format_for_user(&self) -> String {
+        self.format_for_locale(Locale::Ja)
+    }
+
+    pub fn format_for_locale(&self, locale: Locale) -> String {
         match self {
-            Self::Factory(error) => error.to_string(),
-            Self::Storage(error) => error.format_for_user(),
-            Self::Runtime(RuntimeError::Config(error)) => error.format_for_user(),
-            Self::Runtime(error) => error.to_string(),
+            Self::Factory(error) => error.format_for_locale(locale),
+            Self::Storage(error) => error.format_for_locale(locale),
+            Self::Runtime(RuntimeError::Config(error)) => error.format_for_locale(locale),
+            Self::Runtime(error) => error.format_for_locale(locale),
         }
     }
 
-    pub fn issues(&self) -> Vec<ConfigValidationIssue> {
+    pub fn issues_for_locale(&self, locale: Locale) -> Vec<ConfigValidationIssue> {
         match self {
-            Self::Factory(error) => vec![error.issue.clone()],
+            Self::Factory(error) => {
+                let mut issue = error.issue.clone();
+                let factory_message = localize_factory_message(&issue.message, locale);
+                issue.message = if factory_message != issue.message {
+                    factory_message
+                } else {
+                    localize_config_issue_message(&issue.message, locale)
+                };
+                vec![issue]
+            }
             Self::Storage(coosenpai_core::config::ConfigError::Validation(issues))
             | Self::Runtime(RuntimeError::Config(
                 coosenpai_core::config::ConfigError::Validation(issues),
-            )) => issues.clone(),
+            )) => issues.iter().map(|issue| issue.localized(locale)).collect(),
             _ => Vec::new(),
         }
     }

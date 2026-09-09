@@ -154,6 +154,9 @@ impl NotificationConsumer {
             let Some(claimed) = self.claim_displayable()? else {
                 return Ok(false);
             };
+            // 世代ファイルの sibling lock 内で照合と発行を直列化し、
+            // 表示中に世代切替が割り込んで旧世代の通知が出る race を閉じる。
+            let _generation_lock = self.lock_conversation_generation().await?;
             if !self.is_current(&claimed)? {
                 self.skip(claimed)?;
                 return Ok(false);
@@ -173,6 +176,18 @@ impl NotificationConsumer {
             self.log_failure();
         }
         result
+    }
+
+    async fn lock_conversation_generation(&self) -> Result<SiblingLock, NotificationError> {
+        let state_directory = self
+            .conversation_generation_path
+            .parent()
+            .ok_or(NotificationError::InvalidPayload)?;
+        SiblingLock::acquire_async(
+            &crate::conversation_archive::conversation_generation_lock_path(state_directory),
+        )
+        .await
+        .map_err(NotificationError::from)
     }
 
     fn claim_displayable(&self) -> Result<Option<PendingNotification>, NotificationError> {
@@ -243,12 +258,14 @@ impl NotificationConsumer {
                 struct Generation {
                     schema_version: u8,
                     generation: u64,
+                    #[serde(default)]
+                    selected_generation: Option<u64>,
                 }
                 let value: Generation = serde_json::from_slice(&bytes)?;
                 if value.schema_version != 1 {
                     return Err(NotificationError::InvalidPayload);
                 }
-                Ok(value.generation)
+                Ok(value.selected_generation.unwrap_or(value.generation))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
             Err(error) => Err(error.into()),

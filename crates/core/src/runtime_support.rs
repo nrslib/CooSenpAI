@@ -1,5 +1,6 @@
 use super::operation_state::{OperationCancellationCause, OperationCancellationReason};
 use super::*;
+use crate::locale::{text, Locale, TextKey};
 
 pub fn empty_runtime(config: Config) -> RuntimeHandle {
     RuntimeActor::spawn(config, None, None)
@@ -23,6 +24,19 @@ impl RuntimeHandle {
                 agents: Box::new(agents),
                 response,
             })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
+
+    pub async fn update_work_config(
+        &self,
+        work: crate::work::WorkConfig,
+    ) -> Result<u64, RuntimeError> {
+        self.ensure_open()?;
+        let (response, result) = oneshot::channel();
+        self.priority_tx
+            .send(PriorityCommand::UpdateWorkConfig { work, response })
             .await
             .map_err(|_| RuntimeError::Closed)?;
         result.await.map_err(|_| RuntimeError::ResponseDropped)?
@@ -104,6 +118,7 @@ pub(super) fn drain_closed_commands(
     while let Ok(command) = priority_rx.try_recv() {
         match command {
             PriorityCommand::UpdateConfig { response, .. }
+            | PriorityCommand::UpdateWorkConfig { response, .. }
             | PriorityCommand::UpdateWatchEnabled { response, .. }
             | PriorityCommand::ReplaceConfig { response, .. }
             | PriorityCommand::EnterDegraded { response, .. } => {
@@ -112,10 +127,11 @@ pub(super) fn drain_closed_commands(
             PriorityCommand::Quiesce { response, .. } => {
                 let _ = response.send(Err(RuntimeError::Closed));
             }
-            PriorityCommand::CancelUser { response } => {
+            PriorityCommand::CancelUser { response, .. }
+            | PriorityCommand::ResetCompanionEmotions { response } => {
                 let _ = response.send(Err(RuntimeError::Closed));
             }
-            PriorityCommand::RetryUser { response } => {
+            PriorityCommand::RetryUser { response, .. } => {
                 let _ = response.send(Err(RuntimeError::Closed));
             }
         }
@@ -136,6 +152,7 @@ impl RuntimeActor {
             crate::companion_storage::PendingUserMessage,
         >,
         running_coo: &mut Option<RunningOperation>,
+        running_observer: &mut Option<RunningOperation>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
     ) {
         let UserCommand::Enqueue(command) = command;
@@ -146,24 +163,31 @@ impl RuntimeActor {
             }
             return;
         }
-        let persistent_queue = self.user_queue_is_persistent();
         if let Some(response) = response {
             self.user_waiters.insert(input_id.clone(), response);
         }
+        let preparer = self.user_preparer.read().ok().and_then(|slot| slot.clone());
+        let Some(preparer) = preparer else {
+            self.respond_user_waiters(&[input_id], Err(RuntimeError::CompanionUnavailable));
+            return;
+        };
+        let persistent_queue = preparer.uses_persistent_queue();
+        if preparer.owns_user_queue() && !persistent_queue {
+            self.respond_user_waiters(&[input_id], Err(RuntimeError::CompanionUnavailable));
+            return;
+        }
         if let Some(companion) = self.companion.as_ref() {
-            if companion.owns_user_queue() && !persistent_queue {
-                self.respond_user_waiters(&[input_id], Err(RuntimeError::CompanionUnavailable));
-                return;
-            }
             if let Ok(Some(completed)) = companion.completed_user_response(&input_id) {
                 self.respond_user_waiters(&[input_id], Ok(completed));
                 self.revision = self.revision.saturating_add(1);
                 self.publish(snapshot_tx);
                 return;
             }
+        }
+        // 実行中 user 操作では append 処理が共有キューを消費する。
+        let user_operation_running = running_coo.as_ref().is_some_and(RunningOperation::is_user);
+        if !user_operation_running {
             if persistent_queue {
-                let preparer = companion
-                    .user_message_preparer_with_runtime_queue(self.runtime_user_queue.clone());
                 match preparer.pending_message(&input_id) {
                     Ok(Some(input)) if input.user_seq == 0 => {
                         match preparer.take_runtime_input(&input_id) {
@@ -198,10 +222,7 @@ impl RuntimeActor {
                     }
                 }
             } else {
-                match companion
-                    .user_message_preparer_with_runtime_queue(self.runtime_user_queue.clone())
-                    .take_runtime_input(&input_id)
-                {
+                match preparer.take_runtime_input(&input_id) {
                     Ok(Some(input)) => _volatile_users.push_back(input),
                     Ok(None) => {
                         self.respond_user_waiters(
@@ -218,8 +239,11 @@ impl RuntimeActor {
             }
         }
         self.user_work_pending = true;
+        if let Some(operation) = running_observer.as_mut() {
+            self.preempt_operation_for_user(operation);
+        }
         if let Some(operation) = running_coo.as_mut() {
-            if operation.preempt_for_user() {
+            if self.preempt_operation_for_user(operation) {
                 self.companion_recovery_pending = true;
             } else if operation.is_user() {
                 match self.append_pending_user_inputs(operation) {
@@ -237,17 +261,6 @@ impl RuntimeActor {
         }
         self.revision = self.revision.saturating_add(1);
         self.publish(snapshot_tx);
-    }
-
-    pub(super) fn user_queue_is_persistent(&self) -> bool {
-        self.user_preparer
-            .read()
-            .map(|preparer| {
-                preparer
-                    .as_ref()
-                    .is_some_and(|value| value.uses_persistent_queue())
-            })
-            .unwrap_or(false)
     }
 
     pub(super) fn close_user_waiters(&mut self) {
@@ -341,6 +354,19 @@ pub(super) fn control_uses_observer(command: &ControlCommand) -> bool {
 }
 
 impl RuntimeActor {
+    pub(super) fn update_work_config(
+        &mut self,
+        work: crate::work::WorkConfig,
+        snapshot_tx: &watch::Sender<RuntimeSnapshot>,
+        config_tx: &watch::Sender<Config>,
+    ) -> u64 {
+        self.config.work = work;
+        self.revision = self.revision.saturating_add(1);
+        config_tx.send_replace(self.config.clone());
+        self.publish(snapshot_tx);
+        self.revision
+    }
+
     pub(super) fn update_watch_enabled(
         &mut self,
         enabled: bool,
@@ -380,7 +406,15 @@ impl RuntimeActor {
             .active_user_message_id
             .clone()
             .or_else(|| self.terminal_attachment_input_id())
-            .ok_or_else(|| RuntimeError::Factory("取り消せる返事はありません".to_owned()))?;
+            .ok_or_else(|| {
+                RuntimeError::Factory(
+                    text(
+                        TextKey::RuntimeCancelableReplyMissing,
+                        Locale::from_config(&self.config.ui.language),
+                    )
+                    .to_owned(),
+                )
+            })?;
         self.cancel_user_input(&input_id)
     }
 
@@ -410,6 +444,7 @@ impl RuntimeActor {
                 .is_some_and(|failure| failure.input_id == input_id)
         }) {
             self.last_error = None;
+            self.user_work_pending = true;
             self.user_retry_at = None;
             self.user_retry_delay = Duration::from_secs(1);
         }
@@ -450,37 +485,99 @@ impl RuntimeActor {
         self.cancel_user_input(input_id)
     }
 
-    pub(super) fn retry_user(&mut self) -> Result<String, RuntimeError> {
-        let input_id = if let Some(input_id) = self.terminal_attachment_input_id() {
+    pub(super) fn validate_user_target(
+        &self,
+        command: &PriorityCommand,
+    ) -> Result<(), RuntimeError> {
+        let (expected, current) = match command {
+            PriorityCommand::CancelUser {
+                input_id: Some(expected),
+                ..
+            } => (
+                expected,
+                self.active_user_message_id
+                    .clone()
+                    .or_else(|| self.terminal_attachment_input_id()),
+            ),
+            PriorityCommand::RetryUser {
+                input_id: Some(expected),
+                ..
+            } => {
+                if self
+                    .active_user_message_id
+                    .as_ref()
+                    .is_some_and(|active| active != expected)
+                {
+                    return Err(RuntimeError::Factory(
+                        "別の発言を処理中のため再試行を取り消しました".into(),
+                    ));
+                }
+                (expected, Some(self.retry_user_input_id()?))
+            }
+            _ => return Ok(()),
+        };
+        if current.as_deref() == Some(expected.as_str()) {
+            Ok(())
+        } else {
+            Err(RuntimeError::Factory(
+                "対象の発言が変わったため操作を取り消しました".into(),
+            ))
+        }
+    }
+
+    fn retry_user_input_id(&self) -> Result<String, RuntimeError> {
+        if let Some(input_id) = self.terminal_attachment_input_id() {
+            return Ok(input_id);
+        }
+        if self.last_error.is_none() || self.user_retry_at.is_none() {
+            return Err(RuntimeError::Factory(
+                "再試行できる発言はありません".to_owned(),
+            ));
+        }
+        let preparer = self
+            .user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .clone()
+            .ok_or(RuntimeError::CompanionUnavailable)?;
+        preparer
+            .pending_messages()?
+            .into_iter()
+            .find(|input| !input.attachment_is_terminal())
+            .map(|input| input.id)
+            .ok_or_else(|| {
+                RuntimeError::Factory(
+                    text(
+                        TextKey::RuntimeRetryableReplyMissing,
+                        Locale::from_config(&self.config.ui.language),
+                    )
+                    .to_owned(),
+                )
+            })
+    }
+
+    pub(super) fn retry_user(&mut self, expected: Option<&str>) -> Result<String, RuntimeError> {
+        let input_id = self.retry_user_input_id()?;
+        if expected.is_some_and(|expected| expected != input_id) {
+            return Err(RuntimeError::Factory(
+                "対象の発言が変わったため操作を取り消しました".into(),
+            ));
+        }
+        if self.terminal_attachment_input_id().as_deref() == Some(&input_id) {
             let companion = self
                 .companion
                 .as_ref()
                 .ok_or(RuntimeError::CompanionUnavailable)?;
             if !companion.clear_terminal_attachment_failure(&input_id)? {
                 return Err(RuntimeError::Factory(
-                    "再試行できる発言はありません".to_owned(),
+                    text(
+                        TextKey::RuntimeRetryableReplyMissing,
+                        Locale::from_config(&self.config.ui.language),
+                    )
+                    .to_owned(),
                 ));
             }
-            input_id
-        } else {
-            if self.last_error.is_none() || self.user_retry_at.is_none() {
-                return Err(RuntimeError::Factory(
-                    "再試行できる発言はありません".to_owned(),
-                ));
-            }
-            let preparer = self
-                .user_preparer
-                .read()
-                .map_err(|_| RuntimeError::CompanionUnavailable)?
-                .clone()
-                .ok_or(RuntimeError::CompanionUnavailable)?;
-            preparer
-                .pending_messages()?
-                .into_iter()
-                .find(|input| !input.attachment_is_terminal())
-                .map(|input| input.id)
-                .ok_or_else(|| RuntimeError::Factory("再試行できる発言はありません".to_owned()))?
-        };
+        }
         self.operation_cancellation.renew();
         self.last_error = None;
         self.user_retry_at = None;
@@ -499,7 +596,10 @@ impl RuntimeActor {
             .map(|failure| failure.input_id.clone())
     }
 
-    pub(super) fn refresh_user_preparer(&self) {
+    pub(super) fn refresh_user_preparer(&mut self) {
+        if let Some(companion) = self.companion.as_mut() {
+            companion.set_hearing_context(self.hearing_context.clone());
+        }
         if let Ok(mut slot) = self.user_preparer.write() {
             *slot = self.companion.as_ref().map(|companion| {
                 companion.user_message_preparer_with_runtime_queue(self.runtime_user_queue.clone())
@@ -511,8 +611,11 @@ impl RuntimeActor {
         companion: CompanionAgent,
         config: Option<Config>,
     ) -> Result<u64, RuntimeError> {
+        if let Some(config) = &config {
+            validate_config(config)?;
+        }
+        companion.synchronize_emotions()?;
         if let Some(config) = config {
-            validate_config(&config)?;
             self.config = config;
         }
         self.companion = Some(companion);
@@ -535,7 +638,11 @@ impl RuntimeActor {
                 .build(&config)
                 .await
                 .map_err(RuntimeError::Factory)?;
+            if let Some(companion) = &agents.companion {
+                companion.synchronize_emotions()?;
+            }
             self.observer = agents.observer.take();
+            self.observation_delivery = agents.observation_delivery;
             if let Some(companion) = agents.companion.as_ref() {
                 self.companion_display_name = companion.display_name().to_owned();
             }
@@ -555,14 +662,18 @@ impl RuntimeActor {
                 || config.companion.executable != self.config.companion.executable
             {
                 return Err(RuntimeError::Factory(
-                    "provider を更新する RuntimeFactory がありません".to_owned(),
+                    text(
+                        TextKey::RuntimeFactoryRebuildUnavailable,
+                        Locale::from_config(&self.config.ui.language),
+                    )
+                    .to_owned(),
                 ));
+            }
+            if let Some(companion) = self.companion.as_mut() {
+                companion.update_config(config.companion.clone())?;
             }
             if let Some(observer) = self.observer.as_mut() {
                 observer.update_config(config.observer.clone());
-            }
-            if let Some(companion) = self.companion.as_mut() {
-                companion.update_config(config.companion.clone());
             }
         }
         self.operation_cancellation.renew();
@@ -596,7 +707,12 @@ impl RuntimeActor {
         self.phase = RuntimePhase::Idle;
         self.active_user_message_id = None;
         self.companion_draft = None;
+        self.latest_companion_thought = None;
+        self.latest_companion_thought_generation = None;
         if clear_user_state {
+            // 会話切り替え時は、永続 cursor から選択世代の観察を再付与する。
+            // 揮発キューを残すと、切り替え先の recovery に旧世代の観察が混ざる。
+            self.pending_observations.clear();
             self.cancelled_user_message_ids.clear();
             self.user_retry_at = None;
             self.user_retry_delay = Duration::from_secs(1);
@@ -613,7 +729,11 @@ impl RuntimeActor {
         mut agents: RuntimeAgents,
     ) -> Result<u64, RuntimeError> {
         validate_config(&config)?;
+        if let Some(companion) = &agents.companion {
+            companion.synchronize_emotions()?;
+        }
         self.observer = agents.observer.take();
+        self.observation_delivery = agents.observation_delivery;
         if let Some(companion) = agents.companion.as_ref() {
             self.companion_display_name = companion.display_name().to_owned();
         }
@@ -678,15 +798,20 @@ pub(super) fn initialization_error_kind(error: &CompanionError) -> RuntimeErrorK
     }
 }
 
-pub(super) fn config_update_last_error(error: &RuntimeError) -> RuntimeLastError {
+pub(super) fn config_update_last_error(error: &RuntimeError, locale: Locale) -> RuntimeLastError {
     let issues = match error {
-        RuntimeError::Config(crate::config::ConfigError::Validation(issues)) => issues.clone(),
+        RuntimeError::Config(crate::config::ConfigError::Validation(issues)) => {
+            issues.iter().map(|issue| issue.localized(locale)).collect()
+        }
         _ => Vec::new(),
     };
     RuntimeLastError {
         kind: RuntimeErrorKind::Config,
         occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        message: Some(format!("設定の適用に失敗しました: {error}")),
+        message: Some(
+            text(TextKey::ConfigUpdateFailed, locale)
+                .replace("{error}", &error.format_for_locale(locale)),
+        ),
         issues,
         attachment_ocr: None,
     }

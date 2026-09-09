@@ -32,6 +32,8 @@ if [ -n "$target_triple" ]; then
     "$script_dir/Sources/audio_buffer_copy.swift" \
     "$script_dir/Sources/audio_conversion.swift" \
     "$script_dir/Sources/audio_input_processing.swift" \
+    "$script_dir/Sources/music_gate.swift" \
+    "$script_dir/Sources/microphone_input_recovery.swift" \
     "$script_dir/Sources/recognition_state.swift" \
     "$script_dir/Sources/segment_controller.swift" \
     "$script_dir/Sources/voice_activity.swift" \
@@ -52,6 +54,8 @@ else
     "$script_dir/Sources/audio_buffer_copy.swift" \
     "$script_dir/Sources/audio_conversion.swift" \
     "$script_dir/Sources/audio_input_processing.swift" \
+    "$script_dir/Sources/music_gate.swift" \
+    "$script_dir/Sources/microphone_input_recovery.swift" \
     "$script_dir/Sources/recognition_state.swift" \
     "$script_dir/Sources/segment_controller.swift" \
     "$script_dir/Sources/voice_activity.swift" \

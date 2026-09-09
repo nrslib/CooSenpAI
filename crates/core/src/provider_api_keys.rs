@@ -32,6 +32,7 @@ pub fn environment_names(provider: ProviderName) -> &'static [&'static str] {
         ProviderName::Codex => &["OPENAI_API_KEY"],
         ProviderName::Claude => &["ANTHROPIC_API_KEY"],
         ProviderName::Opencode => &["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY"],
+        ProviderName::Mock => &[],
     }
 }
 
@@ -40,6 +41,16 @@ pub fn bridge_environment(
     path_value: &str,
     product_root: &Path,
     store: &dyn ProviderApiKeyStore,
+) -> Result<Vec<(String, String)>, PortError> {
+    bridge_environment_with_api_key(base_environment, path_value, product_root, store, None)
+}
+
+pub fn bridge_environment_with_api_key(
+    base_environment: impl IntoIterator<Item = (String, String)>,
+    path_value: &str,
+    product_root: &Path,
+    store: &dyn ProviderApiKeyStore,
+    temporary_api_key: Option<(ProviderName, &str)>,
 ) -> Result<Vec<(String, String)>, PortError> {
     let mut environment = base_environment
         .into_iter()
@@ -58,6 +69,12 @@ pub fn bridge_environment(
         for name in environment_names(provider) {
             environment.retain(|(key, _)| key != name);
             environment.push(((*name).to_owned(), api_key.clone()));
+        }
+    }
+    if let Some((provider, api_key)) = temporary_api_key {
+        for name in environment_names(provider) {
+            environment.retain(|(key, _)| key != name);
+            environment.push(((*name).to_owned(), api_key.to_owned()));
         }
     }
     Ok(environment)

@@ -19,6 +19,7 @@ pub enum DeliveryOwnership {
 }
 
 pub(super) struct ProviderInvocation<'a> {
+    pub work_result: Option<&'a str>,
     pub prompt: &'a str,
     pub source_ids: &'a [String],
     pub user: bool,
@@ -42,6 +43,7 @@ pub(super) struct CompanionTurn {
 }
 
 pub(crate) struct CompanionCallOutcome {
+    pub(crate) decision_produced: bool,
     pub(crate) response: CompanionResponse,
     pub(crate) data: crate::prompts::CompanionPromptData,
     pub(crate) observations: Vec<ObservationRecord>,
@@ -58,6 +60,7 @@ pub(super) struct ProviderCallOutcome {
 }
 
 pub(super) struct ProviderTurn<'a> {
+    pub work_result: Option<&'a str>,
     pub data: &'a crate::prompts::CompanionPromptData,
     pub user: bool,
     pub image_paths: &'a [PathBuf],
@@ -122,7 +125,7 @@ pub(super) fn session_mode(session: &SessionRequest) -> &'static str {
     match session {
         SessionRequest::New => "new",
         SessionRequest::Resume(_) => "resume",
-        SessionRequest::Ephemeral => "ephemeral",
+        SessionRequest::Ephemeral | SessionRequest::Isolated => "ephemeral",
     }
 }
 
@@ -165,6 +168,8 @@ pub(super) fn require_user_message(response: &CompanionResponse) -> Result<Strin
 
 pub(crate) fn silent_response() -> CompanionResponse {
     CompanionResponse {
+        work_request: None,
+        emotion_delta: None,
         emit: false,
         message: None,
         message_kind: "advice".to_owned(),

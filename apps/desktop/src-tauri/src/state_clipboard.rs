@@ -1,5 +1,6 @@
 use crate::command_guard::{CommandContext, CommandSource, DesktopCommand, DispatchError};
 use crate::state::DesktopState;
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::ports::ClipboardWriter;
 use coosenpai_core::state::{ConversationEntry, ConversationRole};
 use std::sync::Arc;
@@ -9,9 +10,14 @@ impl DesktopState {
         self: &Arc<Self>,
         _context: &CommandContext,
     ) -> Result<(), String> {
+        let locale = Locale::from_config(&self.runtime_config().ui.language);
         let snapshot = self.snapshot().await;
-        if !copy_latest_reply(&snapshot.conversation, self.clipboard_writer.as_ref())? {
-            return Err("コピーできる返事がありません".to_owned());
+        let copied = copy_latest_reply(&snapshot.conversation, self.clipboard_writer.as_ref())
+            .map_err(|error| {
+                text(TextKey::CopyLastReplyFailed, locale).replace("{error}", &error)
+            })?;
+        if !copied {
+            return Err(text(TextKey::CopyLastReplyEmpty, locale).to_owned());
         }
         crate::capture_notice::show_copy_completed(self.clone()).await;
         Ok(())
@@ -49,7 +55,7 @@ fn copy_latest_reply(
     };
     clipboard
         .write_text(&reply.message)
-        .map_err(|error| format!("返事をコピーできませんでした: {error}"))?;
+        .map_err(|error| error.to_string())?;
     Ok(true)
 }
 

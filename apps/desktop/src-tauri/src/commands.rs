@@ -1,20 +1,24 @@
 use crate::bubbles;
 use crate::command_guard::{CommandContext, CommandSource, DesktopCommand, DispatchError};
-use crate::commands_config::{apply_config_patch, command_for_config_patch, config_failure};
+use crate::commands_config::{
+    apply_config_patch, command_for_config_patch, config_failure_for_locale,
+};
 use crate::snapshot::AppSnapshot;
 use crate::state::{ConfigCommitError, DesktopState};
+use crate::ui_commands::UserCommand;
+use crate::ui_events::{UiEvent, UiView};
 use coosenpai_core::config::{Config, ConfigError, ConfigValidationIssue};
+use coosenpai_core::locale::{localize_error_message, text, Locale, TextKey};
 use coosenpai_core::memory::{DailySummary, FactCandidate, FactRecord, FactUpdate, WeeklySummary};
-use coosenpai_core::ports::{RuntimeLogger, SystemSettingsPane, SystemSettingsPort};
+use coosenpai_core::ports::{SystemSettingsPane, SystemSettingsPort};
+use coosenpai_core::runtime::RuntimeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 pub(super) const MAX_CHAT_BYTES: usize = 32 * 1024;
-static BUBBLE_PASSTHROUGH_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
@@ -139,6 +143,8 @@ pub(super) enum CommandOrigin {
     CapturePopup,
     SpeechPopup,
     ModelPopup,
+    Details,
+    Avatar,
 }
 
 pub(crate) fn authorize(label: &str, required: CommandOrigin) -> Result<(), String> {
@@ -148,20 +154,37 @@ pub(crate) fn authorize(label: &str, required: CommandOrigin) -> Result<(), Stri
         "capture-popup" => CommandOrigin::CapturePopup,
         "speech-popup" => CommandOrigin::SpeechPopup,
         "model-popup" => CommandOrigin::ModelPopup,
-        _ => return Err("このウィンドウからは操作できません".to_owned()),
+        "details" => CommandOrigin::Details,
+        "avatar" => CommandOrigin::Avatar,
+        _ => return Err(text(TextKey::CommandWindowNotAllowed, Locale::Ja).to_owned()),
     };
     if actual == required {
         Ok(())
     } else {
-        Err("このウィンドウからは操作できません".to_owned())
+        Err(text(TextKey::CommandWindowNotAllowed, Locale::Ja).to_owned())
     }
 }
 
-pub(super) fn authorize_window(
-    window: &WebviewWindow,
+pub(super) fn authorize_window<R: tauri::Runtime>(
+    window: &WebviewWindow<R>,
     required: CommandOrigin,
 ) -> Result<(), String> {
     authorize(window.label(), required)
+}
+
+/// main と details の両方が発行できる command の入力源を window label から決める。
+pub(super) fn main_or_details_source(window: &WebviewWindow) -> Result<CommandSource, String> {
+    match window.label() {
+        "main" => {
+            authorize_window(window, CommandOrigin::Main)?;
+            Ok(CommandSource::IpcMain)
+        }
+        "details" => {
+            authorize_window(window, CommandOrigin::Details)?;
+            Ok(CommandSource::IpcDetails)
+        }
+        _ => Err(text(TextKey::CommandWindowNotAllowed, Locale::Ja).to_owned()),
+    }
 }
 
 pub(super) async fn dispatch_result<T, F, Fut>(
@@ -175,6 +198,7 @@ where
     F: FnOnce(CommandContext) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = IpcResult<T>> + Send + 'static,
 {
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     let result = run_detached(async move {
         state
             .dispatch(source, command, move |context| async move {
@@ -185,7 +209,36 @@ where
     .await;
     match result {
         Ok(result) => result,
-        Err(error) => IpcResult::failure(error.format_for_user()),
+        Err(error) => IpcResult::failure(error.format_for_locale(locale)),
+    }
+}
+
+/// ポップアップ送信の逐次: dispatch が受理・失敗・拒否のどれで終わっても、
+/// 結果を呼び出し元へ返す前にメイン画面を前面に出す。
+#[cfg(test)]
+pub(super) async fn dispatch_send_and_present<F, Fut>(
+    logger: &dyn RuntimeLogger,
+    locale: Locale,
+    dispatch: F,
+    present_main: impl FnOnce(),
+) -> IpcResult<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<IpcResult<String>, DispatchError>> + Send + 'static,
+{
+    let result = run_detached(dispatch()).await;
+    let outcome = match &result {
+        Ok(IpcResult::Success { .. }) => crate::windows::SendOutcome::Accepted,
+        Ok(IpcResult::Failure { .. }) => crate::windows::SendOutcome::Failed,
+        Err(DispatchError::Rejected(_)) => crate::windows::SendOutcome::Rejected,
+        Err(DispatchError::Failed(_) | DispatchError::Indeterminate(_)) => {
+            crate::windows::SendOutcome::Failed
+        }
+    };
+    crate::windows::present_main_after_send(logger, outcome, present_main);
+    match result {
+        Ok(result) => result,
+        Err(error) => IpcResult::failure(error.format_for_locale(locale)),
     }
 }
 
@@ -201,15 +254,16 @@ where
     });
     match result_rx.await {
         Ok(result) => result,
-        Err(_) => Err(DispatchError::indeterminate(
-            "処理結果を確認できませんでした",
-        )),
+        Err(_) => Err(DispatchError::indeterminate(text(
+            TextKey::CommandResultUnavailable,
+            Locale::Ja,
+        ))),
     }
 }
 
-pub(super) fn validate_id(id: &str) -> Result<(), String> {
+pub(super) fn validate_id_for_locale(id: &str, locale: Locale) -> Result<(), String> {
     if id.trim().is_empty() {
-        Err("id は空にできません".to_owned())
+        Err(text(TextKey::IdentifierEmpty, locale).to_owned())
     } else {
         Ok(())
     }
@@ -265,12 +319,29 @@ pub async fn watch_start(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<AppSnapshot> {
     authorize_window(&window, CommandOrigin::Main)?;
-    let state = state.inner().clone();
-    let request = async move { state.dispatch_watch_start(CommandSource::IpcMain).await };
-    Ok(match run_detached(request).await {
-        Ok(snapshot) => IpcResult::success(snapshot),
-        Err(error) => IpcResult::failure(error.format_for_user()),
-    })
+    state
+        .ui
+        .query(UiView::Chat, |reply| {
+            UiEvent::UserCommand(UserCommand::WatchStart {
+                source: CommandSource::IpcMain,
+                reply,
+            })
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn companion_emotions_reset(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<AppSnapshot> {
+    let source = main_or_details_source(&window)?;
+    state
+        .ui
+        .query(UiView::Chat, |reply| {
+            UiEvent::UserCommand(UserCommand::EmotionsReset { source, reply })
+        })
+        .await
 }
 
 #[tauri::command]
@@ -279,20 +350,15 @@ pub async fn watch_stop(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<AppSnapshot> {
     authorize_window(&window, CommandOrigin::Main)?;
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcMain,
-        DesktopCommand::WatchStop,
-        move |context| async move {
-            match handler_state.command_stop_watch(&context).await {
-                Ok(snapshot) => IpcResult::success(snapshot),
-                Err(error) => config_commit_failure(error),
-            }
-        },
-    )
-    .await)
+    state
+        .ui
+        .query(UiView::Chat, |reply| {
+            UiEvent::UserCommand(UserCommand::WatchStop {
+                source: CommandSource::IpcMain,
+                reply,
+            })
+        })
+        .await
 }
 
 #[tauri::command]
@@ -302,34 +368,20 @@ pub async fn chat_send(
     payload: ChatPayload,
 ) -> TauriIpcResult<String> {
     authorize_window(&window, CommandOrigin::Main)?;
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcMain,
-        DesktopCommand::ChatSend,
-        move |context| async move {
-            if payload.message.trim().is_empty() {
-                return IpcResult::failure("message は空にできません");
-            }
-            if payload.message.len() > MAX_CHAT_BYTES {
-                return IpcResult::failure("message が長すぎます");
-            }
-            match handler_state
-                .command_enqueue_user_message(
-                    &context,
-                    payload.message,
-                    Vec::new(),
-                    crate::state::user_input::UserMessageAttachment::None,
-                )
-                .await
-            {
-                Ok(id) => IpcResult::success(id),
-                Err(error) => IpcResult::failure(error),
-            }
+    Ok(
+        match state
+            .ui
+            .request(
+                crate::ui_events::UiView::Chat,
+                crate::ui_events::UiEvent::SubmitChat(payload.message),
+            )
+            .await
+        {
+            Ok(Some(id)) => IpcResult::success(id),
+            Ok(None) => IpcResult::failure("チャットの受付結果がありません"),
+            Err(error) => IpcResult::failure(error),
         },
     )
-    .await)
 }
 
 #[tauri::command]
@@ -338,20 +390,12 @@ pub async fn chat_cancel(
     window: WebviewWindow,
 ) -> TauriIpcResult<String> {
     authorize_window(&window, CommandOrigin::Main)?;
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcMain,
-        DesktopCommand::ChatCancel,
-        move |_context| async move {
-            match handler_state.core_runtime().cancel_user_message().await {
-                Ok(id) => IpcResult::success(id),
-                Err(error) => IpcResult::failure(error.to_string()),
-            }
-        },
-    )
-    .await)
+    state
+        .ui
+        .query(UiView::Chat, |reply| {
+            UiEvent::UserCommand(UserCommand::ChatCancel(reply))
+        })
+        .await
 }
 #[tauri::command]
 pub async fn chat_retry(
@@ -359,20 +403,12 @@ pub async fn chat_retry(
     window: WebviewWindow,
 ) -> TauriIpcResult<String> {
     authorize_window(&window, CommandOrigin::Main)?;
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcMain,
-        DesktopCommand::ChatRetry,
-        move |_context| async move {
-            match handler_state.core_runtime().retry_user_message().await {
-                Ok(id) => IpcResult::success(id),
-                Err(error) => IpcResult::failure(error.to_string()),
-            }
-        },
-    )
-    .await)
+    state
+        .ui
+        .query(UiView::Chat, |reply| {
+            UiEvent::UserCommand(UserCommand::ChatRetry(reply))
+        })
+        .await
 }
 #[tauri::command]
 pub async fn config_get(
@@ -384,21 +420,45 @@ pub async fn config_get(
 }
 
 #[tauri::command]
-pub async fn model_popup_open(window: WebviewWindow, app: AppHandle) -> TauriIpcResult<()> {
+pub async fn model_popup_open(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
-    Ok(match crate::windows::show_model_popup(&app) {
-        Ok(()) => IpcResult::success(()),
-        Err(error) => IpcResult::failure(format!("モデル変更を開けません: {error}")),
-    })
+    Ok(
+        match state
+            .ui
+            .request(
+                crate::ui_events::UiView::Chat,
+                crate::ui_events::UiEvent::OpenModelPicker,
+            )
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(message) => IpcResult::failure(message),
+        },
+    )
 }
 
 #[tauri::command]
-pub async fn model_popup_close(window: WebviewWindow) -> TauriIpcResult<()> {
+pub async fn model_popup_close(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::ModelPopup)?;
-    Ok(match window.hide() {
-        Ok(()) => IpcResult::success(()),
-        Err(error) => IpcResult::failure(format!("モデル変更を閉じられません: {error}")),
-    })
+    Ok(
+        match state
+            .ui
+            .request(
+                crate::ui_events::UiView::ModelPicker,
+                crate::ui_events::UiEvent::Close,
+            )
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(message) => IpcResult::failure(message),
+        },
+    )
 }
 
 #[tauri::command]
@@ -417,37 +477,36 @@ pub async fn model_popup_config_update(
     patch: Value,
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::ModelPopup)?;
-    if let Err(error) = validate_model_popup_patch(&patch) {
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    if let Err(error) = validate_model_popup_patch(&patch, locale) {
         return Ok(IpcResult::failure(error));
     }
-    Ok(update_config_for_source(
-        state.inner().clone(),
-        patch,
-        None,
-        None,
-        CommandSource::IpcModelPopup,
-    )
-    .await)
+    state
+        .ui
+        .query(UiView::ModelPicker, |reply| {
+            UiEvent::UserCommand(UserCommand::ModelSave { patch, reply })
+        })
+        .await
 }
 
-fn validate_model_popup_patch(patch: &Value) -> Result<(), String> {
+fn validate_model_popup_patch(patch: &Value, locale: Locale) -> Result<(), String> {
     let Some(root) = patch.as_object() else {
-        return Err("モデル設定はオブジェクトで指定してください".to_owned());
+        return Err(text(TextKey::ModelConfigObject, locale).to_owned());
     };
     if root.len() != 1 || !root.contains_key("companion") {
-        return Err("モデル設定では companion だけを変更できます".to_owned());
+        return Err(text(TextKey::ModelConfigCompanionOnly, locale).to_owned());
     }
     let Some(companion) = root.get("companion").and_then(Value::as_object) else {
-        return Err("モデル設定の companion はオブジェクトで指定してください".to_owned());
+        return Err(text(TextKey::ModelConfigCompanionObject, locale).to_owned());
     };
     if companion.is_empty() {
-        return Err("モデル設定を一つ以上指定してください".to_owned());
+        return Err(text(TextKey::ModelConfigRequired, locale).to_owned());
     }
     if companion
         .keys()
         .any(|key| !matches!(key.as_str(), "provider" | "model" | "effort"))
     {
-        return Err("モデル設定では provider、model、effort だけを変更できます".to_owned());
+        return Err(text(TextKey::ModelConfigKeys, locale).to_owned());
     }
     Ok(())
 }
@@ -461,6 +520,7 @@ pub async fn config_update(
     base_config_revision: Option<u64>,
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::Main)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     let normalized_avatar = match avatar_image {
         None => None,
         Some(bytes) => {
@@ -469,14 +529,16 @@ pub async fn config_update(
             match normalized {
                 Ok(Ok(bytes)) => Some(bytes),
                 Ok(Err(error)) => {
-                    return Ok(IpcResult::failure(format!(
-                        "アバター画像を処理できません: {error}"
-                    )))
+                    return Ok(IpcResult::failure(
+                        text(TextKey::AvatarImageProcessFailed, locale)
+                            .replace("{error}", &error.to_string()),
+                    ))
                 }
                 Err(error) => {
-                    return Ok(IpcResult::failure(format!(
-                        "アバター画像の処理を完了できません: {error}"
-                    )))
+                    return Ok(IpcResult::failure(
+                        text(TextKey::AvatarImageProcessingIncomplete, locale)
+                            .replace("{error}", &error.to_string()),
+                    ))
                 }
             }
         }
@@ -484,7 +546,10 @@ pub async fn config_update(
     let mut patch = patch;
     if normalized_avatar.is_some() {
         if let Err(error) = force_avatar_path(&mut patch) {
-            return Ok(config_failure(error));
+            return Ok(config_failure_for_locale(
+                error,
+                Locale::from_config(&state.runtime_config().ui.language),
+            ));
         }
     }
     Ok(update_config_for_source(
@@ -497,7 +562,7 @@ pub async fn config_update(
     .await)
 }
 
-async fn update_config_for_source(
+pub(crate) async fn update_config_for_source(
     state: Arc<DesktopState>,
     patch: Value,
     normalized_avatar: Option<Vec<u8>>,
@@ -505,14 +570,25 @@ async fn update_config_for_source(
     source: CommandSource,
 ) -> IpcResult<Config> {
     let signed = crate::state::signed_build();
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     let persisted = match coosenpai_core::config::load_config(&state.paths) {
         Ok(config) => config,
         Err(ConfigError::Json(_)) => state.runtime_config(),
-        Err(error) => return config_failure(error),
+        Err(error) => {
+            return config_failure_for_locale(
+                error,
+                Locale::from_config(&state.runtime_config().ui.language),
+            )
+        }
     };
     let command = match command_for_config_patch(&persisted, &patch, signed) {
         Ok(command) => command,
-        Err(error) => return config_failure(error),
+        Err(error) => {
+            return config_failure_for_locale(
+                error,
+                Locale::from_config(&state.runtime_config().ui.language),
+            )
+        }
     };
     let staged_avatar = match normalized_avatar {
         None => None,
@@ -525,12 +601,16 @@ async fn update_config_for_source(
             match staged {
                 Ok(Ok(staged)) => Some(staged),
                 Ok(Err(error)) => {
-                    return IpcResult::failure(format!("アバター画像を一時保存できません: {error}"))
+                    return IpcResult::failure(
+                        text(TextKey::AvatarImageStageFailed, locale)
+                            .replace("{error}", &error.to_string()),
+                    )
                 }
                 Err(error) => {
-                    return IpcResult::failure(format!(
-                        "アバター画像の一時保存を完了できません: {error}"
-                    ))
+                    return IpcResult::failure(
+                        text(TextKey::AvatarImageStageIncomplete, locale)
+                            .replace("{error}", &error.to_string()),
+                    )
                 }
             }
         }
@@ -575,7 +655,10 @@ async fn update_config_for_source(
         };
         match result {
             Ok(outcome) => IpcResult::success_with_issues(outcome.config, outcome.issues),
-            Err(error) => config_commit_failure(error),
+            Err(error) => config_commit_failure_for_locale(
+                error,
+                Locale::from_config(&handler_state.runtime_config().ui.language),
+            ),
         }
     })
     .await
@@ -585,7 +668,7 @@ fn force_avatar_path(patch: &mut Value) -> Result<(), ConfigError> {
     let Some(object) = patch.as_object_mut() else {
         return Err(ConfigError::Validation(vec![ConfigValidationIssue {
             path: "config".to_owned(),
-            message: "設定はオブジェクトで指定してください。".to_owned(),
+            message: text(TextKey::ConfigInvalidObject, Locale::Ja).to_owned(),
         }]));
     };
     let ui = object
@@ -594,7 +677,7 @@ fn force_avatar_path(patch: &mut Value) -> Result<(), ConfigError> {
     let Some(ui) = ui.as_object_mut() else {
         return Err(ConfigError::Validation(vec![ConfigValidationIssue {
             path: "ui".to_owned(),
-            message: "設定はオブジェクトで指定してください。".to_owned(),
+            message: text(TextKey::ConfigInvalidObject, Locale::Ja).to_owned(),
         }]));
     };
     ui.insert(
@@ -612,7 +695,10 @@ pub async fn companion_assertiveness_set(
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::Main)?;
     if !matches!(payload.value.as_str(), "low" | "normal" | "high") {
-        return Ok(IpcResult::failure("積極性の値が不正です"));
+        return Ok(IpcResult::failure(text(
+            TextKey::AssertivenessInvalid,
+            Locale::from_config(&state.runtime_config().ui.language),
+        )));
     }
     let value = payload.value;
     let state = state.inner().clone();
@@ -640,7 +726,11 @@ pub async fn persona_list(
     authorize_window(&window, CommandOrigin::Main)?;
     Ok(match crate::factory::persona_options(&state.paths) {
         Ok(values) => IpcResult::success(values),
-        Err(error) => IpcResult::failure(error),
+        Err(error) => IpcResult::failure(localize_error_message(
+            &error,
+            TextKey::PersonaOperationFailed,
+            Locale::from_config(&state.runtime_config().ui.language),
+        )),
     })
 }
 
@@ -681,27 +771,61 @@ pub async fn persona_select(
     payload: PersonaSelectPayload,
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.persona)?;
-    if !crate::factory::persona_names(&state.paths).contains(&payload.persona) {
-        return Ok(IpcResult::failure("選択した性格が見つかりません"));
+    validate_id_for_locale(
+        &payload.persona,
+        Locale::from_config(&state.runtime_config().ui.language),
+    )?;
+    Ok(select_persona_for_view(state.inner().clone(), payload.persona, false).await)
+}
+#[tauri::command]
+pub async fn persona_select_setup(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: PersonaSelectPayload,
+) -> TauriIpcResult<Config> {
+    authorize_window(&window, CommandOrigin::Main)?;
+    validate_id_for_locale(
+        &payload.persona,
+        Locale::from_config(&state.runtime_config().ui.language),
+    )?;
+    Ok(select_persona_for_view(state.inner().clone(), payload.persona, true).await)
+}
+pub(crate) async fn select_persona_for_view(
+    state: Arc<DesktopState>,
+    persona: String,
+    setup: bool,
+) -> IpcResult<Config> {
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    if !crate::factory::persona_names(&state.paths).contains(&persona) {
+        return IpcResult::failure(text(TextKey::PersonaNotFound, locale));
     }
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
+    let handler = state.clone();
+    dispatch_result(
         state,
         CommandSource::IpcMain,
-        DesktopCommand::PersonaSelect,
+        if setup {
+            DesktopCommand::SetupPersonaSelect
+        } else {
+            DesktopCommand::PersonaSelect
+        },
         move |context| async move {
-            match handler_state
-                .command_switch_persona(&context, payload.persona)
-                .await
-            {
+            let result = if setup {
+                handler
+                    .command_switch_persona_during_setup(&context, persona)
+                    .await
+            } else {
+                handler.command_switch_persona(&context, persona).await
+            };
+            match result {
                 Ok(config) => IpcResult::success(config),
-                Err(error) => config_commit_failure(error),
+                Err(error) => config_commit_failure_for_locale(
+                    error,
+                    Locale::from_config(&handler.runtime_config().ui.language),
+                ),
             }
         },
     )
-    .await)
+    .await
 }
 
 #[tauri::command]
@@ -718,20 +842,30 @@ pub async fn panel_open_system_settings(
         .await;
     Ok(match result {
         Ok(()) => IpcResult::success(()),
-        _ => IpcResult::failure("システム設定を開けませんでした"),
+        _ => IpcResult::failure(text(
+            TextKey::SystemSettingsOpenFailed,
+            Locale::from_config(&state.runtime_config().ui.language),
+        )),
     })
 }
 
 #[tauri::command]
 pub async fn app_relaunch(window: WebviewWindow, app: AppHandle) -> Result<IpcResult<()>, String> {
     authorize_window(&window, CommandOrigin::Main)?;
-    app.restart();
+    app.request_restart();
+    Ok(IpcResult::success(()))
 }
 
 #[tauri::command]
 pub async fn app_exit(window: WebviewWindow, app: AppHandle) -> Result<IpcResult<()>, String> {
     authorize_window(&window, CommandOrigin::Main)?;
-    app.exit(0);
+    let state = app
+        .try_state::<Arc<DesktopState>>()
+        .ok_or("UIの状態がありません")?;
+    state.ui.input(
+        crate::ui_events::UiView::Chat,
+        crate::ui_events::UiEvent::Shutdown,
+    );
     Ok(IpcResult::success(()))
 }
 
@@ -742,9 +876,28 @@ pub async fn advice_selected(
     payload: IdPayload,
 ) -> Result<IpcResult<()>, String> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.id)?;
-    crate::windows::show_main(&app);
-    let _ = app.emit("coosenpai:conversation:selected", payload.id);
+    let locale = app
+        .try_state::<Arc<DesktopState>>()
+        .map(|state| Locale::from_config(&state.runtime_config().ui.language))
+        .unwrap_or(Locale::Ja);
+    validate_id_for_locale(&payload.id, locale)?;
+    let state = app
+        .try_state::<Arc<DesktopState>>()
+        .ok_or("UIの状態がありません")?;
+    state
+        .ui
+        .request(
+            crate::ui_events::UiView::Chat,
+            crate::ui_events::UiEvent::OpenMain,
+        )
+        .await?;
+    state
+        .ui
+        .request(
+            crate::ui_events::UiView::Chat,
+            crate::ui_events::UiEvent::SelectConversation(payload.id),
+        )
+        .await?;
     Ok(IpcResult::success(()))
 }
 
@@ -754,38 +907,22 @@ pub async fn settings_requested(
     app: AppHandle,
 ) -> Result<IpcResult<()>, String> {
     authorize_window(&window, CommandOrigin::Main)?;
-    if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-        let state = state.inner().clone();
-        let handler_state = state.clone();
-        let result = dispatch_result(
-            state,
-            CommandSource::IpcMain,
-            DesktopCommand::SettingsOpen,
-            move |context| async move {
-                match handler_state
-                    .command_tutorial_settings_opened(&context)
-                    .await
-                {
-                    Ok(true) => {
-                        handler_state.refresh_speech_input_devices().await;
-                        crate::windows::show_main(&handler_state.app);
-                        let _ = handler_state.app.emit("coosenpai:settings:requested", ());
-                        IpcResult::success(())
-                    }
-                    Ok(false) => IpcResult::failure("性格の案内までお待ちください"),
-                    Err(error) => IpcResult::failure(error.to_string()),
-                }
-            },
-        )
-        .await;
-        if matches!(&result, IpcResult::Failure { .. }) {
-            return Ok(result);
-        }
-        return Ok(result);
-    }
-    crate::windows::show_main(&app);
-    let _ = app.emit("coosenpai:settings:requested", ());
-    Ok(IpcResult::success(()))
+    let state = app
+        .try_state::<Arc<DesktopState>>()
+        .ok_or("UIの状態がありません")?;
+    Ok(
+        match state
+            .ui
+            .request(
+                crate::ui_events::UiView::Chat,
+                crate::ui_events::UiEvent::OpenSettings,
+            )
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(message) => IpcResult::failure(message),
+        },
+    )
 }
 
 #[tauri::command]
@@ -796,8 +933,9 @@ pub async fn chat_input_state(
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
     state
-        .input_active
-        .store(payload.active, std::sync::atomic::Ordering::Release);
+        .ui
+        .request(UiView::Chat, UiEvent::ChatInputActive(payload.active))
+        .await?;
     Ok(IpcResult::success(()))
 }
 
@@ -807,48 +945,28 @@ pub async fn unread_read(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
-    state.publish(|snapshot| snapshot.unread_count = 0).await;
+    state.ui.request(UiView::Chat, UiEvent::UnreadRead).await?;
     Ok(IpcResult::success(()))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BubbleClickPayload {
+    id: String,
+    #[serde(default)]
+    body: bool,
+}
+
 #[tauri::command]
-pub async fn bubble_click(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, Arc<DesktopState>>,
-    payload: IdPayload,
+pub async fn bubble_click<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    state: State<'_, crate::bubble_click::BubbleClickState>,
+    payload: BubbleClickPayload,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Bubble)?;
-    validate_id(&payload.id)?;
-    let _ = state.logger.write(
-        "INFO",
-        &format!("吹き出しのクリックを受け付けました: id={}", payload.id),
-    );
-    let open_url = state.bubbles.lock().await.open_url_for(&payload.id);
-    if let Some(url) = open_url {
-        if url != crate::update_check::RELEASES_URL {
-            return Err("吹き出しの外部リンクが不正です".to_owned());
-        }
-        crate::platform::open_external_url(&url)
-            .await
-            .map_err(|error| error.to_string())?;
-        bubbles::complete_action(state.inner().as_ref(), &payload.id).await;
-        let _ = state.logger.write(
-            "INFO",
-            &format!("吹き出しから外部リンクを開きました: id={}", payload.id),
-        );
-        return Ok(IpcResult::success(()));
-    }
-    crate::windows::show_main_now(&app).await?;
-    bubbles::complete_action(state.inner().as_ref(), &payload.id).await;
-    let _ = state.logger.write(
-        "INFO",
-        &format!(
-            "吹き出しからメインウィンドウを表示しました: id={}",
-            payload.id
-        ),
-    );
-    let _ = app.emit("coosenpai:conversation:selected", payload.id);
+    let host = &state.inner().0;
+    validate_id_for_locale(&payload.id, host.locale())?;
+    host.input_click(payload.id, payload.body).await?;
     Ok(IpcResult::success(()))
 }
 
@@ -859,7 +977,10 @@ pub async fn bubble_hover(
     payload: BubbleHoverPayload,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Bubble)?;
-    validate_id(&payload.id)?;
+    validate_id_for_locale(
+        &payload.id,
+        Locale::from_config(&state.runtime_config().ui.language),
+    )?;
     bubbles::set_hover(state.inner().clone(), &payload.id, payload.hovering).await;
     Ok(IpcResult::success(()))
 }
@@ -870,38 +991,19 @@ pub async fn bubble_focus(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Bubble)?;
-    let focus_result = crate::windows::focus_bubble_if_capture_popup_idle(
-        state.popup_focus_gate(),
-        || async { state.capture_popup_read().await.can_focus() },
-        || {
-            window
-                .set_focusable(true)
-                .map_err(|_| "吹き出しをキーボード操作できる状態にできません".to_owned())
-        },
-        || async {
-            let main = state
-                .app
-                .get_webview_window("main")
-                .ok_or_else(|| "吹き出しをキーボード操作できる状態にできません".to_owned())?;
-            crate::windows::activate_and_focus_window(&main, &window, state.bubble_focus_events())
-                .await
-                .map_err(|error| error.message)
+    Ok(
+        match state
+            .ui
+            .request(
+                crate::ui_events::UiView::Bubble,
+                crate::ui_events::UiEvent::RequestFocus,
+            )
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(error) => IpcResult::failure(error),
         },
     )
-    .await
-    .map_err(|_| "吹き出しをキーボード操作できる状態にできません".to_owned())?;
-    let Some(focus_result) = focus_result else {
-        return Ok(IpcResult::success(()));
-    };
-    if focus_result.focused {
-        let _ = state
-            .logger
-            .write("INFO", "吹き出しのキーボードフォーカスを確認しました");
-        return Ok(IpcResult::success(()));
-    }
-    let details = crate::windows::focus_failure_details(&window, focus_result);
-    crate::windows::log_focus_failure(state.logger.as_ref(), "吹き出し", &details);
-    Err("吹き出しをキーボード操作できる状態にできません".to_owned())
 }
 
 #[tauri::command]
@@ -910,30 +1012,10 @@ pub async fn bubble_passthrough(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Bubble)?;
-    if state.capture_popup_read().await.can_focus() {
-        return Ok(IpcResult::success(()));
-    }
-    let generation = BUBBLE_PASSTHROUGH_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
-    window
-        .set_ignore_cursor_events(true)
-        .map_err(|_| "吹き出しのクリック透過を有効にできません".to_owned())?;
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            if BUBBLE_PASSTHROUGH_GENERATION.load(Ordering::Relaxed) != generation {
-                return;
-            }
-            if state.capture_popup_read().await.can_focus() {
-                continue;
-            }
-            let record_count = state.bubbles.lock().await.snapshot().records.len();
-            if crate::bubbles::accepts_pointer(record_count) {
-                let _ = window.set_ignore_cursor_events(false);
-            }
-            return;
-        }
-    });
+    state.ui.input(
+        crate::ui_events::UiView::Bubble,
+        crate::ui_events::UiEvent::PointerPassthrough,
+    );
     Ok(IpcResult::success(()))
 }
 
@@ -945,40 +1027,58 @@ pub async fn bubble_resize(
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Bubble)?;
     if !valid_bubble_height(payload.height) {
-        return Ok(IpcResult::failure("吹き出しの高さが範囲外です"));
+        return Ok(IpcResult::failure(text(
+            TextKey::BubbleHeightOutOfRange,
+            Locale::from_config(&state.runtime_config().ui.language),
+        )));
     }
-    let _window_sync = state.bubble_window_sync.lock().await;
-    let config = state.runtime_config();
-    let preview = state.bubbles.lock().await.appearance_preview();
-    let position = preview
-        .as_ref()
-        .map_or(config.bubble.position.as_str(), |value| {
-            value.position.as_str()
-        });
-    let display = preview
-        .as_ref()
-        .map_or(config.bubble.display.as_str(), |value| {
-            value.display.as_str()
-        });
-    Ok(
-        match crate::window_bubble::resize(&window, payload.height, position, display) {
-            Ok(()) => IpcResult::success(()),
-            Err(_) => IpcResult::failure("吹き出しの大きさを変更できません"),
-        },
-    )
+    state.ui.input(
+        crate::ui_events::UiView::Bubble,
+        crate::ui_events::UiEvent::BubbleResize(payload.height),
+    );
+    Ok(IpcResult::success(()))
 }
 
 fn valid_bubble_height(height: u32) -> bool {
     (80..=680).contains(&height)
 }
 
-pub(super) fn config_commit_failure<T: Serialize>(error: ConfigCommitError) -> IpcResult<T> {
+pub(super) fn runtime_failure_for_locale<T: Serialize>(
+    error: RuntimeError,
+    locale: Locale,
+) -> IpcResult<T> {
+    IpcResult::failure(error.format_for_locale(locale))
+}
+
+pub(super) fn config_commit_failure_for_locale<T: Serialize>(
+    error: ConfigCommitError,
+    locale: Locale,
+) -> IpcResult<T> {
     IpcResult::Failure {
         ok: false,
         error: IpcError {
-            message: error.format_for_user(),
-            issues: error.issues(),
+            message: error.format_for_locale(locale),
+            issues: error.issues_for_locale(locale),
         },
     }
 }
 
+#[tauri::command]
+pub async fn model_picker_input(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: crate::model_picker_presenter::ModelPickerInput,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::ModelPopup)?;
+    if matches!(&payload, crate::model_picker_presenter::ModelPickerInput::Model { value } | crate::model_picker_presenter::ModelPickerInput::Effort { value } | crate::model_picker_presenter::ModelPickerInput::Provider { value } if value.len() > MAX_CHAT_BYTES)
+    {
+        return Err("入力文が長すぎます".into());
+    }
+    state.ui.input(
+        UiView::ModelPicker,
+        UiEvent::ModelPicker(crate::model_picker_presenter::ModelPickerEvent::Input(
+            payload,
+        )),
+    );
+    Ok(IpcResult::success(()))
+}

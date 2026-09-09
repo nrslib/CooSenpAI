@@ -31,6 +31,7 @@ pub(super) enum OperationLane {
 pub(super) enum OperationCancellationReason {
     Other,
     ConfigUpdate,
+    UserInput,
 }
 
 #[derive(Clone)]
@@ -45,14 +46,16 @@ impl OperationCancellationCause {
         }
     }
 
-    pub(super) fn mark(&self, reason: OperationCancellationReason) {
+    pub(super) fn mark(&self, reason: OperationCancellationReason) -> bool {
         let mut current = self
             .reason
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if current.is_none() {
-            *current = Some(reason);
+        if current.is_some() {
+            return false;
         }
+        *current = Some(reason);
+        true
     }
 
     pub(super) fn get(&self) -> Option<OperationCancellationReason> {
@@ -270,7 +273,6 @@ pub(super) struct RunningOperation {
     pub(super) operation_input_ids: Vec<String>,
     user_append: Option<UserAppendControl>,
     kind: RunningOperationKind,
-    preempted_for_user: bool,
 }
 
 pub(super) enum CancellationResult {
@@ -323,7 +325,7 @@ pub(super) enum OperationOutcome {
     },
     CompanionMailbox {
         companion: Box<CompanionAgent>,
-        result: Result<CompanionResponse, RuntimeError>,
+        result: Result<Option<CompanionResponse>, RuntimeError>,
     },
     User {
         companion: Box<CompanionAgent>,
@@ -359,7 +361,6 @@ impl RunningOperation {
             operation_input_ids: Vec::new(),
             user_append: None,
             kind: RunningOperationKind::Other,
-            preempted_for_user: false,
         }
     }
 
@@ -379,7 +380,6 @@ impl RunningOperation {
             operation_input_ids: Vec::new(),
             user_append: None,
             kind: RunningOperationKind::Observer,
-            preempted_for_user: false,
         }
     }
 
@@ -398,7 +398,6 @@ impl RunningOperation {
             operation_input_ids: Vec::new(),
             user_append: None,
             kind: RunningOperationKind::ProactiveCompanion,
-            preempted_for_user: false,
         }
     }
 
@@ -418,23 +417,29 @@ impl RunningOperation {
             operation_input_ids,
             user_append,
             kind: RunningOperationKind::User,
-            preempted_for_user: false,
         }
     }
 
     pub(super) fn preempt_for_user(&mut self) -> bool {
-        if self.kind == RunningOperationKind::User {
+        if self.kind == RunningOperationKind::User || self.cancellation.is_cancelled() {
             return false;
         }
-        self.preempted_for_user = true;
-        self.cancellation_cause
-            .mark(OperationCancellationReason::Other);
+        if !self
+            .cancellation_cause
+            .mark(OperationCancellationReason::UserInput)
+        {
+            return false;
+        }
         self.cancellation.cancel();
         true
     }
 
     pub(super) fn is_user(&self) -> bool {
         self.kind == RunningOperationKind::User
+    }
+
+    pub(super) fn is_proactive(&self) -> bool {
+        self.kind == RunningOperationKind::ProactiveCompanion
     }
 
     pub(super) fn is_observer(&self) -> bool {
@@ -446,7 +451,7 @@ impl RunningOperation {
     }
 
     pub(super) fn was_preempted_for_user(&self) -> bool {
-        self.preempted_for_user
+        self.cancellation_reason() == Some(OperationCancellationReason::UserInput)
     }
 
     pub(super) fn cancellation_reason(&self) -> Option<OperationCancellationReason> {
@@ -576,6 +581,7 @@ fn cancellation_error(reason: OperationCancellationReason) -> RuntimeError {
     match reason {
         OperationCancellationReason::Other => RuntimeError::Closed,
         OperationCancellationReason::ConfigUpdate => RuntimeError::ConfigUpdateCancelled,
+        OperationCancellationReason::UserInput => RuntimeError::ObservationCancelled,
     }
 }
 

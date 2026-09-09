@@ -5,8 +5,10 @@ use crate::outbox::DurableOutbox;
 use crate::persistence::{
     atomic_write_json, set_private_directory_mode, PersistenceError, SiblingLock,
 };
+use crate::provider::ProviderSession;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
@@ -18,6 +20,26 @@ mod conversation_archive_pending;
 struct ConversationGeneration {
     schema_version: u8,
     generation: u64,
+    /// 旧 snapshot では未保存。未指定時は generation を選択中とみなす。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    started_at: BTreeMap<u64, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    summaries: BTreeMap<u64, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    sessions: BTreeMap<u64, ProviderSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationGenerationSummary {
+    pub generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_message: Option<String>,
+    pub entry_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +50,8 @@ struct ResetIntent {
     target_generation: u64,
     target_user_operation_generation: u64,
     retention_days: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     carry_pending_inputs: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,19 +77,213 @@ impl ResetIntent {
 }
 
 pub fn current_conversation_generation(paths: &ConfigPaths) -> Result<u64, PersistenceError> {
-    match fs::read(&paths.conversation_generation) {
-        Ok(bytes) => {
-            let value: ConversationGeneration = serde_json::from_slice(&bytes)?;
-            if value.schema_version != 1 {
-                return Err(PersistenceError::Invalid(
-                    "conversation generation の schemaVersion が不正です".to_owned(),
-                ));
-            }
-            Ok(value.generation)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
+    with_read_generation_state(paths, |state| {
+        Ok(state.selected_generation.unwrap_or(state.generation))
+    })
+}
+
+pub fn latest_conversation_generation(paths: &ConfigPaths) -> Result<u64, PersistenceError> {
+    with_read_generation_state(paths, |state| Ok(state.generation))
+}
+
+pub fn list_conversation_generations(
+    paths: &ConfigPaths,
+) -> Result<Vec<ConversationGenerationSummary>, PersistenceError> {
+    fs::create_dir_all(&paths.state)?;
+    let _lock = SiblingLock::acquire(&generation_lock_path(paths))?;
+    let state = read_generation_state(paths)?;
+    let entries = crate::companion_storage::load_all_conversation_with_generations(paths)?;
+    let mut entries_by_generation = BTreeMap::<u64, Vec<crate::state::ConversationEntry>>::new();
+    for (generation, entry) in entries {
+        entries_by_generation
+            .entry(generation)
+            .or_default()
+            .push(entry);
     }
+
+    let mut generations = BTreeSet::from([0, state.generation]);
+    if let Some(selected) = state.selected_generation {
+        generations.insert(selected);
+    }
+    generations.extend(state.started_at.keys().copied());
+    generations.extend(state.summaries.keys().copied());
+    generations.extend(state.sessions.keys().copied());
+    generations.extend(entries_by_generation.keys().copied());
+
+    generations
+        .into_iter()
+        .map(|generation| {
+            let entries = entries_by_generation
+                .remove(&generation)
+                .unwrap_or_default();
+            let first = entries.first();
+            let started_at = state
+                .started_at
+                .get(&generation)
+                .cloned()
+                .or_else(|| first.map(|entry| entry.created_at.clone()));
+            Ok(ConversationGenerationSummary {
+                generation,
+                started_at,
+                first_message: first.map(|entry| truncate_first_message(&entry.message)),
+                entry_count: entries.len(),
+            })
+        })
+        .collect()
+}
+
+pub fn select_conversation_generation(
+    paths: &ConfigPaths,
+    generation: u64,
+) -> Result<(), PersistenceError> {
+    fs::create_dir_all(&paths.state)?;
+    let _lock = SiblingLock::acquire(&generation_lock_path(paths))?;
+    let mut state = read_generation_state(paths)?;
+    if generation > state.generation {
+        return Err(PersistenceError::Invalid(format!(
+            "選択する会話世代が存在しません: {generation}"
+        )));
+    }
+    let entries = crate::companion_storage::load_all_conversation_with_generations(paths)?;
+    let known = generation == 0
+        || generation == state.generation
+        || state.started_at.contains_key(&generation)
+        || state.summaries.contains_key(&generation)
+        || state.sessions.contains_key(&generation)
+        || entries.iter().any(|(value, _)| *value == generation);
+    if !known {
+        return Err(PersistenceError::Invalid(format!(
+            "選択する会話世代が存在しません: {generation}"
+        )));
+    }
+    state.selected_generation = Some(generation);
+    write_generation_state(paths, &state)
+}
+
+pub(crate) fn load_conversation_summary(
+    paths: &ConfigPaths,
+    generation: u64,
+) -> Result<Option<String>, PersistenceError> {
+    with_read_generation_state(paths, |state| Ok(state.summaries.get(&generation).cloned()))
+}
+
+pub(crate) fn save_conversation_summary(
+    paths: &ConfigPaths,
+    generation: u64,
+    summary: &str,
+) -> Result<(), PersistenceError> {
+    with_generation_state(paths, |state| {
+        state.summaries.insert(generation, summary.to_owned());
+        Ok(())
+    })
+}
+
+pub(crate) fn load_conversation_session(
+    paths: &ConfigPaths,
+    generation: u64,
+) -> Result<Option<ProviderSession>, PersistenceError> {
+    with_read_generation_state(paths, |state| Ok(state.sessions.get(&generation).cloned()))
+}
+
+pub(crate) fn save_conversation_session(
+    paths: &ConfigPaths,
+    generation: u64,
+    session: Option<&ProviderSession>,
+) -> Result<(), PersistenceError> {
+    with_generation_state(paths, |state| {
+        match session {
+            Some(session) => {
+                state.sessions.insert(generation, session.clone());
+            }
+            None => {
+                state.sessions.remove(&generation);
+            }
+        }
+        Ok(())
+    })
+}
+
+fn with_generation_state<R>(
+    paths: &ConfigPaths,
+    operation: impl FnOnce(&mut ConversationGeneration) -> Result<R, PersistenceError>,
+) -> Result<R, PersistenceError> {
+    fs::create_dir_all(&paths.state)?;
+    let _lock = SiblingLock::acquire(&generation_lock_path(paths))?;
+    let mut state = read_generation_state(paths)?;
+    let result = operation(&mut state)?;
+    validate_generation_state(&state)?;
+    write_generation_state(paths, &state)?;
+    Ok(result)
+}
+
+fn with_read_generation_state<R>(
+    paths: &ConfigPaths,
+    operation: impl FnOnce(&ConversationGeneration) -> Result<R, PersistenceError>,
+) -> Result<R, PersistenceError> {
+    fs::create_dir_all(&paths.state)?;
+    let _lock = SiblingLock::acquire(&generation_lock_path(paths))?;
+    let state = read_generation_state(paths)?;
+    operation(&state)
+}
+
+fn generation_lock_path(paths: &ConfigPaths) -> PathBuf {
+    conversation_generation_lock_path(&paths.state)
+}
+
+pub fn conversation_generation_lock_path(state_directory: &Path) -> PathBuf {
+    state_directory.join(".conversation-generation.lock")
+}
+
+fn read_generation_state(paths: &ConfigPaths) -> Result<ConversationGeneration, PersistenceError> {
+    let state = match fs::read(&paths.conversation_generation) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ConversationGeneration {
+            schema_version: 1,
+            generation: 0,
+            selected_generation: None,
+            started_at: BTreeMap::new(),
+            summaries: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+        },
+        Err(error) => return Err(error.into()),
+    };
+    validate_generation_state(&state)?;
+    Ok(state)
+}
+
+fn validate_generation_state(state: &ConversationGeneration) -> Result<(), PersistenceError> {
+    if state.schema_version != 1 {
+        return Err(PersistenceError::Invalid(
+            "conversation generation の schemaVersion が不正です".to_owned(),
+        ));
+    }
+    if state
+        .selected_generation
+        .is_some_and(|generation| generation > state.generation)
+        || state
+            .started_at
+            .keys()
+            .chain(state.summaries.keys())
+            .chain(state.sessions.keys())
+            .any(|generation| *generation > state.generation)
+    {
+        return Err(PersistenceError::Invalid(
+            "conversation generation の世代参照が不正です".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn write_generation_state(
+    paths: &ConfigPaths,
+    state: &ConversationGeneration,
+) -> Result<(), PersistenceError> {
+    atomic_write_json(&paths.conversation_generation, state)?;
+    sync_directory(&paths.state)
+}
+
+fn truncate_first_message(message: &str) -> String {
+    message.chars().take(80).collect()
 }
 
 pub fn reset_conversation(
@@ -133,12 +351,13 @@ where
     let intent = ResetIntent {
         schema_version: 1,
         archive_key: unique_archive_key(paths, archive_key(now)),
-        target_generation: current_conversation_generation(paths)?.saturating_add(1),
+        target_generation: latest_conversation_generation(paths)?.saturating_add(1),
         target_user_operation_generation: storage
             .load_cursor()?
             .user_operation_generation
             .saturating_add(1),
         retention_days,
+        started_at: Some(now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         carry_pending_inputs,
         operation: Some(operation),
         legacy_archive: None,
@@ -208,7 +427,12 @@ fn execute_intent(paths: &ConfigPaths, intent: &ResetIntent) -> Result<(), Persi
         carried_pending_inputs
     };
     storage.update_cursor(|cursor| {
-        *cursor = Default::default();
+        *cursor = crate::companion_storage::CursorSnapshot {
+            emotion_updates_enabled: cursor.emotion_updates_enabled,
+            companion_emotions: cursor.companion_emotions,
+            emotion_epoch: cursor.emotion_epoch,
+            ..Default::default()
+        };
         cursor.user_operation_generation = intent.target_user_operation_generation;
         if intent.carry_pending_inputs {
             for pending in pending_inputs {
@@ -220,19 +444,26 @@ fn execute_intent(paths: &ConfigPaths, intent: &ResetIntent) -> Result<(), Persi
                 cursor.user_epoch = cursor.user_epoch.checked_add(1).ok_or_else(|| {
                     PersistenceError::Invalid("user epoch が上限に達しました".to_owned())
                 })?;
+                input.conversation_generation = intent.target_generation;
                 input.user_seq = next_user_seq;
                 cursor.pending_inputs.push(PendingInput::UserMessage(input));
             }
         }
         Ok(())
     })?;
-    atomic_write_json(
-        &paths.conversation_generation,
-        &ConversationGeneration {
-            schema_version: 1,
-            generation: intent.target_generation,
-        },
-    )?;
+    let started_at = intent
+        .started_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    with_generation_state(paths, |state| {
+        state.generation = state.generation.max(intent.target_generation);
+        state.selected_generation = Some(intent.target_generation);
+        state
+            .started_at
+            .entry(intent.target_generation)
+            .or_insert(started_at);
+        Ok(())
+    })?;
     if intent.operation() == ResetOperation::Archive {
         sync_tree_directories(&archive)?;
         sync_directory(&paths.archive)?;

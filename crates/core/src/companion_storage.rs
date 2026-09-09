@@ -1,8 +1,8 @@
 pub use crate::companion_cursor::{
     ActiveTurnCommit, CursorSnapshot, ObservationAttempt, ObservationConsumption,
-    PendingAttachmentFailure, PendingDelivery, PendingInput, PendingUserMessage,
-    PreparedUserResponse, TurnCommitKind, TurnCommitPhase, TurnCommitRecoveryAttempt,
-    UserDispatchLease,
+    PendingAttachmentFailure, PendingDelivery, PendingInput, PendingObservation,
+    PendingUserMessage, PreparedUserResponse, TurnCommitKind, TurnCommitPhase,
+    TurnCommitRecoveryAttempt, UserDispatchLease,
 };
 use crate::config::ConfigPaths;
 use crate::frame_buffer::FrameBuffer;
@@ -10,6 +10,7 @@ use crate::logging::FileLogger;
 use crate::outbox::DurableOutbox;
 use crate::persistence::{atomic_write_json, PersistenceError, SiblingLock};
 use crate::ports::RuntimeLogger;
+use crate::provider::ProviderSession;
 use crate::state::{
     parse_observation, ConversationEntry, ConversationRole, ObservationRecord, PendingFrameContext,
     DEFAULT_OBSERVATION_LIMITS,
@@ -74,10 +75,12 @@ pub struct CompanionStorage {
     pub turn_commit_quarantine_path: PathBuf,
     pub log_path: PathBuf,
     pub conversation_directory: PathBuf,
+    pub archive_directory: PathBuf,
     pub provider_directory: PathBuf,
     pub attachments_directory: PathBuf,
     frame_buffer: FrameBuffer,
     pub retention_days: u64,
+    pinned_conversation_generation: Option<u64>,
 }
 
 impl CompanionStorage {
@@ -101,11 +104,29 @@ impl CompanionStorage {
                 .join("failed/companion-active-turn-commits.jsonl"),
             log_path: paths.log.clone(),
             conversation_directory: paths.conversation.clone(),
+            archive_directory: paths.archive.clone(),
             provider_directory: paths.provider.clone(),
             attachments_directory: paths.attachments.clone(),
             frame_buffer: FrameBuffer::new(paths.frame_buffer.clone()),
             retention_days,
+            pinned_conversation_generation: None,
         }
+    }
+
+    pub fn for_conversation_generation(
+        paths: &ConfigPaths,
+        retention_days: u64,
+        generation: u64,
+    ) -> Self {
+        let mut storage = Self::from_paths(paths, retention_days);
+        storage.pinned_conversation_generation = Some(generation);
+        storage
+    }
+
+    pub(crate) fn pin_conversation_generation(&mut self) -> Result<u64, PersistenceError> {
+        let generation = self.conversation_generation()?;
+        self.pinned_conversation_generation = Some(generation);
+        Ok(generation)
     }
 
     pub fn outbox(&self) -> DurableOutbox {
@@ -129,6 +150,9 @@ impl CompanionStorage {
     }
 
     pub fn conversation_generation(&self) -> Result<u64, PersistenceError> {
+        if let Some(generation) = self.pinned_conversation_generation {
+            return Ok(generation);
+        }
         let paths = ConfigPaths::from_root(
             self.state_directory
                 .parent()
@@ -139,8 +163,9 @@ impl CompanionStorage {
     }
 
     pub fn load_conversation(&self) -> Result<Vec<ConversationEntry>, PersistenceError> {
+        let directories = self.conversation_directories()?;
         load_recent_conversation(
-            &self.conversation_directory,
+            &directories,
             MAX_CONVERSATION_ENTRIES,
             self.conversation_generation()?,
         )
@@ -179,11 +204,8 @@ impl CompanionStorage {
     }
 
     pub(crate) fn load_all_conversation(&self) -> Result<Vec<ConversationEntry>, PersistenceError> {
-        load_recent_conversation(
-            &self.conversation_directory,
-            usize::MAX,
-            self.conversation_generation()?,
-        )
+        let directories = self.conversation_directories()?;
+        load_recent_conversation(&directories, usize::MAX, self.conversation_generation()?)
     }
 
     pub(crate) fn completed_user_response(
@@ -216,6 +238,10 @@ impl CompanionStorage {
         crate::persistence::JsonlStore::new(path).append(&value)?;
         self.prune_retention_at(now)?;
         Ok(())
+    }
+
+    fn conversation_directories(&self) -> Result<Vec<PathBuf>, PersistenceError> {
+        conversation_log_directories(&self.conversation_directory, &self.archive_directory)
     }
 
     pub fn append_conversation_once_at(
@@ -276,36 +302,11 @@ impl CompanionStorage {
     }
 
     pub fn load_summary(&self) -> Result<Option<String>, PersistenceError> {
-        let path = self.conversation_directory.join("summary.json");
-        let lock_path = path.with_file_name(".summary.lock");
-        let _lock = SiblingLock::acquire(&lock_path)?;
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let value: Value = serde_json::from_slice(&bytes)?;
-        let object = value.as_object().ok_or_else(|| {
-            PersistenceError::Invalid("conversation summary が object ではありません".to_owned())
-        })?;
-        if object.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
-            return Err(PersistenceError::Invalid(
-                "conversation summary の schemaVersion が不正です".to_owned(),
-            ));
-        }
-        let summary = object
-            .get("text")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| PersistenceError::Invalid("conversation summary が空です".to_owned()))?;
-        let summary_generation = object
-            .get("conversationGeneration")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if summary_generation != self.conversation_generation()? {
-            return Ok(None);
-        }
-        Ok(Some(summary.to_owned()))
+        let paths = self.config_paths()?;
+        crate::conversation_archive::load_conversation_summary(
+            &paths,
+            self.conversation_generation()?,
+        )
     }
 
     pub fn save_summary(&self, summary: &str) -> Result<(), PersistenceError> {
@@ -314,34 +315,169 @@ impl CompanionStorage {
                 "conversation summary が空です".to_owned(),
             ));
         }
-        let path = self.conversation_directory.join("summary.json");
-        let lock_path = path.with_file_name(".summary.lock");
-        let _lock = SiblingLock::acquire(&lock_path)?;
-        let generation = self.conversation_generation()?;
-        atomic_write_json(
-            &path,
-            &serde_json::json!({
-                "schemaVersion": 1,
-                "text": summary,
-                "conversationGeneration": generation,
-            }),
-        )?;
-        Ok(())
+        let paths = self.config_paths()?;
+        crate::conversation_archive::save_conversation_summary(
+            &paths,
+            self.conversation_generation()?,
+            summary,
+        )
+    }
+
+    pub(crate) fn load_session(&self) -> Result<Option<ProviderSession>, PersistenceError> {
+        let paths = self.config_paths()?;
+        crate::conversation_archive::load_conversation_session(
+            &paths,
+            self.conversation_generation()?,
+        )
+    }
+
+    pub(crate) fn save_session(
+        &self,
+        session: Option<&ProviderSession>,
+    ) -> Result<(), PersistenceError> {
+        let paths = self.config_paths()?;
+        crate::conversation_archive::save_conversation_session(
+            &paths,
+            self.conversation_generation()?,
+            session,
+        )
+    }
+
+    fn config_paths(&self) -> Result<ConfigPaths, PersistenceError> {
+        let root = self
+            .state_directory
+            .parent()
+            .ok_or_else(|| PersistenceError::Invalid("state directory が不正です".to_owned()))?
+            .to_path_buf();
+        Ok(ConfigPaths::from_root(root))
     }
 
     pub fn load_cursor(&self) -> Result<CursorSnapshot, PersistenceError> {
-        read_cursor(
+        let cursor = read_cursor(
             &self.cursor_path,
             &self.pending_quarantine_path,
             &self.pending_delivery_quarantine_path,
             &self.turn_commit_quarantine_path,
             &self.log_path,
-        )
+        )?;
+        Ok(self.scope_cursor_to_generation(cursor))
+    }
+
+    pub(crate) fn scope_cursor_to_generation(&self, mut cursor: CursorSnapshot) -> CursorSnapshot {
+        let Some(generation) = self.pinned_conversation_generation else {
+            return cursor;
+        };
+        cursor.user_dispatch = cursor
+            .user_dispatch
+            .filter(|lease| lease.conversation_generation == generation);
+        cursor.active_turn_commit = cursor
+            .active_turn_commit
+            .filter(|commit| commit.conversation_generation == generation);
+        cursor.pending_inputs.retain(|input| match input {
+            PendingInput::UserMessage(input) => input.conversation_generation == generation,
+        });
+        cursor
+            .pending
+            .retain(|observation| observation.conversation_generation == generation);
+        cursor
+            .pending_deliveries
+            .retain(|delivery| delivery.conversation_generation == generation);
+
+        cursor
+    }
+
+    fn merge_cursor_generation(
+        &self,
+        cursor: &mut CursorSnapshot,
+        mut scoped_cursor: CursorSnapshot,
+        generation: u64,
+    ) -> Result<(), PersistenceError> {
+        if cursor
+            .user_dispatch
+            .as_ref()
+            .is_some_and(|lease| lease.conversation_generation != generation)
+            && scoped_cursor.user_dispatch.is_some()
+        {
+            return Err(PersistenceError::Invalid(
+                "別世代の user dispatch lease が実行中です".to_owned(),
+            ));
+        }
+        if cursor
+            .active_turn_commit
+            .as_ref()
+            .is_some_and(|commit| commit.conversation_generation != generation)
+            && scoped_cursor.active_turn_commit.is_some()
+        {
+            return Err(PersistenceError::Invalid(
+                "別世代の active turn commit が実行中です".to_owned(),
+            ));
+        }
+        // 感情状態は会話世代ではなく Coo 全体に属する cursor root state。
+        cursor.emotion_updates_enabled = scoped_cursor.emotion_updates_enabled;
+        cursor.companion_emotions = scoped_cursor.companion_emotions;
+        cursor.emotion_epoch = scoped_cursor.emotion_epoch;
+        cursor.user_operation_generation = scoped_cursor.user_operation_generation;
+        cursor.user_epoch = scoped_cursor.user_epoch;
+        cursor.next_user_seq = scoped_cursor.next_user_seq;
+        cursor.next_dispatch_seq = scoped_cursor.next_dispatch_seq;
+        cursor.ids = scoped_cursor.ids.clone();
+        cursor.failed = scoped_cursor.failed.clone();
+        cursor.observation_attempts = scoped_cursor.observation_attempts.clone();
+        cursor.cancelled_input_ids = scoped_cursor.cancelled_input_ids.clone();
+        cursor.pending_frame_contexts = scoped_cursor.pending_frame_contexts.clone();
+        cursor.consumed_frame_context_ids = scoped_cursor.consumed_frame_context_ids.clone();
+        cursor.observation_consumptions = scoped_cursor.observation_consumptions.clone();
+        cursor.turn_commit_recovery_attempts = scoped_cursor.turn_commit_recovery_attempts.clone();
+        cursor.pending_inputs.retain(|input| match input {
+            PendingInput::UserMessage(input) => input.conversation_generation != generation,
+        });
+        cursor
+            .pending_inputs
+            .append(&mut scoped_cursor.pending_inputs);
+        cursor
+            .pending
+            .retain(|observation| observation.conversation_generation != generation);
+        cursor.pending.append(&mut scoped_cursor.pending);
+        cursor
+            .pending_deliveries
+            .retain(|delivery| delivery.conversation_generation != generation);
+        cursor
+            .pending_deliveries
+            .append(&mut scoped_cursor.pending_deliveries);
+        cursor.pending_inputs.sort_by_key(|input| match input {
+            PendingInput::UserMessage(input) => input.user_seq,
+        });
+
+        if cursor
+            .user_dispatch
+            .as_ref()
+            .is_some_and(|lease| lease.conversation_generation == generation)
+            || scoped_cursor.user_dispatch.is_some()
+        {
+            cursor.user_dispatch = scoped_cursor.user_dispatch;
+        }
+        if cursor
+            .active_turn_commit
+            .as_ref()
+            .is_some_and(|commit| commit.conversation_generation == generation)
+            || scoped_cursor.active_turn_commit.is_some()
+        {
+            cursor.active_turn_commit = scoped_cursor.active_turn_commit;
+        }
+        Ok(())
     }
 
     pub fn update_cursor<R>(
         &self,
         update: impl FnOnce(&mut CursorSnapshot) -> Result<R, PersistenceError>,
+    ) -> Result<R, PersistenceError> {
+        self.update_cursor_cancellable(update, None)
+    }
+
+    fn update_cursor_cancellable<R>(
+        &self,
+        update: impl FnOnce(&mut CursorSnapshot) -> Result<R, PersistenceError>,
+        publication: Option<&crate::persistence::PublicationGate>,
     ) -> Result<R, PersistenceError> {
         let lock = cursor_lock_path(&self.cursor_path);
         let _guard = SiblingLock::acquire(&lock)?;
@@ -352,10 +488,16 @@ impl CompanionStorage {
             &self.turn_commit_quarantine_path,
             &self.log_path,
         )?;
-        let result = update(&mut cursor)?;
+        let mut scoped_cursor = self.scope_cursor_to_generation(cursor.clone());
+        let result = update(&mut scoped_cursor)?;
+        if let Some(generation) = self.pinned_conversation_generation {
+            self.merge_cursor_generation(&mut cursor, scoped_cursor, generation)?;
+        } else {
+            cursor = scoped_cursor;
+        }
         #[cfg(test)]
         failpoints::before_cursor_write(&self.cursor_path)?;
-        write_cursor_locked(&self.cursor_path, &cursor)?;
+        write_cursor_locked_cancellable(&self.cursor_path, &cursor, publication)?;
         Ok(result)
     }
 
@@ -365,6 +507,12 @@ impl CompanionStorage {
         &self,
         mut input: PendingUserMessage,
     ) -> Result<PendingUserMessage, PersistenceError> {
+        let conversation_generation = self.conversation_generation()?;
+        if input.conversation_generation != conversation_generation {
+            return Err(PersistenceError::Invalid(
+                "user input の会話世代が現在の runtime と一致しません".to_owned(),
+            ));
+        }
         self.update_cursor(|cursor| {
             if let Some(existing) = cursor
                 .pending_inputs
@@ -398,8 +546,19 @@ impl CompanionStorage {
         &self,
         max_inputs: usize,
     ) -> Result<(UserDispatchLease, Vec<PendingUserMessage>), PersistenceError> {
+        let conversation_generation = self.conversation_generation()?;
         self.update_cursor(|cursor| {
             if let Some(lease) = cursor.user_dispatch.clone() {
+                if lease.conversation_generation != conversation_generation {
+                    return Ok((
+                        UserDispatchLease {
+                            conversation_generation,
+                            dispatch_seq: 0,
+                            input_ids: Vec::new(),
+                        },
+                        Vec::new(),
+                    ));
+                }
                 let inputs = lease_inputs(cursor, &lease)?;
                 return Ok((lease, inputs));
             }
@@ -407,7 +566,10 @@ impl CompanionStorage {
                 .pending_inputs
                 .iter()
                 .filter_map(|pending| match pending {
-                    PendingInput::UserMessage(input) if !input.attachment_is_terminal() => {
+                    PendingInput::UserMessage(input)
+                        if input.conversation_generation == conversation_generation
+                            && !input.attachment_is_terminal() =>
+                    {
                         Some(input.clone())
                     }
                     _ => None,
@@ -418,6 +580,7 @@ impl CompanionStorage {
             if inputs.is_empty() {
                 return Ok((
                     UserDispatchLease {
+                        conversation_generation,
                         dispatch_seq: 0,
                         input_ids: Vec::new(),
                     },
@@ -429,6 +592,7 @@ impl CompanionStorage {
             })?;
             cursor.next_dispatch_seq = dispatch_seq;
             let lease = UserDispatchLease {
+                conversation_generation,
                 dispatch_seq,
                 input_ids: inputs.iter().map(|input| input.id.clone()).collect(),
             };
@@ -468,41 +632,57 @@ impl CompanionStorage {
     }
 
     pub fn pending_observations(&self) -> Result<Vec<ObservationRecord>, PersistenceError> {
-        Ok(self.load_cursor()?.pending)
+        Ok(self
+            .load_cursor()?
+            .pending
+            .into_iter()
+            .map(|pending| pending.observation)
+            .collect())
     }
 
     pub fn register_pending_frame_context(
         &self,
         context: PendingFrameContext,
     ) -> Result<(), PersistenceError> {
-        self.update_cursor(|cursor| {
-            if cursor
-                .consumed_frame_context_ids
-                .iter()
-                .any(|id| id == &context.id)
-            {
-                return Ok(());
-            }
-            if let Some(existing) = cursor
-                .pending_frame_contexts
-                .iter()
-                .find(|existing| existing.id == context.id)
-            {
-                if existing != &context {
-                    return Err(PersistenceError::Invalid(
-                        "処理待ち画面の ID が重複しています".to_owned(),
-                    ));
+        self.register_pending_frame_context_cancellable(context, None)
+    }
+
+    pub fn register_pending_frame_context_cancellable(
+        &self,
+        context: PendingFrameContext,
+        publication: Option<&crate::persistence::PublicationGate>,
+    ) -> Result<(), PersistenceError> {
+        self.update_cursor_cancellable(
+            |cursor| {
+                if cursor
+                    .consumed_frame_context_ids
+                    .iter()
+                    .any(|id| id == &context.id)
+                {
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            cursor.pending_frame_contexts.push(context);
-            if cursor.pending_frame_contexts.len() > 100 {
-                cursor
+                if let Some(existing) = cursor
                     .pending_frame_contexts
-                    .drain(..cursor.pending_frame_contexts.len() - 100);
-            }
-            Ok(())
-        })
+                    .iter()
+                    .find(|existing| existing.id == context.id)
+                {
+                    if existing != &context {
+                        return Err(PersistenceError::Invalid(
+                            "処理待ち画面の ID が重複しています".to_owned(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                cursor.pending_frame_contexts.push(context);
+                if cursor.pending_frame_contexts.len() > 100 {
+                    cursor
+                        .pending_frame_contexts
+                        .drain(..cursor.pending_frame_contexts.len() - 100);
+                }
+                Ok(())
+            },
+            publication,
+        )
     }
 
     pub(crate) fn observation_claimed_by_user(
@@ -561,9 +741,11 @@ impl CompanionStorage {
         turn_id: &str,
         target_ids: &[String],
     ) -> Result<bool, PersistenceError> {
+        let conversation_generation = self.conversation_generation()?;
         self.update_cursor(|cursor| {
             if cursor.user_epoch != expected_user_epoch
-                || !runnable_inputs(&cursor.pending_inputs).is_empty()
+                || !runnable_inputs_for_generation(&cursor.pending_inputs, conversation_generation)
+                    .is_empty()
             {
                 return Ok(false);
             }
@@ -574,6 +756,7 @@ impl CompanionStorage {
                 return Ok(false);
             }
             cursor.active_turn_commit = Some(ActiveTurnCommit {
+                conversation_generation,
                 turn_id: turn_id.to_owned(),
                 kind: TurnCommitKind::Proactive,
                 phase: TurnCommitPhase::Reserved,
@@ -610,12 +793,14 @@ impl CompanionStorage {
         expected_user_epoch: u64,
         turn_id: &str,
     ) -> Result<bool, PersistenceError> {
+        let conversation_generation = self.conversation_generation()?;
         self.update_cursor(|cursor| {
             if cursor.user_epoch != expected_user_epoch
                 || cursor.active_turn_commit.as_ref().is_none_or(|commit| {
                     commit.turn_id != turn_id || commit.kind != TurnCommitKind::Proactive
                 })
-                || !runnable_inputs(&cursor.pending_inputs).is_empty()
+                || !runnable_inputs_for_generation(&cursor.pending_inputs, conversation_generation)
+                    .is_empty()
             {
                 return Ok(false);
             }
@@ -681,6 +866,12 @@ impl CompanionStorage {
             let Some(commit) = cursor.active_turn_commit.clone() else {
                 return Ok(None);
             };
+            if self
+                .pinned_conversation_generation
+                .is_some_and(|generation| commit.conversation_generation != generation)
+            {
+                return Ok(None);
+            }
             if commit.phase == TurnCommitPhase::Reserved {
                 if commit.kind == TurnCommitKind::User {
                     if let Some(lease) = cursor.user_dispatch.as_ref() {
@@ -754,6 +945,7 @@ impl CompanionStorage {
         operation_generation: Option<u64>,
         turn_id: &str,
     ) -> Result<bool, PersistenceError> {
+        let conversation_generation = self.conversation_generation()?;
         self.update_cursor(|cursor| {
             if operation_generation
                 .is_some_and(|generation| cursor.user_operation_generation != generation)
@@ -770,6 +962,7 @@ impl CompanionStorage {
                 return Ok(false);
             }
             cursor.active_turn_commit = Some(ActiveTurnCommit {
+                conversation_generation,
                 turn_id: turn_id.to_owned(),
                 kind: TurnCommitKind::User,
                 phase: TurnCommitPhase::Reserved,
@@ -820,6 +1013,11 @@ fn lease_inputs(
                 "user dispatch lease の入力がありません".to_owned(),
             ));
         };
+        if input.conversation_generation != lease.conversation_generation {
+            return Err(PersistenceError::Invalid(
+                "user dispatch lease の会話世代が一致しません".to_owned(),
+            ));
+        }
         if input.attachment_is_terminal() {
             return Err(PersistenceError::Invalid(
                 "terminal input が dispatch lease にあります".to_owned(),
@@ -830,11 +1028,17 @@ fn lease_inputs(
     Ok(inputs)
 }
 
-fn runnable_inputs(inputs: &[PendingInput]) -> Vec<&PendingInput> {
+fn runnable_inputs_for_generation(
+    inputs: &[PendingInput],
+    conversation_generation: u64,
+) -> Vec<&PendingInput> {
     inputs
         .iter()
         .filter(|input| match input {
-            PendingInput::UserMessage(input) => !input.attachment_is_terminal(),
+            PendingInput::UserMessage(input) => {
+                input.conversation_generation == conversation_generation
+                    && !input.attachment_is_terminal()
+            }
         })
         .collect()
 }
@@ -938,6 +1142,9 @@ fn complete_cursor_observation(
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CursorDocument<'a> {
+    emotion_updates_enabled: bool,
+    companion_emotions: crate::emotion::EmotionState,
+    emotion_epoch: u64,
     schema_version: u64,
     user_operation_generation: u64,
     user_epoch: u64,
@@ -946,7 +1153,7 @@ struct CursorDocument<'a> {
     user_dispatch: &'a Option<UserDispatchLease>,
     active_turn_commit: &'a Option<ActiveTurnCommit>,
     ids: &'a [String],
-    pending: &'a [ObservationRecord],
+    pending: &'a [PendingObservation],
     failed: &'a [String],
     observation_attempts: &'a [ObservationAttempt],
     cancelled_input_ids: &'a [String],
@@ -961,6 +1168,12 @@ struct CursorDocument<'a> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawCursorDocument {
+    #[serde(default = "emotion_updates_enabled_default")]
+    emotion_updates_enabled: bool,
+    #[serde(default)]
+    companion_emotions: crate::emotion::EmotionState,
+    #[serde(default)]
+    emotion_epoch: u64,
     #[serde(default)]
     schema_version: Option<u64>,
     user_operation_generation: u64,
@@ -990,6 +1203,10 @@ struct RawCursorDocument {
     observation_consumptions: Vec<ObservationConsumption>,
     #[serde(default)]
     turn_commit_recovery_attempts: Vec<TurnCommitRecoveryAttempt>,
+}
+
+fn emotion_updates_enabled_default() -> bool {
+    true
 }
 
 fn read_cursor(
@@ -1026,6 +1243,9 @@ fn read_cursor_locked(
     };
     let raw: RawCursorDocument = serde_json::from_slice(&bytes)?;
     let RawCursorDocument {
+        emotion_updates_enabled,
+        companion_emotions,
+        emotion_epoch,
         schema_version,
         user_operation_generation,
         mut user_epoch,
@@ -1086,7 +1306,7 @@ fn read_cursor_locked(
     let mut pending = Vec::new();
     let mut quarantined = Vec::new();
     for value in raw_pending {
-        match parse_observation(value.clone(), DEFAULT_OBSERVATION_LIMITS) {
+        match parse_pending_observation(value.clone()) {
             Ok(observation) => pending.push(observation),
             Err(_) => quarantined.push(value),
         }
@@ -1179,6 +1399,9 @@ fn read_cursor_locked(
         atomic_write_json(
             path,
             &CursorDocument {
+                emotion_updates_enabled,
+                companion_emotions,
+                emotion_epoch,
                 schema_version: CURSOR_SCHEMA_VERSION,
                 user_operation_generation,
                 user_epoch,
@@ -1220,6 +1443,9 @@ fn read_cursor_locked(
         }
     }
     Ok(CursorSnapshot {
+        emotion_updates_enabled,
+        companion_emotions,
+        emotion_epoch,
         user_operation_generation,
         user_epoch,
         next_user_seq,
@@ -1240,7 +1466,32 @@ fn read_cursor_locked(
     })
 }
 
-fn write_cursor_locked(path: &Path, cursor: &CursorSnapshot) -> Result<(), PersistenceError> {
+fn parse_pending_observation(value: Value) -> Result<PendingObservation, PersistenceError> {
+    let mut value = value;
+    let object = value.as_object_mut().ok_or_else(|| {
+        PersistenceError::Invalid(
+            "pending observation は JSON object でなければなりません".to_owned(),
+        )
+    })?;
+    let conversation_generation = match object.remove("conversationGeneration") {
+        Some(value) => value.as_u64().ok_or_else(|| {
+            PersistenceError::Invalid("pending observation の世代が不正です".to_owned())
+        })?,
+        None => 0,
+    };
+    let observation = parse_observation(value, DEFAULT_OBSERVATION_LIMITS)
+        .map_err(|error| PersistenceError::Invalid(error.to_string()))?;
+    Ok(PendingObservation::new(
+        conversation_generation,
+        observation,
+    ))
+}
+
+fn write_cursor_locked_cancellable(
+    path: &Path,
+    cursor: &CursorSnapshot,
+    publication: Option<&crate::persistence::PublicationGate>,
+) -> Result<(), PersistenceError> {
     let ids = retain_ids(cursor.ids.clone());
     let failed = retain_ids(cursor.failed.clone());
     let observation_attempts = cursor.observation_attempts.clone();
@@ -1260,9 +1511,12 @@ fn write_cursor_locked(path: &Path, cursor: &CursorSnapshot) -> Result<(), Persi
     validate_observation_consumptions(&cursor.observation_consumptions)?;
     validate_observation_attempts(&observation_attempts)?;
     validate_pending_deliveries(&cursor.pending_deliveries)?;
-    atomic_write_json(
+    crate::persistence::atomic_write_json_cancellable(
         path,
         &CursorDocument {
+            emotion_updates_enabled: cursor.emotion_updates_enabled,
+            companion_emotions: cursor.companion_emotions,
+            emotion_epoch: cursor.emotion_epoch,
             schema_version: CURSOR_SCHEMA_VERSION,
             user_operation_generation: cursor.user_operation_generation,
             user_epoch: cursor.user_epoch,
@@ -1291,39 +1545,20 @@ fn write_cursor_locked(path: &Path, cursor: &CursorSnapshot) -> Result<(), Persi
             observation_consumptions: &cursor.observation_consumptions,
             turn_commit_recovery_attempts: &cursor.turn_commit_recovery_attempts,
         },
+        publication,
     )?;
     Ok(())
 }
 
 fn load_recent_conversation(
-    directory: &Path,
+    directories: &[PathBuf],
     limit: usize,
     generation: u64,
 ) -> Result<Vec<ConversationEntry>, PersistenceError> {
-    if !directory.exists() {
-        return Ok(Vec::new());
-    }
-    let paths = daily_conversation_paths(directory)?;
     let mut entries = Vec::new();
-    for path in paths {
-        let lock_path = path.with_file_name(format!(
-            ".{}.lock",
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| {
-                    PersistenceError::Invalid("conversation のファイル名が不正です".to_owned())
-                })?
-        ));
-        let _guard = SiblingLock::acquire(&lock_path)?;
-        let file = File::open(path)?;
-        for line in BufReader::new(file).lines() {
-            let line = line?;
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if let Some(entry) = conversation_entry_from_storage_value(value, generation) {
-                entries.push(entry);
-            }
+    for (stored_generation, entry) in load_conversation_entries_with_generations(directories)? {
+        if stored_generation == generation {
+            entries.push(entry);
         }
     }
     if entries.len() > limit {
@@ -1333,21 +1568,62 @@ fn load_recent_conversation(
     }
 }
 
+pub(crate) fn load_all_conversation_with_generations(
+    paths: &ConfigPaths,
+) -> Result<Vec<(u64, ConversationEntry)>, PersistenceError> {
+    let directories = conversation_log_directories(&paths.conversation, &paths.archive)?;
+    load_conversation_entries_with_generations(&directories)
+}
+
+fn load_conversation_entries_with_generations(
+    directories: &[PathBuf],
+) -> Result<Vec<(u64, ConversationEntry)>, PersistenceError> {
+    let mut entries = Vec::new();
+    for directory in directories {
+        for path in daily_conversation_paths(directory)? {
+            let lock_path = path.with_file_name(format!(
+                ".{}.lock",
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| {
+                        PersistenceError::Invalid("conversation のファイル名が不正です".to_owned())
+                    })?
+            ));
+            let _guard = SiblingLock::acquire(&lock_path)?;
+            let file = File::open(path)?;
+            for line in BufReader::new(file).lines() {
+                let line = line?;
+                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if let Some(entry) = conversation_entry_with_generation_from_storage_value(value) {
+                    entries.push(entry);
+                }
+            }
+        }
+    }
+    Ok(entries)
+}
+
 pub(crate) fn conversation_entry_from_storage_value(
-    mut value: Value,
+    value: Value,
     generation: u64,
 ) -> Option<ConversationEntry> {
+    let (stored_generation, entry) = conversation_entry_with_generation_from_storage_value(value)?;
+    (stored_generation == generation).then_some(entry)
+}
+
+pub(crate) fn conversation_entry_with_generation_from_storage_value(
+    mut value: Value,
+) -> Option<(u64, ConversationEntry)> {
     let stored_generation = value
         .get("conversationGeneration")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    if stored_generation != generation {
-        return None;
-    }
     value.as_object_mut()?.remove("conversationGeneration");
     let entry = serde_json::from_value::<ConversationEntry>(value).ok()?;
     validate_conversation_entry(&entry).ok()?;
-    Some(entry)
+    Some((stored_generation, entry))
 }
 
 fn conversation_storage_value(
@@ -1367,6 +1643,9 @@ fn conversation_storage_value(
 }
 
 fn daily_conversation_paths(directory: &Path) -> Result<Vec<PathBuf>, PersistenceError> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
     let mut paths = fs::read_dir(directory)?
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -1392,6 +1671,25 @@ fn daily_conversation_paths(directory: &Path) -> Result<Vec<PathBuf>, Persistenc
     Ok(paths)
 }
 
+pub(crate) fn conversation_log_directories(
+    conversation_directory: &Path,
+    archive_directory: &Path,
+) -> Result<Vec<PathBuf>, PersistenceError> {
+    let mut directories = if archive_directory.exists() {
+        fs::read_dir(archive_directory)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .map(|entry| entry.path().join("conversation"))
+            .filter(|directory| directory.is_dir())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    directories.sort();
+    directories.push(conversation_directory.to_owned());
+    Ok(directories)
+}
+
 fn validate_pending_inputs(
     inputs: &[PendingInput],
     next_user_seq: u64,
@@ -1401,6 +1699,8 @@ fn validate_pending_inputs(
     let mut previous_seq = 0;
     for input in inputs {
         let PendingInput::UserMessage(input) = input;
+        crate::hearing_context::validate_contexts(&input.hearing_context)
+            .map_err(|error| PersistenceError::Invalid(error.to_owned()))?;
         if input.id.is_empty()
             || !ids.insert(input.id.as_str())
             || input.user_seq == 0
@@ -1504,6 +1804,11 @@ fn validate_user_dispatch(
                 "user dispatch lease の入力がありません".to_owned(),
             ));
         };
+        if input.conversation_generation != lease.conversation_generation {
+            return Err(PersistenceError::Invalid(
+                "user dispatch lease の会話世代が一致しません".to_owned(),
+            ));
+        }
         if input.attachment_is_terminal() || input.user_seq <= last_seq {
             return Err(PersistenceError::Invalid(
                 "user dispatch lease の順序が不正です".to_owned(),
@@ -1514,7 +1819,10 @@ fn validate_user_dispatch(
     let runnable_prefix = pending_inputs
         .iter()
         .filter_map(|pending| match pending {
-            PendingInput::UserMessage(input) if !input.attachment_is_terminal() => {
+            PendingInput::UserMessage(input)
+                if input.conversation_generation == lease.conversation_generation
+                    && !input.attachment_is_terminal() =>
+            {
                 Some(input.id.as_str())
             }
             _ => None,
@@ -1567,6 +1875,14 @@ fn validate_active_turn_commit(
         ));
     }
     let target_inputs = target_inputs.into_iter().flatten().collect::<Vec<_>>();
+    if target_inputs
+        .iter()
+        .any(|input| input.conversation_generation != commit.conversation_generation)
+    {
+        return Err(PersistenceError::Invalid(
+            "active TurnCommit の会話世代が一致しません".to_owned(),
+        ));
+    }
     let has_prepared = target_inputs
         .iter()
         .any(|input| input.prepared_response.is_some());
@@ -1584,7 +1900,9 @@ fn validate_active_turn_commit(
         ));
     }
     let lease_matches = user_dispatch.as_ref().is_some_and(|lease| {
-        Some(lease.dispatch_seq) == commit.dispatch_seq && lease.input_ids == commit.target_ids
+        lease.conversation_generation == commit.conversation_generation
+            && Some(lease.dispatch_seq) == commit.dispatch_seq
+            && lease.input_ids == commit.target_ids
     });
     if user_dispatch.is_some() && !lease_matches {
         return Err(PersistenceError::Invalid(

@@ -2,15 +2,14 @@ use crate::companion_assertiveness::TemporaryAssertiveness;
 use crate::companion_storage::CompanionStorage;
 use crate::config::{local_date_at, CompanionConfig, ConfigPaths};
 use crate::debug::DebugStore;
+use crate::locale::Locale;
 use crate::mailbox::{Mailbox, MailboxError};
 use crate::memory::{MemoryContext, MemoryContextError};
 use crate::outbox::OutboxError;
 use crate::persistence::PersistenceError;
 use crate::persona::PersonaProfile;
 use crate::ports::{Clock, OcrPort, RuntimeLogger, SystemClock};
-use crate::prompts::{
-    build_companion_prompt, companion_schema, companion_system_prompt, CompanionPromptData,
-};
+use crate::prompts::{build_companion_prompt, CompanionPromptData};
 use crate::provider::{
     ProviderCall, ProviderClient, ProviderError, ProviderErrorKind, ProviderEventSink,
     ProviderResult, ProviderSession, SessionRequest,
@@ -34,6 +33,8 @@ mod companion_persistence;
 mod companion_reconcile;
 #[path = "companion_delivery.rs"]
 mod delivery;
+#[path = "companion_hearing_context.rs"]
+mod hearing_context;
 #[path = "companion_helpers.rs"]
 mod helpers;
 #[path = "companion_logging.rs"]
@@ -67,11 +68,21 @@ use support::{
     ProviderCallOutcome, ProviderInvocation, ProviderTurn,
 };
 const MAX_CONVERSATION_ENTRIES: usize = 200;
+#[path = "companion_emotions.rs"]
+mod emotions;
 const MAX_PENDING_OBSERVATIONS: usize = 100;
 const MAX_OBSERVATION_ATTEMPTS: u8 = 3;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_request: Option<crate::work::WorkProposal>,
+    #[serde(
+        default,
+        deserialize_with = "crate::emotion::optional_delta",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub emotion_delta: Option<crate::emotion::EmotionDelta>,
     pub emit: bool,
     pub message: Option<String>,
     pub message_kind: String,
@@ -165,6 +176,7 @@ pub struct CompanionAgent {
     pending_session_summary: Option<String>,
     storage: Option<CompanionStorage>,
     storage_loaded: bool,
+    emotions: emotions::CompanionEmotions,
     conversation: Vec<ConversationEntry>,
     completed_observation_ids: HashSet<String>,
     failed_observation_ids: HashSet<String>,
@@ -185,6 +197,7 @@ pub struct CompanionAgent {
     active_user_dispatch: Option<crate::companion_storage::UserDispatchLease>,
     runtime_user_queue:
         Arc<std::sync::Mutex<VecDeque<crate::companion_storage::PendingUserMessage>>>,
+    hearing_context: Arc<std::sync::Mutex<crate::hearing_context::HearingContextBuffer>>,
     pending_delivery_observation_ids: HashSet<String>,
     delivery_ownership: DeliveryOwnership,
     outbox_enqueue_blocked: bool,
@@ -192,11 +205,16 @@ pub struct CompanionAgent {
     pending_context_notice: Option<String>,
     debug_store: Option<DebugStore>,
     attachment_ocr: Option<Arc<dyn OcrPort>>,
+    work_executor: Option<Arc<dyn crate::work::ChatWorkExecutor>>,
     conversation_pruning_enabled: bool,
     temporary_assertiveness: TemporaryAssertiveness,
     proactive_not_before: Option<chrono::DateTime<chrono::Utc>>,
     latest_user_activity_at: Option<chrono::DateTime<chrono::Utc>>,
+    locale: Locale,
 }
+
+#[path = "companion_work.rs"]
+mod work;
 
 struct StorageRecoveryProvider;
 
@@ -234,6 +252,7 @@ impl CompanionAgent {
             pending_session_summary: None,
             storage: None,
             storage_loaded: false,
+            emotions: emotions::CompanionEmotions::default(),
             conversation: Vec::new(),
             completed_observation_ids: HashSet::new(),
             failed_observation_ids: HashSet::new(),
@@ -253,6 +272,7 @@ impl CompanionAgent {
             pending_user_messages: VecDeque::new(),
             active_user_dispatch: None,
             runtime_user_queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            hearing_context: Arc::default(),
             pending_delivery_observation_ids: HashSet::new(),
             delivery_ownership,
             outbox_enqueue_blocked: false,
@@ -260,11 +280,18 @@ impl CompanionAgent {
             pending_context_notice: None,
             debug_store: None,
             attachment_ocr: None,
+            work_executor: None,
             conversation_pruning_enabled: true,
             temporary_assertiveness: TemporaryAssertiveness::default(),
             proactive_not_before: None,
             latest_user_activity_at: None,
+            locale: Locale::Ja,
         }
+    }
+
+    pub fn with_locale(mut self, locale: Locale) -> Self {
+        self.locale = locale;
+        self
     }
 
     pub fn with_persona(
@@ -316,16 +343,21 @@ impl CompanionAgent {
         &self.display_name
     }
 
+    pub(crate) fn conversation_generation(&self) -> Result<u64, CompanionError> {
+        Ok(self
+            .storage
+            .as_ref()
+            .map(CompanionStorage::conversation_generation)
+            .transpose()?
+            .unwrap_or(0))
+    }
+
     pub(crate) fn provider_client(&self) -> Arc<dyn ProviderClient> {
         self.provider.clone()
     }
 
     pub(crate) fn uses_persistent_user_queue(&self) -> bool {
         self.delivery_ownership == DeliveryOwnership::Owner && self.storage.is_some()
-    }
-
-    pub(crate) fn owns_user_queue(&self) -> bool {
-        self.delivery_ownership == DeliveryOwnership::Owner
     }
 
     pub(crate) fn has_pending_user_inputs(&self) -> Result<bool, CompanionError> {
@@ -380,6 +412,8 @@ impl CompanionAgent {
         Ok(storage
             .completed_user_response(input_id)?
             .map(|entry| CompanionResponse {
+                work_request: None,
+                emotion_delta: None,
                 emit: true,
                 message: Some(entry.message),
                 message_kind: "chat".to_owned(),
@@ -504,7 +538,11 @@ impl CompanionAgent {
             mailbox.recover()?;
         }
         #[cfg(test)]
-        crate::runtime::test_barrier::wait("initialization reconcile").await;
+        crate::runtime::test_barrier::wait(&format!(
+            "initialization reconcile: {}",
+            self.display_name()
+        ))
+        .await;
         if self.delivery_ownership == DeliveryOwnership::Owner {
             if let Some(storage) = &self.storage {
                 storage.clear_transient_observation_markers()?;
@@ -575,6 +613,7 @@ impl CompanionAgent {
         if delivery_was_blocked || self.delivery_backpressure_active() {
             self.defer_observations(&observations)?;
             return Ok(CompanionCallOutcome {
+                decision_produced: false,
                 response: silent_response(),
                 data: crate::prompts::CompanionPromptData::default(),
                 observations: Vec::new(),
@@ -592,6 +631,7 @@ impl CompanionAgent {
             .partition::<Vec<_>, _>(ObservationRecord::is_companion_signal);
         if observations.is_empty() {
             return Ok(CompanionCallOutcome {
+                decision_produced: false,
                 response: silent_response(),
                 data: crate::prompts::CompanionPromptData::default(),
                 observations: Vec::new(),
@@ -608,6 +648,7 @@ impl CompanionAgent {
             self.defer_observations(&observations)?;
             self.proactive_not_before = None;
             return Ok(CompanionCallOutcome {
+                decision_produced: false,
                 response: silent_response(),
                 data: crate::prompts::CompanionPromptData::default(),
                 observations: Vec::new(),
@@ -626,6 +667,7 @@ impl CompanionAgent {
             if critical.is_empty() {
                 self.proactive_not_before = quiet_deadline;
                 return Ok(CompanionCallOutcome {
+                    decision_produced: false,
                     response: silent_response(),
                     data: crate::prompts::CompanionPromptData::default(),
                     observations: Vec::new(),
@@ -822,6 +864,16 @@ impl CompanionAgent {
         self.session_calls = 0;
         self.pending_session_summary = None;
         self.needs_session_context = true;
+        if let Some(storage) = &self.storage {
+            if let Err(error) = storage.save_session(None) {
+                if let Some(logger) = &self.logger {
+                    let _ = logger.write(
+                        "WARN",
+                        &format!("会話 session の破棄を保存できませんでした: {error}"),
+                    );
+                }
+            }
+        }
     }
 
     pub(crate) fn discard_proactive_candidate(
@@ -892,18 +944,14 @@ impl CompanionAgent {
             data.observations = observation_values(&observations)?;
             data.last_observation = None;
         }
-        let changed_day = self.refresh_usage(user)?;
-        if changed_day && self.session.is_some() {
-            self.prepare_new_session(cancellation.clone(), user).await?;
-        }
-        if self.session_calls >= self.config.session_max_calls && self.session.is_some() {
-            self.prepare_new_session(cancellation.clone(), user).await?;
-        }
+        self.prepare_call_session(user, cancellation.clone())
+            .await?;
         if !user {
             self.mark_pending(&observations)?;
             if self.proactive_limit_reached() {
                 self.log_proactive_limit_reached()?;
                 return Ok(CompanionCallOutcome {
+                    decision_produced: false,
                     response: silent_response(),
                     data,
                     observations,
@@ -936,6 +984,7 @@ impl CompanionAgent {
         let provider_outcome = self
             .call_provider(
                 ProviderTurn {
+                    work_result: None,
                     data: &data,
                     user,
                     image_paths: &image_paths,
@@ -960,6 +1009,7 @@ impl CompanionAgent {
             }
         }
         Ok(CompanionCallOutcome {
+            decision_produced: true,
             response,
             data,
             observations,
@@ -1000,6 +1050,20 @@ impl CompanionAgent {
         helpers::remember_sent_observations(&mut self.sent_observation_ids, observations);
     }
 
+    async fn prepare_call_session(
+        &mut self,
+        user: bool,
+        cancellation: CancellationToken,
+    ) -> Result<(), CompanionError> {
+        let changed_day = self.refresh_usage(user)?;
+        if self.session.is_some()
+            && (changed_day || self.session_calls >= self.config.session_max_calls)
+        {
+            self.prepare_new_session(cancellation, user).await?;
+        }
+        Ok(())
+    }
+
     async fn prepare_new_session(
         &mut self,
         cancellation: CancellationToken,
@@ -1033,6 +1097,9 @@ impl CompanionAgent {
         self.session = None;
         self.session_calls = 0;
         self.needs_session_context = true;
+        if let Some(storage) = &self.storage {
+            storage.save_session(None)?;
+        }
         Ok(())
     }
 
@@ -1065,7 +1132,10 @@ impl CompanionAgent {
                 prompt: summary_prompt,
                 images: Vec::new(),
                 tools_disabled: true,
-                output_schema: Some(companion_schema()),
+                output_schema: Some(crate::prompts::companion_output_schema(
+                    self.config.emotions_enabled,
+                )),
+                output_validation_schema: Some(crate::prompts::companion_response_schema()),
                 session: provider_session,
                 model: Some(model),
                 effort: Some(effort),

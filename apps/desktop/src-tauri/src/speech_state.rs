@@ -27,9 +27,4 @@ impl SpeechController {
             _ => crate::command_guard::ResourcePhase::Transitioning,
         }
     }
-
-    pub(crate) fn accepts_transient_shortcut_error(&self, generation: u64) -> bool {
-        let lifecycle = self.lifecycle();
-        lifecycle.is_current(generation) && !lifecycle.can_apply_cleanup(generation)
-    }
 }

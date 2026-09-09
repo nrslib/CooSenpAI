@@ -1,7 +1,12 @@
 use super::*;
 
 impl SpeechController {
-    pub(super) fn resolve_input_device(&self, configured: &str) -> (String, Option<String>) {
+
+    pub(super) fn resolve_input_device_for_locale(
+        &self,
+        configured: &str,
+        locale: coosenpai_core::locale::Locale,
+    ) -> (String, Option<String>) {
         if configured == "default" {
             return ("default".to_owned(), None);
         }
@@ -11,11 +16,23 @@ impl SpeechController {
             }
             Ok(_) => (
                 "default".to_owned(),
-                Some("選択したマイクが見つからないため、システム既定を使います".to_owned()),
+                Some(
+                    coosenpai_core::locale::text(
+                        coosenpai_core::locale::TextKey::SpeechInputDeviceFallback,
+                        locale,
+                    )
+                    .to_owned(),
+                ),
             ),
             Err(_) => (
                 "default".to_owned(),
-                Some("マイク一覧を取得できないため、システム既定を使います".to_owned()),
+                Some(
+                    coosenpai_core::locale::text(
+                        coosenpai_core::locale::TextKey::SpeechInputDeviceListFallback,
+                        locale,
+                    )
+                    .to_owned(),
+                ),
             ),
         }
     }
@@ -25,27 +42,12 @@ impl SpeechController {
     }
 
     pub async fn refresh_input_devices(&self, state: &DesktopState) {
-        match self.input_devices.input_devices() {
-            Ok(devices) => {
-                state
-                    .publish(|snapshot| snapshot.speech.input_devices = devices)
-                    .await;
-            }
-            Err(error) => {
-                let original = error.to_string();
-                let message = super::support::present_speech_error(
-                    state,
-                    Some("input-device-list"),
-                    &original,
-                )
-                .message
-                .to_owned();
-                state
-                    .publish(|snapshot| {
-                        apply_warning(&mut snapshot.speech, "input-device-list", message)
-                    })
-                    .await;
-            }
-        }
+        let result = self
+            .input_devices
+            .input_devices()
+            .map_err(|error| error.to_string());
+        state
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::SpeechDevicesLoaded(result))
+            .await;
     }
 }

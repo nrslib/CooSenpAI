@@ -33,6 +33,7 @@ export interface SendRequest extends RequestBase {
   readonly executable?: string;
   readonly cwd: string;
   readonly toolsDisabled: boolean;
+  readonly isolateTools?: boolean;
   readonly timeoutMs: number;
 }
 
@@ -78,6 +79,7 @@ const SEND_KEYS = [
   "executable",
   "cwd",
   "toolsDisabled",
+  "isolateTools",
   "timeoutMs",
 ] as const;
 const CANCEL_KEYS = [...BASE_KEYS, "targetId"] as const;
@@ -150,6 +152,12 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
     throw new BridgeError("protocol", "schema exceeds the byte limit");
   }
   if (record.toolsDisabled !== true) throw new BridgeError("protocol", "toolsDisabled must be true");
+  if (record.isolateTools !== undefined && typeof record.isolateTools !== "boolean") {
+    throw new BridgeError("protocol", "isolateTools must be a boolean");
+  }
+  if (record.isolateTools === true && (session(record).mode !== "ephemeral" || images.length !== 0)) {
+    throw new BridgeError("protocol", "isolated calls require an ephemeral session without images");
+  }
   if (typeof record.timeoutMs !== "number" || !Number.isSafeInteger(record.timeoutMs) || record.timeoutMs <= 0) {
     throw new BridgeError("protocol", "timeoutMs must be a positive integer");
   }
@@ -172,6 +180,7 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
     ...(executable === undefined ? {} : { executable }),
     cwd,
     toolsDisabled: true,
+    isolateTools: record.isolateTools === true,
     timeoutMs: record.timeoutMs,
   };
 }

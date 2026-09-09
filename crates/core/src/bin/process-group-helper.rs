@@ -64,12 +64,16 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some("--sleep") => {
-            let Some(milliseconds) = arguments.next().and_then(|value| value.parse::<u64>().ok())
-            else {
+        Some("--wait-for-cancel") => {
+            let Some(ready_path) = arguments.next() else {
                 std::process::exit(2);
             };
-            thread::sleep(Duration::from_millis(milliseconds));
+            if std::fs::write(ready_path, b"ready").is_err() {
+                std::process::exit(1);
+            }
+            loop {
+                thread::park();
+            }
         }
         Some("--hold-lock") => {
             let (Some(lock_path), Some(ready_path), Some(milliseconds)) =

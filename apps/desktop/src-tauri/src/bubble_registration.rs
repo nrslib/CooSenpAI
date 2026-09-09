@@ -1,13 +1,9 @@
-use super::{
-    schedule_expiry, sync_window, BubblePresentation, BubblePresentationOutcome, BubbleRecord,
-    BubbleState,
-};
+use super::{sync_window, BubblePresentation, BubblePresentationOutcome, BubbleRecord};
 use crate::state::DesktopState;
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{watch, Mutex};
+use std::time::Duration;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 const ACK_ATTEMPTS: usize = 3;
@@ -18,7 +14,7 @@ pub async fn show(
     record: BubbleRecord,
     duration_ms: u64,
 ) -> Result<BubblePresentationOutcome> {
-    let presentation = register(&state, record, duration_ms).await?;
+    let presentation = register(&state.ui, record, duration_ms).await?;
     complete_presentation(state, presentation).await
 }
 
@@ -29,95 +25,63 @@ pub(crate) async fn show_replacing(
     replaced_ids: &[String],
     cancellation: &CancellationToken,
 ) -> Result<BubblePresentationOutcome> {
-    let bubble_surface_active =
-        !(state.main_window_focused.load(Ordering::Acquire) && record.interaction.is_none());
-    let removed = bubble_surface_active && super::complete_actions(&state, replaced_ids).await;
-    if removed && !super::wait_for_tutorial_bubble_transition(cancellation).await {
+    if cancellation.is_cancelled() {
         return Ok(BubblePresentationOutcome::Dismissed);
     }
-    if !replaced_ids.is_empty() && cancellation.is_cancelled() {
-        return Ok(BubblePresentationOutcome::Dismissed);
-    }
-    let presentation = register(&state, record, duration_ms).await?;
+    let presentation = register_replacing(&state.ui, record, duration_ms, replaced_ids).await?;
     complete_presentation(state, presentation).await
 }
 
 pub(crate) async fn register(
-    state: &DesktopState,
+    ui: &crate::ui_root::UiHandle,
     record: BubbleRecord,
     duration_ms: u64,
 ) -> Result<BubblePresentation> {
-    register_replacing(state, record, duration_ms, &[]).await
+    register_replacing(ui, record, duration_ms, &[]).await
 }
 
 async fn register_replacing(
-    state: &DesktopState,
+    ui: &crate::ui_root::UiHandle,
     record: BubbleRecord,
     duration_ms: u64,
     replaced_ids: &[String],
 ) -> Result<BubblePresentation> {
-    register_replacing_for_surface(
-        &state.bubbles,
-        &state.main_window_focused,
-        record,
-        Duration::from_millis(duration_ms),
-        state.runtime_config().bubble.max_stack,
-        replaced_ids,
+    let (reply, response) = tokio::sync::oneshot::channel();
+    ui.request(
+        crate::ui_events::UiView::Application,
+        crate::ui_events::UiEvent::BubbleRequested {
+            record: Box::new(record),
+            duration_ms,
+            replaced_ids: replaced_ids.to_vec(),
+            reply,
+        },
     )
     .await
-}
-
-pub(crate) async fn register_replacing_for_surface(
-    bubbles: &Mutex<BubbleState>,
-    main_window_focused: &AtomicBool,
-    record: BubbleRecord,
-    duration: Duration,
-    max_stack: usize,
-    replaced_ids: &[String],
-) -> Result<BubblePresentation> {
-    let id = record.id.clone();
-    let mut bubbles = bubbles.lock().await;
-    if main_window_focused.load(Ordering::Acquire) && record.interaction.is_none() {
-        return Ok(acknowledged_in_main());
-    }
-    let shown = if replaced_ids.is_empty() {
-        bubbles.show(record, Instant::now(), duration, max_stack)
-    } else {
-        bubbles.show_replacing(record, Instant::now(), duration, max_stack, replaced_ids)
-    };
-    if !shown {
-        anyhow::bail!("会話リセット前の吹き出しです");
-    }
-    let dismissed = bubbles
-        .presentation_cancellation(&id)
-        .context("登録した吹き出しの表示状態がありません")?;
-    Ok(BubblePresentation {
-        generation: bubbles.generation,
-        acknowledgements: bubbles.subscribe_acknowledgements(),
-        dismissed,
-        registered_on_bubble_surface: true,
-    })
-}
-
-fn acknowledged_in_main() -> BubblePresentation {
-    let (_, acknowledgements) = watch::channel(0);
-    BubblePresentation {
-        generation: 0,
-        acknowledgements,
-        dismissed: CancellationToken::new(),
-        registered_on_bubble_surface: false,
-    }
+    .map_err(anyhow::Error::msg)?;
+    response.await.context("吹き出しの受付が終了しました")?
 }
 
 pub(crate) async fn complete_presentation(
     state: Arc<DesktopState>,
+    presentation: BubblePresentation,
+) -> Result<BubblePresentationOutcome> {
+    await_presentation(&state.ui, presentation).await
+}
+
+pub(crate) async fn await_presentation(
+    ui: &crate::ui_root::UiHandle,
     mut presentation: BubblePresentation,
 ) -> Result<BubblePresentationOutcome> {
     if !presentation.registered_on_bubble_surface {
         return Ok(BubblePresentationOutcome::Acknowledged);
     }
     for _ in 0..ACK_ATTEMPTS {
-        sync_window(&state).await?;
+        ui.request(
+            crate::ui_events::UiView::Application,
+            crate::ui_events::UiEvent::BubbleRefresh,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
         if let Some(outcome) = wait_for_presentation_completion(
             &mut presentation.acknowledgements,
             presentation.generation,
@@ -125,9 +89,6 @@ pub(crate) async fn complete_presentation(
         )
         .await
         {
-            if outcome == BubblePresentationOutcome::Acknowledged {
-                schedule_expiry(state).await;
-            }
             return Ok(outcome);
         }
     }
@@ -139,14 +100,13 @@ pub async fn show_best_effort(
     record: BubbleRecord,
     duration_ms: u64,
 ) -> bool {
-    let Ok(presentation) = register(&state, record, duration_ms).await else {
+    let Ok(presentation) = register(&state.ui, record, duration_ms).await else {
         return false;
     };
     if !presentation.registered_on_bubble_surface {
         return true;
     }
     let _ = sync_window(&state).await;
-    schedule_expiry(state).await;
     true
 }
 

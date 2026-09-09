@@ -58,6 +58,7 @@ export class OpenCodeAgent implements ProviderAgent {
   }
 
   async send(options: ProviderCallOptions): Promise<ProviderCallResult> {
+    if (options.isolateTools === true) throw new BridgeError("unsupported", "OpenCode の作業用 tool 隔離は未対応です");
     if (options.session.mode === "resume" && options.session.id === undefined) {
       throw new BridgeError("protocol", "resume session ID がありません");
     }

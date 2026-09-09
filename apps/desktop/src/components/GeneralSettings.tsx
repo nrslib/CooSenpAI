@@ -1,12 +1,16 @@
 import type { ChangeEvent, RefObject, ReactElement } from "react";
 
+import { useI18n } from "../i18n/index.js";
+import { AppUpdatePanel } from "./AppUpdatePanel.js";
 import type { PersonaOption } from "../types.js";
 import { MemoryPanel } from "../MemoryPanel.js";
 import { tutorialSettingsHighlight } from "../tutorial-ui.js";
-import { fontPreset } from "../settings-form.js";
+import { fontPreset, inputId } from "../settings-form.js";
 import type { FormState } from "../settings-form.js";
+import { personaOptionLabel } from "./PersonaPicker.js";
+import { SettingsSearchItem } from "../settings-search.js";
 import { SettingsCategoryProps } from "./SettingsCategoryProps.js";
-import { BooleanInput, NumberInput, PersonaSelect, ReminderEditor, SelectInput, TextInput } from "./SettingsControls.js";
+import { BooleanInput, NumberInput, ReminderEditor, SelectInput, TextInput } from "./SettingsControls.js";
 
 interface Props extends SettingsCategoryProps {
   readonly personas: readonly PersonaOption[];
@@ -15,52 +19,82 @@ interface Props extends SettingsCategoryProps {
   readonly onResetAvatar: () => void;
   readonly onReloadPersona: () => void;
   readonly onEditPersona: () => void;
+  readonly onOpenPersonaPicker: () => void;
 }
 
-export function GeneralSettings({ form, snapshot, saving, update, errorFor, personas, avatarInputRef, onSelectAvatar, onResetAvatar, onReloadPersona, onEditPersona }: Props): ReactElement {
+export function GeneralSettings({ form, snapshot, saving, update, errorFor, personas, avatarInputRef, onSelectAvatar, onResetAvatar, onReloadPersona, onEditPersona, onOpenPersonaPicker }: Props): ReactElement {
+  const { locale, t } = useI18n();
+  const selectedPersona = personas.find((option) => option.id === form.persona);
   return <>
     <fieldset id="settings-companion" className={tutorialSettingsHighlight(snapshot.onboarding, "persona") ? "tutorial-highlight" : undefined}>
-      <legend>性格</legend>
-      <p className="field-help">名前と、話し方を決める性格は別々に変更できます。</p>
-      <label><span>呼び名（既定: Coo）</span><input id="setting-companion-displayName" value={form.displayName} maxLength={20} disabled={saving} onChange={(event) => update("displayName", event.target.value)} />{errorFor("companion.displayName") === undefined ? null : <span className="field-error">{errorFor("companion.displayName")}</span>}</label>
-      <label><span>アバターの色</span><input id="setting-ui-avatarColor" type="color" value={form.avatarColor} onChange={(event) => update("avatarColor", event.target.value)} /></label>
-      <label><span>アバター画像</span><input ref={avatarInputRef} id="setting-ui-avatarPath" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" disabled={saving} onChange={onSelectAvatar} /><small className={form.avatarImageLoadFailed ? "field-error" : undefined}>{form.avatarImageLoadFailed ? "設定された画像を読み込めないため、既定のアバターを使用中" : form.avatarFileName === undefined ? form.avatarPath === null ? "未設定（既定のアバターを使用）" : "設定済みのアバターを使用中" : `選択中: ${form.avatarFileName}（反映するまで未保存）`}</small></label>
-      <div className="button-row"><button type="button" disabled={saving || (form.avatarPath === null && form.avatarImage === undefined)} onClick={onResetAvatar}>既定のアバターに戻す</button></div>
-      <PersonaSelect path="companion.persona" value={form.persona} options={personas} disabled={saving} update={(value) => update("persona", value)} />
-      <div className="button-row"><button type="button" disabled={saving} onClick={onReloadPersona}>性格を再読込</button><button type="button" onClick={onEditPersona}>性格を編集</button></div>
-      <SelectInput label="積極性" path="companion.assertiveness" value={form.assertiveness} options={["low", "normal", "high"]} update={(value) => update("assertiveness", value as FormState["assertiveness"])} />
-      <p className="field-help">ふだんの基準です。メイン画面のチップで一時的に変えられます。</p>
+      <legend>{t("settings.companion.heading")}</legend>
+      <p className="field-help">{t("settings.companion.description")}</p>
+      <SettingsSearchItem label={t("settings.companion.displayName")} path="companion.displayName" description={t("settings.companion.description")}>
+        <label><span>{t("settings.companion.displayName")}</span><input id="setting-companion-displayName" value={form.displayName} maxLength={20} disabled={saving} onChange={(event) => update("displayName", event.target.value)} />{errorFor("companion.displayName") === undefined ? null : <span className="field-error">{errorFor("companion.displayName")}</span>}</label>
+      </SettingsSearchItem>
+      <SettingsSearchItem label={t("settings.companion.avatarColor")} path="ui.avatarColor">
+        <label><span>{t("settings.companion.avatarColor")}</span><input id="setting-ui-avatarColor" type="color" value={form.avatarColor} onChange={(event) => update("avatarColor", event.target.value)} /></label>
+      </SettingsSearchItem>
+      <SettingsSearchItem label={t("settings.companion.avatarImage")} path="ui.avatarPath" description={t("settings.companion.avatarImageDescription")}>
+        <label><span>{t("settings.companion.avatarImage")}</span><input ref={avatarInputRef} id="setting-ui-avatarPath" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" disabled={saving} onChange={onSelectAvatar} /><small className={form.avatarImageLoadFailed ? "field-error" : undefined}>{form.avatarImageLoadFailed ? t("settings.companion.avatarImageLoadFailed") : form.avatarFileName === undefined ? form.avatarPath === null ? t("settings.companion.avatarUnset") : t("settings.companion.avatarConfigured") : t("settings.companion.avatarSelected", { file: form.avatarFileName })}</small></label>
+      </SettingsSearchItem>
+      <div className="button-row"><button type="button" disabled={saving || (form.avatarPath === null && form.avatarImage === undefined)} onClick={onResetAvatar}>{t("settings.companion.resetAvatar")}</button></div>
+      <SettingsSearchItem label={t("settings.companion.persona")} path="companion.persona" description={t("settings.companion.personaDescription")}>
+        <div className="persona-picker-trigger"><span>{t("settings.companion.persona")}</span><button id={inputId("companion.persona")} type="button" aria-haspopup="dialog" disabled={saving} onClick={onOpenPersonaPicker}><span>{selectedPersona === undefined ? form.persona : personaOptionLabel(selectedPersona, locale)}</span><span aria-hidden="true">{t("settings.companion.choosePersona")}</span></button>{errorFor("companion.persona") === undefined ? null : <span className="field-error">{errorFor("companion.persona")}</span>}</div>
+      </SettingsSearchItem>
+      <div className="button-row"><button type="button" disabled={saving} onClick={onReloadPersona}>{t("settings.companion.reloadPersona")}</button><button type="button" onClick={onEditPersona}>{t("settings.companion.editPersona")}</button></div>
+      <SelectInput label={t("settings.companion.assertiveness")} path="companion.assertiveness" value={form.assertiveness} options={["low", "normal", "high"]} update={(value) => update("assertiveness", value as FormState["assertiveness"])} />
+      <p className="field-help">{t("settings.companion.assertivenessHelp")}</p>
+      <SettingsSearchItem label={t("settings.companion.emotionsEnabled")} path="companion.emotionsEnabled" description={t("settings.companion.emotionsDescription")}>
+        <label><span>{t("settings.companion.emotionsEnabled")}</span><input id="setting-companion-emotionsEnabled" type="checkbox" checked={form.emotionsEnabled} disabled={saving} onChange={(event) => update("emotionsEnabled", event.target.checked)} />{errorFor("companion.emotionsEnabled") === undefined ? null : <span className="field-error">{errorFor("companion.emotionsEnabled")}</span>}</label>
+        <p className="field-help">{t("settings.companion.emotionsHelp")}</p>
+      </SettingsSearchItem>
     </fieldset>
 
-    <fieldset id="settings-appearance"><legend>見た目</legend>
-      <label><span>テーマ</span><select id="setting-ui-theme" value={form.uiTheme} onChange={(event) => update("uiTheme", event.target.value as FormState["uiTheme"])}><option value="system">自動</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label>
-      <label><span>フォント</span><select id="setting-ui-font" value={fontPreset(form.uiFont)} onChange={(event) => { if (event.target.value !== "custom") update("uiFont", event.target.value); }}><option value="system">システム</option><option value="rounded">丸ゴシック</option><option value="serif">明朝</option><option value="mono">等幅</option><option value="custom">インストール済みフォント</option></select></label>
-      <label><span>フォント名（自由入力）</span><input value={fontPreset(form.uiFont) === "custom" ? form.uiFont : ""} placeholder="例: A-OTF UD新ゴ Pr6N" onChange={(event) => update("uiFont", event.target.value)} /></label>
+    <fieldset id="settings-appearance"><legend>{t("settings.appearance.heading")}</legend>
+      <SettingsSearchItem label={t("settings.appearance.theme")} path="ui.theme">
+        <label><span>{t("settings.appearance.theme")}</span><select id="setting-ui-theme" value={form.uiTheme} onChange={(event) => update("uiTheme", event.target.value as FormState["uiTheme"])}><option value="system">{t("settings.appearance.system")}</option><option value="light">{t("settings.appearance.light")}</option><option value="dark">{t("settings.appearance.dark")}</option></select></label>
+      </SettingsSearchItem>
+      <SettingsSearchItem label={t("settings.appearance.font")} path="ui.font">
+        <label><span>{t("settings.appearance.font")}</span><select id="setting-ui-font" value={fontPreset(form.uiFont)} onChange={(event) => { if (event.target.value !== "custom") update("uiFont", event.target.value); }}><option value="system">{t("settings.appearance.systemFont")}</option><option value="rounded">{t("settings.appearance.roundedFont")}</option><option value="serif">{t("settings.appearance.serifFont")}</option><option value="mono">{t("settings.appearance.monoFont")}</option><option value="custom">{t("settings.appearance.installedFont")}</option></select></label>
+      </SettingsSearchItem>
+      <SettingsSearchItem label={t("settings.appearance.freeFont")} path="ui.font" description={t("settings.appearance.freeFontDescription")}>
+        <label><span>{t("settings.appearance.freeFont")}</span><input value={fontPreset(form.uiFont) === "custom" ? form.uiFont : ""} placeholder={t("settings.appearance.freeFontPlaceholder")} onChange={(event) => update("uiFont", event.target.value)} /></label>
+      </SettingsSearchItem>
+      <SettingsSearchItem label={t("language.label")} path="ui.language">
+        <label><span>{t("language.label")}</span><select id="setting-ui-language" value={form.language} onChange={(event) => update("language", event.target.value as FormState["language"])}><option value="ja">{t("language.japanese")}</option><option value="en">{t("language.english")}</option></select></label>
+      </SettingsSearchItem>
     </fieldset>
 
-    <fieldset id="settings-memory"><legend>記憶</legend>
-      <BooleanInput label="記憶を有効にする" path="memory.enabled" value={form.memoryEnabled} update={(value) => update("memoryEnabled", value)} />
-      <BooleanInput label="昨日までの会話と観察の要約を AI に渡す" path="memory.providerConsent" value={form.memoryProviderConsent} update={(value) => update("memoryProviderConsent", value)} />
-      <p className="field-help">前日の記録から要約を作り、以後の会話に添付します。</p>
+    <fieldset id="settings-memory"><legend>{t("settings.memorySettings.heading")}</legend>
+      <BooleanInput label={t("settings.memorySettings.enabled")} path="memory.enabled" value={form.memoryEnabled} update={(value) => update("memoryEnabled", value)} />
+      <BooleanInput label={t("settings.memorySettings.providerConsent")} path="memory.providerConsent" value={form.memoryProviderConsent} update={(value) => update("memoryProviderConsent", value)} />
+      <p className="field-help">{t("settings.memorySettings.help")}</p>
     </fieldset>
     <MemoryPanel status={snapshot.memoryStatus} />
 
-    <fieldset id="settings-app"><legend>アプリ</legend><BooleanInput label="更新の確認" path="app.checkForUpdates" value={form.checkForUpdates} update={(value) => update("checkForUpdates", value)} /><p className="field-help">GitHub へ版の確認だけを送ります。</p><BooleanInput label="ログイン時に起動する" path="app.launchAtLogin" value={form.launchAtLogin} update={(value) => update("launchAtLogin", value)} /></fieldset>
+    <fieldset id="settings-app"><legend>{t("settings.appSettings.heading")}</legend><BooleanInput label={t("settings.appSettings.checkForUpdates")} path="app.checkForUpdates" value={form.checkForUpdates} update={(value) => update("checkForUpdates", value)} /><p className="field-help">{t("settings.appSettings.checkForUpdatesHelp")}</p><BooleanInput label={t("settings.appSettings.launchAtLogin")} path="app.launchAtLogin" value={form.launchAtLogin} update={(value) => update("launchAtLogin", value)} /></fieldset>
 
-    <fieldset id="settings-general-detail"><legend>詳細</legend>
-      <h3>性格</h3>
-      <label><span>今日のふりかえり時刻</span><input id="setting-companion-reviewTime" type="time" value={form.reviewTime} onChange={(event) => update("reviewTime", event.target.value)} /><small>空欄にすると無効です。</small></label>
+    <AppUpdatePanel enabled={snapshot.config.app.checkForUpdates} showCheck />
+
+    <fieldset id="settings-general-detail"><legend>{t("settings.detail.heading")}</legend>
+      <h3>{t("settings.detail.personality")}</h3>
+      <SettingsSearchItem label={t("settings.detail.reviewTime")} path="companion.reviewTime" description={t("settings.detail.reviewTimeHelp")}>
+        <label><span>{t("settings.detail.reviewTime")}</span><input id="setting-companion-reviewTime" type="time" value={form.reviewTime} onChange={(event) => update("reviewTime", event.target.value)} /><small>{t("settings.detail.reviewTimeHelp")}</small></label>
+      </SettingsSearchItem>
       <ReminderEditor value={form.reminders} update={(value) => update("reminders", value)} />
-      <label><span>考え中の送信（既定: 順番待ち）</span><select id="setting-chat-whileThinking" value={form.whileThinking} onChange={(event) => update("whileThinking", event.target.value as FormState["whileThinking"])}><option value="queue">順番待ち</option><option value="append">言い足し</option></select><small>言い足しでは、考え中に送った発言も含めて一つの返事にまとめます。</small></label>
-      <h3>言語</h3>
-      <TextInput label="認識ロケール（既定: system）" path="speech.locale" value={form.speechLocale} update={(value) => update("speechLocale", value)} />
-      <h3>記憶</h3>
-      <NumberInput label="日付変更後の待ち時間（分）" path="memory.graceMinutes" value={form.memoryGraceMinutes} update={(value) => update("memoryGraceMinutes", value)} errorFor={errorFor} />
-      <NumberInput label="日次要約の保持日数" path="memory.dailyRetentionDays" value={form.memoryDailyRetentionDays} update={(value) => update("memoryDailyRetentionDays", value)} errorFor={errorFor} />
-      <NumberInput label="週次要約の保持週数" path="memory.weeklyRetentionWeeks" value={form.memoryWeeklyRetentionWeeks} update={(value) => update("memoryWeeklyRetentionWeeks", value)} errorFor={errorFor} />
-      <NumberInput label="文脈の再注入間隔" path="companion.contextRefreshCalls" value={form.contextRefreshCalls} update={(value) => update("contextRefreshCalls", value)} errorFor={errorFor} />
-      <NumberInput label="覚える候補を聞く1日の上限" path="memory.factPromptDailyLimit" value={form.factPromptDailyLimit} update={(value) => update("factPromptDailyLimit", value)} errorFor={errorFor} />
-      <fieldset id="settings-debug"><legend>デバッグ</legend><BooleanInput label="デバッグ記録を残す" path="debug.enabled" value={form.debugEnabled} update={(value) => update("debugEnabled", value)} /><p className="field-help">有効時は送信画像、OCR、プロンプト、AI 応答を最大 3 日・200 MiB 保存します。</p></fieldset>
+      <SettingsSearchItem label={t("settings.detail.whileThinking")} path="chat.whileThinking" description={t("settings.detail.whileThinkingHelp")}>
+        <label><span>{t("settings.detail.whileThinking")}</span><select id="setting-chat-whileThinking" value={form.whileThinking} onChange={(event) => update("whileThinking", event.target.value as FormState["whileThinking"])}><option value="queue">{t("settings.detail.queue")}</option><option value="append">{t("settings.detail.append")}</option></select><small>{t("settings.detail.whileThinkingHelp")}</small></label>
+      </SettingsSearchItem>
+      <h3>{t("settings.detail.language")}</h3>
+      <TextInput label={t("settings.detail.recognitionLocale")} path="speech.locale" value={form.speechLocale} update={(value) => update("speechLocale", value)} />
+      <h3>{t("settings.detail.memory")}</h3>
+      <NumberInput label={t("settings.detail.graceMinutes")} path="memory.graceMinutes" value={form.memoryGraceMinutes} update={(value) => update("memoryGraceMinutes", value)} errorFor={errorFor} />
+      <NumberInput label={t("settings.detail.dailyRetentionDays")} path="memory.dailyRetentionDays" value={form.memoryDailyRetentionDays} update={(value) => update("memoryDailyRetentionDays", value)} errorFor={errorFor} />
+      <NumberInput label={t("settings.detail.weeklyRetentionWeeks")} path="memory.weeklyRetentionWeeks" value={form.memoryWeeklyRetentionWeeks} update={(value) => update("memoryWeeklyRetentionWeeks", value)} errorFor={errorFor} />
+      <NumberInput label={t("settings.detail.contextRefreshCalls")} path="companion.contextRefreshCalls" value={form.contextRefreshCalls} update={(value) => update("contextRefreshCalls", value)} errorFor={errorFor} />
+      <NumberInput label={t("settings.detail.factPromptDailyLimit")} path="memory.factPromptDailyLimit" value={form.factPromptDailyLimit} update={(value) => update("factPromptDailyLimit", value)} errorFor={errorFor} />
+      <fieldset id="settings-debug"><legend>{t("settings.detail.debug")}</legend><BooleanInput label={t("settings.detail.debugEnabled")} path="debug.enabled" value={form.debugEnabled} update={(value) => update("debugEnabled", value)} /><p className="field-help">{t("settings.detail.debugHelp")}</p></fieldset>
     </fieldset>
   </>;
 }

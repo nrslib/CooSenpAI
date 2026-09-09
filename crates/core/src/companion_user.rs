@@ -43,10 +43,12 @@ pub(crate) struct UserOperationResult {
 
 #[derive(Clone)]
 pub(crate) struct UserMessagePreparer {
+    pub(super) emotions: super::emotions::CompanionEmotions,
     pub(super) storage: Option<CompanionStorage>,
     pub(super) clock: Arc<dyn Clock>,
     pub(super) delivery_ownership: DeliveryOwnership,
     pub(super) runtime_queue: Arc<std::sync::Mutex<VecDeque<PendingUserMessage>>>,
+    pub(super) hearing_context: Arc<Mutex<crate::hearing_context::HearingContextBuffer>>,
 }
 
 impl CompanionAgent {
@@ -116,10 +118,12 @@ impl CompanionAgent {
         runtime_queue: Arc<std::sync::Mutex<VecDeque<PendingUserMessage>>>,
     ) -> UserMessagePreparer {
         UserMessagePreparer {
+            emotions: self.emotions.clone(),
             storage: self.storage.clone(),
             clock: self.clock.clone(),
             delivery_ownership: self.delivery_ownership,
             runtime_queue,
+            hearing_context: self.hearing_context.clone(),
         }
     }
 
@@ -270,6 +274,19 @@ impl CompanionAgent {
             });
         }
         self.refresh_runtime_observation_context(&mut inputs)?;
+        if let Some(logger) = &self.logger {
+            let observations = turn_observations(&inputs);
+            let frames = super::user_prompt::turn_pending_frames(&inputs);
+            logger.write("INFO", &format!(
+                "利用者応答の文脈を再収集: observation-ids={} frame-ids={} audio-count={} ocr-count={} hearing-count={} hearing-bytes={}",
+                observations.iter().map(ObservationRecord::id).collect::<Vec<_>>().join(","),
+                frames.iter().map(|frame| frame.id.as_str()).collect::<Vec<_>>().join(","),
+                observations.iter().filter(|observation| observation.is_audio()).count(),
+                frames.iter().filter(|frame| frame.ocr_text.is_some()).count(),
+                inputs.iter().map(|input| input.hearing_context.len()).sum::<usize>(),
+                inputs.iter().flat_map(|input| &input.hearing_context).map(|context| context.text.len()).sum::<usize>(),
+            ))?;
+        }
         let observations = turn_observations(&inputs);
         let attachment_observations =
             super::helpers::unsent_observations(observations.clone(), &self.sent_observation_ids);
@@ -284,7 +301,11 @@ impl CompanionAgent {
             .await?;
         data.attachment_ocr_text = attachment_ocr_text;
         let checkpoint = UserCallCheckpoint::capture(self);
-        let outcome = match self
+        let emotions = self
+            .emotions
+            .configure(self.storage.as_ref(), self.config.emotions_enabled)?;
+        data.companion_emotions = self.config.emotions_enabled.then_some(emotions.state);
+        let mut outcome = match self
             .call(
                 CompanionTurn {
                     data,
@@ -295,7 +316,7 @@ impl CompanionAgent {
                     requested_source_ids: input_ids.clone(),
                     additional_inputs,
                     accepted_mid_turn_ids: Some(accepted_mid_turn_ids.clone()),
-                    tutorial_response_key,
+                    tutorial_response_key: tutorial_response_key.clone(),
                 },
                 cancellation.clone(),
             )
@@ -328,7 +349,55 @@ impl CompanionAgent {
                 return Err(CompanionError::Cancelled);
             }
         }
+        if let Some(proposal) = outcome.response.work_request.take() {
+            if tutorial_response_key.is_some() {
+                return Err(CompanionError::Output);
+            }
+            let mut work_inputs = inputs.clone();
+            if input_ids.len() != work_inputs.len() {
+                let storage = self.storage.as_ref().ok_or(CompanionError::Output)?;
+                for pending in storage.reconcile_pending_user_inputs()?.pending_inputs {
+                    let PendingInput::UserMessage(input) = pending;
+                    if input_ids.contains(&input.id)
+                        && !work_inputs.iter().any(|known| known.id == input.id)
+                    {
+                        work_inputs.push(input);
+                    }
+                }
+                if work_inputs.len() != input_ids.len() {
+                    return Err(CompanionError::Output);
+                }
+            }
+            let answer = self
+                .execute_chat_work(proposal, &work_inputs, cancellation.clone())
+                .await?;
+            self.prepare_call_session(true, cancellation.clone())
+                .await?;
+            let mut completion_data = outcome.data.clone();
+            self.apply_session_context(&mut completion_data, true, &input_ids)?;
+            let completion = self
+                .call_provider(
+                    ProviderTurn {
+                        work_result: Some(&answer),
+                        data: &completion_data,
+                        user: true,
+                        image_paths: &[],
+                        events: None,
+                        source_ids: &input_ids,
+                        additional_inputs: None,
+                        tutorial_response_key: None,
+                    },
+                    cancellation.clone(),
+                )
+                .await?;
+            outcome.response = completion.response;
+        }
         let prepared = PreparedUserResponse {
+            emotion_epoch: emotions.epoch,
+            emotion_delta: outcome
+                .response
+                .emotion_delta
+                .filter(|_| self.config.emotions_enabled),
             id: Uuid::new_v4().to_string(),
             created_at: self
                 .clock
@@ -464,6 +533,7 @@ impl CompanionAgent {
             .collect::<Vec<_>>();
         let observations = turn_observations(inputs);
         Ok(CompanionPromptData {
+            companion_emotions: None,
             companion_name: self.display_name.clone(),
             observations: observation_values(&observations)?,
             observation_frame_paths,
@@ -511,12 +581,25 @@ impl CompanionAgent {
             .flat_map(|input| input.observations.iter().cloned())
             .collect();
         let cursor = storage.load_cursor()?;
+        for input in inputs.iter_mut() {
+            if let Some(crate::companion_storage::PendingInput::UserMessage(pending)) = cursor
+                .pending_inputs
+                .iter()
+                .find(|pending| pending.id() == input.id)
+            {
+                input.hearing_context = pending.hearing_context.clone();
+            }
+        }
         let observations = crate::recent_observations::merge_recent_observations(
             crate::recent_observations::merge_recent_observations(
                 supplied,
                 storage.load_recent_observations(now)?,
             ),
-            cursor.pending.clone(),
+            cursor
+                .pending
+                .iter()
+                .map(|pending| pending.observation.clone())
+                .collect(),
         );
         let observations = keep_latest_observations(observations, self.config.wake_coalesce_max);
         let observation_in_progress = inputs.iter().any(|input| input.observation_in_progress);
@@ -759,7 +842,8 @@ impl CompanionAgent {
     ) -> Result<(), CompanionError> {
         if self.delivery_ownership == DeliveryOwnership::Owner {
             if let Some(storage) = &self.storage {
-                let cancelled = storage.update_cursor(|cursor| {
+                let cancelled = self.emotions.update_cursor(storage, |cursor| {
+                    let mut already_started = false;
                     if input_ids
                         .iter()
                         .any(|input_id| cursor.cancelled_input_ids.iter().any(|id| id == input_id))
@@ -781,6 +865,16 @@ impl CompanionAgent {
                                 "user input の prepared response が一致しません".to_owned(),
                             ));
                         }
+                        already_started |= input.response_commit_started;
+                    }
+                    if self.config.emotions_enabled
+                        && cursor.emotion_updates_enabled
+                        && !already_started
+                        && cursor.emotion_epoch == response.emotion_epoch
+                    {
+                        if let Some(delta) = response.emotion_delta {
+                            cursor.companion_emotions = cursor.companion_emotions.apply(delta);
+                        }
                     }
                     for input in &mut cursor.pending_inputs {
                         if input_ids.iter().any(|id| input.id() == id) {
@@ -795,7 +889,15 @@ impl CompanionAgent {
                 }
             }
         }
+        let already_committed = self
+            .conversation
+            .iter()
+            .any(|entry| entry.id == response.id);
         self.append_conversation_once(response.conversation_entry(input_ids))?;
+        if self.storage.is_none() && !already_committed {
+            self.emotions
+                .apply_volatile(response.emotion_epoch, response.emotion_delta);
+        }
         if self.delivery_ownership == DeliveryOwnership::Owner {
             self.publish_user_response(input_ids, response)?;
         }
@@ -926,6 +1028,8 @@ pub(super) fn common_prepared_response(
 
 fn prepared_response(response: &PreparedUserResponse) -> CompanionResponse {
     CompanionResponse {
+        work_request: None,
+        emotion_delta: response.emotion_delta,
         emit: true,
         message: Some(response.message.clone()),
         message_kind: "chat".to_owned(),
@@ -935,3 +1039,7 @@ fn prepared_response(response: &PreparedUserResponse) -> CompanionResponse {
         fact_updates: Vec::new(),
     }
 }
+
+#[cfg(test)]
+#[path = "companion_user_test_barrier.rs"]
+pub(crate) mod user_response_barrier;

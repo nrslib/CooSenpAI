@@ -270,6 +270,39 @@ fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, ImageError> {
     Ok(bytes.into_inner())
 }
 
+/// PNG の左上原点ピクセル矩形を切り出して PNG として返す。
+pub fn crop_png(
+    bytes: &[u8],
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, ImageError> {
+    if bytes.is_empty() || bytes.len() > MAX_ENCODED_BYTES {
+        return Err(if bytes.is_empty() {
+            ImageError::Empty
+        } else {
+            ImageError::TooLarge
+        });
+    }
+    if width == 0 || height == 0 {
+        return Err(ImageError::Empty);
+    }
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let mut decode_limits = image::Limits::default();
+    decode_limits.max_image_width = Some(MAX_DIMENSION);
+    decode_limits.max_image_height = Some(MAX_DIMENSION);
+    decode_limits.max_alloc = Some(ImageLimits::default().max_decoded_bytes);
+    reader.limits(decode_limits);
+    let image = reader.decode()?;
+    if x >= image.width() || y >= image.height() {
+        return Err(ImageError::Empty);
+    }
+    let width = width.min(image.width() - x);
+    let height = height.min(image.height() - y);
+    encode_png(&image.crop_imm(x, y, width, height).to_rgba8())
+}
+
 pub fn hash_reduced_pixels(pixels: &[f64]) -> String {
     let mut hash = 2_166_136_261u32;
     for pixel in pixels {

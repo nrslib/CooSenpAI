@@ -187,11 +187,23 @@ impl StagnationSnapshot {
 #[derive(Debug, Clone)]
 pub struct WatchStagnationStore {
     path: PathBuf,
+    publication: Option<crate::persistence::PublicationGate>,
 }
 
 impl WatchStagnationStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            publication: None,
+        }
+    }
+
+    pub fn with_publication_gate(
+        mut self,
+        publication: crate::persistence::PublicationGate,
+    ) -> Self {
+        self.publication = Some(publication);
+        self
     }
 
     pub fn load(&self, now: DateTime<Utc>) -> Result<StagnationSnapshot, PersistenceError> {
@@ -215,7 +227,11 @@ impl WatchStagnationStore {
         state.last_meaningful_change_at = Some(changed_at.to_rfc3339());
         state.reported_at = None;
         state.pending_report = None;
-        atomic_write_json(&self.path, &state)?;
+        crate::persistence::atomic_write_json_cancellable(
+            &self.path,
+            &state,
+            self.publication.as_ref(),
+        )?;
         Ok(true)
     }
 

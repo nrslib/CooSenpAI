@@ -2,21 +2,15 @@ use coosenpai_core::ports::ScreenPoint;
 use tauri::{LogicalPosition, LogicalSize};
 
 pub(crate) fn position(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    update_layout(window, 1, "bottom-right", "main")
+    update_layout(window, "bottom-right", "main")
 }
 
 pub(crate) fn update_layout(
     window: &tauri::WebviewWindow,
-    record_count: usize,
     position: &str,
     display: &str,
 ) -> tauri::Result<()> {
-    resize(
-        window,
-        104_u32.saturating_mul(u32::try_from(record_count.max(1)).unwrap_or(3)),
-        position,
-        display,
-    )
+    resize(window, 104, position, display)
 }
 
 pub(crate) fn resize(

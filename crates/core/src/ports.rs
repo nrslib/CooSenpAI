@@ -76,23 +76,26 @@ impl Clock for SystemClock {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenDisplay {
+    pub id: u32,
+    /// Global desktop coordinates in logical points (CoreGraphics top-left origin).
+    pub bounds: WindowBounds,
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedScreen {
+    pub display: ScreenDisplay,
+    pub path: PathBuf,
+}
+
 #[async_trait]
 pub trait ScreenCapturePort: Send + Sync {
     async fn capture(
         &self,
-        destination: &Path,
+        destination_directory: &Path,
         cancellation: CancellationToken,
-    ) -> Result<PathBuf, PortError>;
-}
-
-#[async_trait]
-pub trait InteractiveCapturePort: Send + Sync {
-    /// `true` は選択完了、`false` はユーザーによる取消を表す。
-    async fn capture_interactive(
-        &self,
-        destination: &Path,
-        cancellation: CancellationToken,
-    ) -> Result<bool, PortError>;
+    ) -> Result<Vec<CapturedScreen>, PortError>;
 }
 
 pub trait HelperResolverPort: Send + Sync {
@@ -174,6 +177,11 @@ impl Default for SpeechPermissions {
 
 #[async_trait]
 pub trait SpeechPermissionPort: Send + Sync {
+    async fn request_recognition(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<SpeechPermissionKind, PortError>;
+
     fn current(&self) -> Result<SpeechPermissions, PortError>;
 
     async fn request(
@@ -282,8 +290,21 @@ pub enum HearingEvent {
         microphone: SpeechPermissionKind,
         recognition: SpeechPermissionKind,
     },
+    Recognizing {
+        source: AudioObservationSource,
+        generation: u64,
+        sequence: u64,
+        text: String,
+    },
+    NoSpeech {
+        source: AudioObservationSource,
+        generation: u64,
+        sequence: u64,
+    },
     Final {
         source: AudioObservationSource,
+        generation: u64,
+        sequence: u64,
         text: String,
     },
     Warning {
@@ -490,12 +511,20 @@ impl ScreenCapturePermission {
     }
 
     pub fn presentation(self) -> ScreenCapturePresentation {
-        const ALLOW: &str =
-            "システム設定の画面収録で CooSenpAI を許可して、アプリを再起動してください";
+        self.presentation_for_locale(crate::locale::Locale::Ja)
+    }
+
+    pub fn presentation_for_locale(
+        self,
+        locale: crate::locale::Locale,
+    ) -> ScreenCapturePresentation {
         match (self.kind, self.capture_verified) {
             (ScreenCapturePermissionKind::Granted, Some(false)) => ScreenCapturePresentation {
                 status: "not-granted",
-                message: Some("画面収録は許可済みですが、反映にはアプリの再起動が必要です"),
+                message: Some(crate::locale::text(
+                    crate::locale::TextKey::ScreenPermissionRestart,
+                    locale,
+                )),
             },
             (ScreenCapturePermissionKind::Granted, _) => ScreenCapturePresentation {
                 status: "granted",
@@ -504,15 +533,24 @@ impl ScreenCapturePermission {
             (ScreenCapturePermissionKind::NotDetermined, _)
             | (ScreenCapturePermissionKind::Denied, _) => ScreenCapturePresentation {
                 status: "not-granted",
-                message: Some(ALLOW),
+                message: Some(crate::locale::text(
+                    crate::locale::TextKey::ScreenPermissionAllow,
+                    locale,
+                )),
             },
             (ScreenCapturePermissionKind::Restricted, _) => ScreenCapturePresentation {
                 status: "not-granted",
-                message: Some("この Mac の制限により画面収録を利用できません"),
+                message: Some(crate::locale::text(
+                    crate::locale::TextKey::ScreenPermissionRestricted,
+                    locale,
+                )),
             },
             (ScreenCapturePermissionKind::Unavailable, _) => ScreenCapturePresentation {
                 status: "unknown",
-                message: Some("画面収録の権限状態を確認できません"),
+                message: Some(crate::locale::text(
+                    crate::locale::TextKey::ScreenPermissionUnavailable,
+                    locale,
+                )),
             },
         }
     }
@@ -528,8 +566,10 @@ pub struct WindowBounds {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnWindowBounds {
+    /// ウィンドウの位置・寸法・表示状態が変わるたびに進む世代。
+    pub revision: u64,
     pub captured_at: DateTime<Utc>,
-    /// 画像と同じ Retina 物理座標系の矩形。
+    /// ディスプレイ倍率に依存しない、デスクトップ全体の論理座標系の矩形。
     pub bounds: Vec<WindowBounds>,
 }
 

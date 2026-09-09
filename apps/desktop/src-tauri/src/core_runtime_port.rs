@@ -4,7 +4,7 @@ use coosenpai_core::config::Config;
 use coosenpai_core::observer::ObservationFrameInput;
 use coosenpai_core::runtime::{RuntimeError, RuntimeHandle, RuntimeSnapshot};
 use coosenpai_core::state::{
-    AudioObservationSource, ObservationRecord, PendingFrameContext, StagnationObservation,
+    AudioObservation, ObservationRecord, PendingFrameContext, StagnationObservation,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -14,9 +14,19 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
     fn snapshot(&self) -> RuntimeSnapshot;
     fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot>;
     fn watch_scope_generation(&self) -> u64;
+    fn begin_hearing_context(
+        &self,
+        generation: u64,
+        cancellation: CancellationToken,
+    ) -> Result<String, RuntimeError>;
+    fn update_hearing_context(
+        &self,
+        context: coosenpai_core::hearing_context::HearingContext,
+    ) -> Result<bool, RuntimeError>;
     fn register_pending_frame_context(
         &self,
         context: PendingFrameContext,
+        publication: &coosenpai_core::persistence::PublicationGate,
     ) -> Result<(), RuntimeError>;
     async fn observe(
         &self,
@@ -40,17 +50,34 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
     ) -> Result<ObservationRecord, RuntimeError>;
     async fn audio_observation(
         &self,
-        source: AudioObservationSource,
-        text: String,
+        observation: AudioObservation,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError>;
     async fn cancel_user_message(&self) -> Result<String, RuntimeError>;
     async fn retry_user_message(&self) -> Result<String, RuntimeError>;
+    async fn cancel_user_message_for(&self, input_id: String) -> Result<String, RuntimeError>;
+    async fn retry_user_message_for(&self, input_id: String) -> Result<String, RuntimeError>;
+    async fn reset_companion_emotions(&self) -> Result<(), RuntimeError>;
     async fn consolidate_memory(&self, period: String) -> Result<u64, RuntimeError>;
 }
 
 #[async_trait]
 impl CoreRuntimePort for RuntimeHandle {
+    fn begin_hearing_context(
+        &self,
+        generation: u64,
+        cancellation: CancellationToken,
+    ) -> Result<String, RuntimeError> {
+        RuntimeHandle::begin_hearing_context(self, generation, cancellation)
+    }
+
+    fn update_hearing_context(
+        &self,
+        context: coosenpai_core::hearing_context::HearingContext,
+    ) -> Result<bool, RuntimeError> {
+        RuntimeHandle::update_hearing_context(self, context)
+    }
+
     fn config(&self) -> Config {
         RuntimeHandle::config(self)
     }
@@ -70,8 +97,9 @@ impl CoreRuntimePort for RuntimeHandle {
     fn register_pending_frame_context(
         &self,
         context: PendingFrameContext,
+        publication: &coosenpai_core::persistence::PublicationGate,
     ) -> Result<(), RuntimeError> {
-        RuntimeHandle::register_pending_frame_context(self, context)
+        RuntimeHandle::register_pending_frame_context_cancellable(self, context, Some(publication))
     }
 
     async fn observe(
@@ -112,11 +140,10 @@ impl CoreRuntimePort for RuntimeHandle {
 
     async fn audio_observation(
         &self,
-        source: AudioObservationSource,
-        text: String,
+        observation: AudioObservation,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError> {
-        self.audio_observation_cancellable(source, text, cancellation)
+        self.ingest_audio_observation_cancellable(observation, cancellation)
             .await
     }
 
@@ -128,7 +155,19 @@ impl CoreRuntimePort for RuntimeHandle {
         RuntimeHandle::retry_user_message(self).await
     }
 
+    async fn cancel_user_message_for(&self, input_id: String) -> Result<String, RuntimeError> {
+        RuntimeHandle::cancel_user_message_for(self, input_id).await
+    }
+
+    async fn retry_user_message_for(&self, input_id: String) -> Result<String, RuntimeError> {
+        RuntimeHandle::retry_user_message_for(self, input_id).await
+    }
+
     async fn consolidate_memory(&self, period: String) -> Result<u64, RuntimeError> {
         RuntimeHandle::consolidate_memory(self, period).await
+    }
+
+    async fn reset_companion_emotions(&self) -> Result<(), RuntimeError> {
+        RuntimeHandle::reset_companion_emotions(self).await
     }
 }

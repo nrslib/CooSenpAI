@@ -1,26 +1,34 @@
 {
   "name": "@coosenpai/desktop",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node scripts/tauri.mjs dev",
     "frontend:dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "vite build",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "tauri": "node scripts/tauri.mjs"
   },
   "dependencies": {
+    "@pixiv/three-vrm": "^3.5.5",
+    "@pixiv/three-vrm-animation": "3.5.5",
     "@tauri-apps/api": "^2.8.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "three": "^0.180.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.0",
+    "@types/node": "^22.20.1",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "@types/three": "^0.180.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "jsdom": "^24.1.3",
     "typescript": "^5.7.0",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "vitest": "^3.0.0"
   }
 }

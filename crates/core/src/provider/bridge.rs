@@ -66,6 +66,7 @@ pub struct ProviderBridge {
 }
 
 struct BridgeInner {
+    clear_environment: bool,
     launch: RwLock<BridgeLaunch>,
     state: Mutex<BridgeState>,
     write_lock: Mutex<()>,
@@ -138,8 +139,17 @@ struct BridgeEvent {
 
 impl ProviderBridge {
     pub fn new(launch: BridgeLaunch) -> Self {
+        Self::with_environment(launch, false)
+    }
+
+    pub fn new_with_explicit_environment(launch: BridgeLaunch) -> Self {
+        Self::with_environment(launch, true)
+    }
+
+    fn with_environment(launch: BridgeLaunch, clear_environment: bool) -> Self {
         Self {
             inner: Arc::new(BridgeInner {
+                clear_environment,
                 launch: RwLock::new(launch),
                 state: Mutex::new(BridgeState {
                     generation: 0,
@@ -371,7 +381,7 @@ impl ProviderBridge {
                     },
                     session_id: None,
                     usage: None,
-                    schema: input.output_schema.clone(),
+                    schema: input.output_validation_schema.or(input.output_schema),
                 },
             )
             .await?;
@@ -647,6 +657,9 @@ impl BridgeInner {
             return Err(retryable("Node または provider bridge が見つかりません。"));
         }
         let mut command = Command::new(&launch.node);
+        if self.clear_environment {
+            command.env_clear();
+        }
         command
             .arg(&launch.script)
             .envs(launch.env.iter().map(|(key, value)| (key, value)))

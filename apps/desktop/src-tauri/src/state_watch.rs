@@ -1,5 +1,7 @@
 use super::*;
 use crate::bubbles::{BubbleAction, BubbleInteraction};
+use crate::watch_presenter::WatchResult;
+use coosenpai_core::locale::{text, Locale, TextKey};
 
 const WATCH_FULLSCREEN_CONSENT_ID: &str = "watch-fullscreen-consent";
 const WATCH_FULLSCREEN_CONFIRM_ACTION: &str = "watch-fullscreen-confirm";
@@ -33,6 +35,25 @@ pub(crate) struct WatchStartIntent {
 }
 
 impl WatchControl {
+    fn finish(&mut self, generation: u64) -> bool {
+        match &self.lifecycle {
+            WatchLifecycle::Running {
+                generation: current,
+                ..
+            } if *current == generation => {
+                self.lifecycle = WatchLifecycle::Stopped;
+                true
+            }
+            WatchLifecycle::Stopping => {
+                self.lifecycle = WatchLifecycle::Stopped;
+                true
+            }
+            WatchLifecycle::Stopped
+            | WatchLifecycle::Starting { .. }
+            | WatchLifecycle::Running { .. } => false,
+        }
+    }
+
     pub(super) fn can_start(&self) -> bool {
         matches!(self.lifecycle, WatchLifecycle::Stopped)
     }
@@ -59,6 +80,13 @@ impl WatchControl {
 
     pub(super) fn take_power_resume(&mut self) -> bool {
         std::mem::take(&mut self.resume_after_power)
+    }
+
+    pub(super) fn accepts_generation(&self, generation: u64) -> bool {
+        matches!(
+            &self.lifecycle,
+            WatchLifecycle::Running { generation: current, .. } if *current == generation
+        )
     }
 
     pub(super) fn cancel_pending_start(&mut self) -> bool {
@@ -138,9 +166,15 @@ impl DesktopState {
             self.snapshot().await.last_error.as_ref(),
         ) {
             self.finish_pending_watch_start(generation).await;
-            self.show_watch_start_rejection("設定を修正してから、もう一度試してください")
-                .await;
-            anyhow::bail!("設定を修正して保存してください")
+            self.show_watch_start_rejection(text(
+                TextKey::WatchConfigFix,
+                Locale::from_config(&config.ui.language),
+            ))
+            .await;
+            anyhow::bail!(text(
+                TextKey::WatchConfigInvalid,
+                Locale::from_config(&config.ui.language),
+            ))
         }
         Ok(Some(WatchStartIntent {
             generation,
@@ -170,7 +204,11 @@ impl DesktopState {
             None,
         ) {
             return Err(ConfigCommitError::Runtime(RuntimeError::Factory(
-                "この吹き出しの操作は期限切れです".to_owned(),
+                text(
+                    TextKey::SetupExpired,
+                    Locale::from_config(&self.runtime_config().ui.language),
+                )
+                .to_owned(),
             )));
         }
         self.command_update_config_with(permit, |mut config| {
@@ -197,21 +235,28 @@ impl DesktopState {
         if cancellation.is_cancelled() {
             return Ok(self.snapshot().await);
         }
-        let presentation = permission.presentation();
+        let locale = Locale::from_config(&self.runtime_config().ui.language);
+        let presentation = permission.presentation_for_locale(locale);
         if presentation.status != "granted" {
             self.finish_pending_watch_start(generation).await;
-            let message = presentation.message.unwrap_or("画面収録の許可が必要です");
+            let message = presentation
+                .message
+                .unwrap_or(text(TextKey::WatchPermissionRequired, locale));
             self.show_watch_start_rejection(message).await;
             anyhow::bail!("{message}")
         }
+        let tutorial_active = self.tutorial_is_active().await;
         let result = self
             .commit_watch_start(generation, &cancellation, || {
-                crate::watch::spawn(self.clone(), generation)
+                crate::watch::spawn(self.clone(), generation, tutorial_active)
             })
             .await;
         if result.is_err() {
-            self.show_watch_start_rejection("画面を見る処理を開始できませんでした")
-                .await;
+            self.show_watch_start_rejection(text(
+                TextKey::WatchStartFailed,
+                Locale::from_config(&self.runtime_config().ui.language),
+            ))
+            .await;
         }
         result
     }
@@ -250,14 +295,11 @@ impl DesktopState {
         }
         let _ = self.logger.write("INFO", "見守りを開始しました。");
         let snapshot = self
-            .publish(|snapshot| {
-                snapshot.observer_running = true;
-                snapshot.watch_intent_active = true;
-                snapshot.observer.phase = crate::snapshot::ObserverViewPhase::Idle;
-                snapshot.observer.error_message = None;
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Watch {
+                generation,
+                event: WatchResult::Started,
             })
             .await;
-        crate::windows::sync_tray(&self.app, true);
         drop(control);
         crate::bubbles::complete_action(self, WATCH_START_REJECTION_ID).await;
         Ok(snapshot)
@@ -284,7 +326,12 @@ impl DesktopState {
     ) -> Result<Option<WatchStartIntent>> {
         let generation = permit
             .fence(crate::command_guard::GenerationResource::Watch)
-            .ok_or_else(|| anyhow::anyhow!("見守り開始世代がありません"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(text(
+                    TextKey::WatchGenerationMissing,
+                    Locale::from_config(&self.runtime_config().ui.language),
+                ))
+            })?
             .value;
         self.begin_watch_start(generation).await
     }
@@ -342,7 +389,76 @@ impl DesktopState {
         self.stop_watch_generation(manual, None).await.0
     }
 
+    pub(super) async fn stop_watch_internal_and_wait(&self, manual: bool) -> AppSnapshot {
+        self.stop_watch_generation_and_wait(manual, None).await.0
+    }
+
+    // 停止済み世代から遅れて届く投影は、新しい世代の表示を上書きさせない。
+    pub(crate) async fn publish_watch_view(
+        &self,
+        generation: u64,
+        event: crate::watch_presenter::WatchResult,
+    ) {
+        let control = self.watch_control.lock().await;
+        if !control.accepts_generation(generation) {
+            let _ = self.logger.write(
+                "INFO",
+                &format!(
+                    "見守り: 世代の古い状態更新を破棄しました: error-type=watch-stale-generation generation={generation}"
+                ),
+            );
+            return;
+        }
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::Watch { generation, event })
+            .await;
+    }
+
+    // 停止は取消と Stopped 投影で完了とし、worker の回収はバックグラウンドに委ねる。
     async fn stop_watch_generation(
+        &self,
+        manual: bool,
+        expected_generation: Option<u64>,
+    ) -> (AppSnapshot, bool) {
+        let mut control = self.watch_control.lock().await;
+        if expected_generation.is_some_and(|expected| control.generation != expected) {
+            drop(control);
+            return (self.snapshot().await, false);
+        }
+        if manual {
+            control.resume_after_power = false;
+        }
+        let task = if control.cancel_pending_start() {
+            None
+        } else {
+            let previous = std::mem::replace(&mut control.lifecycle, WatchLifecycle::Stopped);
+            match previous {
+                WatchLifecycle::Running { task, .. } => Some(task),
+                WatchLifecycle::Starting { .. } => {
+                    unreachable!("pending start handled above")
+                }
+                WatchLifecycle::Stopped | WatchLifecycle::Stopping => {
+                    control.lifecycle = previous;
+                    None
+                }
+            }
+        };
+        if let Some(task) = task {
+            task.cancel();
+            tauri::async_runtime::spawn(async move { task.wait().await });
+            let _ = self.logger.write("INFO", "見守りを停止しました。");
+        }
+        let snapshot = self
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Watch {
+                generation: control.generation,
+                event: WatchResult::Stopped,
+            })
+            .await;
+        drop(control);
+        (snapshot, true)
+    }
+
+    // 終了処理では worker の回収まで待つ。
+    async fn stop_watch_generation_and_wait(
         &self,
         manual: bool,
         expected_generation: Option<u64>,
@@ -379,7 +495,8 @@ impl DesktopState {
             return (self.snapshot().await, false);
         }
         if let Some(task) = task {
-            task.stop().await;
+            task.cancel();
+            task.wait().await;
             let _ = self.logger.write("INFO", "見守りを停止しました。");
         }
         let mut control = self.watch_control.lock().await;
@@ -390,53 +507,23 @@ impl DesktopState {
             control.lifecycle = WatchLifecycle::Stopped;
         }
         let snapshot = self
-            .publish(|snapshot| {
-                snapshot.observer_running = false;
-                snapshot.watch_intent_active = false;
-                snapshot.observer.phase = crate::snapshot::ObserverViewPhase::Stopped;
-                snapshot.observer.pending_frame_count = 0;
-                snapshot.observer.next_send_at = None;
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Watch {
+                generation: control.generation,
+                event: WatchResult::Stopped,
             })
             .await;
-        crate::windows::sync_tray(&self.app, false);
         drop(control);
         (snapshot, true)
     }
 
     pub async fn watch_finished(&self, generation: u64, failed: bool) {
         let mut control = self.watch_control.lock().await;
-        let should_publish = match &control.lifecycle {
-            WatchLifecycle::Running {
-                generation: current,
-                ..
-            } if *current == generation => {
-                control.lifecycle = WatchLifecycle::Stopped;
-                true
-            }
-            WatchLifecycle::Stopping => {
-                control.lifecycle = WatchLifecycle::Stopped;
-                true
-            }
-            WatchLifecycle::Stopped
-            | WatchLifecycle::Starting { .. }
-            | WatchLifecycle::Running { .. } => false,
-        };
-        if should_publish {
-            self.publish(|snapshot| {
-                snapshot.observer_running = false;
-                snapshot.watch_intent_active = false;
-                snapshot.observer.phase = if failed {
-                    crate::snapshot::ObserverViewPhase::Error
-                } else {
-                    crate::snapshot::ObserverViewPhase::Stopped
-                };
-                if failed {
-                    snapshot.observer.pending_frame_count = 0;
-                    snapshot.observer.next_send_at = None;
-                }
+        if control.finish(generation) {
+            self.publish_event(crate::snapshot_presenter::SnapshotEvent::Watch {
+                generation,
+                event: WatchResult::Finished { failed },
             })
             .await;
-            crate::windows::sync_tray(&self.app, false);
         }
         drop(control);
     }
@@ -488,14 +575,25 @@ impl DesktopState {
     }
 
     pub(super) async fn suspend_for_power(&self) {
-        let should_stop = {
+        if let Err(error) = self
+            .ui
+            .request(
+                crate::ui_events::UiView::Application,
+                crate::ui_events::UiEvent::InterruptCapture(true),
+            )
+            .await
+        {
+            let _ = self.logger.write("WARN", &error);
+        }
+        let (should_stop, generation) = {
             let mut control = self.watch_control.lock().await;
-            control.request_power_suspend()
+            (control.request_power_suspend(), control.generation)
         };
         if should_stop {
             self.stop_watch_internal(false).await;
-            self.publish(|snapshot| {
-                snapshot.observer.phase = crate::snapshot::ObserverViewPhase::Suspended
+            self.publish_event(crate::snapshot_presenter::SnapshotEvent::Watch {
+                generation,
+                event: WatchResult::Suspended,
             })
             .await;
         }
@@ -520,10 +618,6 @@ impl DesktopState {
     }
 
     pub(crate) async fn show_watch_start_rejection(self: &Arc<Self>, message: &str) {
-        if crate::windows::main_is_focused(&self.app) {
-            crate::bubbles::clear_for_main_window(self).await;
-            return;
-        }
         let config = self.runtime_config();
         let conversation_generation = self.bubbles.lock().await.conversation_generation();
         crate::bubbles::show_best_effort(
@@ -540,7 +634,6 @@ impl DesktopState {
                 avatar_color: config.ui.avatar_color,
                 conversation_generation,
                 persistent: true,
-                open_url: None,
                 interaction: None,
             },
             config.notification.bubble_duration_ms,
@@ -561,10 +654,22 @@ fn watch_has_enabled_target(config: &coosenpai_core::config::WatchConfig) -> boo
 }
 
 fn watch_fullscreen_consent_record(config: &Config, conversation_generation: u64) -> BubbleRecord {
+    watch_fullscreen_consent_record_for_locale(
+        config,
+        conversation_generation,
+        Locale::from_config(&config.ui.language),
+    )
+}
+
+fn watch_fullscreen_consent_record_for_locale(
+    config: &Config,
+    conversation_generation: u64,
+    locale: Locale,
+) -> BubbleRecord {
     BubbleRecord {
         id: WATCH_FULLSCREEN_CONSENT_ID.to_owned(),
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        message: "画面全体を見てもいいですか？".to_owned(),
+        message: text(TextKey::WatchFullscreenConsent, locale).to_owned(),
         message_kind: "notice".to_owned(),
         notification_priority: "none".to_owned(),
         caused_by: None,
@@ -573,20 +678,20 @@ fn watch_fullscreen_consent_record(config: &Config, conversation_generation: u64
         avatar_color: config.ui.avatar_color.clone(),
         conversation_generation,
         persistent: true,
-        open_url: None,
         interaction: Some(BubbleInteraction {
             select: None,
+            secret_input: None,
             actions: vec![
                 BubbleAction {
                     id: WATCH_FULLSCREEN_CONFIRM_ACTION.to_owned(),
-                    label: "はい".to_owned(),
+                    label: text(TextKey::CommonYes, locale).to_owned(),
                 },
                 BubbleAction {
                     id: WATCH_FULLSCREEN_SETTINGS_ACTION.to_owned(),
-                    label: "いいえ".to_owned(),
+                    label: text(TextKey::CommonNo, locale).to_owned(),
                 },
             ],
-            detail: Some("「いいえ」を選ぶと、見るアプリを設定できます。".to_owned()),
+            detail: Some(text(TextKey::WatchFullscreenDetail, locale).to_owned()),
             technical_detail: None,
         }),
     }

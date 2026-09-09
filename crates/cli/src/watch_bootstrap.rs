@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use coosenpai_core::companion::{CompanionAgent, DeliveryOwnership};
 use coosenpai_core::config::{Config, ConfigPaths};
 use coosenpai_core::debug::DebugStore;
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::logging::FileLogger;
 use coosenpai_core::mailbox::Mailbox;
 use coosenpai_core::memory::{MemoryContext, MemoryService, MemoryStore};
@@ -36,12 +37,15 @@ impl WatchBootstrap {
             } else {
                 initial_permission
             };
-            let presentation = permission.presentation();
+            let locale = Locale::from_config(&config.ui.language);
+            let presentation = permission.presentation_for_locale(locale);
             logger.write("INFO", &format!("画面収録権限: {}", presentation.status))?;
             if presentation.status != "granted" {
                 anyhow::bail!(
                     "{}",
-                    presentation.message.unwrap_or("画面収録の権限がありません")
+                    presentation
+                        .message
+                        .unwrap_or(text(TextKey::ScreenPermissionUnavailable, locale))
                 )
             }
             let watch_lock =
@@ -153,6 +157,7 @@ impl RuntimeFactory for WatchRuntimeFactory {
             None,
             DeliveryOwnership::Owner,
         )
+        .with_locale(Locale::from_config(&config.ui.language))
         .with_storage(&self.paths, config.retention.conversation_days)
         .with_incoming_mailbox(self.incoming_mailbox.clone())
         .with_outgoing_mailboxes(self.outgoing_mailboxes.clone())
@@ -179,6 +184,7 @@ impl RuntimeFactory for WatchRuntimeFactory {
             memory
         };
         Ok(RuntimeAgents {
+            observation_delivery: coosenpai_core::runtime::ObservationDelivery::Companion,
             observer: Some(observer),
             companion: Some(companion),
             memory: Some(memory),

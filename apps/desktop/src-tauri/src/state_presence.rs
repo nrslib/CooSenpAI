@@ -1,8 +1,9 @@
 use super::*;
-use crate::bubbles::{self, BubbleAction, BubbleInteraction, BubbleRecord};
+use crate::bubbles;
 use crate::command_guard::{CommandSource, DesktopCommand, DispatchError};
 use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveTime, Utc};
 use coosenpai_core::config::MemoryConfig;
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::memory::{FactStore, MemoryStore};
 use coosenpai_core::presence::{CompanionPresenceStore, PresenceEvent};
 use coosenpai_core::state::ConversationRole;
@@ -20,22 +21,10 @@ impl DesktopState {
         let temporary = self.factory.temporary_assertiveness();
         temporary.set(value, expires_at);
         let current = temporary.current(Utc::now());
-        self.publish(|snapshot| snapshot.temporary_assertiveness = current)
-            .await;
-
-        let state = self.clone();
-        let delay = expires_at
-            .signed_duration_since(Utc::now())
-            .to_std()
-            .unwrap_or(Duration::ZERO);
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(delay).await;
-            if temporary.clear_if_expires_at(expires_at) {
-                state
-                    .publish(|snapshot| snapshot.temporary_assertiveness = None)
-                    .await;
-            }
-        });
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::TemporarySelected(
+            current,
+        ))
+        .await;
         self.runtime_config()
     }
 
@@ -72,6 +61,23 @@ impl DesktopState {
 
     async fn run_presence_tick(self: &Arc<Self>, startup: bool) -> anyhow::Result<()> {
         let now = Local::now();
+        let result = self.run_presence_tick_domain(startup, now).await;
+        self.ui.input(
+            crate::ui_events::UiView::Application,
+            crate::ui_events::UiEvent::PresenceTickCompleted {
+                date: now.date_naive(),
+                result: result.as_ref().copied().map_err(ToString::to_string),
+            },
+        );
+        result.map(|_| ())
+    }
+
+    async fn run_presence_tick_domain(
+        self: &Arc<Self>,
+        startup: bool,
+        now: DateTime<Local>,
+    ) -> anyhow::Result<bool> {
+        let mut completed = false;
         let config = self.runtime_config();
         let store = CompanionPresenceStore::new(&self.paths);
         let event = store.update(now.date_naive(), |state| {
@@ -93,11 +99,10 @@ impl DesktopState {
                 store.update(now.date_naive(), |state| {
                     state.mark_completed(&event);
                 })?;
-                self.refresh_conversation().await;
+                completed = true;
             }
         }
-        self.present_fact_candidate(now.date_naive()).await?;
-        Ok(())
+        Ok(completed)
     }
 
     async fn run_presence_event(&self, event: &PresenceEvent) -> anyhow::Result<()> {
@@ -200,13 +205,18 @@ impl DesktopState {
         .join("\n")
     }
 
-    async fn present_fact_candidate(
-        self: &Arc<Self>,
+    pub(crate) async fn load_fact_candidate(
+        &self,
         date: chrono::NaiveDate,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<crate::presence_presenter::FactCandidateLoaded> {
         let config = self.runtime_config();
+        let generation = self.bubbles.lock().await.conversation_generation();
+        let mut result = crate::presence_presenter::FactCandidateLoaded {
+            candidate: None,
+            conversation_generation: generation,
+        };
         if !config.memory.enabled || config.memory.fact_prompt_daily_limit == 0 {
-            return Ok(());
+            return Ok(result);
         }
         let candidates = FactStore::new(self.paths.clone()).load_candidates()?;
         let ids = candidates
@@ -218,49 +228,16 @@ impl DesktopState {
         let selected = store.update(date, |state| {
             state.select_fact_candidate(&ids, config.memory.fact_prompt_daily_limit)
         })?;
-        let Some(id) = selected else {
-            return Ok(());
-        };
-        let Some(candidate) = candidates.candidates.iter().find(|value| value.id == id) else {
-            store.update(date, |state| state.resolve_fact_candidate(&id))?;
-            return Ok(());
-        };
-        let generation = self.bubbles.lock().await.conversation_generation();
-        bubbles::show_best_effort(
-            self.clone(),
-            BubbleRecord {
-                id: format!("fact-prompt-{id}"),
-                created_at: Utc::now().to_rfc3339(),
-                message: format!("これ、覚えておく？\n{}", candidate.text),
-                message_kind: "fact-confirmation".to_owned(),
-                notification_priority: "info".to_owned(),
-                caused_by: None,
-                display_name: config.companion.display_name,
-                persona: config.companion.persona,
-                avatar_color: config.ui.avatar_color,
-                conversation_generation: generation,
-                persistent: true,
-                open_url: None,
-                interaction: Some(BubbleInteraction {
-                    select: None,
-                    actions: vec![
-                        BubbleAction {
-                            id: "memory-confirm".to_owned(),
-                            label: "はい".to_owned(),
-                        },
-                        BubbleAction {
-                            id: "memory-reject".to_owned(),
-                            label: "いいえ".to_owned(),
-                        },
-                    ],
-                    detail: Some(id),
-                    technical_detail: None,
-                }),
-            },
-            config.notification.bubble_duration_ms,
-        )
-        .await;
-        Ok(())
+        if let Some(id) = selected {
+            result.candidate = candidates
+                .candidates
+                .into_iter()
+                .find(|value| value.id == id);
+            if result.candidate.is_none() {
+                store.update(date, |state| state.resolve_fact_candidate(&id))?;
+            }
+        }
+        Ok(result)
     }
 
     pub(super) async fn resolve_fact_prompt(
@@ -269,6 +246,7 @@ impl DesktopState {
         confirm: bool,
     ) -> Result<(), ConfigCommitError> {
         let date = Local::now().date_naive();
+        let locale = Locale::from_config(&self.runtime_config().ui.language);
         let store = CompanionPresenceStore::new(&self.paths);
         let active_candidate_id = store
             .load(date)
@@ -276,13 +254,13 @@ impl DesktopState {
             .active_fact_candidate_id
             .ok_or_else(|| {
                 ConfigCommitError::Runtime(RuntimeError::Factory(
-                    "確認する候補がありません".to_owned(),
+                    text(TextKey::FactCandidateMissing, locale).to_owned(),
                 ))
             })?;
         let candidate_id =
             fact_candidate_for_bubble(&active_candidate_id, bubble_id).ok_or_else(|| {
                 ConfigCommitError::Runtime(RuntimeError::Factory(
-                    "この候補の確認操作は期限切れです".to_owned(),
+                    text(TextKey::FactCandidateExpired, locale).to_owned(),
                 ))
             })?;
         let expected_bubble_id = format!("fact-prompt-{candidate_id}");

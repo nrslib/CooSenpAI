@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 build = "build.rs"
 
+[features]
+e2e-fixtures = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

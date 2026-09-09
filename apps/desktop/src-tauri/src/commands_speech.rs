@@ -1,10 +1,10 @@
-use crate::command_guard::{CommandSource, DesktopCommand};
-use crate::commands::{
-    authorize_window, dispatch_result, CommandOrigin, IpcResult, TauriIpcResult, MAX_CHAT_BYTES,
-};
+use crate::commands::{authorize_window, CommandOrigin, IpcResult, TauriIpcResult, MAX_CHAT_BYTES};
 use crate::speech::{SpeechPopupSnapshot, SpeechSource};
 use crate::state::DesktopState;
-use coosenpai_core::ports::{SystemSettingsPane, SystemSettingsPort};
+use crate::ui_commands::UserCommand;
+use crate::ui_events::{UiEvent, UiView};
+use coosenpai_core::locale::{text, Locale, TextKey};
+use coosenpai_core::ports::SystemSettingsPane;
 use serde::Deserialize;
 use std::sync::Arc;
 use tauri::{State, WebviewWindow};
@@ -18,13 +18,25 @@ pub struct SpeechStartPayload {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechSendPayload {
-    text: String,
+    generation: u64,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechSettingsPayload {
     kind: String,
+}
+
+pub(crate) async fn start_composer_voice(
+    ui: &crate::ui_root::UiHandle,
+) -> Result<Option<String>, String> {
+    ui.request(
+        crate::ui_events::UiView::Chat,
+        crate::ui_events::UiEvent::Voice(crate::ui_events::VoiceAction::Start(
+            SpeechSource::Composer,
+        )),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -34,26 +46,17 @@ pub async fn speech_start(
     payload: SpeechStartPayload,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     if payload.source != "composer" {
-        return Ok(IpcResult::failure("source は composer で指定してください"));
+        return Ok(IpcResult::failure(text(
+            TextKey::SpeechSourceInvalid,
+            locale,
+        )));
     }
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcMain,
-        DesktopCommand::SpeechStart,
-        move |context| async move {
-            match handler_state
-                .command_speech_begin(&context, SpeechSource::Composer)
-                .await
-            {
-                Ok(()) => IpcResult::success(()),
-                Err(message) => IpcResult::failure(message),
-            }
-        },
-    )
-    .await)
+    Ok(match start_composer_voice(&state.ui).await {
+        Ok(_) => IpcResult::success(()),
+        Err(message) => IpcResult::failure(message),
+    })
 }
 
 #[tauri::command]
@@ -62,18 +65,19 @@ pub async fn speech_finish(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcMain,
-        DesktopCommand::SpeechFinish,
-        move |context| async move {
-            handler_state.command_speech_finish(&context);
-            IpcResult::success(())
+    Ok(
+        match state
+            .ui
+            .request(
+                crate::ui_events::UiView::Chat,
+                crate::ui_events::UiEvent::Voice(crate::ui_events::VoiceAction::Finish),
+            )
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(message) => IpcResult::failure(message),
         },
     )
-    .await)
 }
 
 #[tauri::command]
@@ -82,20 +86,19 @@ pub async fn speech_cancel(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcMain,
-        DesktopCommand::SpeechCancel,
-        move |context| async move {
-            match handler_state.command_speech_cancel(&context) {
-                Ok(()) => IpcResult::success(()),
-                Err(message) => IpcResult::failure(message),
-            }
+    Ok(
+        match state
+            .ui
+            .request(
+                crate::ui_events::UiView::Chat,
+                crate::ui_events::UiEvent::Voice(crate::ui_events::VoiceAction::Cancel),
+            )
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(message) => IpcResult::failure(message),
         },
     )
-    .await)
 }
 
 #[tauri::command]
@@ -104,7 +107,12 @@ pub async fn speech_popup_snapshot(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<SpeechPopupSnapshot> {
     authorize_window(&window, CommandOrigin::SpeechPopup)?;
-    Ok(IpcResult::success(state.speech_popup_snapshot().await))
+    state
+        .ui
+        .query(UiView::SpeechPopup, |reply| {
+            UiEvent::UserCommand(UserCommand::SpeechSnapshot(reply))
+        })
+        .await
 }
 
 #[tauri::command]
@@ -114,60 +122,88 @@ pub async fn speech_popup_send(
     payload: SpeechSendPayload,
 ) -> TauriIpcResult<String> {
     authorize_window(&window, CommandOrigin::SpeechPopup)?;
-    if payload.text.trim().is_empty() {
-        return Ok(IpcResult::failure("text は空にできません"));
-    }
+    let (reply, result) = tokio::sync::oneshot::channel();
+    state.ui.input(
+        UiView::SpeechPopup,
+        UiEvent::CaptureCompleted(Box::new(crate::capture::CaptureEvent::VoiceSend {
+            generation: payload.generation,
+            reply,
+        })),
+    );
+    Ok(match result.await {
+        Ok(Ok(id)) => IpcResult::success(id),
+        Ok(Err(message)) => IpcResult::failure(message),
+        Err(_) => IpcResult::failure("音声入力の受付は終了しています"),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpeechEditPayload {
+    generation: u64,
+    edit_revision: u64,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeechKeyPayload {
+    generation: u64,
+    input: crate::capture::PopupKeyInput,
+}
+
+#[tauri::command]
+pub async fn speech_popup_edit(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: SpeechEditPayload,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::SpeechPopup)?;
     if payload.text.len() > MAX_CHAT_BYTES {
-        return Ok(IpcResult::failure("text が長すぎます"));
+        return Ok(IpcResult::failure("文章が長すぎます"));
     }
-    let state = state.inner().clone();
-    let Some(generation) = state.speech_confirming_generation() else {
-        return Ok(IpcResult::failure("確認する音声入力がありません"));
-    };
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcSpeechPopup,
-        DesktopCommand::SpeechConfirm,
-        move |context| async move {
-            if context
-                .fence(crate::command_guard::GenerationResource::Speech)
-                .is_none_or(|stamp| stamp.value != generation)
-            {
-                return IpcResult::failure("古い音声入力です");
-            }
-            match handler_state
-                .command_speech_confirm(&context, payload.text)
-                .await
-            {
-                Ok(id) => IpcResult::success(id),
-                Err(message) => IpcResult::failure(message),
-            }
-        },
-    )
-    .await)
+    state.ui.input(
+        UiView::SpeechPopup,
+        UiEvent::CaptureCompleted(Box::new(crate::capture::CaptureEvent::VoiceEdit {
+            generation: payload.generation,
+            edit_revision: payload.edit_revision,
+            text: payload.text,
+        })),
+    );
+    Ok(IpcResult::success(()))
+}
+
+#[tauri::command]
+pub async fn speech_popup_key(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: SpeechKeyPayload,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::SpeechPopup)?;
+    state.ui.input(
+        UiView::SpeechPopup,
+        UiEvent::CaptureCompleted(Box::new(crate::capture::CaptureEvent::VoiceKey {
+            generation: payload.generation,
+            input: payload.input,
+        })),
+    );
+    Ok(IpcResult::success(()))
 }
 
 #[tauri::command]
 pub async fn speech_popup_cancel(
     window: WebviewWindow,
     state: State<'_, Arc<DesktopState>>,
+    payload: SpeechSendPayload,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::SpeechPopup)?;
-    let state = state.inner().clone();
-    let handler_state = state.clone();
-    Ok(dispatch_result(
-        state,
-        CommandSource::IpcSpeechPopup,
-        DesktopCommand::SpeechCancel,
-        move |context| async move {
-            match handler_state.command_speech_cancel(&context) {
-                Ok(()) => IpcResult::success(()),
-                Err(message) => IpcResult::failure(message),
-            }
-        },
-    )
-    .await)
+    state.ui.input(
+        UiView::SpeechPopup,
+        UiEvent::CaptureCompleted(Box::new(crate::capture::CaptureEvent::VoiceCancel {
+            generation: payload.generation,
+        })),
+    );
+    Ok(IpcResult::success(()))
 }
 
 #[tauri::command]
@@ -177,32 +213,36 @@ pub async fn speech_open_system_settings(
     payload: SpeechSettingsPayload,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
-    let pane = match speech_settings_pane(&payload.kind) {
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    let pane = match speech_settings_pane_for_locale(&payload.kind, locale) {
         Ok(pane) => pane,
         Err(message) => return Ok(IpcResult::failure(message)),
     };
-    let result = crate::platform::MacSystemSettings
-        .open(pane, state.cancellation.child_token())
-        .await;
-    Ok(match result {
-        Ok(()) => IpcResult::success(()),
-        _ => IpcResult::failure(speech_settings_open_error(&payload.kind)),
-    })
-}
-
-fn speech_settings_open_error(kind: &str) -> &'static str {
-    if kind == "recognition" {
-        "音声認識のシステム設定を開けませんでした"
+    let failure = if payload.kind == "recognition" {
+        TextKey::SpeechRecognitionSettingsFailed
     } else {
-        "マイクのシステム設定を開けませんでした"
-    }
+        TextKey::SpeechMicrophoneSettingsFailed
+    };
+    state
+        .ui
+        .query(UiView::Chat, |reply| {
+            UiEvent::UserCommand(UserCommand::SystemSettings {
+                pane,
+                failure,
+                reply,
+            })
+        })
+        .await
 }
 
-fn speech_settings_pane(kind: &str) -> Result<SystemSettingsPane, &'static str> {
+fn speech_settings_pane_for_locale(
+    kind: &str,
+    locale: Locale,
+) -> Result<SystemSettingsPane, &'static str> {
     match kind {
         "microphone" => Ok(SystemSettingsPane::Microphone),
         "recognition" => Ok(SystemSettingsPane::SpeechRecognition),
-        _ => Err("kind は microphone または recognition です"),
+        _ => Err(text(TextKey::SpeechSettingsKindInvalid, locale)),
     }
 }
 

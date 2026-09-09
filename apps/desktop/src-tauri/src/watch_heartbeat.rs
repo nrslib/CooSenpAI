@@ -1,10 +1,12 @@
 use super::*;
+use crate::watch_presenter::WatchResult;
 
 pub(super) async fn heartbeat_if_due(
     state: &DesktopState,
     config: &Config,
     memory: &mut WatchMemory,
     max_interval_ms: u64,
+    generation: u64,
     cancellation: CancellationToken,
 ) -> Result<()> {
     if !memory.frames.is_empty()
@@ -95,7 +97,7 @@ pub(super) async fn heartbeat_if_due(
     memory.last_observation = Instant::now();
     memory.window_start = memory.last_observation;
     state
-        .publish(|snapshot| snapshot.observer.record_observation(observation))
+        .publish_watch_view(generation, WatchResult::HeartbeatObserved(observation))
         .await;
     Ok(())
 }

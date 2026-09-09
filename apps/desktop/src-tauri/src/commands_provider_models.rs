@@ -1,6 +1,7 @@
 use crate::commands::{authorize, CommandOrigin, IpcResult, TauriIpcResult};
 use crate::factory::ProviderModelOptions;
 use crate::state::DesktopState;
+use coosenpai_core::locale::Locale;
 
 pub(crate) async fn provider_models_for_state(
     origin: &str,
@@ -15,7 +16,9 @@ pub(crate) async fn provider_models_for_state(
             .await
         {
             Ok(values) => IpcResult::success(values),
-            Err(error) => IpcResult::failure(error.to_string()),
+            Err(error) => IpcResult::failure(
+                error.format_for_locale(Locale::from_config(&state.runtime_config().ui.language)),
+            ),
         },
     )
 }

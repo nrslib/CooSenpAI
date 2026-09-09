@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 build = "build.rs"
+default-run = "coosenpai-desktop"
 
 [lib]
 name = "coosenpai_desktop"
@@ -14,6 +15,21 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [[bin]]
 name = "coosenpai-desktop"
 path = "src/main.rs"
+
+[[test]]
+name = "desktop_config_entry"
+path = "tests/desktop_config_entry.rs"
+harness = false
+
+[[bin]]
+name = "coosenpai-update-verify"
+path = "src/update_verify_main.rs"
+test = false
+required-features = ["update-verifier"]
+
+[features]
+update-verifier = []
+e2e-fixtures = ["coosenpai-core/e2e-fixtures"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
@@ -28,7 +44,7 @@ image = { workspace = true, features = ["jpeg"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-semver.workspace = true
+semver = { workspace = true, features = ["serde"] }
 sha2.workspace = true
 tempfile.workspace = true
 tauri = { version = "2.11.5", default-features = false, features = ["wry", "tray-icon", "image-png", "macos-private-api"] }
@@ -39,6 +55,15 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+base64 = "0.22"
+minisign-verify = "0.2.5"
+flate2 = "1"
+tar = "0.4"
+plist = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tauri = { version = "2.11.5", default-features = false, features = ["wry", "tray-icon", "image-png", "macos-private-api", "test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow"] }

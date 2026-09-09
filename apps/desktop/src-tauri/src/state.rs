@@ -1,93 +1,32 @@
-use crate::bubbles::{self, BubbleRecord, BubbleState, BubbleWindowSyncState};
-use crate::capture::CapturePopupState;
+use crate::bubbles::{self, BubbleRecord, BubbleState};
 pub(crate) use crate::config_update::{
     ConfigCommitError, ConfigUpdateCoordinator, ConfigUpdateTransaction,
 };
 use crate::factory::{bundled_persona_directory, DesktopRuntimeFactory};
 use crate::own_bounds::TauriOwnWindowBounds;
-use crate::snapshot::{AppSnapshot, SnapshotEvent};
+use crate::snapshot::AppSnapshot;
 use anyhow::{Context, Result};
 use coosenpai_core::companion_storage::CompanionStorage;
-use coosenpai_core::config::{ensure_layout, load_config};
 use coosenpai_core::config::{Config, ConfigPaths};
+use coosenpai_core::conversation_archive::list_conversation_generations;
 use coosenpai_core::logging::FileLogger;
 use coosenpai_core::notification::NotificationConsumer;
-use coosenpai_core::onboarding::OnboardingStore;
 use coosenpai_core::persistence::WatchLock;
 use coosenpai_core::ports::{
-    ClipboardReader, ClipboardWriter, NotificationPort, ProviderApiKeyStore, RuntimeLogger,
-    SelectedTextCopyPort,
+    ClipboardReader, ClipboardWriter, ProviderApiKeyStore, RuntimeLogger, SelectedTextCopyPort,
 };
-use coosenpai_core::runtime::{
-    RuntimeError, RuntimeErrorKind, RuntimeHandle, RuntimeLastError, RuntimeSnapshot,
-};
+use coosenpai_core::runtime::{RuntimeError, RuntimeErrorKind, RuntimeHandle, RuntimeLastError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
-    collections::HashMap,
-    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 
-const THOUGHT_BUBBLE_COOLDOWN: Duration = Duration::from_millis(1_500);
-
-#[derive(Debug, Default)]
-struct ThoughtBubbleScheduler {
-    last_presented_at: Option<Instant>,
-    pending: Option<String>,
-    flush_scheduled: bool,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ThoughtBubbleAction {
-    Show(String),
-    Wait(Duration),
-    None,
-}
-
-impl ThoughtBubbleScheduler {
-    fn queue(&mut self, now: Instant, thought: String) -> ThoughtBubbleAction {
-        self.pending = Some(thought);
-        let Some(last_presented_at) = self.last_presented_at else {
-            self.last_presented_at = Some(now);
-            return ThoughtBubbleAction::Show(self.pending.take().expect("thought is queued"));
-        };
-        let elapsed = now.saturating_duration_since(last_presented_at);
-        if elapsed >= THOUGHT_BUBBLE_COOLDOWN && !self.flush_scheduled {
-            self.last_presented_at = Some(now);
-            return ThoughtBubbleAction::Show(self.pending.take().expect("thought is queued"));
-        }
-        if self.flush_scheduled {
-            ThoughtBubbleAction::None
-        } else {
-            self.flush_scheduled = true;
-            ThoughtBubbleAction::Wait(THOUGHT_BUBBLE_COOLDOWN.saturating_sub(elapsed))
-        }
-    }
-
-    fn flush(&mut self, now: Instant) -> ThoughtBubbleAction {
-        let Some(last_presented_at) = self.last_presented_at else {
-            self.flush_scheduled = false;
-            return ThoughtBubbleAction::None;
-        };
-        let elapsed = now.saturating_duration_since(last_presented_at);
-        if elapsed < THOUGHT_BUBBLE_COOLDOWN {
-            return ThoughtBubbleAction::Wait(THOUGHT_BUBBLE_COOLDOWN - elapsed);
-        }
-        self.flush_scheduled = false;
-        self.last_presented_at = Some(now);
-        self.pending
-            .take()
-            .map_or(ThoughtBubbleAction::None, ThoughtBubbleAction::Show)
-    }
-
-    fn clear_pending(&mut self) {
-        self.pending = None;
-    }
-}
+#[path = "state_bubble_click.rs"]
+mod bubble_click;
 
 #[path = "state_clipboard.rs"]
 mod clipboard;
@@ -96,6 +35,8 @@ pub(crate) use clipboard::dispatch_copy_last_reply_shortcut;
 mod audio;
 #[path = "state_command_api.rs"]
 mod command_api;
+#[path = "state_conversation.rs"]
+mod conversation_state;
 #[path = "state_permission.rs"]
 mod permission;
 #[path = "state_persona.rs"]
@@ -108,6 +49,8 @@ mod runtime_state;
 mod setup;
 #[path = "state_startup.rs"]
 mod startup;
+#[path = "state_startup_context.rs"]
+mod startup_context;
 #[path = "state_tutorial_finish.rs"]
 mod tutorial_finish;
 #[path = "state_tutorial_notice_effects.rs"]
@@ -127,25 +70,22 @@ pub(crate) use watch_state::WatchStartIntent;
 use watch_state::{WatchControl, WatchLifecycle};
 
 pub(crate) struct DesktopState {
+    pub(crate) work: Arc<crate::work::WorkController>,
     pub app: AppHandle,
-    pub(crate) main_window_visible: AtomicBool,
     pub(crate) main_window_focused: AtomicBool,
-    capture_popup_focus: watch::Sender<bool>,
     bubble_focus: watch::Sender<bool>,
-    pub bubbles: Mutex<BubbleState>,
-    pub(crate) bubble_window_sync: Mutex<BubbleWindowSyncState>,
-    thought_bubble: Mutex<ThoughtBubbleScheduler>,
-    capture_popup: Mutex<CapturePopupState>,
-    text_capture_serial: Mutex<()>,
-    pub(crate) input_popup_gate: Mutex<()>,
+    pub bubbles: Arc<Mutex<BubbleState>>,
+    pub(crate) capture: crate::capture::CaptureHandle,
+    pub(crate) ui: crate::ui_root::UiHandle,
+    pub(crate) screen_capture_gate: crate::screen_capture_gate::ScreenCaptureGate,
     pub clipboard_reader: Arc<dyn coosenpai_core::ports::ClipboardReader>,
     pub selected_text_copier: Arc<dyn SelectedTextCopyPort>,
     pub(crate) clipboard_writer: Arc<dyn coosenpai_core::ports::ClipboardWriter>,
-    speech: Arc<crate::speech::SpeechController>,
+    pub(crate) speech: Arc<crate::speech::SpeechController>,
     hearing: Arc<crate::hearing::HearingController>,
-    tutorial: Mutex<crate::tutorial::TutorialController>,
-    tutorial_sequence: Mutex<tutorial_sequence::TutorialSequenceControl>,
-    pub shortcut_coordinator: crate::capture::ShortcutCoordinator,
+    pub(crate) voice_output: Arc<crate::voice_output::VoiceOutputController>,
+    pub(crate) tutorial: Arc<Mutex<crate::tutorial::TutorialController>>,
+    pub shortcut_coordinator: Arc<crate::capture::ShortcutCoordinator>,
     pub(crate) command_firewall: crate::command_guard::CommandFirewall,
     pub input_active: AtomicBool,
     pub cancellation: CancellationToken,
@@ -154,16 +94,12 @@ pub(crate) struct DesktopState {
     pub paths: ConfigPaths,
     pub logger: Arc<FileLogger>,
     pub own_bounds: Arc<TauriOwnWindowBounds>,
-    conversation_sync: Mutex<()>,
+    conversation_sync: Arc<Mutex<()>>,
     screen_permission: Mutex<permission::ScreenPermissionCache>,
-    #[cfg(test)]
-    screen_permission_override: Mutex<Option<coosenpai_core::ports::ScreenCapturePermission>>,
-    snapshot: Mutex<AppSnapshot>,
+    pub(crate) snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
     pub(crate) config_update: ConfigUpdateCoordinator,
-    bubble_delivery_log_state: Mutex<BubbleDeliveryLogState>,
     watch_control: Mutex<WatchControl>,
     pub(crate) watch_intent_lock: Mutex<()>,
-    popup_focus_gate: Mutex<()>,
     runtime_active: AtomicBool,
     shutting_down: AtomicBool,
     presence_startup_pending: AtomicBool,
@@ -184,42 +120,6 @@ impl DesktopState {
         self.core_runtime().snapshot()
     }
 
-    pub(crate) async fn capture_popup_read(
-        &self,
-    ) -> tokio::sync::MutexGuard<'_, CapturePopupState> {
-        self.capture_popup.lock().await
-    }
-
-    pub(crate) async fn capture_popup_for_command(
-        &self,
-        _permit: &crate::command_guard::CommandContext,
-    ) -> tokio::sync::MutexGuard<'_, CapturePopupState> {
-        self.capture_popup.lock().await
-    }
-
-    pub(crate) async fn capture_popup_for_event(
-        &self,
-        generation: crate::command_guard::GenerationStamp,
-    ) -> Result<tokio::sync::MutexGuard<'_, CapturePopupState>, crate::command_guard::DispatchError>
-    {
-        self.ensure_command_generation(generation)?;
-        let capture = self.capture_popup.lock().await;
-        self.ensure_command_generation(generation)?;
-        Ok(capture)
-    }
-
-    pub(crate) async fn text_capture_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.text_capture_serial.lock().await
-    }
-
-    pub(crate) fn capture_popup_focus_events(&self) -> watch::Receiver<bool> {
-        self.capture_popup_focus.subscribe()
-    }
-
-    pub(crate) fn set_capture_popup_focused(&self, focused: bool) {
-        self.capture_popup_focus.send_replace(focused);
-    }
-
     pub(crate) fn bubble_focus_events(&self) -> watch::Receiver<bool> {
         self.bubble_focus.subscribe()
     }
@@ -228,12 +128,8 @@ impl DesktopState {
         self.bubble_focus.send_replace(focused);
     }
 
-    pub(crate) fn popup_focus_gate(&self) -> &Mutex<()> {
-        &self.popup_focus_gate
-    }
-
     pub(crate) async fn input_popup_kind(&self) -> Option<crate::input_popup::InputPopupKind> {
-        let capture_kind = self.capture_popup_read().await.kind();
+        let capture_kind = self.capture.view().kind;
         if let Some(kind) = capture_kind {
             return Some(match kind {
                 crate::capture::CaptureKind::Image => {
@@ -242,22 +138,11 @@ impl DesktopState {
                 crate::capture::CaptureKind::Text => {
                     crate::input_popup::InputPopupKind::CaptureText
                 }
+                crate::capture::CaptureKind::Voice => crate::input_popup::InputPopupKind::Speech,
             });
         }
         (self.speech_resource_phase() != crate::command_guard::ResourcePhase::Idle)
             .then_some(crate::input_popup::InputPopupKind::Speech)
-    }
-
-    pub(crate) fn speech_is_recording(&self) -> bool {
-        self.speech.is_recording()
-    }
-
-    pub(crate) fn speech_confirming_generation(&self) -> Option<u64> {
-        self.speech.confirming_generation()
-    }
-
-    pub(crate) fn speech_accepts_transient_shortcut_error(&self, generation: u64) -> bool {
-        self.speech.accepts_transient_shortcut_error(generation)
     }
 
     pub(crate) async fn speech_popup_snapshot(&self) -> crate::speech::SpeechPopupSnapshot {
@@ -312,10 +197,6 @@ impl DesktopState {
         self.speech.resource_phase()
     }
 
-    pub(crate) async fn cancel_speech_and_wait(&self) {
-        self.speech.cancel_and_wait(self).await;
-    }
-
     pub async fn initialize(app: AppHandle) -> Result<Arc<Self>> {
         Self::initialize_with_clipboards(
             app,
@@ -332,43 +213,42 @@ impl DesktopState {
         clipboard_writer: Arc<dyn ClipboardWriter>,
         selected_text_copier: Arc<dyn SelectedTextCopyPort>,
     ) -> Result<Arc<Self>> {
-        Self::initialize_with_clipboards_and_keychain(
+        Self::initialize_with_ports(
             app,
             clipboard_reader,
             clipboard_writer,
             selected_text_copier,
             crate::platform::provider_api_key_store(),
+            crate::platform::voice_output_provider(),
         )
         .await
     }
 
-    pub(crate) async fn initialize_with_clipboards_and_keychain(
+    pub(crate) async fn initialize_with_ports(
         app: AppHandle,
         clipboard_reader: Arc<dyn ClipboardReader>,
         clipboard_writer: Arc<dyn ClipboardWriter>,
         selected_text_copier: Arc<dyn SelectedTextCopyPort>,
         keychain: Arc<dyn ProviderApiKeyStore>,
+        voice_output_provider: Arc<dyn coosenpai_core::voice_output::VoiceOutputProviderFactory>,
     ) -> Result<Arc<Self>> {
-        let user_home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("ホームディレクトリを取得できません")?;
+        let paths = crate::desktop_startup::prepare_paths(
+            std::env::var_os("HOME"),
+            std::env::var_os("COOSENPAI_HOME"),
+        )?;
         let resource_dir = startup::resource_directory(&app)?;
-        let paths = ConfigPaths::for_home(&user_home)
+        let paths = paths
             .with_builtin_personas(bundled_persona_directory(resource_dir.clone()))
-            .with_builtin_tutorial(resource_dir.join("tutorial/tutorial.md"));
-        ensure_layout(&paths)?;
-        let (config, startup_config_error) = startup::startup_config(load_config(&paths));
+            .with_builtin_tutorial(resource_dir.join("tutorial/tutorial.md"))
+            .with_builtin_tutorial_en(resource_dir.join("tutorial/tutorial.en.md"));
         let logger = Arc::new(FileLogger::new(paths.log.clone())?);
         logger.write("INFO", "CooSenpAI desktop runtimeを初期化しました。")?;
-        if let Err(error) = crate::avatar::cleanup_stale_backups(&paths) {
+        if let Err(error) = crate::avatar::cleanup_stale_files(&paths) {
             let _ = logger.write(
                 "WARN",
                 &format!("アバター旧ファイルの起動時 cleanup に失敗しました: {error}"),
             );
         }
-        let (mut tutorial, onboarding_persistence_error) =
-            startup::startup_tutorial(OnboardingStore::new(paths.onboarding.clone()));
-        let onboarding_view = crate::snapshot::OnboardingView::from_state(tutorial.state());
         let watch_lock = WatchLock::acquire(&paths.watch_lock)
             .context("別の coosenpai watch が起動しています")?;
         let cancellation = CancellationToken::new();
@@ -381,47 +261,19 @@ impl DesktopState {
             )
             .map_err(anyhow::Error::msg)?,
         );
-        let setup_provider_error = if onboarding_view.setup_required {
-            match factory.tutorial_provider(tutorial_state::tutorial_placeholders(&config)) {
-                Ok(provider) => {
-                    tutorial.attach_setup_provider(provider);
-                    None
-                }
-                Err(error) => Some(startup::factory_runtime_error(error.issue)),
-            }
-        } else {
-            None
-        };
-        let (current_conversation_generation, generation_error) =
-            startup::conversation_generation(&paths);
-        let should_initialize_conversation = startup::should_initialize_conversation_on_startup(
-            startup_config_error.is_none(),
-            onboarding_persistence_error.is_none(),
-            generation_error.is_none(),
-            onboarding_view.setup_required,
-            onboarding_view.tutorial_active,
-        );
-        let (conversation_generation, startup_conversation_error) =
-            startup::initialize_conversation_before_runtime(
-                &paths,
-                &config,
-                current_conversation_generation,
-                generation_error.is_some(),
-                should_initialize_conversation,
-            );
-        let onboarding_error = startup::onboarding_runtime_error(tutorial.state());
-        let startup_ready = startup_config_error.is_none()
-            && generation_error.is_none()
-            && onboarding_persistence_error.is_none()
-            && startup_conversation_error.is_none();
-        let runtime_error = startup_config_error
-            .clone()
-            .or(generation_error)
-            .or(startup_conversation_error)
-            .or(onboarding_persistence_error)
-            .or(setup_provider_error)
-            .or(onboarding_error);
-        let runtime_active = runtime_error.is_none();
+        let startup = startup_context::StartupContext::load(&paths, factory.as_ref());
+        startup.log_status(logger.as_ref())?;
+        let runtime_active = startup.is_runtime_active();
+        let startup_context::StartupContext {
+            config,
+            mut tutorial,
+            onboarding: onboarding_view,
+            conversation_generation,
+            ready: startup_ready,
+            error: runtime_error,
+        } = startup;
+        factory.work.approvals.set_mode(config.work.approval_mode);
+        factory.work.set_roots(config.work.allowed_roots.clone());
         let runtime = startup::startup_runtime(
             &config,
             runtime_error.clone(),
@@ -434,6 +286,16 @@ impl DesktopState {
         .await?;
         let storage = CompanionStorage::from_paths(&paths, config.retention.conversation_days);
         let conversation = storage.load_conversation().unwrap_or_default();
+        let conversation_generations = match list_conversation_generations(&paths) {
+            Ok(generations) => generations,
+            Err(error) => {
+                let _ = logger.write(
+                    "WARN",
+                    &format!("会話世代一覧の読込に失敗しました: {error}"),
+                );
+                Vec::new()
+            }
+        };
         let observer_calls = coosenpai_core::usage::today_observer_usage(&paths.usage)
             .map(|usage| usage.ai_calls)
             .unwrap_or(0);
@@ -450,47 +312,46 @@ impl DesktopState {
         let initial_avatar =
             crate::avatar::load_with_status(&paths, config.ui.avatar_path.as_deref());
         let config_revision = config.revision;
-        let (capture_popup_focus, _) = watch::channel(false);
+        let (ui, start_ui_root) = crate::ui_root::channel();
+        let (capture, capture_presenter) = crate::capture::channel(ui.clone());
         let (bubble_focus, _) = watch::channel(false);
         logger.write(
             "INFO",
             &format!("画面収録権限: {}", permission.presentation().status),
         )?;
+        let screen_capture_gate = crate::screen_capture_gate::ScreenCaptureGate::default();
         let state = Arc::new(Self {
+            work: factory.work.clone(),
             own_bounds: Arc::new(TauriOwnWindowBounds::new(app.clone())),
-            conversation_sync: Mutex::new(()),
+            conversation_sync: Arc::new(Mutex::new(())),
             screen_permission: Mutex::new(permission::ScreenPermissionCache::new(
                 permission,
                 Instant::now(),
             )),
-            #[cfg(test)]
-            screen_permission_override: Mutex::new(None),
             app,
-            main_window_visible: AtomicBool::new(false),
             main_window_focused: AtomicBool::new(false),
-            capture_popup_focus,
             bubble_focus,
-            bubbles: Mutex::new(BubbleState::for_conversation_generation(
+            bubbles: Arc::new(Mutex::new(BubbleState::for_conversation_generation(
                 conversation_generation,
-            )),
-            bubble_window_sync: Mutex::new(BubbleWindowSyncState::default()),
-            thought_bubble: Mutex::new(ThoughtBubbleScheduler::default()),
-            capture_popup: Mutex::new(CapturePopupState::default()),
-            text_capture_serial: Mutex::new(()),
-            input_popup_gate: Mutex::new(()),
+            ))),
+            capture,
+            ui,
+            screen_capture_gate,
             clipboard_reader,
             selected_text_copier,
             clipboard_writer,
             speech,
             hearing,
-            tutorial: Mutex::new(tutorial),
-            tutorial_sequence: Mutex::new(tutorial_sequence::TutorialSequenceControl::default()),
-            shortcut_coordinator: crate::capture::ShortcutCoordinator::default(),
+            voice_output: Arc::new(crate::voice_output::VoiceOutputController::new(
+                voice_output_provider,
+            )),
+            tutorial: Arc::new(Mutex::new(tutorial)),
+            shortcut_coordinator: Arc::new(crate::capture::ShortcutCoordinator::default()),
             command_firewall: crate::command_guard::CommandFirewall::default(),
             input_active: AtomicBool::new(false),
             cancellation,
             factory,
-            snapshot: Mutex::new({
+            snapshot: Arc::new(std::sync::Mutex::new({
                 let mut snapshot = AppSnapshot::initial(
                     config,
                     conversation,
@@ -506,10 +367,11 @@ impl DesktopState {
                 snapshot.last_error = runtime_error;
                 snapshot.onboarding = onboarding_view.clone();
                 snapshot.speech.input_devices = speech_input_devices;
+                snapshot.conversation_generations = conversation_generations;
+                snapshot.selected_conversation_generation = conversation_generation;
                 snapshot
-            }),
+            })),
             config_update: ConfigUpdateCoordinator::new(config_revision),
-            bubble_delivery_log_state: Mutex::new(BubbleDeliveryLogState::default()),
             watch_control: Mutex::new(WatchControl {
                 lifecycle: WatchLifecycle::Stopped,
                 generation: 0,
@@ -518,7 +380,6 @@ impl DesktopState {
                 start_commit_barrier: None,
             }),
             watch_intent_lock: Mutex::new(()),
-            popup_focus_gate: Mutex::new(()),
             runtime_active: AtomicBool::new(runtime_active),
             shutting_down: AtomicBool::new(false),
             presence_startup_pending: AtomicBool::new(true),
@@ -528,8 +389,8 @@ impl DesktopState {
             logger,
             _watch_lock: watch_lock,
         });
-        state.own_bounds.request_refresh()?;
-        Self::spawn_own_bounds_monitor(state.clone());
+        state.app.manage(state.ui.clone());
+        start_ui_root(state.clone(), state.snapshot().await, capture_presenter);
         Self::spawn_runtime_monitor(state.clone());
         Self::spawn_notification_monitor(state.clone());
         Self::spawn_power_monitor(state.clone());
@@ -563,20 +424,17 @@ impl DesktopState {
                 .await;
         }
         state.refresh_debug().await;
+        state.voice_output.start(&state);
         state.sync_audio();
         Ok(state)
     }
 
     pub async fn snapshot(&self) -> AppSnapshot {
-        self.snapshot.lock().await.clone()
+        self.snapshot.lock().expect("snapshot lock").clone()
     }
 
     pub(crate) async fn refresh_avatar_image(&self) {
-        let avatar = crate::avatar::load_with_status(
-            &self.paths,
-            self.runtime_config().ui.avatar_path.as_deref(),
-        );
-        self.publish(|snapshot| apply_avatar_load_result(snapshot, avatar))
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::AvatarRefresh)
             .await;
     }
 
@@ -601,27 +459,29 @@ impl DesktopState {
         self.runtime_active.load(Ordering::Acquire)
     }
 
-    pub async fn publish<F>(&self, update: F) -> AppSnapshot
-    where
-        F: FnOnce(&mut AppSnapshot),
-    {
-        let mut snapshot = self.snapshot.lock().await;
-        let avatar_path = snapshot.config.ui.avatar_path.clone();
-        update(&mut snapshot);
-        if snapshot.config.ui.avatar_path != avatar_path {
-            refresh_avatar_snapshot(&mut snapshot, &self.paths);
-        }
-        snapshot.config_revision = self.config_update.current_revision();
-        snapshot.revision = snapshot.revision.saturating_add(1);
-        let result = snapshot.clone();
-        let _ = self.app.emit(
-            "coosenpai:snapshot:updated",
-            SnapshotEvent {
-                revision: result.revision,
-                snapshot: result.clone(),
+    pub(crate) async fn publish_event(
+        &self,
+        event: crate::snapshot_presenter::SnapshotEvent,
+    ) -> AppSnapshot {
+        let input = crate::snapshot_presenter::SnapshotInput {
+            event,
+            config_revision: self.config_update.current_revision(),
+            work: coosenpai_core::work::WorkConfig {
+                approval_mode: self.work.approvals.mode(),
+                allowed_roots: self.work.roots(),
             },
-        );
-        result
+        };
+        if let Err(error) = self
+            .ui
+            .request(
+                crate::ui_events::UiView::Application,
+                crate::ui_events::UiEvent::SnapshotResult(Box::new(input)),
+            )
+            .await
+        {
+            let _ = self.logger.write("WARN", &error);
+        }
+        self.snapshot().await
     }
 
     pub async fn refresh_conversation(&self) {
@@ -630,12 +490,21 @@ impl DesktopState {
         let storage = CompanionStorage::from_paths(&self.paths, config.retention.conversation_days);
         let (calls, limit_reached) =
             companion_usage_summary(&self.paths, config.companion.daily_proactive_limit);
-        if let Ok(conversation) = storage.load_conversation() {
-            self.publish(|snapshot| {
-                snapshot.conversation = conversation;
-                snapshot.companion.total_calls_today = calls;
-                snapshot.companion.proactive_limit_reached = limit_reached;
-            })
+        let conversation = storage.load_conversation();
+        let generations = list_conversation_generations(&self.paths);
+        let selected_generation = storage.conversation_generation();
+        if let (Ok(conversation), Ok(generations), Ok(selected_generation)) =
+            (conversation, generations, selected_generation)
+        {
+            self.publish_event(
+                crate::snapshot_presenter::SnapshotEvent::ConversationLoaded {
+                    conversation,
+                    generations,
+                    selected_generation,
+                    calls,
+                    limit_reached,
+                },
+            )
             .await;
         }
         self.refresh_debug().await;
@@ -656,8 +525,15 @@ impl DesktopState {
         } else {
             coosenpai_core::debug::DebugCatalog::default()
         };
-        self.publish(|snapshot| snapshot.debug_catalog = catalog)
-            .await;
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::DebugLoaded(
+            catalog,
+        ))
+        .await;
+    }
+
+    pub(crate) async fn finish_capture_cleanup(&self) {
+        self.cancellation.cancel();
+        self.capture.shutdown().await;
     }
 
     pub async fn shutdown(&self) {
@@ -665,9 +541,11 @@ impl DesktopState {
             return;
         }
         self.cancellation.cancel();
-        self.speech.cancel_and_wait(self).await;
+        self.capture.shutdown().await;
+        self.work.shutdown().await;
+        self.voice_output.stop().await;
         self.cancel_audio_and_wait().await;
-        let _ = self.stop_watch_internal(true).await;
+        let _ = self.stop_watch_internal_and_wait(true).await;
         let cleanup = self.runtime.shutdown();
         if tokio::time::timeout(Duration::from_secs(10), cleanup)
             .await
@@ -699,16 +577,6 @@ fn companion_usage_summary(paths: &ConfigPaths, proactive_limit: Option<u32>) ->
     .unwrap_or((0, false))
 }
 
-fn refresh_avatar_snapshot(snapshot: &mut AppSnapshot, paths: &ConfigPaths) {
-    let avatar = crate::avatar::load_with_status(paths, snapshot.config.ui.avatar_path.as_deref());
-    apply_avatar_load_result(snapshot, avatar);
-}
-
-fn apply_avatar_load_result(snapshot: &mut AppSnapshot, avatar: crate::avatar::AvatarLoadResult) {
-    snapshot.avatar_image_png = avatar.image_png;
-    snapshot.avatar_image_load_failed = avatar.failed;
-}
-
 fn onboarding_policy_phase_from(
     finish_pending: bool,
     needs_setup: bool,
@@ -732,108 +600,16 @@ fn onboarding_policy_phase_from(
     }
 }
 
-#[derive(Clone, Copy)]
-enum NotificationTarget {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NotificationTarget {
     Bubble,
     Os,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BubbleDeliveryDecision {
-    Show,
-    SuppressRead,
-    SuppressUnread,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BubbleDeliveryLogKey {
-    decision: BubbleDeliveryDecision,
-    main_focused: bool,
-    input_active: bool,
-}
-
-#[derive(Default)]
-struct BubbleDeliveryLogState {
-    last_by_notification: HashMap<String, BubbleDeliveryLogKey>,
-}
-
-impl BubbleDeliveryLogState {
-    fn should_log(&mut self, notification_id: &str, key: BubbleDeliveryLogKey) -> bool {
-        if self.last_by_notification.get(notification_id).copied() == Some(key) {
-            return false;
-        }
-        self.last_by_notification
-            .insert(notification_id.to_owned(), key);
-        true
+impl DesktopState {
+    pub(crate) async fn voice_conversation_generation(&self) -> u64 {
+        self.bubbles.lock().await.conversation_generation()
     }
-
-    fn clear(&mut self, notification_id: &str) {
-        self.last_by_notification.remove(notification_id);
-    }
-}
-
-impl BubbleDeliveryDecision {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Show => "show",
-            Self::SuppressRead => "suppress-read",
-            Self::SuppressUnread => "suppress-unread",
-        }
-    }
-}
-
-fn bubble_delivery_log(
-    message_kind: &str,
-    decision: BubbleDeliveryDecision,
-    main_focused: bool,
-    input_active: bool,
-) -> String {
-    format!(
-        "吹き出し配達判定: kind={message_kind} decision={} main-focused={main_focused} input-active={input_active}",
-        decision.as_str()
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BubblePresentationStyle {
-    tutorial: bool,
-    persistent: bool,
-}
-
-fn bubble_presentation_style(
-    message_kind: &str,
-    tutorial_active: bool,
-    keep_latest: bool,
-) -> BubblePresentationStyle {
-    if tutorial_active && message_kind == "chat" {
-        BubblePresentationStyle {
-            tutorial: true,
-            persistent: true,
-        }
-    } else {
-        BubblePresentationStyle {
-            tutorial: false,
-            persistent: keep_latest,
-        }
-    }
-}
-
-fn bubble_delivery_decision(
-    message_kind: &str,
-    input_active: bool,
-    main_focused: bool,
-) -> BubbleDeliveryDecision {
-    if message_kind != "chat" && input_active {
-        BubbleDeliveryDecision::SuppressUnread
-    } else if main_focused {
-        BubbleDeliveryDecision::SuppressRead
-    } else {
-        BubbleDeliveryDecision::Show
-    }
-}
-
-fn should_show_thought_bubble(enabled: bool, input_active: bool, main_focused: bool) -> bool {
-    enabled && !input_active && !main_focused
 }
 
 pub fn signed_build() -> bool {
@@ -841,3 +617,11 @@ pub fn signed_build() -> bool {
         == Some("Developer ID Application: Masanobu Naruse (MUFAV5XYJD)")
 }
 
+#[path = "state_tutorial_progress_effects.rs"]
+mod tutorial_progress_effects;
+
+#[path = "state_tutorial_response_effects.rs"]
+mod tutorial_response_effects;
+
+#[path = "state_tutorial_lifecycle_effects.rs"]
+mod tutorial_lifecycle_effects;

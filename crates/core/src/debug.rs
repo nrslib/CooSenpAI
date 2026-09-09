@@ -24,6 +24,7 @@ pub enum DebugError {
 #[derive(Debug, Clone)]
 pub struct DebugStore {
     root: PathBuf,
+    publication: Option<crate::persistence::PublicationGate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -98,7 +99,16 @@ impl DebugStore {
     pub fn from_paths(paths: &ConfigPaths) -> Self {
         Self {
             root: paths.debug.clone(),
+            publication: None,
         }
+    }
+
+    pub fn with_publication_gate(
+        mut self,
+        publication: crate::persistence::PublicationGate,
+    ) -> Self {
+        self.publication = Some(publication);
+        self
     }
 
     pub fn new_id() -> String {
@@ -113,10 +123,15 @@ impl DebugStore {
         ocr_text: Option<&str>,
     ) -> Result<(), DebugError> {
         let directory = self.day_directory(created_at)?;
-        atomic_write_bytes(&directory.join(format!("frame-{id}.png")), provider_png)?;
-        atomic_write_bytes(
+        crate::persistence::atomic_write_bytes_cancellable(
+            &directory.join(format!("frame-{id}.png")),
+            provider_png,
+            self.publication.as_ref(),
+        )?;
+        crate::persistence::atomic_write_bytes_cancellable(
             &directory.join(format!("ocr-{id}.txt")),
             ocr_text.unwrap_or_default().as_bytes(),
+            self.publication.as_ref(),
         )?;
         self.prune(created_at)
     }
@@ -124,7 +139,11 @@ impl DebugStore {
     pub fn record_gate(&self, record: &DebugGateRecord) -> Result<(), DebugError> {
         let created_at = parse_timestamp(&record.created_at)?;
         let directory = self.day_directory(created_at)?;
-        write_json(&directory.join(format!("gate-{}.json", record.id)), record)?;
+        crate::persistence::atomic_write_bytes_cancellable(
+            &directory.join(format!("gate-{}.json", record.id)),
+            &serde_json::to_vec_pretty(record)?,
+            self.publication.as_ref(),
+        )?;
         self.prune(created_at)
     }
 

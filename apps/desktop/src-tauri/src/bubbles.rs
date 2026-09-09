@@ -1,25 +1,30 @@
 use crate::state::DesktopState;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager};
+
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+#[path = "bubble_presenter.rs"]
+pub(crate) mod presenter;
 #[path = "bubble_registration.rs"]
 mod registration;
-pub(crate) use registration::{complete_presentation, register, show_replacing};
 #[cfg(test)]
-pub(crate) use registration::{
-    register_replacing_for_surface, wait_for_acknowledgement, wait_for_presentation_completion,
-};
+pub(crate) use presenter::register_replacing_for_surface;
+pub(crate) use registration::await_presentation;
+pub(crate) use registration::{complete_presentation, register, show_replacing};
 pub use registration::{show, show_best_effort};
+#[cfg(test)]
+pub(crate) use registration::{wait_for_acknowledgement, wait_for_presentation_completion};
 
-const EXIT_ANIMATION: Duration = Duration::from_millis(180);
-const TUTORIAL_SEQUENCE_GAP: Duration = Duration::from_millis(250);
+#[path = "bubble_deck.rs"]
+mod deck;
+pub(crate) use deck::{reading_delay, BubbleDeckDirection};
+
+pub(crate) const TUTORIAL_TRANSITION_DELAY: Duration = Duration::from_millis(430);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -38,8 +43,6 @@ pub struct BubbleRecord {
     pub conversation_generation: u64,
     #[serde(default)]
     pub persistent: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interaction: Option<BubbleInteraction>,
 }
@@ -49,12 +52,23 @@ pub struct BubbleRecord {
 pub struct BubbleInteraction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub select: Option<BubbleSelect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_input: Option<BubbleSecretInput>,
     #[serde(default)]
     pub actions: Vec<BubbleAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub technical_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BubbleSecretInput {
+    pub label: String,
+    pub placeholder: String,
+    pub action: String,
+    pub submit_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,8 +99,12 @@ pub struct BubbleAction {
 pub struct BubbleSnapshot {
     pub generation: u64,
     pub records: Vec<BubbleRecord>,
+    pub front_id: Option<String>,
+    pub history_ids: Vec<String>,
+    pub reading: bool,
     pub theme: String,
     pub font: String,
+    pub language: String,
     pub position: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_color: Option<String>,
@@ -103,18 +121,40 @@ pub(crate) struct BubbleAppearancePreview {
     pub display: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BubbleMilestone {
+    Activated,
+    Read,
+}
+
 struct BubbleEntry {
     record: BubbleRecord,
+    registration: u64,
+    explicitly_dismissed: CancellationToken,
     expires_at: Option<Instant>,
     presentation: CancellationToken,
     restarts_setup_on_dismiss: bool,
+    display_order: Option<u64>,
+    duration: Duration,
+    reading_remaining: Duration,
+    reading_until: Option<Instant>,
+    read: CancellationToken,
+    activated: CancellationToken,
 }
 
+#[derive(Debug)]
 pub(crate) struct BubblePresentation {
     generation: u64,
     acknowledgements: watch::Receiver<u64>,
     dismissed: CancellationToken,
-    registered_on_bubble_surface: bool,
+    pub(crate) registered_on_bubble_surface: bool,
+    pub(crate) explicitly_dismissed: CancellationToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BubbleClickTarget {
+    pub(crate) registration: u64,
+    pub(crate) record: Arc<BubbleRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,29 +170,11 @@ pub struct BubbleState {
     conversation_generation: u64,
     acknowledgement: watch::Sender<u64>,
     appearance_preview: Option<BubbleAppearancePreview>,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct BubbleWindowSyncState {
-    has_content: bool,
-    position: Option<String>,
-    display: Option<String>,
-}
-
-impl BubbleWindowSyncState {
-    fn needs_initial_show(&self, has_content: bool) -> bool {
-        has_content && !self.has_content
-    }
-
-    fn layout_changed(&self, position: &str, display: &str) -> bool {
-        self.position.as_deref() != Some(position) || self.display.as_deref() != Some(display)
-    }
-
-    fn commit(&mut self, has_content: bool, position: &str, display: &str) {
-        self.has_content = has_content;
-        self.position = Some(position.to_owned());
-        self.display = Some(display.to_owned());
-    }
+    display_sequence: u64,
+    active_id: Option<String>,
+    history_id: Option<String>,
+    interrupted_history: Option<(String, String)>,
+    max_stack: usize,
 }
 
 impl Default for BubbleState {
@@ -165,11 +187,20 @@ impl Default for BubbleState {
             conversation_generation: 0,
             acknowledgement,
             appearance_preview: None,
+            display_sequence: 0,
+            active_id: None,
+            history_id: None,
+            interrupted_history: None,
+            max_stack: 3,
         }
     }
 }
 
 impl BubbleState {
+    fn mark_changed(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+    }
+
     pub fn for_conversation_generation(conversation_generation: u64) -> Self {
         Self {
             conversation_generation,
@@ -189,7 +220,7 @@ impl BubbleState {
             return false;
         }
         self.appearance_preview = preview;
-        self.generation = self.generation.saturating_add(1);
+        self.mark_changed();
         true
     }
 
@@ -201,15 +232,11 @@ impl BubbleState {
         self.entries
             .iter()
             .rev()
-            .find(|entry| entry.record.message_kind == message_kind)
+            .find(|entry| {
+                entry.record.message_kind == message_kind
+                    && (message_kind != "setup" || entry.restarts_setup_on_dismiss)
+            })
             .map(|entry| entry.record.clone())
-    }
-
-    pub(crate) fn open_url_for(&self, id: &str) -> Option<String> {
-        self.entries
-            .iter()
-            .find(|entry| entry.record.id == id)
-            .and_then(|entry| entry.record.open_url.clone())
     }
 
     pub(crate) fn restarts_setup_on_dismiss(&self, id: &str) -> bool {
@@ -230,6 +257,7 @@ impl BubbleState {
             return false;
         }
         self.conversation_generation = generation;
+        self.interrupted_history = None;
         retain_entries(&mut self.entries, |entry| {
             entry.record.conversation_generation >= generation
         });
@@ -239,24 +267,36 @@ impl BubbleState {
             .map(|entry| entry.record.id.as_str())
             .collect::<HashSet<_>>();
         self.hovered.retain(|id| retained.contains(id.as_str()));
-        self.generation = self.generation.saturating_add(1);
+        self.mark_changed();
+        true
+    }
+
+    pub fn switch_conversation_generation(&mut self, generation: u64) -> bool {
+        if generation == self.conversation_generation {
+            return false;
+        }
+        self.conversation_generation = generation;
+        self.interrupted_history = None;
+        retain_entries(&mut self.entries, |entry| {
+            entry.record.conversation_generation == generation
+        });
+        let retained = self
+            .entries
+            .iter()
+            .map(|entry| entry.record.id.as_str())
+            .collect::<HashSet<_>>();
+        self.hovered.retain(|id| retained.contains(id.as_str()));
+        self.mark_changed();
         true
     }
 
     pub fn set_max_stack(&mut self, max_stack: usize) -> bool {
-        let before = self.entries.len();
-        while self.entries.len() > max_stack {
-            let Some(index) = eviction_index(&self.entries) else {
-                break;
-            };
-            let removed = self.entries.remove(index);
-            removed.presentation.cancel();
-            self.hovered.remove(&removed.record.id);
-        }
-        if self.entries.len() == before {
+        self.max_stack = max_stack;
+        if !self.trim_deck() {
             return false;
         }
-        self.generation = self.generation.saturating_add(1);
+        self.reconcile_deck(Instant::now());
+        self.mark_changed();
         true
     }
 
@@ -267,6 +307,16 @@ impl BubbleState {
         duration: Duration,
         max_stack: usize,
     ) -> bool {
+        if record.conversation_generation < self.conversation_generation {
+            return false;
+        }
+        if !is_thought_bubble(&record) && self.entries.len() >= max_stack {
+            if let Some(index) = thought_eviction_index(&self.entries) {
+                let removed = self.entries.remove(index);
+                removed.presentation.cancel();
+                self.hovered.remove(&removed.record.id);
+            }
+        }
         if is_thought_bubble(&record)
             && self.entries.len() >= max_stack
             && thought_eviction_index(&self.entries).is_none()
@@ -283,61 +333,68 @@ impl BubbleState {
                 .iter_mut()
                 .find(|entry| is_thought_bubble(&entry.record))
             {
-                entry.expires_at = (!(record.persistent || record.interaction.is_some()))
-                    .then_some(now + duration);
+                entry.expires_at = None;
+                entry.duration = duration;
+                entry.reading_remaining = reading_delay(&record.message);
+                if self.active_id.as_ref() == Some(&entry.record.id) {
+                    self.active_id = Some(record.id.clone());
+                }
+                if self.history_id.as_ref() == Some(&entry.record.id) {
+                    self.history_id = Some(record.id.clone());
+                }
+                entry.reading_until = (self.active_id.as_ref() == Some(&record.id)
+                    && self.history_id.is_none())
+                .then_some(now + entry.reading_remaining);
+                entry.read = CancellationToken::new();
+                entry.registration = self.generation.saturating_add(1);
                 entry.record = record;
-                self.generation = self.generation.saturating_add(1);
+                self.reconcile_deck(now);
+                self.mark_changed();
                 return true;
             }
         }
-        let replaced_ids = if is_latest_companion_bubble(&record) {
-            self.entries
-                .iter()
-                .filter(|entry| is_latest_companion_bubble(&entry.record))
-                .map(|entry| entry.record.id.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        self.show_replacing(record, now, duration, max_stack, &replaced_ids)
+        self.show_replacing(record, now, duration, max_stack, &[])
     }
 
     pub(crate) fn show_replacing(
         &mut self,
-        mut record: BubbleRecord,
+        record: BubbleRecord,
         now: Instant,
         duration: Duration,
         max_stack: usize,
         replaced_ids: &[String],
     ) -> bool {
-        if is_tutorial_progress_kind(&record.message_kind) {
-            record.persistent = true;
-        }
         if record.conversation_generation < self.conversation_generation {
             return false;
         }
         self.advance_conversation_generation(record.conversation_generation);
+        self.max_stack = max_stack;
         let restarts_setup_on_dismiss = record.message_kind == "setup";
-        retain_entries(&mut self.entries, |item| {
-            item.record.id != record.id && !replaced_ids.contains(&item.record.id)
-        });
+        let replacing_front = self.active_id.as_ref() == Some(&record.id);
+        self.retire_cards(replaced_ids, now);
+        retain_entries(&mut self.entries, |item| item.record.id != record.id);
         self.hovered.retain(|id| !replaced_ids.contains(id));
+        let id = record.id.clone();
+        let reading_remaining = reading_delay(&record.message);
         self.entries.push(BubbleEntry {
-            expires_at: (!(record.persistent || record.interaction.is_some()))
-                .then_some(now + duration),
+            registration: self.generation.saturating_add(1),
+            explicitly_dismissed: CancellationToken::new(),
+            expires_at: None,
             record,
             presentation: CancellationToken::new(),
             restarts_setup_on_dismiss,
+            display_order: None,
+            duration,
+            reading_remaining,
+            reading_until: None,
+            read: CancellationToken::new(),
+            activated: CancellationToken::new(),
         });
-        while self.entries.len() > max_stack {
-            let Some(index) = eviction_index(&self.entries) else {
-                break;
-            };
-            let removed = self.entries.remove(index);
-            removed.presentation.cancel();
-            self.hovered.remove(&removed.record.id);
+        if replacing_front {
+            self.activate(id, now);
         }
-        self.generation = self.generation.saturating_add(1);
+        self.reconcile_deck(now);
+        self.mark_changed();
         true
     }
 
@@ -353,7 +410,7 @@ impl BubbleState {
             .map(|entry| entry.record.id.as_str())
             .collect::<HashSet<_>>();
         self.hovered.retain(|id| retained.contains(id.as_str()));
-        self.generation = self.generation.saturating_add(1);
+        self.mark_changed();
         true
     }
 
@@ -361,12 +418,16 @@ impl BubbleState {
         if !self.allows_manual_dismiss(id) {
             return false;
         }
+        if let Some(entry) = self.entries.iter().find(|entry| entry.record.id == id) {
+            entry.explicitly_dismissed.cancel();
+        }
         self.hovered.remove(id);
         let before = self.entries.len();
         retain_entries(&mut self.entries, |entry| entry.record.id != id);
         let changed = before != self.entries.len();
         if changed {
-            self.generation = self.generation.saturating_add(1);
+            self.reconcile_deck(Instant::now());
+            self.mark_changed();
         }
         changed
     }
@@ -377,27 +438,38 @@ impl BubbleState {
         retain_entries(&mut self.entries, |entry| entry.record.id != id);
         let changed = before != self.entries.len();
         if changed {
-            self.generation = self.generation.saturating_add(1);
+            self.reconcile_deck(Instant::now());
+            self.mark_changed();
         }
         changed
     }
 
-    pub(crate) fn complete_actions(&mut self, ids: &[String]) -> bool {
-        let removed = self
+    pub(crate) fn click_target(&self, id: &str) -> Option<BubbleClickTarget> {
+        self.entries
+            .iter()
+            .find(|entry| entry.record.id == id)
+            .map(|entry| BubbleClickTarget {
+                registration: entry.registration,
+                record: Arc::new(entry.record.clone()),
+            })
+    }
+
+    pub(crate) fn accepts_click(&self, target: &BubbleClickTarget) -> bool {
+        target.record.conversation_generation == self.conversation_generation
+            && self.entries.iter().any(|entry| {
+                entry.registration == target.registration && entry.record == *target.record
+            })
+    }
+
+    pub(crate) fn complete_action_if_not_interactive(&mut self, id: &str) -> bool {
+        if self
             .entries
             .iter()
-            .filter(|entry| ids.contains(&entry.record.id))
-            .map(|entry| entry.record.id.clone())
-            .collect::<HashSet<_>>();
-        if removed.is_empty() {
+            .any(|entry| entry.record.id == id && entry.record.interaction.is_some())
+        {
             return false;
         }
-        retain_entries(&mut self.entries, |entry| {
-            !removed.contains(&entry.record.id)
-        });
-        self.hovered.retain(|id| !removed.contains(id));
-        self.generation = self.generation.saturating_add(1);
-        true
+        self.complete_action(id)
     }
 
     pub(crate) fn clear_for_main_window(&mut self) -> bool {
@@ -416,21 +488,8 @@ impl BubbleState {
         {
             return false;
         }
-        self.generation = self.generation.saturating_add(1);
+        self.mark_changed();
         true
-    }
-
-    fn complete_tutorial_typing(&mut self, id: &str) -> bool {
-        let before = self.entries.len();
-        retain_entries(&mut self.entries, |entry| {
-            entry.record.id != id || entry.record.message_kind != "tutorial-typing"
-        });
-        let changed = before != self.entries.len();
-        if changed {
-            self.hovered.remove(id);
-            self.generation = self.generation.saturating_add(1);
-        }
-        changed
     }
 
     pub fn dismiss_message_kind(&mut self, message_kind: &str) -> bool {
@@ -447,7 +506,7 @@ impl BubbleState {
             entry.record.message_kind != message_kind
         });
         self.hovered.retain(|id| !removed.contains(id));
-        self.generation = self.generation.saturating_add(1);
+        self.mark_changed();
         true
     }
 
@@ -457,16 +516,16 @@ impl BubbleState {
             .iter()
             .filter(|entry| is_tutorial_progress_kind(&entry.record.message_kind))
             .map(|entry| entry.record.id.clone())
-            .collect::<HashSet<_>>();
+            .collect::<Vec<_>>();
         if removed.is_empty() {
             return false;
         }
-        retain_entries(&mut self.entries, |entry| {
-            !is_tutorial_progress_kind(&entry.record.message_kind)
-        });
-        self.hovered.retain(|id| !removed.contains(id));
-        self.generation = self.generation.saturating_add(1);
-        true
+        let changed = self.retire_cards(&removed, Instant::now());
+        if changed {
+            self.reconcile_deck(Instant::now());
+            self.mark_changed();
+        }
+        changed
     }
 
     pub fn accepts_interaction(&self, id: &str, action: &str, value: Option<&str>) -> bool {
@@ -481,6 +540,13 @@ impl BubbleState {
         if interaction.actions.iter().any(|item| item.id == action) {
             return value.is_none();
         }
+        if interaction
+            .secret_input
+            .as_ref()
+            .is_some_and(|input| input.action == action)
+        {
+            return value.is_some_and(|value| !value.trim().is_empty());
+        }
         interaction.select.as_ref().is_some_and(|select| {
             select.action == action
                 && value
@@ -489,12 +555,17 @@ impl BubbleState {
     }
 
     pub fn set_hover(&mut self, id: &str, hovering: bool) {
-        if hovering {
-            self.hovered.insert(id.to_owned());
+        let changed = if hovering {
+            if !self.entries.iter().any(|entry| entry.record.id == id) {
+                return;
+            }
+            self.hovered.insert(id.to_owned())
         } else {
-            self.hovered.remove(id);
+            self.hovered.remove(id)
+        };
+        if changed {
+            self.mark_changed();
         }
-        self.generation = self.generation.saturating_add(1);
     }
 
     pub fn expire(&mut self, now: Instant) -> bool {
@@ -504,11 +575,12 @@ impl BubbleState {
             hovered.contains(&entry.record.id)
                 || entry.expires_at.is_none_or(|expires_at| expires_at > now)
         });
-        let changed = before != self.entries.len();
-        if changed {
-            self.generation = self.generation.saturating_add(1);
+        let expired = before != self.entries.len();
+        let advanced = self.reconcile_deck(now);
+        if expired && !advanced {
+            self.mark_changed();
         }
-        changed
+        expired || advanced
     }
 
     pub fn snapshot(&self) -> BubbleSnapshot {
@@ -519,29 +591,16 @@ impl BubbleState {
                 .iter()
                 .map(|entry| entry.record.clone())
                 .collect(),
+            front_id: self.front_record().map(|record| record.id.clone()),
+            history_ids: self.history_ids(),
+            reading: self.front_is_reading(),
             theme: "system".to_owned(),
             font: "system".to_owned(),
+            language: "ja".to_owned(),
             position: "bottom-right".to_owned(),
             avatar_color: None,
             avatar_image_png: None,
         }
-    }
-
-    pub fn snapshot_with_appearance(
-        &self,
-        theme: &str,
-        font: &str,
-        avatar_color: Option<&str>,
-        position: &str,
-        avatar_image_png: Option<&[u8]>,
-    ) -> BubbleSnapshot {
-        let mut snapshot = self.snapshot();
-        snapshot.theme = theme.to_owned();
-        snapshot.font = font.to_owned();
-        snapshot.avatar_color = avatar_color.map(str::to_owned);
-        snapshot.position = position.to_owned();
-        snapshot.avatar_image_png = avatar_image_png.map(ToOwned::to_owned);
-        snapshot
     }
 
     pub fn acknowledge(&self, generation: u64) -> bool {
@@ -570,33 +629,14 @@ impl BubbleState {
             .map(|entry| entry.presentation.clone())
     }
 
-    fn next_expiry(&self) -> Option<(u64, Instant)> {
+    fn next_expiry(&self) -> Option<Instant> {
         self.entries
             .iter()
             .filter(|entry| !self.hovered.contains(&entry.record.id))
             .filter_map(|entry| entry.expires_at)
+            .chain(self.entries.iter().filter_map(|entry| entry.reading_until))
             .min()
-            .map(|deadline| (self.generation, deadline))
     }
-}
-
-fn eviction_index(entries: &[BubbleEntry]) -> Option<usize> {
-    entries
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entry)| {
-            let rank = if is_thought_bubble(&entry.record) {
-                0
-            } else if is_companion_bubble(&entry.record) {
-                1
-            } else {
-                return None;
-            };
-            (entry.record.interaction.is_none() && !entry.record.persistent)
-                .then_some((rank, index))
-        })
-        .min_by_key(|(rank, index)| (*rank, *index))
-        .map(|(_, index)| index)
 }
 
 fn thought_eviction_index(entries: &[BubbleEntry]) -> Option<usize> {
@@ -608,23 +648,12 @@ fn thought_eviction_index(entries: &[BubbleEntry]) -> Option<usize> {
     })
 }
 
-fn is_latest_companion_bubble(record: &BubbleRecord) -> bool {
-    record.persistent && record.interaction.is_none() && is_companion_bubble(record)
-}
-
 fn is_thought_bubble(record: &BubbleRecord) -> bool {
     record.message_kind == "thought"
 }
 
-fn is_companion_bubble(record: &BubbleRecord) -> bool {
-    matches!(
-        record.message_kind.as_str(),
-        "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "chat"
-    )
-}
-
 fn is_tutorial_progress_kind(message_kind: &str) -> bool {
-    matches!(message_kind, "tutorial" | "tutorial-typing")
+    message_kind == "tutorial"
 }
 
 fn retain_entries(entries: &mut Vec<BubbleEntry>, mut keep: impl FnMut(&BubbleEntry) -> bool) {
@@ -637,193 +666,122 @@ fn retain_entries(entries: &mut Vec<BubbleEntry>, mut keep: impl FnMut(&BubbleEn
     });
 }
 
+#[derive(Debug)]
+pub(crate) enum BubbleMutation {
+    ConversationGeneration(u64),
+    Preview(Option<BubbleAppearancePreview>),
+    FastForward(Option<String>),
+    Navigate(BubbleDeckDirection),
+    Dismiss(String),
+    CompleteAction(String),
+    ClearTutorialProgress,
+    ClearThoughtBubbles,
+    SetMaxStack(usize),
+    DismissMessageKind(String),
+    Hover { id: String, hovering: bool },
+}
+
+pub(crate) async fn mutate_checked(
+    ui: &crate::ui_root::UiHandle,
+    mutation: BubbleMutation,
+) -> Result<bool, String> {
+    let (reply, response) = tokio::sync::oneshot::channel();
+    ui.request(
+        crate::ui_events::UiView::Application,
+        crate::ui_events::UiEvent::BubbleMutation { mutation, reply },
+    )
+    .await?;
+    response
+        .await
+        .map_err(|_| "吹き出しの状態変更が終了しました".to_owned())
+}
+
+pub(crate) async fn mutate(state: &DesktopState, mutation: BubbleMutation) -> bool {
+    mutate_checked(&state.ui, mutation).await.unwrap_or(false)
+}
+
 pub async fn dismiss(state: &DesktopState, id: &str) {
-    if state.bubbles.lock().await.dismiss(id) {
-        let _ = sync_window(state).await;
-    }
+    mutate(state, BubbleMutation::Dismiss(id.to_owned())).await;
 }
 
 pub async fn complete_action(state: &DesktopState, id: &str) {
-    if state.bubbles.lock().await.complete_action(id) {
-        let _ = sync_window(state).await;
-    }
-}
-
-pub(crate) async fn complete_actions(state: &DesktopState, ids: &[String]) -> bool {
-    let changed = state.bubbles.lock().await.complete_actions(ids);
-    if changed {
-        let _ = sync_window(state).await;
-    }
-    changed
-}
-
-pub async fn complete_tutorial_typing(state: &DesktopState, id: &str) {
-    if state.bubbles.lock().await.complete_tutorial_typing(id) {
-        let _ = sync_window(state).await;
-    }
-}
-
-pub async fn clear_tutorial_typing(state: &DesktopState) -> bool {
-    let changed = state
-        .bubbles
-        .lock()
-        .await
-        .dismiss_message_kind("tutorial-typing");
-    if changed {
-        let _ = sync_window(state).await;
-    }
-    changed
+    mutate(state, BubbleMutation::CompleteAction(id.to_owned())).await;
 }
 
 pub async fn clear_tutorial_progress(state: &DesktopState) -> bool {
-    let changed = state.bubbles.lock().await.clear_tutorial_progress();
-    if changed {
-        let _ = sync_window(state).await;
-    }
-    changed
+    mutate(state, BubbleMutation::ClearTutorialProgress).await
 }
 
-pub(crate) async fn wait_for_tutorial_bubble_transition(cancellation: &CancellationToken) -> bool {
-    if cancellation.is_cancelled() {
-        return false;
-    }
-    tokio::select! {
-        () = tokio::time::sleep(EXIT_ANIMATION + TUTORIAL_SEQUENCE_GAP) => true,
-        () = cancellation.cancelled() => false,
-    }
+pub(crate) async fn wait_for_reading(
+    state: &DesktopState,
+    id: &str,
+    main_reading_delay: Duration,
+) -> bool {
+    wait_for_card_milestone(state, id, BubbleMilestone::Read, main_reading_delay).await
 }
 
-pub(crate) async fn clear_for_main_window(state: &DesktopState) {
-    let cleared = {
-        let mut bubbles = state.bubbles.lock().await;
-        if !state.main_window_focused.load(Ordering::Acquire) {
-            return;
-        }
-        bubbles.clear_for_main_window()
-    };
-    if cleared {
-        let _ = sync_window(state).await;
-    }
+pub(crate) async fn wait_for_card_milestone(
+    state: &DesktopState,
+    id: &str,
+    milestone: BubbleMilestone,
+    main_reading_delay: Duration,
+) -> bool {
+    wait_for_card_milestone_with_cancellation(
+        state,
+        id,
+        milestone,
+        main_reading_delay,
+        state.cancellation.clone(),
+    )
+    .await
+}
+
+pub(crate) async fn wait_for_card_milestone_with_cancellation(
+    state: &DesktopState,
+    id: &str,
+    milestone: BubbleMilestone,
+    main_delay: Duration,
+    cancellation: CancellationToken,
+) -> bool {
+    state
+        .ui
+        .query(crate::ui_events::UiView::Application, |reply| {
+            crate::ui_events::UiEvent::Tutorial(Box::new(
+                crate::tutorial_events::TutorialEvent::Card(
+                    crate::tutorial_events::CardEvent::WaitCard {
+                        notice_id: id.to_owned(),
+                        milestone,
+                        main_delay,
+                        cancellation,
+                        reply,
+                    },
+                ),
+            ))
+        })
+        .await
+        .unwrap_or(false)
 }
 
 pub async fn set_hover(state: Arc<DesktopState>, id: &str, hovering: bool) {
-    state.bubbles.lock().await.set_hover(id, hovering);
-    schedule_expiry(state).await;
+    mutate(
+        &state,
+        BubbleMutation::Hover {
+            id: id.to_owned(),
+            hovering,
+        },
+    )
+    .await;
 }
 
 pub(crate) async fn sync_window(state: &DesktopState) -> Result<()> {
-    let mut window_sync = state.bubble_window_sync.lock().await;
-    let config = state.runtime_config();
-    let avatar_image_png = state.snapshot().await.avatar_image_png;
-    let (snapshot, display) = {
-        let bubbles = state.bubbles.lock().await;
-        let preview = bubbles.appearance_preview();
-        let theme = preview
-            .as_ref()
-            .map_or(config.ui.theme.as_str(), |value| value.theme.as_str());
-        let font = preview
-            .as_ref()
-            .map_or(config.ui.font.as_str(), |value| value.font.as_str());
-        let avatar_color = preview
-            .as_ref()
-            .map(|value| value.avatar_color.as_str())
-            .or(config.ui.avatar_color.as_deref());
-        let position = preview
-            .as_ref()
-            .map_or(config.bubble.position.as_str(), |value| {
-                value.position.as_str()
-            });
-        let display = preview
-            .as_ref()
-            .map_or(config.bubble.display.clone(), |value| value.display.clone());
-        (
-            bubbles.snapshot_with_appearance(
-                theme,
-                font,
-                avatar_color,
-                position,
-                avatar_image_png.as_deref(),
-            ),
-            display,
+    state
+        .ui
+        .request(
+            crate::ui_events::UiView::Application,
+            crate::ui_events::UiEvent::BubbleRefresh,
         )
-    };
-    let window = state
-        .app
-        .get_webview_window("bubble")
-        .context("吹き出しウィンドウがありません")?;
-    window.emit("coosenpai:bubble:show", snapshot.clone())?;
-    let has_content = !snapshot.records.is_empty();
-    let initial_show = window_sync.needs_initial_show(has_content);
-    let layout_changed = window_sync.layout_changed(&snapshot.position, &display);
-    if !has_content {
-        if window_sync.has_content {
-            window.set_ignore_cursor_events(true)?;
-        }
-        let app = state.app.clone();
-        let generation = snapshot.generation;
-        if window_sync.has_content {
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(EXIT_ANIMATION).await;
-                let Some(state) = app.try_state::<Arc<DesktopState>>() else {
-                    return;
-                };
-                let current = state.bubbles.lock().await.snapshot();
-                if current.generation == generation && current.records.is_empty() {
-                    if let Some(window) = app.get_webview_window("bubble") {
-                        let _ = window.hide();
-                    }
-                }
-            });
-        }
-    } else {
-        if initial_show || layout_changed {
-            crate::window_bubble::update_layout(
-                &window,
-                snapshot.records.len(),
-                &snapshot.position,
-                &display,
-            )?;
-        }
-        if initial_show {
-            window.set_ignore_cursor_events(false)?;
-            window.show()?;
-        }
-    }
-    window_sync.commit(has_content, &snapshot.position, &display);
+        .await
+        .map_err(anyhow::Error::msg)?;
     Ok(())
-}
-
-pub(crate) fn accepts_pointer(record_count: usize) -> bool {
-    record_count > 0
-}
-
-pub(super) async fn schedule_expiry(state: Arc<DesktopState>) {
-    let Some((mut generation, mut deadline)) = state.bubbles.lock().await.next_expiry() else {
-        return;
-    };
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(deadline.saturating_duration_since(Instant::now())).await;
-            let (changed, next) = {
-                let mut bubbles = state.bubbles.lock().await;
-                if bubbles.generation != generation {
-                    return;
-                }
-                let changed = bubbles.expire(Instant::now());
-                (changed, bubbles.next_expiry())
-            };
-            if changed {
-                let _ = sync_window(&state).await;
-            }
-            let Some((next_generation, next_deadline)) = next else {
-                return;
-            };
-            generation = next_generation;
-            deadline = next_deadline;
-            if deadline <= Instant::now() {
-                tokio::task::yield_now().await;
-            }
-        }
-    });
 }
 

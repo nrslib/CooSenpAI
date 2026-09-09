@@ -14,8 +14,7 @@ use objc2_vision::{
     VNImageOption, VNImageRequestHandler, VNRecognizeTextRequest, VNRequest,
     VNRequestTextRecognitionLevel,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -23,69 +22,6 @@ use tokio_util::sync::CancellationToken;
 
 pub fn platform_is_available() -> bool {
     true
-}
-
-pub async fn capture_screen(
-    destination: PathBuf,
-    cancellation: CancellationToken,
-) -> Result<PathBuf> {
-    let parent = destination
-        .parent()
-        .context("capture destination に親がありません")?;
-    tokio::fs::create_dir_all(parent).await?;
-    let runner = TokioProcessRunner;
-    let output = runner
-        .run(
-            ProcessRequest {
-                executable: PathBuf::from("/usr/sbin/screencapture"),
-                args: vec![
-                    "-x".to_owned(),
-                    "-m".to_owned(),
-                    "-t".to_owned(),
-                    "png".to_owned(),
-                    destination.display().to_string(),
-                ],
-                env: Vec::new(),
-                cwd: None,
-                stdin: Vec::new(),
-                timeout: Duration::from_secs(10),
-            },
-            cancellation,
-        )
-        .await
-        .context("screencapture を起動できません")?;
-    if output.status != Some(0) {
-        anyhow::bail!("screencapture が失敗しました")
-    }
-    Ok(destination)
-}
-
-pub async fn capture_interactive_region(
-    destination: PathBuf,
-    cancellation: CancellationToken,
-) -> Result<bool> {
-    let parent = destination
-        .parent()
-        .context("capture destination に親がありません")?;
-    tokio::fs::create_dir_all(parent).await?;
-    let output = TokioProcessRunner
-        .run(
-            ProcessRequest {
-                executable: PathBuf::from("/usr/sbin/screencapture"),
-                args: vec![
-                    "-i".to_owned(),
-                    "-x".to_owned(),
-                    destination.display().to_string(),
-                ],
-                env: Vec::new(),
-                cwd: None,
-                stdin: Vec::new(),
-                timeout: Duration::from_secs(5 * 60),
-            },
-            cancellation,
-        )
-        .await?;
-    Ok(output.status == Some(0) && destination.is_file())
 }
 
 pub fn running_applications() -> Result<Vec<coosenpai_core::ports::RunningApplication>> {
@@ -128,48 +64,6 @@ pub fn frontmost_application() -> Option<coosenpai_core::ports::RunningApplicati
         name: application.localizedName()?.to_string(),
         icon_png: Vec::new(),
     })
-}
-
-pub async fn capture_application_window(
-    bundle_id: &str,
-    destination: PathBuf,
-    cancellation: CancellationToken,
-) -> Result<Option<coosenpai_core::ports::ApplicationCapture>> {
-    let Some(window) = crate::window_info::application_window(bundle_id)? else {
-        return Ok(None);
-    };
-    let parent = destination
-        .parent()
-        .context("application capture destination に親がありません")?;
-    tokio::fs::create_dir_all(parent).await?;
-    let output = TokioProcessRunner
-        .run(
-            ProcessRequest {
-                executable: PathBuf::from("/usr/sbin/screencapture"),
-                args: vec![
-                    "-l".to_owned(),
-                    window.id.to_string(),
-                    "-x".to_owned(),
-                    "-o".to_owned(),
-                    "-t".to_owned(),
-                    "png".to_owned(),
-                    destination.display().to_string(),
-                ],
-                env: Vec::new(),
-                cwd: None,
-                stdin: Vec::new(),
-                timeout: Duration::from_secs(10),
-            },
-            cancellation,
-        )
-        .await?;
-    if output.status != Some(0) {
-        anyhow::bail!("アプリウィンドウの screencapture が失敗しました")
-    }
-    Ok(Some(coosenpai_core::ports::ApplicationCapture {
-        path: destination,
-        window_id: window.id,
-    }))
 }
 
 fn icon_png(image: &NSImage) -> Option<Vec<u8>> {
@@ -245,43 +139,6 @@ pub async fn read_activity() -> Result<ActivitySnapshot> {
         idle_ms: read_hid_idle_ms().await?,
         front_app: read_front_app_name().await?,
     })
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct DisplayGeometry {
-    pub physical_width: f64,
-    pub logical_width: f64,
-}
-
-pub async fn read_display_geometry() -> Option<DisplayGeometry> {
-    let output = run_system_command(
-        "/usr/sbin/system_profiler",
-        &["SPDisplaysDataType", "-json"],
-        Duration::from_secs(5),
-    )
-    .await
-    .ok()?;
-    let value = serde_json::from_str::<Value>(&output).ok()?;
-    find_display_geometry(&value)
-}
-
-pub fn comparison_top_pixels(
-    geometry: Option<&DisplayGeometry>,
-    image_width: u32,
-    image_height: u32,
-) -> u32 {
-    let scale = geometry
-        .filter(|geometry| geometry.logical_width > 0.0)
-        .map(|geometry| f64::from(image_width) / geometry.logical_width)
-        .or_else(|| {
-            geometry
-                .filter(|geometry| geometry.logical_width > 0.0)
-                .map(|geometry| geometry.physical_width / geometry.logical_width)
-        });
-    let top = scale
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .map_or_else(|| f64::from(image_height) * 0.015, |value| 28.0 * value);
-    top.round().max(1.0) as u32
 }
 
 pub async fn is_on_battery() -> bool {
@@ -516,65 +373,6 @@ fn parse_quoted_field(output: &str, key: &str) -> Result<String> {
         }
     }
     anyhow::bail!("{key} の値が閉じていません")
-}
-
-fn find_display_geometry(value: &Value) -> Option<DisplayGeometry> {
-    match value {
-        Value::Object(object) => {
-            let physical_width = read_resolution_width(
-                object,
-                &["spdisplays_resolution", "resolution", "Resolution"],
-            );
-            let logical_width = read_resolution_width(
-                object,
-                &["spdisplays_ui_resolution", "ui_resolution", "UI Resolution"],
-            );
-            if let (Some(physical_width), Some(logical_width)) = (physical_width, logical_width) {
-                if physical_width > 0.0 && logical_width > 0.0 {
-                    return Some(DisplayGeometry {
-                        physical_width,
-                        logical_width,
-                    });
-                }
-            }
-            object.values().find_map(find_display_geometry)
-        }
-        Value::Array(values) => values.iter().find_map(find_display_geometry),
-        _ => None,
-    }
-}
-
-fn read_resolution_width(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<f64> {
-    keys.iter()
-        .filter_map(|key| object.get(*key).and_then(Value::as_str))
-        .find_map(parse_resolution_width)
-}
-
-fn parse_resolution_width(value: &str) -> Option<f64> {
-    let mut start = None;
-    let mut end = None;
-    for (index, character) in value.char_indices() {
-        if character.is_ascii_digit() {
-            if start.is_none() {
-                start = Some(index);
-            }
-            end = Some(index + character.len_utf8());
-        } else if let (Some(start_index), Some(end_index)) = (start, end) {
-            let rest = value[end_index..].trim_start();
-            if rest.starts_with('x') || rest.starts_with('×') {
-                return value[start_index..end_index].parse().ok();
-            }
-            start = None;
-            end = None;
-        }
-    }
-    if let (Some(start), Some(end)) = (start, end) {
-        let rest = value[end..].trim_start();
-        if rest.starts_with('x') || rest.starts_with('×') {
-            return value[start..end].parse().ok();
-        }
-    }
-    None
 }
 
 fn recognize_text_blocking(path: &Path, level: &str) -> Result<Vec<OcrBlock>> {

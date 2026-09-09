@@ -1,6 +1,7 @@
 use super::*;
-use crate::commands_config::invalidates_running_operations;
+use crate::commands_config::{invalidates_running_operations, work_config_is_only_difference};
 use crate::config_update::ConfigUpdateOutcome;
+use coosenpai_core::locale::{localize_shortcut_message, text, Locale, TextKey};
 
 impl DesktopState {
     pub(super) async fn update_config_with_raw<F>(
@@ -18,11 +19,18 @@ impl DesktopState {
         let shortcut_version = transaction.base_revision.saturating_add(1);
         let previous = self.runtime.config();
         let avatar_updated = staged_avatar.is_some();
+        let normal_mode =
+            self.onboarding_policy_phase().await == crate::command_guard::OnboardingPhase::Normal;
+        let guarded_update = move |current: Config| {
+            let next = update(current.clone())?;
+            crate::commands_config::validate_work_config_change(&current, &next, normal_mode)?;
+            Ok(next)
+        };
         let persisted = match persist_config_update(
             &self.paths,
             &self.runtime,
             &previous,
-            update,
+            guarded_update,
             staged_avatar,
             expected_revision,
         ) {
@@ -35,9 +43,15 @@ impl DesktopState {
         };
         let requested = persisted.requested.ok_or_else(|| {
             ConfigCommitError::Runtime(RuntimeError::Factory(
-                "設定候補を構築できませんでした".to_owned(),
+                text(
+                    TextKey::ConfigCandidateBuildFailed,
+                    Locale::from_config(&previous.ui.language),
+                )
+                .to_owned(),
             ))
         })?;
+        self.work.approvals.set_mode(requested.work.approval_mode);
+        self.work.set_roots(requested.work.allowed_roots.clone());
         let persisted_before = persisted.previous;
         let staged = persisted.staged;
         let provider_start_gate = persisted.provider_start_gate;
@@ -49,19 +63,38 @@ impl DesktopState {
         }
         let watch_scope_changed = persisted_before.watch.fullscreen != requested.watch.fullscreen
             || persisted_before.watch.apps != requested.watch.apps;
+        let language_changed = persisted_before.ui.language != staged.ui.language;
         let bubble_stack_changed = persisted_before.bubble.max_stack != requested.bubble.max_stack;
         let bubble_appearance_changed = bubble_appearance_changed(&persisted_before, &requested);
-        let persona_notice = persona_change_notice(&persisted_before, &staged);
+        let persona_notice = persona_change_notice(
+            &persisted_before,
+            &staged,
+            Locale::from_config(&staged.ui.language),
+        );
         let invalidates_operations = invalidates_running_operations(&persisted_before, &staged);
         let watch_enabled_is_only_difference = watch_enabled_is_only_difference(&previous, &staged);
+        let _voice_start = if previous.voice_output != requested.voice_output {
+            let gate = self.voice_output.start_gate.lock().await;
+            self.voice_output.stop().await;
+            Some(gate)
+        } else {
+            None
+        };
         if Self::audio_session_needs_stop(&persisted_before, &requested) {
-            self.cancel_audio_and_wait().await;
+            self.cancel_audio().await;
         }
         if watch_scope_changed {
             self.runtime.invalidate_watch_scope();
         }
         let watch_was_running = self.snapshot().await.observer_running;
-        let config_update = if watch_enabled_is_only_difference {
+        let work_mode_only = work_config_is_only_difference(&previous, &staged);
+        let config_update = if work_mode_only {
+            self.runtime
+                .update_work_config(staged.work.clone())
+                .await
+                .map(|_| ())
+                .map_err(ConfigCommitError::Runtime)
+        } else if watch_enabled_is_only_difference {
             self.runtime
                 .update_watch_enabled(staged.watch.enabled)
                 .await
@@ -77,19 +110,28 @@ impl DesktopState {
         };
         if let Err(error) = config_update {
             self.runtime
-                .enter_degraded(config_commit_last_error(&error))
+                .enter_degraded(config_commit_last_error_for_locale(
+                    &error,
+                    Locale::from_config(&staged.ui.language),
+                ))
                 .await?;
             self.finish_config_degraded_state(&error).await;
             return Err(error);
         }
-        if watch_enabled_is_only_difference {
+        if watch_enabled_is_only_difference || work_mode_only {
             transaction.commit_config(staged.revision)?;
             self.activate_runtime();
-            self.publish(|snapshot| snapshot.apply_config(staged.clone()))
-                .await;
+            self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(
+                staged.clone(),
+            ))
+            .await;
             if avatar_updated {
                 self.refresh_avatar_image().await;
-                let _ = crate::bubbles::sync_window(self).await;
+            }
+            if avatar_updated || language_changed {
+                crate::bubbles::sync_window(self).await.map_err(|error| {
+                    ConfigCommitError::Runtime(RuntimeError::Factory(error.to_string()))
+                })?;
             }
             return Ok(ConfigUpdateOutcome {
                 config: staged,
@@ -140,9 +182,16 @@ impl DesktopState {
                             self.config_update.observe_config_revision(*actual);
                             return Err(error.into());
                         }
+                        let locale = Locale::from_config(&staged.ui.language);
                         let message = restore.map_or_else(
-                            || error.format_for_user(),
-                            |restore| format!("{}; {restore}", error.format_for_user()),
+                            || error.format_for_locale(locale),
+                            |restore| {
+                                format!(
+                                    "{}; {}",
+                                    error.format_for_locale(locale),
+                                    localize_shortcut_message(&restore, locale)
+                                )
+                            },
                         );
                         (staged.clone(), vec![keymap_issue(message)])
                     }
@@ -157,7 +206,10 @@ impl DesktopState {
                 .await
             {
                 self.runtime
-                    .enter_degraded(config_commit_last_error(&error))
+                    .enter_degraded(config_commit_last_error_for_locale(
+                        &error,
+                        Locale::from_config(&config.ui.language),
+                    ))
                     .await?;
                 self.finish_config_degraded_state(&error).await;
                 return Err(error);
@@ -175,33 +227,44 @@ impl DesktopState {
             if let Err(message) = self.sync_launch_at_login(config.app.launch_at_login) {
                 issues.push(coosenpai_core::config::ConfigValidationIssue {
                     path: "app.launchAtLogin".to_owned(),
-                    message: format!("ログイン時起動を変更できませんでした: {message}"),
+                    message: text(
+                        TextKey::LaunchAtLoginSyncFailed,
+                        Locale::from_config(&config.ui.language),
+                    )
+                    .replace("{error}", &message),
                 });
             }
         }
-        self.publish(|snapshot| snapshot.apply_config(config.clone()))
-            .await;
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(
+            config.clone(),
+        ))
+        .await;
         if avatar_updated {
             self.refresh_avatar_image().await;
         }
-        crate::windows::sync_shortcut_menu(&self.app, &config);
         if !config.ui.thought_bubble {
             self.clear_pending_thought_bubble().await;
         }
-        let thought_bubbles_cleared =
-            !config.ui.thought_bubble && self.bubbles.lock().await.clear_thought_bubbles();
-        let bubble_stack_changed_on_screen = bubble_stack_changed
-            && self
-                .bubbles
-                .lock()
-                .await
-                .set_max_stack(config.bubble.max_stack);
-        if avatar_updated
-            || thought_bubbles_cleared
-            || bubble_appearance_changed
-            || bubble_stack_changed_on_screen
-        {
-            let _ = crate::bubbles::sync_window(self).await;
+        if !config.ui.thought_bubble {
+            crate::bubbles::mutate_checked(
+                &self.ui,
+                crate::bubbles::BubbleMutation::ClearThoughtBubbles,
+            )
+            .await
+            .map_err(|error| ConfigCommitError::Runtime(RuntimeError::Factory(error)))?;
+        }
+        if bubble_stack_changed {
+            crate::bubbles::mutate_checked(
+                &self.ui,
+                crate::bubbles::BubbleMutation::SetMaxStack(config.bubble.max_stack),
+            )
+            .await
+            .map_err(|error| ConfigCommitError::Runtime(RuntimeError::Factory(error)))?;
+        }
+        if avatar_updated || language_changed || bubble_appearance_changed {
+            crate::bubbles::sync_window(self).await.map_err(|error| {
+                ConfigCommitError::Runtime(RuntimeError::Factory(error.to_string()))
+            })?;
         }
         self.refresh_debug().await;
         self.activate_runtime();
@@ -218,7 +281,11 @@ impl DesktopState {
         let transaction = self.config_update.begin().await;
         if !self.runtime_active.load(Ordering::Acquire) {
             return Err(ConfigCommitError::Runtime(RuntimeError::Factory(
-                "設定を修正して保存してください".to_owned(),
+                text(
+                    TextKey::WatchConfigInvalid,
+                    Locale::from_config(&self.runtime_config().ui.language),
+                )
+                .to_owned(),
             )));
         }
         let config = self.runtime.config();
@@ -230,10 +297,8 @@ impl DesktopState {
             let companion = self.factory.build_companion_candidate(&config).await?;
             self.runtime.replace_companion(companion).await?;
         }
-        self.publish(|snapshot| {
-            snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle;
-        })
-        .await;
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::CompanionStopped)
+            .await;
         transaction.commit()?;
         Ok(())
     }
@@ -245,7 +310,11 @@ impl DesktopState {
         let transaction = self.config_update.begin().await;
         if !self.runtime_active.load(Ordering::Acquire) {
             return Err(ConfigCommitError::Runtime(RuntimeError::Factory(
-                "設定を修正して保存してください".to_owned(),
+                text(
+                    TextKey::WatchConfigInvalid,
+                    Locale::from_config(&self.runtime_config().ui.language),
+                )
+                .to_owned(),
             )));
         }
         let recovery = self.runtime.config();
@@ -258,16 +327,21 @@ impl DesktopState {
             })?;
         if previous == persona {
             transaction.commit_config(config.revision)?;
-            self.publish(|snapshot| snapshot.apply_config(config.clone()))
-                .await;
+            self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(
+                config.clone(),
+            ))
+            .await;
             return Ok(config);
         }
+        let locale = Locale::from_config(&config.ui.language);
         let tutorial_provider = self.tutorial.lock().await.provider();
         let replace_result = if let Some(provider) = tutorial_provider {
             let agents = self.factory.build_tutorial_agents(&config, provider)?;
             self.runtime.replace_config(config.clone(), agents).await
         } else {
-            let notice = format!("ペルソナが {previous} から {persona} に切り替わった");
+            let notice = text(TextKey::PersonaChangedNotice, locale)
+                .replace("{previous}", &previous)
+                .replace("{next}", &persona);
             let companion = self
                 .factory
                 .build_companion_candidate_with_notice(&config, Some(notice))
@@ -279,30 +353,60 @@ impl DesktopState {
         if let Err(error) = replace_result {
             let error = ConfigCommitError::Runtime(error);
             self.runtime
-                .enter_degraded(config_commit_last_error(&error))
+                .enter_degraded(config_commit_last_error_for_locale(
+                    &error,
+                    Locale::from_config(&config.ui.language),
+                ))
                 .await?;
             self.finish_config_degraded_state(&error).await;
             return Err(error);
         }
         transaction.commit_config(config.revision)?;
-        self.publish(|snapshot| {
-            snapshot.apply_config(config.clone());
-            snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle;
-        })
+        self.publish_event(
+            crate::snapshot_presenter::SnapshotEvent::CompanionReconfigured(config.clone()),
+        )
         .await;
-        crate::windows::sync_persona(&self.app, &persona);
+        Ok(config)
+    }
+
+    pub(super) async fn switch_persona_during_setup_raw(
+        self: &Arc<Self>,
+        persona: String,
+    ) -> Result<Config, ConfigCommitError> {
+        let transaction = self.config_update.begin().await;
+        let recovery = self.runtime.config();
+        let mut previous = String::new();
+        let config =
+            coosenpai_core::config::patch_config(&self.paths, Some(&recovery), |mut config| {
+                previous.clone_from(&config.companion.persona);
+                config.companion.persona = persona.clone();
+                Ok(config)
+            })?;
+        if previous == persona {
+            transaction.commit_config(config.revision)?;
+            self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(
+                config.clone(),
+            ))
+            .await;
+            return Ok(config);
+        }
+        self.runtime.update_config(config.clone()).await?;
+        transaction.commit_config(config.revision)?;
+        self.publish_event(
+            crate::snapshot_presenter::SnapshotEvent::CompanionReconfigured(config.clone()),
+        )
+        .await;
         Ok(config)
     }
 
     async fn finish_config_degraded_state(&self, error: &ConfigCommitError) {
-        let last_error = config_commit_last_error(error);
+        let locale = Locale::from_config(&self.runtime_config().ui.language);
+        let last_error = config_commit_last_error_for_locale(error, locale);
         self.deactivate_runtime().await;
         self.stop_watch_internal(true).await;
-        self.publish(|snapshot| {
-            snapshot.last_error = Some(last_error);
-            snapshot.companion.ready = false;
-            snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Error;
-        })
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::CompanionFailed(
+            last_error,
+        ))
         .await;
     }
 
@@ -380,7 +484,7 @@ where
                 Ok(staged)
             },
             |current, staged| {
-                if let Err(error) = crate::avatar::cleanup_stale_backups(paths) {
+                if let Err(error) = crate::avatar::cleanup_stale_files(paths) {
                     avatar_cleanup_errors.push(format!("保存前: {error}"));
                 }
                 if let Some(avatar) = staged_avatar.as_mut() {
@@ -452,12 +556,11 @@ fn bubble_appearance_changed(previous: &Config, next: &Config) -> bool {
         || previous.bubble.display != next.bubble.display
 }
 
-fn persona_change_notice(previous: &Config, next: &Config) -> Option<String> {
+fn persona_change_notice(previous: &Config, next: &Config, locale: Locale) -> Option<String> {
     (previous.companion.persona != next.companion.persona).then(|| {
-        format!(
-            "ペルソナが {} から {} に切り替わった",
-            previous.companion.persona, next.companion.persona
-        )
+        text(TextKey::PersonaChangedNotice, locale)
+            .replace("{previous}", &previous.companion.persona)
+            .replace("{next}", &next.companion.persona)
     })
 }
 
@@ -472,6 +575,7 @@ fn apply_keymap_changes(current: &mut Config, previous: &Config, requested: &Con
     apply!(capture_region);
     apply!(microphone);
     apply!(toggle_panel);
+    apply!(toggle_avatar);
     apply!(toggle_watch);
     apply!(send_text);
     apply!(copy_last_reply);
@@ -498,12 +602,15 @@ pub(crate) async fn commit_config_or_degrade(
     Ok(())
 }
 
-pub(crate) fn config_commit_last_error(error: &ConfigCommitError) -> RuntimeLastError {
+pub(crate) fn config_commit_last_error_for_locale(
+    error: &ConfigCommitError,
+    locale: Locale,
+) -> RuntimeLastError {
     RuntimeLastError {
         kind: RuntimeErrorKind::Config,
         occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        message: Some(error.format_for_user()),
-        issues: error.issues(),
+        message: Some(error.format_for_locale(locale)),
+        issues: error.issues_for_locale(locale),
         attachment_ocr: None,
     }
 }

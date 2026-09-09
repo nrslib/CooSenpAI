@@ -1,6 +1,7 @@
 use crate::state::DesktopState;
 use async_trait::async_trait;
 use coosenpai_core::config::{Config, ConfigPaths};
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::persistence::{atomic_write_json, SiblingLock};
 use coosenpai_core::ports::RuntimeLogger;
 use coosenpai_core::process::{ProcessRequest, ProcessRunner, TokioProcessRunner};
@@ -179,6 +180,8 @@ struct RemoteEffortProviderPayload {
 enum ModelCatalogError {
     InvalidState,
     InvalidResponse,
+    NotFound,
+    TooManyCandidates,
     Network,
     Process,
     EmptyModels,
@@ -189,6 +192,8 @@ impl ModelCatalogError {
         match self {
             Self::InvalidState => "invalid-state",
             Self::InvalidResponse => "invalid-response",
+            Self::NotFound => "not-found",
+            Self::TooManyCandidates => "too-many-candidates",
             Self::Network => "network",
             Self::Process => "process",
             Self::EmptyModels => "empty-models",
@@ -328,7 +333,7 @@ fn validate_value_list(
         return Err(ModelCatalogError::EmptyModels);
     }
     if values.len() > MAX_CANDIDATES {
-        return Err(ModelCatalogError::InvalidResponse);
+        return Err(ModelCatalogError::TooManyCandidates);
     }
     if values.iter().any(|value| {
         let trimmed = value.trim();
@@ -358,7 +363,7 @@ fn validate_model_efforts(
     model_efforts: &BTreeMap<String, Vec<String>>,
 ) -> Result<(), ModelCatalogError> {
     if model_efforts.len() > MAX_CANDIDATES {
-        return Err(ModelCatalogError::InvalidResponse);
+        return Err(ModelCatalogError::TooManyCandidates);
     }
     for (model, efforts) in model_efforts {
         if model.trim().is_empty() || model.chars().any(char::is_control) || model.len() > 256 {
@@ -586,20 +591,23 @@ impl RemoteModelsClient for HttpRemoteModelsClient {
             .send()
             .await
             .map_err(|_| ModelCatalogError::Network)?;
-        if matches!(
-            response.status(),
-            StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-        ) {
-            return Err(ModelCatalogError::Network);
-        }
-        if !response.status().is_success() {
-            return Err(ModelCatalogError::InvalidResponse);
-        }
+        classify_remote_status(response.status())?;
         let body = read_remote_body(response).await?;
         let value = serde_json::from_slice::<serde_json::Value>(&body)
             .map_err(|_| ModelCatalogError::InvalidResponse)?;
         parse_remote_model_catalog(value)
     }
+}
+
+fn classify_remote_status(status: StatusCode) -> Result<(), ModelCatalogError> {
+    if status.is_success() {
+        return Ok(());
+    }
+    Err(match status {
+        StatusCode::NOT_FOUND => ModelCatalogError::NotFound,
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => ModelCatalogError::Network,
+        _ => ModelCatalogError::InvalidResponse,
+    })
 }
 
 async fn read_remote_body(mut response: reqwest::Response) -> Result<Vec<u8>, ModelCatalogError> {
@@ -688,10 +696,16 @@ async fn refresh_remote_models(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpencodeModels {
+    models: Vec<String>,
+    dropped: usize,
+}
+
 async fn load_opencode_models(
     config: &Config,
     cancellation: CancellationToken,
-) -> Result<Vec<String>, ModelCatalogError> {
+) -> Result<OpencodeModels, ModelCatalogError> {
     load_opencode_models_with_runner(config, cancellation, &TokioProcessRunner).await
 }
 
@@ -699,7 +713,7 @@ async fn load_opencode_models_with_runner(
     config: &Config,
     cancellation: CancellationToken,
     runner: &dyn ProcessRunner,
-) -> Result<Vec<String>, ModelCatalogError> {
+) -> Result<OpencodeModels, ModelCatalogError> {
     let path_value =
         coosenpai_core::provider::resolve_login_shell_path(cancellation.child_token()).await;
     let executable_name = if config.companion.provider == "opencode" {
@@ -731,25 +745,33 @@ async fn load_opencode_models_with_runner(
     parse_opencode_models(stdout)
 }
 
-fn parse_opencode_models(output: &str) -> Result<Vec<String>, ModelCatalogError> {
-    let models = output
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty()
-                || line.chars().any(char::is_whitespace)
-                || line.chars().any(char::is_control)
-            {
-                return None;
-            }
-            let (provider, model) = line.split_once('/')?;
-            if provider.is_empty() || model.is_empty() || provider.contains('/') {
-                return None;
-            }
-            Some(line.to_owned())
-        })
-        .collect::<Vec<_>>();
-    normalize_value_list(models)
+fn parse_opencode_models(output: &str) -> Result<OpencodeModels, ModelCatalogError> {
+    let mut models: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.len() > 256
+            || line.chars().any(char::is_whitespace)
+            || line.chars().any(char::is_control)
+        {
+            continue;
+        }
+        let Some((provider, model)) = line.split_once('/') else {
+            continue;
+        };
+        if provider.is_empty() || model.is_empty() || provider.contains('/') {
+            continue;
+        }
+        if !models.iter().any(|current| current == line) {
+            models.push(line.to_owned());
+        }
+    }
+    if models.is_empty() {
+        return Err(ModelCatalogError::EmptyModels);
+    }
+    let dropped = models.len().saturating_sub(MAX_CANDIDATES);
+    models.truncate(MAX_CANDIDATES);
+    Ok(OpencodeModels { models, dropped })
 }
 
 fn log_remote_refresh(logger: &dyn RuntimeLogger, outcome: RemoteRefreshOutcome) {
@@ -764,8 +786,22 @@ fn log_remote_refresh(logger: &dyn RuntimeLogger, outcome: RemoteRefreshOutcome)
     }
 }
 
+fn log_opencode_truncation(logger: &dyn RuntimeLogger, opencode_models: &OpencodeModels) {
+    if opencode_models.dropped > 0 {
+        let _ = logger.write(
+            "DEBUG",
+            &format!(
+                "opencode のモデル候補を上限 {} 件に絞りました: total={}",
+                MAX_CANDIDATES,
+                opencode_models.models.len() + opencode_models.dropped
+            ),
+        );
+    }
+}
+
 pub(crate) async fn catalog_for_state(state: &DesktopState) -> ModelCatalogView {
     let config = state.runtime_config();
+    let locale = Locale::from_config(&config.ui.language);
     let store = Arc::new(ModelCatalogStore::new(&state.paths));
     if config.app.check_for_updates {
         match HttpRemoteModelsClient::new() {
@@ -786,12 +822,15 @@ pub(crate) async fn catalog_for_state(state: &DesktopState) -> ModelCatalogView 
     if cached.opencode.is_none() {
         match load_opencode_models(&config, state.cancellation.child_token()).await {
             Ok(models) => {
+                log_opencode_truncation(state.logger.as_ref(), &models);
                 let store_for_update = store.clone();
-                if tokio::task::spawn_blocking(move || store_for_update.update_opencode(models))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .is_none()
+                if tokio::task::spawn_blocking(move || {
+                    store_for_update.update_opencode(models.models)
+                })
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .is_none()
                 {
                     let _ = state.logger.write(
                         "DEBUG",
@@ -811,7 +850,7 @@ pub(crate) async fn catalog_for_state(state: &DesktopState) -> ModelCatalogView 
                 view_async(
                     store.clone(),
                     config.clone(),
-                    Some("一覧を取得できませんでした".to_owned()),
+                    Some(text(TextKey::ModelCatalogLoadFailed, locale).to_owned()),
                 )
                 .await
             }
@@ -823,11 +862,13 @@ pub(crate) async fn catalog_for_state(state: &DesktopState) -> ModelCatalogView 
 
 pub(crate) async fn reload_opencode_models(state: &DesktopState) -> ModelCatalogView {
     let config = state.runtime_config();
+    let locale = Locale::from_config(&config.ui.language);
     let store = Arc::new(ModelCatalogStore::new(&state.paths));
     match load_opencode_models(&config, state.cancellation.child_token()).await {
         Ok(models) => {
+            log_opencode_truncation(state.logger.as_ref(), &models);
             let store_for_update = store.clone();
-            if tokio::task::spawn_blocking(move || store_for_update.update_opencode(models))
+            if tokio::task::spawn_blocking(move || store_for_update.update_opencode(models.models))
                 .await
                 .ok()
                 .and_then(Result::ok)
@@ -842,7 +883,7 @@ pub(crate) async fn reload_opencode_models(state: &DesktopState) -> ModelCatalog
                 view_async(
                     store.clone(),
                     config.clone(),
-                    Some("一覧を保存できませんでした".to_owned()),
+                    Some(text(TextKey::ModelCatalogSaveFailed, locale).to_owned()),
                 )
                 .await
             }
@@ -855,7 +896,12 @@ pub(crate) async fn reload_opencode_models(state: &DesktopState) -> ModelCatalog
                     error.reason()
                 ),
             );
-            view_async(store, config, Some("一覧を取得できませんでした".to_owned())).await
+            view_async(
+                store,
+                config,
+                Some(text(TextKey::ModelCatalogLoadFailed, locale).to_owned()),
+            )
+            .await
         }
     }
 }

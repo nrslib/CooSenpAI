@@ -1,5 +1,7 @@
-import { useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 
+import { usePanelPresenter, type PanelCommand } from "../usePanelPresenter.js";
+import { useI18n } from "../i18n/index.js";
 import type { IpcResult, PersonaDocument, PersonaOption } from "../types.js";
 import { CloseIcon } from "./LineIcons.js";
 import { ConfirmationDialog } from "./ConfirmationDialog.js";
@@ -10,60 +12,46 @@ interface Props {
   readonly onSave: (id: string, displayName: string, body: string) => Promise<IpcResult<unknown>>;
   readonly onDelete: (id: string) => Promise<IpcResult<unknown>>;
   readonly onRestore: (id: string, version: string) => Promise<IpcResult<unknown>>;
+  readonly onRefresh: () => Promise<IpcResult<unknown>>;
   readonly onClose: () => void;
 }
 
-export function PersonaEditor({ option, document, onSave, onDelete, onRestore, onClose }: Props): ReactElement {
+export function PersonaEditor({ option, document, onSave, onDelete, onRestore, onRefresh, onClose }: Props): ReactElement {
+  const { t } = useI18n();
   const [id, setId] = useState(option.builtin ? `${option.id}-custom` : option.id);
   const [displayName, setDisplayName] = useState(option.builtin ? "" : option.displayName);
   const [body, setBody] = useState(document.body);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const save = async (): Promise<void> => {
-    setBusy(true);
-    const result = await onSave(id, displayName, body);
-    setBusy(false);
-    if (result.ok) onClose();
-    else setError(result.error.message);
-  };
-  const deletePersona = async (): Promise<void> => {
-    setDeleteConfirmOpen(false);
-    setBusy(true);
-    const result = await onDelete(option.id);
-    setBusy(false);
-    if (result.ok) onClose();
-    else setError(result.error.message);
-  };
+  const presenter = usePanelPresenter<{
+    busy: boolean; canSave: boolean; deleteConfirmOpen: boolean; error: string | null;
+  }, PanelCommand & { payload: string | { id: string; displayName: string; body: string; version: string } }>("persona",
+    { builtin: option.builtin, originalId: option.id, draft: { id, displayName, body } }, async (command) => {
+      switch (command.kind) {
+        case "save": { const value = command.payload as { id: string; displayName: string; body: string }; return onSave(value.id, value.displayName, value.body); }
+        case "delete": return onDelete(command.payload as string);
+        case "restore": { const value = command.payload as { id: string; version: string }; return onRestore(value.id, value.version); }
+        case "refresh": return onRefresh();
+        case "close": onClose(); return { ok: true, value: null };
+        default: throw new Error(`Unknown persona command: ${command.kind}`);
+      }
+    });
+  useEffect(() => presenter.send({ type: "change", value: { id, displayName, body } }), [id, displayName, body, presenter.send]);
+  const action = (name: string, value: unknown = null): void => presenter.send({ type: "action", name, value });
+  const close = (): void => action("close");
+  const busy = presenter.state?.busy ?? true;
+  const error = presenter.error ?? presenter.state?.error ?? undefined;
+  const deleteConfirmOpen = presenter.state?.deleteConfirmOpen === true;
   return <div className="dialog-overlay" role="presentation" onKeyDown={(event) => {
-    closePersonaEditorOnEscape(event, onClose);
-  }}><section className="persona-editor" role="dialog" aria-modal="true" aria-label="性格を編集">
-    <div className="settings-heading"><h2>{option.builtin ? "複製して自分の性格を作る" : "性格を編集"}</h2><button type="button" aria-label="閉じる" onClick={onClose}><CloseIcon /></button></div>
-    <label>ID<input value={id} disabled={!option.builtin} pattern="[A-Za-z0-9-]+" maxLength={64} onChange={(event) => setId(event.target.value)} /></label>
-    <label>一覧に表示する名前<input value={displayName} maxLength={40} onChange={(event) => setDisplayName(event.target.value)} /></label>
-    <label>本文<textarea rows={14} value={body} onChange={(event) => setBody(event.target.value)} /></label>
-    {document.versions.length === 0 ? null : <label>前の版に戻す<select defaultValue="" onChange={(event) => {
-      if (event.target.value !== "") void onRestore(option.id, event.target.value).then((result) => result.ok ? onClose() : setError(result.error.message));
-    }}><option value="">版を選択</option>{document.versions.map((version) => <option key={version.id} value={version.id}>{version.createdAt}</option>)}</select></label>}
+    if (event.key === "Escape" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !busy) event.stopPropagation();
+    action("key", { key: event.key, composing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode });
+  }}><section className="persona-editor" role="dialog" aria-modal="true" aria-label={t("settings.personaEditor.aria")}>
+    <div className="settings-heading"><h2>{option.builtin ? t("settings.personaEditor.duplicateTitle") : t("settings.personaEditor.editTitle")}</h2><button type="button" aria-label={t("settings.personaEditor.close")} disabled={busy} onClick={close}><CloseIcon /></button></div>
+    <label>{t("settings.personaEditor.id")}<input value={id} disabled={!option.builtin} pattern="[A-Za-z0-9-]+" maxLength={64} onChange={(event) => setId(event.target.value)} /></label>
+    <label>{t("settings.personaEditor.displayName")}<input value={displayName} maxLength={40} onChange={(event) => setDisplayName(event.target.value)} /></label>
+    <label>{t("settings.personaEditor.body")}<textarea rows={14} value={body} onChange={(event) => setBody(event.target.value)} /></label>
+    {document.versions.length === 0 ? null : <label>{t("settings.personaEditor.restore")}<select defaultValue="" onChange={(event) => {
+      action("restore", event.target.value);
+    }}><option value="">{t("settings.personaEditor.selectVersion")}</option>{document.versions.map((version) => <option key={version.id} value={version.id}>{version.createdAt}</option>)}</select></label>}
     {error === undefined ? null : <p className="field-error">{error}</p>}
-    <div className="button-row"><button className="primary" type="button" disabled={busy || !canSavePersona(id, displayName, body)} onClick={() => void save()}>保存</button>{option.builtin ? null : <button type="button" disabled={busy} onClick={() => setDeleteConfirmOpen(true)}>削除</button>}<button type="button" onClick={onClose}>取り消し</button></div>
-  </section>{deleteConfirmOpen ? <ConfirmationDialog id="persona-delete" title="性格を削除しますか？" description="この性格を削除します。" cancelLabel="キャンセル" confirmLabel="削除する" onCancel={() => setDeleteConfirmOpen(false)} onConfirm={() => { void deletePersona(); }} /> : null}</div>;
-}
-
-export function shouldClosePersonaEditor(event: Pick<KeyboardEvent, "key" | "isComposing" | "keyCode">): boolean {
-  return event.key === "Escape" && !event.isComposing && event.keyCode !== 229;
-}
-
-export function closePersonaEditorOnEscape(
-  event: Pick<ReactKeyboardEvent, "nativeEvent" | "stopPropagation">,
-  onClose: () => void,
-): boolean {
-  if (!shouldClosePersonaEditor(event.nativeEvent)) return false;
-  event.stopPropagation();
-  onClose();
-  return true;
-}
-
-export function canSavePersona(id: string, displayName: string, body: string): boolean {
-  return /^[A-Za-z0-9-]{1,64}$/u.test(id) && displayName.trim() !== "" && body.trim() !== "";
+    <div className="button-row"><button className="primary" type="button" disabled={presenter.state?.canSave !== true} onClick={() => action("save", { id, displayName, body })}>{t("settings.personaEditor.save")}</button>{option.builtin ? null : <button type="button" disabled={busy} onClick={() => action("requestDelete")}>{t("settings.personaEditor.delete")}</button>}<button type="button" disabled={busy} onClick={close}>{t("common.cancel")}</button></div>
+  </section>{deleteConfirmOpen ? <ConfirmationDialog id="persona-delete" title={t("settings.personaEditor.deleteTitle")} description={t("settings.personaEditor.deleteDescription")} cancelLabel={t("common.cancel")} confirmLabel={t("settings.personaEditor.delete")} onCancel={() => action("cancelDelete")} onConfirm={() => action("delete")} /> : null}</div>;
 }

@@ -14,6 +14,13 @@ pub struct MacSpeechPermissions;
 
 #[async_trait]
 impl SpeechPermissionPort for MacSpeechPermissions {
+    async fn request_recognition(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<SpeechPermissionKind, PortError> {
+        request_recognition(cancellation).await
+    }
+
     fn current(&self) -> Result<SpeechPermissions, PortError> {
         Ok(SpeechPermissions {
             microphone: current_microphone()?,
@@ -76,6 +83,11 @@ async fn request_microphone(
 async fn request_recognition(
     cancellation: CancellationToken,
 ) -> Result<SpeechPermissionKind, PortError> {
+    if cancellation.is_cancelled() {
+        return Err(PortError::Unavailable(
+            "音声認識権限の確認を取り消しました".to_owned(),
+        ));
+    }
     let current = current_recognition();
     if current != SpeechPermissionKind::NotDetermined {
         return Ok(current);

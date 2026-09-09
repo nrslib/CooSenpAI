@@ -1,105 +1,37 @@
 use crate::bubbles::{self, BubbleRecord};
 use crate::state::DesktopState;
 use async_trait::async_trait;
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::persistence::{atomic_write_json, SiblingLock};
 use coosenpai_core::ports::RuntimeLogger;
-use reqwest::{Client, StatusCode};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::Manager;
 
-pub(crate) const RELEASES_URL: &str = "https://github.com/nrslib/CooSenpAI/releases";
-
-const LATEST_RELEASE_API_URL: &str =
-    "https://api.github.com/repos/nrslib/CooSenpAI/releases/latest";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const STATE_SCHEMA_VERSION: u8 = 1;
 
 #[async_trait]
 trait LatestReleaseClient: Send + Sync {
-    async fn latest_tag(&self) -> Result<String, ReleaseFetchError>;
+    async fn latest_tag(&self) -> Result<Option<String>, String>;
 }
 
-struct GitHubReleaseClient {
-    client: Client,
-}
-
-impl GitHubReleaseClient {
-    fn new() -> Result<Self, reqwest::Error> {
-        Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("CooSenpAI/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map(|client| Self { client })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ReleaseFetchError {
-    Timeout,
-    Transport,
-    RateLimited,
-    HttpStatus,
-    InvalidResponse,
-}
-
-impl ReleaseFetchError {
-    fn reason(self) -> &'static str {
-        match self {
-            Self::Timeout => "timeout",
-            Self::Transport => "network",
-            Self::RateLimited => "rate-limit",
-            Self::HttpStatus => "http-status",
-            Self::InvalidResponse => "invalid-response",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct LatestReleasePayload {
-    tag_name: String,
+struct TauriReleaseClient {
+    state: Arc<DesktopState>,
 }
 
 #[async_trait]
-impl LatestReleaseClient for GitHubReleaseClient {
-    async fn latest_tag(&self) -> Result<String, ReleaseFetchError> {
-        let response = self
-            .client
-            .get(LATEST_RELEASE_API_URL)
-            .send()
+impl LatestReleaseClient for TauriReleaseClient {
+    async fn latest_tag(&self) -> Result<Option<String>, String> {
+        self.state
+            .app
+            .state::<crate::app_update::AppUpdater>()
+            .check(&self.state, crate::app_update::CheckOrigin::Background)
             .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    ReleaseFetchError::Timeout
-                } else {
-                    ReleaseFetchError::Transport
-                }
-            })?;
-        let status = response.status();
-        if matches!(
-            status,
-            StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-        ) {
-            return Err(ReleaseFetchError::RateLimited);
-        }
-        if !status.is_success() {
-            return Err(ReleaseFetchError::HttpStatus);
-        }
-        response
-            .json::<LatestReleasePayload>()
-            .await
-            .map(|release| release.tag_name)
-            .map_err(|error| {
-                if error.is_timeout() {
-                    ReleaseFetchError::Timeout
-                } else {
-                    ReleaseFetchError::InvalidResponse
-                }
-            })
     }
 }
 
@@ -116,13 +48,13 @@ struct DesktopUpdateNoticeSink {
 impl UpdateNoticeSink for DesktopUpdateNoticeSink {
     async fn show_update(&self, version: &Version) -> bool {
         let config = self.state.runtime_config();
+        let locale = Locale::from_config(&config.ui.language);
         let conversation_generation = self.state.bubbles.lock().await.conversation_generation();
         let record = BubbleRecord {
             id: format!("update-available-{version}"),
             created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            message: format!(
-                "新しいバージョン v{version} があります。GitHub Releases からダウンロードできます"
-            ),
+            message: text(TextKey::UpdateAvailable, locale)
+                .replace("{version}", &version.to_string()),
             message_kind: "notice".to_owned(),
             notification_priority: "info".to_owned(),
             caused_by: None,
@@ -131,15 +63,41 @@ impl UpdateNoticeSink for DesktopUpdateNoticeSink {
             avatar_color: config.ui.avatar_color,
             conversation_generation,
             persistent: false,
-            open_url: Some(RELEASES_URL.to_owned()),
             interaction: None,
         };
-        bubbles::show_best_effort(
-            self.state.clone(),
+        show_update_notice(
+            &self.state.ui,
             record,
             config.notification.bubble_duration_ms,
         )
         .await
+    }
+}
+
+async fn show_update_notice(
+    ui: &crate::ui_root::UiHandle,
+    record: BubbleRecord,
+    duration_ms: u64,
+) -> bool {
+    let presentation = match bubbles::register(ui, record, duration_ms).await {
+        Ok(presentation) => presentation,
+        Err(_) => return false,
+    };
+    await_update_notice(ui, presentation).await
+}
+
+async fn await_update_notice(
+    ui: &crate::ui_root::UiHandle,
+    presentation: bubbles::BubblePresentation,
+) -> bool {
+    if !presentation.registered_on_bubble_surface {
+        return false;
+    }
+    let explicitly_dismissed = presentation.explicitly_dismissed.clone();
+    match bubbles::await_presentation(ui, presentation).await {
+        Ok(bubbles::BubblePresentationOutcome::Acknowledged) => true,
+        Ok(bubbles::BubblePresentationOutcome::Dismissed) => explicitly_dismissed.is_cancelled(),
+        Err(_) => false,
     }
 }
 
@@ -232,11 +190,6 @@ struct UpdateChecker {
 }
 
 impl UpdateChecker {
-    fn new(state_path: PathBuf, logger: Arc<dyn RuntimeLogger>) -> Result<Self, reqwest::Error> {
-        let client = Arc::new(GitHubReleaseClient::new()?);
-        Ok(Self::with_client(state_path, client, logger))
-    }
-
     fn with_client(
         state_path: PathBuf,
         client: Arc<dyn LatestReleaseClient>,
@@ -258,12 +211,10 @@ impl UpdateChecker {
             return;
         };
         let tag = match self.client.latest_tag().await {
-            Ok(tag) => tag,
+            Ok(Some(tag)) => tag,
+            Ok(None) => return,
             Err(error) => {
-                self.log_info(&format!(
-                    "更新確認をスキップしました: reason={}",
-                    error.reason()
-                ));
+                self.log_info(&format!("更新確認をスキップしました: reason={}", error));
                 return;
             }
         };
@@ -314,15 +265,13 @@ impl UpdateChecker {
 pub(crate) fn start(state: Arc<DesktopState>) {
     tauri::async_runtime::spawn(async move {
         let logger: Arc<dyn RuntimeLogger> = state.logger.clone();
-        let checker = match UpdateChecker::new(state.paths.update_check.clone(), logger) {
-            Ok(checker) => checker,
-            Err(_) => {
-                let _ = state
-                    .logger
-                    .write("INFO", "更新確認をスキップしました: reason=client");
-                return;
-            }
-        };
+        let checker = UpdateChecker::with_client(
+            state.paths.update_check.clone(),
+            Arc::new(TauriReleaseClient {
+                state: state.clone(),
+            }),
+            logger,
+        );
         loop {
             if state.cancellation.is_cancelled() {
                 return;

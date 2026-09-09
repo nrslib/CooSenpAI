@@ -11,7 +11,7 @@ pub(super) fn session_json<'a>(
 ) -> Result<(&'static str, Option<&'a str>), ProviderError> {
     match request {
         SessionRequest::New => Ok(("new", None)),
-        SessionRequest::Ephemeral => Ok(("ephemeral", None)),
+        SessionRequest::Ephemeral | SessionRequest::Isolated => Ok(("ephemeral", None)),
         SessionRequest::Resume(session) => {
             if session.provider != provider {
                 return Err(ProviderError {

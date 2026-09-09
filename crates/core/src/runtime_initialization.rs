@@ -1,6 +1,16 @@
 use super::*;
 
 impl RuntimeActor {
+    pub(super) fn reset_companion_emotions(&mut self) -> Result<(), RuntimeError> {
+        self.user_preparer
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .ok_or(RuntimeError::CompanionUnavailable)?
+            .reset_companion_emotions()?;
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
     pub(super) fn schedule_initialization_retry(
         &mut self,
         kind: RuntimeErrorKind,
@@ -64,9 +74,10 @@ impl RuntimeActor {
     }
 
     pub(super) fn companion_recovery_can_start(&self) -> bool {
-        self.companion.as_ref().is_some_and(|companion| {
-            companion.proactive_recovery_can_start(&self.pending_observations)
-        })
+        self.observation_delivery == ObservationDelivery::Companion
+            && self.companion.as_ref().is_some_and(|companion| {
+                companion.proactive_recovery_can_start(&self.pending_observations)
+            })
     }
 
     pub(super) fn resume_proactive_after_user(
@@ -176,6 +187,14 @@ impl RuntimeActor {
             .as_ref()
             .map_or((0, false), CompanionAgent::pending_delivery_status);
         RuntimeSnapshot {
+            companion_emotions: self
+                .user_preparer
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .map_or_else(crate::emotion::EmotionState::default, |preparer| {
+                    preparer.companion_emotions()
+                }),
             revision: self.revision,
             phase: self.phase,
             pending_observations: self.pending_observations.len(),
@@ -201,9 +220,13 @@ impl RuntimeActor {
                 .as_ref()
                 .is_some_and(CompanionAgent::proactive_limit_reached),
             active_user_message_id: self.active_user_message_id.clone(),
+            user_work_pending: self.user_work_pending,
             cancelled_user_message_ids: self.cancelled_user_message_ids.clone(),
             companion_draft: self.companion_draft.clone(),
             latest_companion_thought: self.latest_companion_thought.clone(),
+            latest_companion_decision: self.latest_companion_decision.clone(),
+            latest_user_interruption: self.latest_user_interruption.clone(),
+            latest_companion_thought_generation: self.latest_companion_thought_generation,
             provider_usage: self.provider_usage.clone(),
         }
     }

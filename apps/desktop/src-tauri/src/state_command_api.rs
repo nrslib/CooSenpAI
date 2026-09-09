@@ -5,6 +5,9 @@ use coosenpai_core::onboarding::TutorialStep;
 use coosenpai_core::state::ObservationRecord;
 
 impl DesktopState {
+    pub(crate) async fn apply_voice_cancel(&self) -> Result<(), String> {
+        self.speech.cancel_and_wait_for_switch(self).await
+    }
     pub(crate) async fn cancel_setup_attempt_before_restart(&self) {
         self.tutorial.lock().await.invalidate_setup_attempt();
         let _ = self.logger.write(
@@ -18,21 +21,6 @@ impl DesktopState {
         permit: &CommandContext,
         source: crate::speech::SpeechSource,
     ) -> Result<(), String> {
-        let action = crate::input_popup::start_action(
-            self.input_popup_kind().await,
-            crate::input_popup::InputPopupKind::Speech,
-            match source {
-                crate::speech::SpeechSource::Shortcut => {
-                    crate::command_guard::CommandSource::GlobalShortcut
-                }
-                crate::speech::SpeechSource::Composer => {
-                    crate::command_guard::CommandSource::IpcMain
-                }
-            },
-        );
-        if action == crate::input_popup::InputPopupStartAction::CancelThenStart {
-            self.cancel_input_popup_for_switch(permit).await?;
-        }
         self.speech
             .clone()
             .begin(self.clone(), permit, source)
@@ -43,35 +31,12 @@ impl DesktopState {
         self.speech.clone().finish(self.clone(), permit);
     }
 
-    pub(crate) fn command_speech_cancel(
-        self: &Arc<Self>,
-        permit: &CommandContext,
-    ) -> Result<(), String> {
-        self.speech.clone().cancel(self.clone(), permit)
-    }
-
-    pub(crate) async fn cancel_input_popup_for_switch(
-        &self,
-        permit: &CommandContext,
-    ) -> Result<(), String> {
-        match self.input_popup_kind().await {
-            Some(crate::input_popup::InputPopupKind::CaptureImage)
-            | Some(crate::input_popup::InputPopupKind::CaptureText) => {
-                crate::capture::cancel_for_switch(self, permit).await
-            }
-            Some(crate::input_popup::InputPopupKind::Speech) => {
-                self.speech.cancel_and_wait_for_switch(self).await
-            }
-            None => Ok(()),
-        }
-    }
-
     pub(crate) async fn command_speech_confirm(
         self: &Arc<Self>,
-        permit: &CommandContext,
+        generation: u64,
         text: String,
     ) -> Result<String, String> {
-        self.speech.confirm(self, permit, text).await
+        self.speech.confirm(self, generation, text).await
     }
 
     pub(crate) async fn command_enqueue_user_message(
@@ -143,6 +108,14 @@ impl DesktopState {
         persona: String,
     ) -> Result<Config, ConfigCommitError> {
         self.switch_persona_raw(persona).await
+    }
+
+    pub(crate) async fn command_switch_persona_during_setup(
+        self: &Arc<Self>,
+        _permit: &CommandContext,
+        persona: String,
+    ) -> Result<Config, ConfigCommitError> {
+        self.switch_persona_during_setup_raw(persona).await
     }
 
     pub(crate) async fn command_reload_persona(
@@ -239,6 +212,27 @@ impl DesktopState {
         _permit: &CommandContext,
     ) -> Result<(), RuntimeError> {
         self.reset_conversation().await
+    }
+
+    pub(crate) async fn command_select_conversation(
+        self: &Arc<Self>,
+        _permit: &CommandContext,
+        generation: u64,
+    ) -> Result<(), RuntimeError> {
+        self.switch_conversation_generation(generation).await
+    }
+
+    pub(crate) async fn command_reset_companion_emotions(
+        &self,
+        _permit: &CommandContext,
+    ) -> Result<AppSnapshot, RuntimeError> {
+        self.core_runtime().reset_companion_emotions().await?;
+        let runtime = self.core_runtime().snapshot();
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::Runtime(
+            runtime.clone(),
+        ))
+        .await;
+        Ok(self.snapshot().await)
     }
 
     pub(crate) async fn command_stop_watch(

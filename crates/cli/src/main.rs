@@ -1,10 +1,11 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use coosenpai_core::config::{Config, ConfigPaths};
+use coosenpai_core::locale::Locale;
 use coosenpai_core::logging::FileLogger;
 use coosenpai_core::prompts::{
-    build_companion_prompt, build_observer_prompt, companion_schema, observer_schema,
-    observer_system_prompt, CompanionPromptData, ObserverPromptFrame,
+    build_companion_prompt, build_observer_prompt, observer_schema, observer_system_prompt,
+    CompanionPromptData, ObserverPromptFrame,
 };
 use coosenpai_core::provider::{
     resolve_login_shell_path, ProviderCall, ProviderClient, ProviderError, ProviderErrorKind,
@@ -390,6 +391,7 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                 .iter()
                 .enumerate()
                 .map(|(index, _)| ObserverPromptFrame {
+                    display: None,
                     index: index + 1,
                     relative_seconds: index as f64 * 15.0,
                     trigger: Some(ActivityTriggerKind::Timer),
@@ -424,6 +426,7 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                         images: images.into_iter().map(Into::into).collect(),
                         tools_disabled: true,
                         output_schema: Some(observer_schema()),
+                        output_validation_schema: None,
                         session: SessionRequest::Ephemeral,
                         model: Some(case.model.to_owned()),
                         effort: Some(case.effort.to_owned()),
@@ -489,6 +492,19 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                 });
             let data = CompanionPromptData {
                 companion_name: case.config.companion.display_name.clone(),
+                companion_emotions: if case.config.companion.emotions_enabled {
+                    match input
+                        .get("companionEmotions")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                    {
+                        Ok(value) => value,
+                        Err(error) => return eval_error(started, error.to_string()),
+                    }
+                } else {
+                    None
+                },
                 observations: observations.clone(),
                 observation_log_directory: None,
                 omitted_observations: Some(Vec::new()),
@@ -530,10 +546,11 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                     .and_then(Value::as_str)
                     .map(str::to_owned),
             };
-            let system_prompt = coosenpai_core::prompts::companion_system_prompt(
+            let system_prompt = coosenpai_core::prompts::companion_system_prompt_for_locale(
                 &case.config.companion.assertiveness,
                 &case.config.companion.display_name,
                 &persona.body,
+                Locale::from_config(&case.config.ui.language),
             );
             case.provider
                 .call(
@@ -542,7 +559,12 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                         prompt: build_companion_prompt(&data),
                         images: images.into_iter().map(Into::into).collect(),
                         tools_disabled: true,
-                        output_schema: Some(companion_schema()),
+                        output_schema: Some(coosenpai_core::prompts::companion_output_schema(
+                            case.config.companion.emotions_enabled,
+                        )),
+                        output_validation_schema: Some(
+                            coosenpai_core::prompts::companion_response_schema(),
+                        ),
                         session: SessionRequest::New,
                         model: Some(case.model.to_owned()),
                         effort: Some(case.effort.to_owned()),
@@ -578,6 +600,7 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                             images: Vec::new(),
                             tools_disabled: true,
                             output_schema: Some(coosenpai_core::memory::memory_summary_schema()),
+                            output_validation_schema: None,
                             session: SessionRequest::Ephemeral,
                             model: Some(case.model.to_owned()),
                             effort: Some(case.effort.to_owned()),

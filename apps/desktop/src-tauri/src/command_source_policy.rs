@@ -7,7 +7,8 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
             command,
             DesktopCommand::TutorialInteract
                 | DesktopCommand::TutorialAdvance
-                | DesktopCommand::TutorialFastForward
+                | DesktopCommand::BubbleFastForward
+                | DesktopCommand::BubbleNavigate
                 | DesktopCommand::MemoryConfirm
                 | DesktopCommand::MemoryReject
                 | DesktopCommand::ConversationReset
@@ -19,9 +20,7 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
         ),
         CommandSource::IpcCapturePopup => matches!(
             command,
-            DesktopCommand::CaptureSendImage
-                | DesktopCommand::CaptureSendText
-                | DesktopCommand::CaptureCancel
+            DesktopCommand::CaptureSendImage | DesktopCommand::CaptureSendText
         ),
         CommandSource::IpcSpeechPopup => matches!(
             command,
@@ -30,6 +29,10 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
         CommandSource::IpcModelPopup => matches!(
             command,
             DesktopCommand::ConfigDisplayUpdate | DesktopCommand::ConfigProviderUpdate
+        ),
+        CommandSource::IpcDetails => matches!(
+            command,
+            DesktopCommand::CompanionEmotionsReset | DesktopCommand::ConversationSelect
         ),
         CommandSource::Tray => matches!(
             command,
@@ -69,12 +72,16 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
 
 fn main_allows(command: DesktopCommand) -> bool {
     match command {
-        DesktopCommand::ChatSend
+        DesktopCommand::WorkApprove
+        | DesktopCommand::WorkConfigure
+        | DesktopCommand::ChatSend
         | DesktopCommand::ChatCancel
         | DesktopCommand::ChatRetry
         | DesktopCommand::SpeechStart
         | DesktopCommand::SpeechFinish
         | DesktopCommand::SpeechCancel
+        | DesktopCommand::VoiceOutputTest
+        | DesktopCommand::VoiceOutputStop
         | DesktopCommand::SettingsAppearancePreview
         | DesktopCommand::ConfigDisplayUpdate
         | DesktopCommand::ConfigProviderUpdate
@@ -83,6 +90,7 @@ fn main_allows(command: DesktopCommand) -> bool {
         | DesktopCommand::ConfigKeymapUpdate
         | DesktopCommand::WatchTargetUpdate
         | DesktopCommand::PersonaSelect
+        | DesktopCommand::SetupPersonaSelect
         | DesktopCommand::PersonaSave
         | DesktopCommand::PersonaDelete
         | DesktopCommand::PersonaRestore
@@ -94,23 +102,26 @@ fn main_allows(command: DesktopCommand) -> bool {
         | DesktopCommand::MemoryDelete
         | DesktopCommand::MemoryConsolidate
         | DesktopCommand::ConversationReset
+        | DesktopCommand::ConversationSelect
         | DesktopCommand::TutorialAdvance
+        | DesktopCommand::CompanionEmotionsReset
         | DesktopCommand::TutorialSettingsPresented
         | DesktopCommand::TutorialFinish
         | DesktopCommand::TutorialRestart
         | DesktopCommand::SetupPrompt
         | DesktopCommand::SetupRestart
         | DesktopCommand::SettingsOpen
+        | DesktopCommand::LicenseDocumentOpen
         | DesktopCommand::WatchStart
-        | DesktopCommand::WatchStop => true,
-        DesktopCommand::CaptureStartImage
-        | DesktopCommand::CaptureStartText
+        | DesktopCommand::WatchStop
+        | DesktopCommand::CaptureStartImage => true,
+        DesktopCommand::CaptureStartText
         | DesktopCommand::CaptureSendImage
         | DesktopCommand::CaptureSendText
-        | DesktopCommand::CaptureCancel
         | DesktopCommand::SpeechConfirm
         | DesktopCommand::TutorialInteract
-        | DesktopCommand::TutorialFastForward
+        | DesktopCommand::BubbleFastForward
+        | DesktopCommand::BubbleNavigate
         | DesktopCommand::TutorialResume
         | DesktopCommand::WatchPowerSuspend
         | DesktopCommand::WatchPowerResume

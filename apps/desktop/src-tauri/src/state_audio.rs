@@ -8,6 +8,7 @@ impl DesktopState {
     ) -> bool {
         previous.audio.enabled
             && (!next.audio.enabled
+                || previous.audio.mic != next.audio.mic
                 || previous.audio.speaker != next.audio.speaker
                 || previous.audio.debug_dump_dir != next.audio.debug_dump_dir)
     }
@@ -26,10 +27,24 @@ impl DesktopState {
         self.hearing.cancel_and_wait(self).await;
     }
 
+    pub(crate) async fn cancel_audio(&self) {
+        self.hearing.cancel(self).await;
+    }
+
     pub(crate) async fn deactivate_runtime(&self) {
         self.runtime_active
             .store(false, std::sync::atomic::Ordering::Release);
+        self.voice_output.stop().await;
         self.cancel_audio_and_wait().await;
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub async fn install_hearing_permission_port_for_test(
+        &self,
+        port: Arc<dyn coosenpai_core::ports::SpeechPermissionPort>,
+    ) {
+        self.hearing.install_permission_port_for_test(port).await;
     }
 
     #[cfg(test)]

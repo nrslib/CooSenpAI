@@ -19,6 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         manifest_dir.join("../../../tools/hearing-helper/Sources/audio_buffer_copy.swift");
     let hearing_conversion_source =
         manifest_dir.join("../../../tools/hearing-helper/Sources/audio_conversion.swift");
+    let hearing_music_gate_source =
+        manifest_dir.join("../../../tools/hearing-helper/Sources/music_gate.swift");
     let hearing_recognition_state_source =
         manifest_dir.join("../../../tools/hearing-helper/Sources/recognition_state.swift");
     let hearing_segment_controller_source =
@@ -50,6 +52,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "cargo:rerun-if-changed={}",
         hearing_conversion_source.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        hearing_music_gate_source.display()
     );
     println!(
         "cargo:rerun-if-changed={}",

@@ -1,9 +1,9 @@
 use super::{
-    capture_is_allowed, capture_trigger, mark_meaningful_change, record_gate, trigger_name,
-    CaptureDisposition, WatchMemory,
+    capture_is_allowed, capture_trigger, ensure_capture_active, mark_meaningful_change,
+    record_gate, trigger_name, CaptureDisposition, WatchMemory,
 };
-use crate::snapshot::ObserverViewPhase;
 use crate::state::DesktopState;
+use crate::watch_presenter::WatchResult;
 use anyhow::{Context, Result};
 use coosenpai_core::config::{Config, WatchAppConfig};
 use coosenpai_core::debug::DebugStore;
@@ -101,6 +101,7 @@ impl ApplicationWatchSet {
         ocr: &dyn OcrPort,
         semaphore: &Arc<Semaphore>,
         memory: &mut WatchMemory,
+        generation: u64,
         cancellation: CancellationToken,
     ) -> Result<()> {
         let now = Instant::now();
@@ -108,7 +109,7 @@ impl ApplicationWatchSet {
         for application in &config.watch.apps {
             let foreground =
                 application_is_foreground(activity, &application.bundle_id, &application.name);
-            update_foreground(state, application, foreground).await;
+            update_foreground(state, generation, application, foreground).await;
             if !application.enabled {
                 continue;
             }
@@ -135,9 +136,19 @@ impl ApplicationWatchSet {
                 target.last_capture.elapsed().as_millis() as u64,
                 config.watch.triggers.min_spacing_ms,
             ) {
-                record_gate(state, config, trigger, None, None, false, "最低間隔")?;
+                record_gate(
+                    state,
+                    config,
+                    trigger,
+                    None,
+                    None,
+                    false,
+                    "最低間隔",
+                    &memory.publication,
+                )?;
                 update_target_result(
                     state,
+                    generation,
                     application,
                     trigger,
                     CaptureDisposition::MinSpacing,
@@ -157,10 +168,11 @@ impl ApplicationWatchSet {
                 semaphore,
                 target,
                 memory,
+                generation,
                 cancellation.clone(),
             )
             .await?;
-            update_target_result(state, application, trigger, result.0, result.1).await;
+            update_target_result(state, generation, application, trigger, result.0, result.1).await;
         }
         Ok(())
     }
@@ -178,23 +190,36 @@ async fn capture_application(
     semaphore: &Arc<Semaphore>,
     target: &mut ApplicationWatchState,
     memory: &mut WatchMemory,
+    generation: u64,
     cancellation: CancellationToken,
 ) -> Result<(CaptureDisposition, Option<String>)> {
     state
-        .publish(|snapshot| snapshot.observer.phase = ObserverViewPhase::Capturing)
+        .publish_watch_view(generation, WatchResult::CaptureStarted)
         .await;
+    let scope_generation = state.core_runtime().watch_scope_generation();
+    ensure_capture_active(&cancellation)?;
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("application.png");
-    let Some(captured) = capture
+    let Some(_screen_gate) =
+        crate::screen_capture_gate::acquire_screen_capture_gate(state, &cancellation).await
+    else {
+        return Err(anyhow::anyhow!("見守りの撮影が取り消されました"));
+    };
+    let captured = capture
         .capture_application(&application.bundle_id, &source, cancellation.clone())
         .await
-        .map_err(anyhow::Error::new)?
-    else {
+        .map_err(anyhow::Error::new)?;
+    ensure_capture_active(&cancellation)?;
+    let Some(captured) = captured else {
         target.last_capture = Instant::now();
         return Ok((CaptureDisposition::WindowUnavailable, None));
     };
+    if cancellation.is_cancelled() {
+        return Err(anyhow::anyhow!("見守りの撮影が取り消されました"));
+    }
     let captured_at = chrono::Utc::now();
     let bytes = tokio::fs::read(&captured.path).await?;
+    ensure_capture_active(&cancellation)?;
     let (width, height) = png_dimensions(&bytes).context("アプリの画面 PNG が不正です")?;
     let processed = process_png(
         bytes,
@@ -204,16 +229,19 @@ async fn capture_application(
         semaphore.clone(),
     )
     .await?;
+    ensure_capture_active(&cancellation)?;
     let provider_path = directory.path().join("provider.png");
     tokio::fs::write(&provider_path, &processed.provider_png).await?;
+    ensure_capture_active(&cancellation)?;
     let ocr_text = if ocr_enabled {
         let ocr_path = directory.path().join("ocr.png");
         tokio::fs::write(&ocr_path, &processed.masked_png).await?;
+        ensure_capture_active(&cancellation)?;
         ocr.recognize(
             &ocr_path,
             &config.watch.ocr_gate.level,
             Duration::from_millis(config.watch.ocr_gate.timeout_ms),
-            cancellation,
+            cancellation.clone(),
         )
         .await
         .ok()
@@ -221,6 +249,7 @@ async fn capture_application(
     } else {
         None
     };
+    ensure_capture_active(&cancellation)?;
     let changed_by_ocr = matches!((&ocr_text, &target.last_ocr), (Some(_), Some(_)));
     let changed = match (&ocr_text, &target.last_ocr) {
         (Some(current), Some(previous)) => current.signature != *previous,
@@ -228,13 +257,16 @@ async fn capture_application(
     };
     let context_id = DebugStore::new_id();
     let debug_id = config.debug.enabled.then(|| context_id.clone());
+    ensure_capture_active(&cancellation)?;
     if let Some(id) = &debug_id {
-        DebugStore::from_paths(&state.paths).record_frame(
-            id,
-            captured_at,
-            &processed.provider_png,
-            ocr_text.as_ref().map(|value| value.text.as_str()),
-        )?;
+        DebugStore::from_paths(&state.paths)
+            .with_publication_gate(memory.publication.clone())
+            .record_frame(
+                id,
+                captured_at,
+                &processed.provider_png,
+                ocr_text.as_ref().map(|value| value.text.as_str()),
+            )?;
     }
     target.last_capture = Instant::now();
     if !changed {
@@ -250,6 +282,7 @@ async fn capture_application(
             } else {
                 "画素一致"
             },
+            &memory.publication,
         )?;
         return Ok((
             CaptureDisposition::Unchanged,
@@ -273,9 +306,9 @@ async fn capture_application(
         return Ok((CaptureDisposition::Suppressed, None));
     }
     let ocr_text = ocr_text.map(|value| value.text);
-    state
-        .core_runtime()
-        .register_pending_frame_context(PendingFrameContext::bounded(
+    ensure_capture_active(&cancellation)?;
+    state.core_runtime().register_pending_frame_context(
+        PendingFrameContext::bounded(
             context_id.clone(),
             captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             trigger,
@@ -283,9 +316,12 @@ async fn capture_application(
             Some(application.name.clone()),
             frame_target.clone(),
             ocr_text.clone(),
-        ))?;
+        ),
+        &memory.publication,
+    )?;
     memory.frames.push(ObservationFrameInput {
-        scope_generation: state.core_runtime().watch_scope_generation(),
+        display: None,
+        scope_generation,
         context_id,
         captured_at,
         debug_id: debug_id.clone(),
@@ -313,6 +349,7 @@ async fn capture_application(
             .and_then(|frame| frame.ocr_text.as_deref()),
         true,
         "送った",
+        &memory.publication,
     )?;
     let _ = state.logger.write(
         "INFO",
@@ -325,48 +362,40 @@ async fn capture_application(
     Ok((CaptureDisposition::Accepted, Some(captured_at.to_rfc3339())))
 }
 
-async fn update_foreground(state: &DesktopState, application: &WatchAppConfig, value: bool) {
+async fn update_foreground(
+    state: &DesktopState,
+    generation: u64,
+    application: &WatchAppConfig,
+    value: bool,
+) {
     state
-        .publish(|snapshot| {
-            if let Some(target) = snapshot
-                .observer
-                .targets
-                .iter_mut()
-                .find(|target| target.target == format!("app:{}", application.bundle_id))
-            {
-                target.foreground = value;
-            }
-        })
+        .publish_watch_view(
+            generation,
+            WatchResult::TargetForeground {
+                bundle_id: application.bundle_id.clone(),
+                foreground: value,
+            },
+        )
         .await;
 }
 
 async fn update_target_result(
     state: &Arc<DesktopState>,
+    generation: u64,
     application: &WatchAppConfig,
     trigger: ActivityTriggerKind,
     disposition: CaptureDisposition,
     captured_at: Option<String>,
 ) {
     state
-        .publish(|snapshot| {
-            snapshot.observer.phase = ObserverViewPhase::Idle;
-            snapshot.observer.last_trigger = Some(trigger_name(trigger).to_owned());
-            snapshot.observer.last_capture_disposition = Some(disposition.display().to_owned());
-            snapshot.observer.pending_frame_count = snapshot
-                .observer
-                .pending_frame_count
-                .saturating_add(usize::from(disposition == CaptureDisposition::Accepted));
-            if let Some(target) = snapshot
-                .observer
-                .targets
-                .iter_mut()
-                .find(|target| target.target == format!("app:{}", application.bundle_id))
-            {
-                target.last_trigger = Some(trigger_name(trigger).to_owned());
-                if captured_at.is_some() {
-                    target.last_captured_at = captured_at;
-                }
-            }
-        })
+        .publish_watch_view(
+            generation,
+            WatchResult::TargetCaptured {
+                bundle_id: application.bundle_id.clone(),
+                trigger,
+                disposition,
+                captured_at,
+            },
+        )
         .await;
 }

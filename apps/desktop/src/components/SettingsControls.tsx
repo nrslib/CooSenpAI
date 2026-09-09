@@ -1,7 +1,9 @@
 import type { ReactElement } from "react";
 
-import type { CompanionReminder, PersonaOption, ProviderName } from "../types.js";
+import type { CompanionReminder, ProviderName } from "../types.js";
+import { useI18n } from "../i18n/index.js";
 import { inputId, tuningHelp } from "../settings-form.js";
+import { SettingsSearchItem } from "../settings-search.js";
 
 export function NumberInput({ label, path, value, update, errorFor }: {
   readonly label: string;
@@ -9,15 +11,20 @@ export function NumberInput({ label, path, value, update, errorFor }: {
   readonly value: string;
   readonly update: (value: string) => void;
   readonly errorFor: (path: string) => string | undefined;
-}): ReactElement {
+}): ReactElement | null {
+  const { t } = useI18n();
   const error = errorFor(path);
   const help = tuningHelp[path];
-  return <label>
-    <span>{label}{help === undefined ? "" : `（既定: ${help.defaultValue}）`}</span>
-    {help === undefined ? null : <small>{help.description}</small>}
-    <input id={inputId(path)} type="number" value={value} onChange={(event) => update(event.target.value)} />
-    {error === undefined ? null : <span className="field-error">{error}</span>}
-  </label>;
+  const helpDescription = help === undefined ? undefined : t(help.descriptionKey);
+  const defaultValue = help === undefined ? undefined : help.defaultValueKey === undefined ? help.defaultValue : t(help.defaultValueKey);
+  return <SettingsSearchItem label={label} path={path} description={helpDescription}>
+    <label>
+      <span>{label}{defaultValue === undefined ? "" : t("settings.controls.defaultValue", { value: defaultValue })}</span>
+      {helpDescription === undefined ? null : <small>{helpDescription}</small>}
+      <input id={inputId(path)} type="number" value={value} onChange={(event) => update(event.target.value)} />
+      {error === undefined ? null : <span className="field-error">{error}</span>}
+    </label>
+  </SettingsSearchItem>;
 }
 
 export function TextInput({ label, path, value, update }: {
@@ -25,8 +32,10 @@ export function TextInput({ label, path, value, update }: {
   readonly path: string;
   readonly value: string;
   readonly update: (value: string) => void;
-}): ReactElement {
-  return <label>{label}<input id={inputId(path)} value={value} onChange={(event) => update(event.target.value)} /></label>;
+}): ReactElement | null {
+  return <SettingsSearchItem label={label} path={path}>
+    <label>{label}<input id={inputId(path)} value={value} onChange={(event) => update(event.target.value)} /></label>
+  </SettingsSearchItem>;
 }
 
 export function ModelInput({ path, value, options, update }: {
@@ -34,13 +43,18 @@ export function ModelInput({ path, value, options, update }: {
   readonly value: string;
   readonly options: readonly string[];
   readonly update: (value: string) => void;
-}): ReactElement {
-  const listId = `models-${options.join("-").replace(/[^a-z0-9-]/giu, "-")}`;
-  return <label>モデル
-    <input id={inputId(path)} list={listId} value={value} onChange={(event) => update(event.target.value)} />
-    <datalist id={listId}>{options.map((option) => <option key={option} value={option} />)}</datalist>
-    <small>候補から選ぶか、モデル名を直接入力できます。</small>
-  </label>;
+}): ReactElement | null {
+  const { t } = useI18n();
+  const listId = `models-${path.replace(/[^a-z0-9-]/giu, "-")}`;
+  const label = t("settings.controls.model");
+  const description = t("settings.controls.modelDescription");
+  return <SettingsSearchItem label={label} path={path} description={description}>
+    <label>{label}
+      <input id={inputId(path)} list={listId} value={value} onChange={(event) => update(event.target.value)} />
+      <datalist id={listId}>{options.map((option) => <option key={option} value={option} />)}</datalist>
+      <small>{description}</small>
+    </label>
+  </SettingsSearchItem>;
 }
 
 export function BooleanInput({ label, path, value, update }: {
@@ -48,13 +62,18 @@ export function BooleanInput({ label, path, value, update }: {
   readonly path?: string;
   readonly value: boolean;
   readonly update: (value: boolean) => void;
-}): ReactElement {
+}): ReactElement | null {
+  const { t } = useI18n();
   const help = path === undefined ? undefined : tuningHelp[path];
-  return <label className="boolean-field">
-    <span>{label}{help === undefined ? "" : `（既定: ${help.defaultValue}）`}</span>
-    {help === undefined ? null : <small>{help.description}</small>}
-    <input id={path === undefined ? undefined : inputId(path)} type="checkbox" checked={value} onChange={(event) => update(event.target.checked)} />
-  </label>;
+  const helpDescription = help === undefined ? undefined : t(help.descriptionKey);
+  const defaultValue = help === undefined ? undefined : help.defaultValueKey === undefined ? help.defaultValue : t(help.defaultValueKey);
+  return <SettingsSearchItem label={label} path={path} description={helpDescription}>
+    <label className="boolean-field">
+      <span>{label}{defaultValue === undefined ? "" : t("settings.controls.defaultValue", { value: defaultValue })}</span>
+      {helpDescription === undefined ? null : <small>{helpDescription}</small>}
+      <input id={path === undefined ? undefined : inputId(path)} type="checkbox" checked={value} onChange={(event) => update(event.target.checked)} />
+    </label>
+  </SettingsSearchItem>;
 }
 
 export function SelectInput({ label, path, value, options, disabled = false, update }: {
@@ -64,49 +83,47 @@ export function SelectInput({ label, path, value, options, disabled = false, upd
   readonly options: readonly string[];
   readonly disabled?: boolean;
   readonly update: (value: string) => void;
-}): ReactElement {
+}): ReactElement | null {
+  const { t } = useI18n();
   const help = path === undefined ? undefined : tuningHelp[path];
-  return <label>
-    <span>{label}{help === undefined ? "" : `（既定: ${help.defaultValue}）`}</span>
-    {help === undefined ? null : <small>{help.description}</small>}
-    <select id={path === undefined ? undefined : inputId(path)} value={value} disabled={disabled} onChange={(event) => update(event.target.value)}>
-      {options.map((option) => <option key={option}>{option}</option>)}
-    </select>
-  </label>;
-}
-
-export function PersonaSelect({ path, value, options, disabled, update }: {
-  readonly path: string;
-  readonly value: string;
-  readonly options: readonly PersonaOption[];
-  readonly disabled: boolean;
-  readonly update: (value: string) => void;
-}): ReactElement {
-  return <label>性格<select id={inputId(path)} value={value} disabled={disabled} onChange={(event) => update(event.target.value)}>
-    {options.map((option) => <option key={option.id} value={option.id}>{option.builtin ? option.id : `カスタム: ${option.displayName}`}</option>)}
-  </select></label>;
+  const helpDescription = help === undefined ? undefined : t(help.descriptionKey);
+  const defaultValue = help === undefined ? undefined : help.defaultValueKey === undefined ? help.defaultValue : t(help.defaultValueKey);
+  return <SettingsSearchItem label={label} path={path} description={helpDescription}>
+    <label>
+      <span>{label}{defaultValue === undefined ? "" : t("settings.controls.defaultValue", { value: defaultValue })}</span>
+      {helpDescription === undefined ? null : <small>{helpDescription}</small>}
+      <select id={path === undefined ? undefined : inputId(path)} value={value} disabled={disabled} onChange={(event) => update(event.target.value)}>
+        {options.map((option) => <option key={option}>{option}</option>)}
+      </select>
+    </label>
+  </SettingsSearchItem>;
 }
 
 export function ProviderInput({ path, value, update }: {
   readonly path: string;
   readonly value: ProviderName;
   readonly update: (value: ProviderName) => void;
-}): ReactElement {
-  return <SelectInput label="プロバイダ" path={path} value={value} options={["codex", "claude", "opencode"]} update={(next) => update(next as ProviderName)} />;
+}): ReactElement | null {
+  const { t } = useI18n();
+  return <SelectInput label={t("settings.controls.provider")} path={path} value={value} options={["codex", "claude", "opencode"]} update={(next) => update(next as ProviderName)} />;
 }
 
 export function ReminderEditor({ value, update }: {
   readonly value: readonly CompanionReminder[];
   readonly update: (value: CompanionReminder[]) => void;
-}): ReactElement {
+}): ReactElement | null {
+  const { t } = useI18n();
   const replace = (index: number, item: CompanionReminder): void => update(value.map((current, currentIndex) => currentIndex === index ? item : current));
-  return <div className="reminder-editor">
-    <span>時刻を決めた声かけ（最大 10 件）</span>
-    {value.map((item, index) => <div className="reminder-row" key={item.id}>
-      <input aria-label={`声かけ ${index + 1} の時刻`} type="time" value={item.time} onChange={(event) => replace(index, { ...item, time: event.target.value })} />
-      <input aria-label={`声かけ ${index + 1} のテーマ`} value={item.theme} maxLength={500} placeholder="テーマ" onChange={(event) => replace(index, { ...item, theme: event.target.value })} />
-      <button type="button" onClick={() => update(value.filter((_, currentIndex) => currentIndex !== index))}>削除</button>
-    </div>)}
-    <button type="button" disabled={value.length >= 10} onClick={() => update([...value, { id: `reminder-${globalThis.crypto.randomUUID()}`, time: "12:00", theme: "休憩" }])}>声かけを追加</button>
-  </div>;
+  const label = t("settings.controls.reminders");
+  return <SettingsSearchItem label={label} path="companion.reminders" description={t("settings.controls.remindersDescription")}>
+    <div className="reminder-editor">
+      <span>{t("settings.controls.remindersCount")}</span>
+      {value.map((item, index) => <div className="reminder-row" key={item.id}>
+        <input aria-label={t("settings.controls.reminderTime", { index: index + 1 })} type="time" value={item.time} onChange={(event) => replace(index, { ...item, time: event.target.value })} />
+        <input aria-label={t("settings.controls.reminderTheme", { index: index + 1 })} value={item.theme} maxLength={500} placeholder={t("settings.controls.reminderThemePlaceholder")} onChange={(event) => replace(index, { ...item, theme: event.target.value })} />
+        <button type="button" onClick={() => update(value.filter((_, currentIndex) => currentIndex !== index))}>{t("common.delete")}</button>
+      </div>)}
+      <button type="button" disabled={value.length >= 10} onClick={() => update([...value, { id: `reminder-${globalThis.crypto.randomUUID()}`, time: "12:00", theme: t("settings.controls.defaultReminderTheme") }])}>{t("settings.controls.addReminder")}</button>
+    </div>
+  </SettingsSearchItem>;
 }

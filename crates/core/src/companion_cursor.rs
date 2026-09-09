@@ -4,12 +4,16 @@ use crate::persistence::PersistenceError;
 use crate::state::{
     ConversationEntry, ConversationRole, ObservationRecord, PendingFrameContext, UserScreenContext,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as DeError, ser::Error as SerError, Deserialize, Serialize};
+use serde_json::Value;
 
 pub(crate) const OWNED_USER_ID_PREFIX: &str = "runtime-user-";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CursorSnapshot {
+    pub emotion_updates_enabled: bool,
+    pub companion_emotions: crate::emotion::EmotionState,
+    pub emotion_epoch: u64,
     pub user_operation_generation: u64,
     /// ユーザーキューの横取りを無効化する単調増加の世代。
     pub user_epoch: u64,
@@ -22,7 +26,7 @@ pub struct CursorSnapshot {
     /// 予約済み TurnCommit。再起動時は phase と対象 ID を使って安全に recovery する。
     pub active_turn_commit: Option<ActiveTurnCommit>,
     pub ids: Vec<String>,
-    pub pending: Vec<ObservationRecord>,
+    pub pending: Vec<PendingObservation>,
     pub failed: Vec<String>,
     pub observation_attempts: Vec<ObservationAttempt>,
     pub cancelled_input_ids: Vec<String>,
@@ -36,9 +40,38 @@ pub struct CursorSnapshot {
     pub turn_commit_recovery_attempts: Vec<TurnCommitRecoveryAttempt>,
 }
 
+impl Default for CursorSnapshot {
+    fn default() -> Self {
+        Self {
+            companion_emotions: Default::default(),
+            emotion_epoch: 0,
+            emotion_updates_enabled: true,
+            user_operation_generation: 0,
+            user_epoch: 0,
+            next_user_seq: 0,
+            next_dispatch_seq: 0,
+            user_dispatch: None,
+            active_turn_commit: None,
+            ids: Vec::new(),
+            pending: Vec::new(),
+            failed: Vec::new(),
+            observation_attempts: Vec::new(),
+            cancelled_input_ids: Vec::new(),
+            pending_inputs: Vec::new(),
+            pending_deliveries: Vec::new(),
+            pending_frame_contexts: Vec::new(),
+            consumed_frame_context_ids: Vec::new(),
+            observation_consumptions: Vec::new(),
+            turn_commit_recovery_attempts: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UserDispatchLease {
+    #[serde(default)]
+    pub conversation_generation: u64,
     pub dispatch_seq: u64,
     pub input_ids: Vec<String>,
 }
@@ -46,6 +79,8 @@ pub struct UserDispatchLease {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActiveTurnCommit {
+    #[serde(default)]
+    pub conversation_generation: u64,
     pub turn_id: String,
     pub kind: TurnCommitKind,
     pub phase: TurnCommitPhase,
@@ -114,6 +149,8 @@ impl PendingInput {
 pub struct PendingUserMessage {
     pub id: String,
     #[serde(default)]
+    pub conversation_generation: u64,
+    #[serde(default)]
     pub user_seq: u64,
     pub created_at: String,
     pub message: String,
@@ -124,6 +161,12 @@ pub struct PendingUserMessage {
     pub observations: Vec<ObservationRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_frames: Vec<PendingFrameContext>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::hearing_context::deserialize_contexts"
+    )]
+    pub hearing_context: Vec<crate::hearing_context::HearingContext>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub observation_in_progress: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,6 +177,69 @@ pub struct PendingUserMessage {
     pub attachment_failure: Option<PendingAttachmentFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tutorial_response_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingObservation {
+    pub conversation_generation: u64,
+    pub observation: ObservationRecord,
+}
+
+impl PendingObservation {
+    pub fn new(conversation_generation: u64, observation: ObservationRecord) -> Self {
+        Self {
+            conversation_generation,
+            observation,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        self.observation.id()
+    }
+
+    pub fn source_frame_ids(&self) -> &[String] {
+        self.observation.source_frame_ids()
+    }
+}
+
+impl Serialize for PendingObservation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut value = serde_json::to_value(&self.observation).map_err(S::Error::custom)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            S::Error::custom("pending observation は JSON object でなければなりません")
+        })?;
+        object.insert(
+            "conversationGeneration".to_owned(),
+            Value::from(self.conversation_generation),
+        );
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PendingObservation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            D::Error::custom("pending observation は JSON object でなければなりません")
+        })?;
+        let conversation_generation = match object.remove("conversationGeneration") {
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| D::Error::custom("pending observation の世代が不正です"))?,
+            None => 0,
+        };
+        let observation = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self {
+            conversation_generation,
+            observation,
+        })
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -151,6 +257,7 @@ impl PendingUserMessage {
         let screen_context = UserScreenContext {
             observations: self.observations.clone(),
             pending_frames: self.pending_frames.clone(),
+            hearing_context: self.hearing_context.clone(),
         };
         ConversationEntry {
             schema_version: 1,
@@ -179,6 +286,10 @@ pub struct PendingAttachmentFailure {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedUserResponse {
+    #[serde(default)]
+    pub emotion_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotion_delta: Option<crate::emotion::EmotionDelta>,
     pub id: String,
     pub created_at: String,
     pub message: String,
@@ -207,6 +318,8 @@ impl PreparedUserResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PendingDelivery {
+    #[serde(default)]
+    pub conversation_generation: u64,
     pub remark_id: String,
     pub created_at: String,
     pub proactive_date: String,

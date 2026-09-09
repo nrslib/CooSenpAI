@@ -258,11 +258,19 @@ pub struct UserScreenContext {
     pub observations: Vec<ObservationRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_frames: Vec<PendingFrameContext>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::hearing_context::deserialize_contexts"
+    )]
+    pub hearing_context: Vec<crate::hearing_context::HearingContext>,
 }
 
 impl UserScreenContext {
     pub fn is_empty(&self) -> bool {
-        self.observations.is_empty() && self.pending_frames.is_empty()
+        self.observations.is_empty()
+            && self.pending_frames.is_empty()
+            && self.hearing_context.is_empty()
     }
 }
 

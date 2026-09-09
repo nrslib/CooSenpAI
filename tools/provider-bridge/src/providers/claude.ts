@@ -97,7 +97,7 @@ export class ClaudeAgent implements ProviderAgent {
     if (options.signal.aborted) abort();
     else options.signal.addEventListener("abort", abort, { once: true });
     const selectedModel = model(options.model);
-    const frameDirectory = observationFrameDirectory();
+    const frameDirectory = options.isolateTools === true ? undefined : observationFrameDirectory();
     const readTools = frameDirectory === undefined ? [] : ["Read"];
     const sdkOptions: Options = {
       abortController: controller,
@@ -111,6 +111,9 @@ export class ClaudeAgent implements ProviderAgent {
       strictMcpConfig: true,
       settingSources: [],
       permissionMode: "dontAsk",
+      ...(options.isolateTools === true ? {
+        canUseTool: async () => ({ behavior: "deny" as const, message: "作業plannerはtoolを実行できません" }),
+      } : {}),
       includePartialMessages: true,
       persistSession: options.session.mode !== "ephemeral",
       extraArgs: { "replay-user-messages": null },

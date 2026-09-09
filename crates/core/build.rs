@@ -16,13 +16,16 @@ fn main() -> io::Result<()> {
     let instructions = read_facet_directory(&facets_root.join("instructions"), &["observer.md"])?;
     let observer_instructions = read_facet_file(&facets_root.join("instructions/observer.md"))?;
     let observer_output_contracts =
-        read_facet_directory(&facets_root.join("output-contracts"), &[])?;
+        read_facet_file(&facets_root.join("output-contracts/observer.md"))?;
+    let companion_output_contracts =
+        read_facet_file(&facets_root.join("output-contracts/companion.md"))?;
     let knowledge = read_facet_directory(&facets_root.join("knowledge"), &[])?;
     let policy = read_facet_directory(&facets_root.join("policies"), &[])?;
     let output = format!(
         "pub const BUILTIN_INSTRUCTIONS: &str = {instructions:?};\n\
 pub const BUILTIN_OBSERVER_INSTRUCTIONS: &str = {observer_instructions:?};\n\
 pub const BUILTIN_OBSERVER_OUTPUT_CONTRACTS: &str = {observer_output_contracts:?};\n\
+pub const BUILTIN_COMPANION_OUTPUT_CONTRACTS: &str = {companion_output_contracts:?};\n\
 pub const BUILTIN_KNOWLEDGE: &str = {knowledge:?};\n\
 pub const BUILTIN_POLICY: &str = {policy:?};\n"
     );

@@ -7,19 +7,48 @@ use std::collections::BTreeSet;
 use tokio_util::sync::CancellationToken;
 
 pub const FINISH_PENDING_MESSAGE: &str = "終了処理をやり直してください";
-pub(crate) const TUTORIAL_AUTO_ADVANCE_MESSAGE: &str = "この案内は自動で進みます";
 pub(crate) const TUTORIAL_SKIP_ACTION: &str = "tutorial-skip";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupPhase {
     Inactive,
+    SelectingLanguage,
     Selecting {
         selected: String,
         detail: Option<String>,
     },
+    SelectingMethod {
+        provider: String,
+        method: SetupConnectionMethod,
+        detail: Option<String>,
+    },
     Connecting {
         provider: String,
+        method: SetupConnectionMethod,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupConnectionMethod {
+    Login,
+    ApiKey,
+}
+
+impl SetupConnectionMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Login => "login",
+            Self::ApiKey => "api-key",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "login" => Some(Self::Login),
+            "api-key" => Some(Self::ApiKey),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +127,9 @@ impl TutorialController {
 
     pub fn from_state(store: OnboardingStore, state: OnboardingState) -> Self {
         let resume_pending = state.tutorial_active();
-        let setup_phase = if state.needs_setup() {
+        let setup_phase = if state.needs_language_selection() {
+            SetupPhase::SelectingLanguage
+        } else if state.needs_setup() {
             setup_selecting("codex", None)
         } else {
             SetupPhase::Inactive
@@ -151,6 +182,13 @@ impl TutorialController {
         self.state.tutorial_finish_pending()
     }
 
+    pub(crate) fn chat_practice_notice_is_current(&self, id: &str) -> bool {
+        self.chat_input_enabled()
+            && !self.finish_pending()
+            && !self.step_response_presented
+            && matches!(self.state.tutorial_notice_id("after-open"), Ok(current) if current == id)
+    }
+
     pub fn production_restored(&self) -> bool {
         self.production_restored
     }
@@ -165,12 +203,25 @@ impl TutorialController {
         self.settings_presentation_in_progress = None;
     }
 
+    pub fn replace_provider(&mut self, provider: TutorialProvider) {
+        self.provider = Some(provider);
+    }
+
     pub fn attach_setup_provider(&mut self, provider: TutorialProvider) {
         self.provider = Some(provider);
         self.chat_opened = false;
         self.resume_pending = false;
-        if !matches!(self.setup_phase, SetupPhase::Selecting { .. }) {
-            self.setup_phase = setup_selecting("codex", None);
+        if !matches!(
+            self.setup_phase,
+            SetupPhase::SelectingLanguage
+                | SetupPhase::Selecting { .. }
+                | SetupPhase::SelectingMethod { .. }
+        ) {
+            self.setup_phase = if self.state.needs_language_selection() {
+                SetupPhase::SelectingLanguage
+            } else {
+                setup_selecting("codex", None)
+            };
         }
         self.reset_response_tracking();
         self.production_restored = false;
@@ -186,15 +237,77 @@ impl TutorialController {
         &self.setup_phase
     }
 
-    pub fn begin_setup_connection(
-        &mut self,
-        provider: &str,
-        parent_cancellation: &CancellationToken,
-    ) -> Result<SetupAttempt, OnboardingError> {
-        if !matches!(provider, "codex" | "claude" | "opencode") {
+    pub fn select_setup_language(&mut self, language: &str) -> Result<(), OnboardingError> {
+        if !matches!(language, "ja" | "en") {
+            return Err(OnboardingError::Invalid("language が不正です".to_owned()));
+        }
+        if !matches!(self.setup_phase, SetupPhase::SelectingLanguage) {
+            return Err(OnboardingError::Invalid(
+                "初回セットアップの言語選択を受け付けられません".to_owned(),
+            ));
+        }
+        self.state = self.store.update(|state| {
+            state.select_language();
+            state.clone()
+        })?;
+        self.setup_phase = setup_selecting("codex", None);
+        Ok(())
+    }
+
+    pub fn select_setup_provider(&mut self, provider: &str) -> Result<(), OnboardingError> {
+        if !matches!(provider, "codex" | "claude") {
             return Err(OnboardingError::Invalid("provider が不正です".to_owned()));
         }
         if !matches!(self.setup_phase, SetupPhase::Selecting { .. }) {
+            return Err(OnboardingError::Invalid(
+                "初回セットアップの provider 選択を受け付けられません".to_owned(),
+            ));
+        }
+        self.setup_phase = SetupPhase::SelectingMethod {
+            provider: provider.to_owned(),
+            method: SetupConnectionMethod::Login,
+            detail: None,
+        };
+        Ok(())
+    }
+
+    pub fn select_setup_connection_method(
+        &mut self,
+        method: SetupConnectionMethod,
+    ) -> Result<(), OnboardingError> {
+        let SetupPhase::SelectingMethod {
+            provider, detail, ..
+        } = &self.setup_phase
+        else {
+            return Err(OnboardingError::Invalid(
+                "初回セットアップの接続方法選択を受け付けられません".to_owned(),
+            ));
+        };
+        self.setup_phase = SetupPhase::SelectingMethod {
+            provider: provider.clone(),
+            method,
+            detail: detail.clone(),
+        };
+        Ok(())
+    }
+
+    pub fn begin_setup_connection(
+        &mut self,
+        provider: &str,
+        method: SetupConnectionMethod,
+        parent_cancellation: &CancellationToken,
+    ) -> Result<SetupAttempt, OnboardingError> {
+        if !matches!(provider, "codex" | "claude") {
+            return Err(OnboardingError::Invalid("provider が不正です".to_owned()));
+        }
+        if !matches!(
+            &self.setup_phase,
+            SetupPhase::SelectingMethod {
+                provider: current_provider,
+                method: current_method,
+                ..
+            } if current_provider == provider && *current_method == method
+        ) {
             return Err(OnboardingError::Invalid(
                 "初回セットアップの応答を受け付けられません".to_owned(),
             ));
@@ -204,6 +317,7 @@ impl TutorialController {
         self.setup_cancellation = parent_cancellation.child_token();
         self.setup_phase = SetupPhase::Connecting {
             provider: provider.to_owned(),
+            method,
         };
         Ok(SetupAttempt {
             generation: self.setup_generation,
@@ -221,12 +335,14 @@ impl TutorialController {
         provider: &str,
         detail: String,
     ) -> bool {
-        if self.setup_attempt_is_current(attempt)
-            && matches!(
-                &self.setup_phase,
-                SetupPhase::Connecting { provider: current } if current == provider
-            )
-        {
+        let method = match &self.setup_phase {
+            SetupPhase::Connecting {
+                provider: current,
+                method,
+            } if current == provider => Some(*method),
+            _ => None,
+        };
+        if self.setup_attempt_is_current(attempt) && method.is_some() {
             self.setup_phase = setup_selecting(provider, Some(detail));
             return true;
         }
@@ -240,35 +356,32 @@ impl TutorialController {
 
     pub fn setup_detail(&self) -> Option<&str> {
         match &self.setup_phase {
+            SetupPhase::SelectingLanguage => None,
             SetupPhase::Selecting { detail, .. } => detail.as_deref(),
+            SetupPhase::SelectingMethod { detail, .. } => detail.as_deref(),
             SetupPhase::Inactive | SetupPhase::Connecting { .. } => None,
+        }
+    }
+
+    pub fn setup_connection_method(&self) -> Option<SetupConnectionMethod> {
+        match &self.setup_phase {
+            SetupPhase::SelectingMethod { method, .. } | SetupPhase::Connecting { method, .. } => {
+                Some(*method)
+            }
+            SetupPhase::Inactive | SetupPhase::SelectingLanguage | SetupPhase::Selecting { .. } => {
+                None
+            }
         }
     }
 
     pub fn setup_selected(&self) -> &str {
         match &self.setup_phase {
+            SetupPhase::SelectingLanguage => "codex",
             SetupPhase::Selecting { selected, .. } => selected,
-            SetupPhase::Connecting { provider } => provider,
+            SetupPhase::SelectingMethod { provider, .. }
+            | SetupPhase::Connecting { provider, .. } => provider,
             SetupPhase::Inactive => "codex",
         }
-    }
-
-    pub fn skip_hint(&self) -> Option<String> {
-        if !self.state.tutorial_active()
-            || !matches!(
-                self.state.current_step(),
-                Some(
-                    TutorialStep::Chat
-                        | TutorialStep::Text
-                        | TutorialStep::Image
-                        | TutorialStep::Voice
-                        | TutorialStep::Watch
-                )
-            )
-        {
-            return None;
-        }
-        self.provider.as_ref()?.render("skip-hint").ok()
     }
 
     pub fn start(&mut self, provider: TutorialProvider) -> Result<(), OnboardingError> {
@@ -527,12 +640,13 @@ impl TutorialController {
     pub fn reset_setup(&mut self) -> Result<(), OnboardingError> {
         self.state = self.store.update(|state| {
             state.setup.completed_at = None;
+            state.setup.language_selected = false;
             state.tutorial = Default::default();
             state.clone()
         })?;
         self.provider = None;
         self.resume_pending = false;
-        self.setup_phase = setup_selecting("codex", None);
+        self.setup_phase = SetupPhase::SelectingLanguage;
         self.reset_response_tracking();
         self.production_restored = false;
         self.settings_highlight_pending = None;

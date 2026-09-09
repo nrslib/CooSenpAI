@@ -69,6 +69,41 @@ pub fn append_observation(
     prune_daily_jsonl(&paths.observations, retention_days, 50 * 1024 * 1024)
 }
 
+pub(super) fn append_observation_record(
+    directory: &Path,
+    record: &ObservationRecord,
+) -> Result<(), PersistenceError> {
+    let created_at = DateTime::parse_from_rfc3339(record.created_at())
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| PersistenceError::Invalid("観察の createdAt が不正です".to_owned()))?;
+    let path = directory.join(format!("{}.jsonl", local_date_at(created_at)));
+    let value = serde_json::to_value(record)?;
+    JsonlStore::new(path).append_unique(&value, |existing: &Value| {
+        existing.get("id").and_then(Value::as_str) == Some(record.id())
+    })?;
+    Ok(())
+}
+
+/// Confirmed audio is durable before waiting for an Observer or Companion provider.
+pub fn record_audio_observation(
+    paths: &ConfigPaths,
+    retention_days: u64,
+    observation: &AudioObservation,
+    now: DateTime<Utc>,
+) -> Result<(), PersistenceError> {
+    append_observation_record(
+        &paths.observations,
+        &ObservationRecord::Audio(observation.clone()),
+    )?;
+    append_transcript(
+        &paths.transcripts,
+        retention_days,
+        &TranscriptRecord::from_observation(observation),
+        now,
+    )?;
+    prune_daily_jsonl_at(&paths.observations, retention_days, 50 * 1024 * 1024, now)
+}
+
 pub fn append_transcript(
     directory: &Path,
     retention_days: u64,

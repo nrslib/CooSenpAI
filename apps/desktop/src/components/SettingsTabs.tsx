@@ -1,14 +1,17 @@
 import type { ReactElement } from "react";
 
+import { useI18n } from "../i18n/index.js";
 import { SETTINGS_CATEGORIES, type SettingsCategory } from "../settings-categories.js";
 
 interface Props {
   readonly activeCategory: SettingsCategory;
   readonly onSelect: (category: SettingsCategory) => void;
+  readonly disabled?: boolean;
 }
 
-export function SettingsTabs({ activeCategory, onSelect }: Props): ReactElement {
-  return <nav className="settings-tabs" aria-label="設定カテゴリ" role="tablist" aria-orientation="vertical">
+export function SettingsTabs({ activeCategory, onSelect, disabled = false }: Props): ReactElement {
+  const { t } = useI18n();
+  return <nav className="settings-tabs" aria-label={t("settings.categoriesLabel")} role="tablist" aria-orientation="vertical">
     {SETTINGS_CATEGORIES.map((category) => <button
       id={`settings-tab-${category.id}`}
       className="settings-tab"
@@ -17,8 +20,9 @@ export function SettingsTabs({ activeCategory, onSelect }: Props): ReactElement 
       role="tab"
       aria-selected={activeCategory === category.id}
       aria-controls={`settings-category-${category.id}`}
-      tabIndex={activeCategory === category.id ? 0 : -1}
+      tabIndex={disabled ? -1 : activeCategory === category.id ? 0 : -1}
+      disabled={disabled}
       onClick={() => onSelect(category.id)}
-    >{category.label}</button>)}
+    >{t(category.labelKey)}</button>)}
   </nav>;
 }

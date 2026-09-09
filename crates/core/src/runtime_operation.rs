@@ -10,6 +10,43 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinError;
 impl RuntimeActor {
+    pub(super) fn preempt_operation_for_user(&mut self, operation: &mut RunningOperation) -> bool {
+        if !operation.preempt_for_user() {
+            return false;
+        }
+        if operation.is_observer() || operation.is_proactive() {
+            self.latest_user_interruption = Some(UserInterruption {
+                sequence: self.revision.saturating_add(1),
+                occurred_at: chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                observer: operation.is_observer()
+                    || self.latest_user_interruption.as_ref().is_some_and(|event| {
+                        event.sequence == self.revision.saturating_add(1) && event.observer
+                    }),
+                proactive: !operation.is_observer()
+                    || self.latest_user_interruption.as_ref().is_some_and(|event| {
+                        event.sequence == self.revision.saturating_add(1) && event.proactive
+                    }),
+            });
+            if let Some(logger) = &self.logger {
+                if let Err(error) = logger.write(
+                    "INFO",
+                    &format!("利用者入力で中断: operation={}", operation.kind_label()),
+                ) {
+                    self.last_error = Some(RuntimeLastError {
+                        kind: RuntimeErrorKind::Logging,
+                        occurred_at: chrono::Utc::now()
+                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        message: Some(error.to_string()),
+                        issues: Vec::new(),
+                        attachment_ocr: None,
+                    });
+                }
+            }
+        }
+        true
+    }
+
     pub(super) fn start_pending_user_operation(
         &mut self,
         volatile_users: &mut std::collections::VecDeque<PendingUserMessage>,
@@ -566,8 +603,10 @@ impl RuntimeActor {
                 None => Err(RuntimeError::ObserverUnavailable),
             }
         };
-        if let Ok(observation) = &result {
-            self.pending_observations.push(observation.clone());
+        if self.observation_delivery == ObservationDelivery::Companion {
+            if let Ok(observation) = &result {
+                self.pending_observations.push(observation.clone());
+            }
         }
         let _ = response.send(result);
         self.revision = self.revision.saturating_add(1);
@@ -576,8 +615,7 @@ impl RuntimeActor {
 
     pub(super) fn process_audio_observation(
         &mut self,
-        source: crate::state::AudioObservationSource,
-        text: String,
+        observation: crate::state::AudioObservation,
         cancellation: CancellationToken,
         response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
@@ -586,7 +624,7 @@ impl RuntimeActor {
             Err(RuntimeError::Closed)
         } else {
             match self.observer.as_mut() {
-                Some(observer) => match observer.audio_observation(source, &text) {
+                Some(observer) => match observer.ingest_audio_observation(observation) {
                     Ok(observation) => Ok(ObservationRecord::Audio(observation)),
                     Err(ObserverError::OutboxPending { record }) => Ok(*record),
                     Err(error) => Err(RuntimeError::from(error)),
@@ -594,8 +632,10 @@ impl RuntimeActor {
                 None => Err(RuntimeError::ObserverUnavailable),
             }
         };
-        if let Ok(observation) = &result {
-            self.pending_observations.push(observation.clone());
+        if self.observation_delivery == ObservationDelivery::Companion {
+            if let Ok(observation) = &result {
+                self.pending_observations.push(observation.clone());
+            }
         }
         let _ = response.send(result);
         self.revision = self.revision.saturating_add(1);
@@ -704,7 +744,7 @@ impl RuntimeActor {
         let provider_cancellation = cancellation.clone();
         let catch_panic_to_keep_agent = self.factory.is_none();
         let task = tokio::spawn(async move {
-            let process = companion.process_incoming_mailbox(provider_cancellation);
+            let process = companion.process_incoming_mailbox_decision(provider_cancellation);
             let result = if catch_panic_to_keep_agent {
                 std::panic::AssertUnwindSafe(process)
                     .catch_unwind()
@@ -743,7 +783,11 @@ impl RuntimeActor {
         };
         let Some(mut memory) = self.memory.take() else {
             let _ = response.send(Err(RuntimeError::Factory(
-                "記憶メンテナンスは常駐 runtime でのみ利用できます".to_owned(),
+                text(
+                    TextKey::RuntimeMemoryMaintenanceUnavailable,
+                    Locale::from_config(&self.config.ui.language),
+                )
+                .to_owned(),
             )));
             return StartResult::Completed;
         };
@@ -792,8 +836,20 @@ impl RuntimeActor {
                 self.observer = Some(*observer);
                 let result = if config_update_cancelled {
                     Err(RuntimeError::ConfigUpdateCancelled)
+                } else if preempted_for_user {
+                    match result {
+                        Err(RuntimeError::Observer(ObserverError::Provider(_))) | Ok(_) => {
+                            Err(RuntimeError::ObservationCancelled)
+                        }
+                        Err(error) => Err(error),
+                    }
                 } else {
                     match result {
+                        Ok(observation)
+                            if self.observation_delivery == ObservationDelivery::CallerOnly =>
+                        {
+                            Ok(observation)
+                        }
                         Ok(observation) => {
                             self.pending_observations.push(observation.clone());
                             if let Some(companion) = self.companion.as_mut() {
@@ -846,10 +902,15 @@ impl RuntimeActor {
                     Err(RuntimeError::ConfigUpdateCancelled)
                 } else if preempted_for_user {
                     if let Ok(candidate) = result {
-                        let _ = companion.discard_proactive_candidate(
+                        if let Err(error) = companion.discard_proactive_candidate(
                             &candidate.observations,
                             &candidate.consumed_observations,
-                        );
+                        ) {
+                            self.schedule_initialization_retry(
+                                initialization_error_kind(&error),
+                                snapshot_tx,
+                            );
+                        }
                     } else {
                         companion.discard_provider_session();
                     }
@@ -876,6 +937,7 @@ impl RuntimeActor {
                                 self.companion_recovery_at = None;
                                 Ok(crate::companion::silent_response())
                             } else {
+                                let decision_produced = candidate.decision_produced;
                                 let candidate_observations = candidate.observations.clone();
                                 let candidate_consumed_observations =
                                     candidate.consumed_observations.clone();
@@ -887,7 +949,13 @@ impl RuntimeActor {
                                     .commit_proactive_candidate_if_current(candidate, user_epoch)
                                 {
                                     Ok(Some((response, consumed_ids))) => {
-                                        self.accept_companion_thought(&response);
+                                        if decision_produced {
+                                            self.accept_companion_response(
+                                                &companion,
+                                                &response,
+                                                consumed_ids.clone(),
+                                            );
+                                        }
                                         self.pending_observations.retain(|observation| {
                                             !consumed_ids.iter().any(|id| id == observation.id())
                                         });
@@ -962,22 +1030,24 @@ impl RuntimeActor {
                 } else {
                     companion.proactive_retry_after()
                 };
-                self.companion = Some(companion);
                 if preempted_for_user && !config_update_cancelled {
                     self.companion_recovery_pending = true;
                     self.companion_recovery_at = None;
-                    result = Ok(crate::companion::silent_response());
+                    result = Ok(None);
                 }
                 if result.is_ok() && !preempted_for_user {
-                    if let Ok(response) = &result {
-                        self.accept_companion_thought(response);
+                    if let Ok(Some(response)) = &result {
+                        self.accept_companion_response(&companion, response, Vec::new());
                     }
                     self.pending_observations.clear();
                     self.companion_recovery_at =
                         proactive_retry_after.map(|delay| Instant::now() + delay);
                 }
+                self.companion = Some(companion);
                 if let OperationReply::Companion(response) = reply {
-                    let _ = response.send(result);
+                    let _ = response.send(result.map(|decision| {
+                        decision.unwrap_or_else(crate::companion::silent_response)
+                    }));
                 }
             }
             OperationOutcome::User {
@@ -1092,7 +1162,7 @@ impl RuntimeActor {
                 }
                 self.resume_proactive_after_user(&companion, cancelled || response_result.is_ok());
                 if let Ok(response) = &response_result {
-                    self.accept_companion_thought(response);
+                    self.accept_companion_response(&companion, response, Vec::new());
                 }
                 self.companion = Some(companion);
                 self.active_user_message_id = None;
@@ -1160,6 +1230,7 @@ impl RuntimeActor {
                         }
                     }
                     self.observer = agents.observer.take();
+                    self.observation_delivery = agents.observation_delivery;
                     if let Some(companion) = agents.companion.as_ref() {
                         self.companion_display_name = companion.display_name().to_owned();
                     }

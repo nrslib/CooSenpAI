@@ -14,7 +14,32 @@ impl CompanionStorage {
     }
 
     pub fn resolve_attachment(&self, relative: &str) -> Result<PathBuf, PersistenceError> {
-        self.attachment_store().resolve(relative)
+        if !valid_attachment_relative_path(relative) {
+            return self.attachment_store().resolve(relative);
+        }
+        match self.attachment_store().resolve(relative) {
+            Ok(path) => Ok(path),
+            Err(error) => {
+                let archives = if self.archive_directory.exists() {
+                    fs::read_dir(&self.archive_directory)?
+                        .filter_map(Result::ok)
+                        .filter(|entry| {
+                            entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
+                        })
+                        .map(|entry| entry.path())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                for archive in archives {
+                    let path = archive.join(relative);
+                    if path.is_file() {
+                        return Ok(path);
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn prune_attachments(&self) -> Result<(), PersistenceError> {
@@ -26,8 +51,8 @@ impl CompanionStorage {
     fn protected_attachment_paths(&self) -> Result<HashSet<PathBuf>, PersistenceError> {
         let generation = self.conversation_generation()?;
         let mut preserved = HashSet::new();
-        if self.conversation_directory.exists() {
-            for path in super::daily_conversation_paths(&self.conversation_directory)? {
+        for directory in self.conversation_directories()? {
+            for path in super::daily_conversation_paths(&directory)? {
                 let file = File::open(path)?;
                 for line in BufReader::new(file).lines() {
                     let line = line?;

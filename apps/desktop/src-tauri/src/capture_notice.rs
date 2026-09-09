@@ -1,17 +1,21 @@
 use crate::bubbles::{self, BubbleRecord};
 use crate::state::DesktopState;
 use async_trait::async_trait;
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::ports::RuntimeLogger;
 use std::sync::Arc;
-use tauri::Manager;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NoticeTarget {
+    Status,
+    Bubble,
+}
 
 const NOTICE_DURATION_MS: u64 = 3_000;
-const COPY_COMPLETED_MESSAGE: &str = "コピーしました";
 const COPY_NOTICE_DURATION_MS: u64 = 2_000;
 
 #[async_trait]
 trait NoticeWindowPort: Send + Sync {
-    fn main_is_foreground(&self) -> bool;
     async fn show_status(&self, message: &str);
     async fn show_bubble(&self, message: &str, duration_ms: u64) -> Result<(), String>;
 }
@@ -20,12 +24,6 @@ struct DesktopNoticeWindowPort(Arc<DesktopState>);
 
 #[async_trait]
 impl NoticeWindowPort for DesktopNoticeWindowPort {
-    fn main_is_foreground(&self) -> bool {
-        self.0.app.get_webview_window("main").is_some_and(|window| {
-            window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
-        })
-    }
-
     async fn show_status(&self, message: &str) {
         crate::capture::publish_transient_shortcut_error(self.0.clone(), message.to_owned()).await;
     }
@@ -47,7 +45,6 @@ impl NoticeWindowPort for DesktopNoticeWindowPort {
                 avatar_color: config.ui.avatar_color,
                 conversation_generation,
                 persistent: false,
-                open_url: None,
                 interaction: None,
             },
             duration_ms,
@@ -58,12 +55,13 @@ impl NoticeWindowPort for DesktopNoticeWindowPort {
     }
 }
 
-pub(crate) async fn show_empty_clipboard(state: Arc<DesktopState>) {
+pub(crate) async fn show_empty_clipboard(state: Arc<DesktopState>, target: NoticeTarget) {
     let port = DesktopNoticeWindowPort(state.clone());
     let config = state.runtime_config();
+    let locale = Locale::from_config(&config.ui.language);
     let shortcut = crate::state::tutorial_state::shortcut_label(config.keymap.send_text.as_deref());
-    let message = empty_clipboard_message(&shortcut);
-    if let Err(error) = present_empty_clipboard(&port, &message).await {
+    let message = empty_clipboard_message_for_locale(&shortcut, locale);
+    if let Err(error) = present_empty_clipboard(&port, &message, target).await {
         let _ = state.logger.write(
             "WARN",
             &format!("クリップボード通知の表示に失敗しました: error-type=bubble ({error})"),
@@ -73,8 +71,12 @@ pub(crate) async fn show_empty_clipboard(state: Arc<DesktopState>) {
 
 pub(crate) async fn show_copy_completed(state: Arc<DesktopState>) {
     let port = DesktopNoticeWindowPort(state.clone());
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     if let Err(error) = port
-        .show_bubble(COPY_COMPLETED_MESSAGE, COPY_NOTICE_DURATION_MS)
+        .show_bubble(
+            text(TextKey::CopyCompleted, locale),
+            COPY_NOTICE_DURATION_MS,
+        )
         .await
     {
         let _ = state.logger.write(
@@ -84,20 +86,21 @@ pub(crate) async fn show_copy_completed(state: Arc<DesktopState>) {
     }
 }
 
-fn empty_clipboard_message(shortcut: &str) -> String {
-    format!("文章を選んで {shortcut} を押してください")
+fn empty_clipboard_message_for_locale(shortcut: &str, locale: Locale) -> String {
+    text(TextKey::EmptyClipboard, locale).replace("{shortcut}", shortcut)
 }
 
-async fn present_empty_clipboard(port: &dyn NoticeWindowPort, message: &str) -> Result<(), String> {
-    present_notice(port, message).await
-}
-
-async fn present_notice(port: &dyn NoticeWindowPort, message: &str) -> Result<(), String> {
-    if port.main_is_foreground() {
-        port.show_status(message).await;
-        Ok(())
-    } else {
-        port.show_bubble(message, NOTICE_DURATION_MS).await
+async fn present_empty_clipboard(
+    port: &dyn NoticeWindowPort,
+    message: &str,
+    target: NoticeTarget,
+) -> Result<(), String> {
+    match target {
+        NoticeTarget::Status => {
+            port.show_status(message).await;
+            Ok(())
+        }
+        NoticeTarget::Bubble => port.show_bubble(message, NOTICE_DURATION_MS).await,
     }
 }
 

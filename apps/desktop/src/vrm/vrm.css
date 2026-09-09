@@ -1,0 +1,9 @@
+.vrm-error { margin: 8px 16px; font-size: 12px; }
+.vrm-controls { position: absolute; z-index: 20; inset: 65px 12px auto; max-height: calc(100% - 90px); overflow-y: auto; padding: 16px; border: 1px solid var(--muted); border-radius: 12px; background: var(--bg); color: var(--text); box-shadow: 0 8px 24px #0003; }
+.vrm-controls p, .vrm-controls label { display: block; margin: 12px 0; font-size: 12px; }
+.vrm-controls input[type="file"] { display: block; width: 100%; margin-top: 8px; }
+.vrm-heading { display: flex; justify-content: space-between; align-items: center; }
+.motion-controls { margin-top: 24px; border-top: 1px solid var(--muted); }
+.motion-row { margin: 12px 0; border: 1px solid var(--muted); border-radius: 8px; min-width: 0; }
+.motion-row select { display: block; width: 100%; margin-top: 8px; }
+.motion-actions { display: flex; gap: 8px; flex-wrap: wrap; }

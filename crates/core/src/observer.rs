@@ -35,24 +35,38 @@ const MAX_OBSERVER_ATTEMPTS: usize = 3;
 // 観察 prompt は毎回現在の比較データを再構成するため、長期 session の履歴だけが判断へ残り続けないようにする。
 const OBSERVER_SESSION_MAX_CALLS: usize = 60;
 
+fn require_active_observation(cancellation: &CancellationToken) -> Result<(), ObserverError> {
+    if cancellation.is_cancelled() {
+        return Err(ProviderError {
+            kind: ProviderErrorKind::Retryable,
+            message: "observer をキャンセルしました".to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn session_mode(session: &SessionRequest) -> &'static str {
     match session {
         SessionRequest::New => "new",
         SessionRequest::Resume(_) => "resume",
-        SessionRequest::Ephemeral => "ephemeral",
+        SessionRequest::Ephemeral | SessionRequest::Isolated => "ephemeral",
     }
 }
 
 #[path = "observer_storage.rs"]
 mod storage;
-pub use storage::{append_observation, excluded_bounds_for_self, observation_store};
+pub use storage::{
+    append_observation, excluded_bounds_for_self, observation_store, record_audio_observation,
+};
 use storage::{
-    append_transcript, read_latest_observation, reconcile_transcripts, stagnation_identity,
-    timestamp,
+    append_observation_record, append_transcript, read_latest_observation, reconcile_transcripts,
+    stagnation_identity, timestamp,
 };
 
 #[derive(Debug, Clone)]
 pub struct ObservationFrameInput {
+    pub display: Option<crate::ports::ScreenDisplay>,
     pub scope_generation: u64,
     pub context_id: String,
     pub captured_at: DateTime<Utc>,
@@ -288,6 +302,7 @@ impl ObserverAgent {
             .enumerate()
             .map(|(index, frame)| ObserverPromptFrame {
                 index: index + 1,
+                display: frame.display,
                 relative_seconds: frame.relative_seconds,
                 trigger: Some(frame.trigger),
                 front_app: frame.front_app.clone(),
@@ -331,6 +346,7 @@ impl ObserverAgent {
                 cancellation.clone(),
             )
             .await?;
+        require_active_observation(&cancellation)?;
         let value = result.value.ok_or(ObserverError::Output)?;
         if let Some(store) = &self.debug_store {
             if store
@@ -401,12 +417,7 @@ impl ObserverAgent {
                 self.log_debug_failure("observer");
             }
         }
-        if cancellation.is_cancelled() {
-            return Err(ObserverError::Provider(crate::provider::ProviderError {
-                kind: crate::provider::ProviderErrorKind::Retryable,
-                message: "observer をキャンセルしました".to_owned(),
-            }));
-        }
+        require_active_observation(&cancellation)?;
         let _scope_lock = scope_guard
             .as_ref()
             .map(|(_, _, lock)| lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
@@ -415,12 +426,7 @@ impl ObserverAgent {
         }) {
             return Err(ObserverError::StaleScope);
         }
-        if cancellation.is_cancelled() {
-            return Err(ObserverError::Provider(crate::provider::ProviderError {
-                kind: crate::provider::ProviderErrorKind::Retryable,
-                message: "observer をキャンセルしました".to_owned(),
-            }));
-        }
+        require_active_observation(&cancellation)?;
         if let Err(error) = self.persist_record(&ObservationRecord::Visual(record.clone())) {
             self.previous = serde_json::to_value(&record).ok();
             return Err(error);
@@ -454,12 +460,18 @@ impl ObserverAgent {
         source: AudioObservationSource,
         text: &str,
     ) -> Result<AudioObservation, ObserverError> {
+        let record = AudioObservation::from_confirmed_text(source, text, self.clock.now())
+            .map_err(|_| ObserverError::Output)?;
+        self.ingest_audio_observation(record)
+    }
+
+    pub fn ingest_audio_observation(
+        &mut self,
+        record: AudioObservation,
+    ) -> Result<AudioObservation, ObserverError> {
         self.load_previous_if_needed();
         self.retry_pending_outbox();
         self.reconcile_transcripts_if_needed();
-        let now = self.clock.now();
-        let record = AudioObservation::from_confirmed_text(source, text, now)
-            .map_err(|_| ObserverError::Output)?;
         let outbox_pending = match self.persist_record(&ObservationRecord::Audio(record.clone())) {
             Ok(()) => false,
             Err(ObserverError::OutboxPending { .. }) => true,
@@ -596,6 +608,7 @@ impl ObserverAgent {
                     images: image_paths.iter().cloned().map(Into::into).collect(),
                     tools_disabled: true,
                     output_schema: Some(observer_schema()),
+                    output_validation_schema: None,
                     session: session.clone(),
                     model: Some(self.config.model.clone()),
                     effort: Some(self.config.effort.clone()),
@@ -620,6 +633,10 @@ impl ObserverAgent {
                 }
                 result = &mut provider_call => result,
             };
+            if let Err(error) = require_active_observation(&cancellation) {
+                self.log_call_cancelled();
+                return Err(error);
+            }
             match result {
                 Ok(result) => {
                     self.log_call_end(mode, started.elapsed().as_millis())?;
@@ -726,7 +743,7 @@ impl ObserverAgent {
                 self.session = Some(session);
             }
             (SessionRequest::Resume(_), None) => {}
-            (SessionRequest::Ephemeral, _) => {}
+            (SessionRequest::Ephemeral | SessionRequest::Isolated, _) => {}
         }
         Ok(())
     }
@@ -945,13 +962,7 @@ impl ObserverAgent {
                     "observations の保存先がありません".to_owned(),
                 ))
             })?;
-            let created_at = DateTime::parse_from_rfc3339(record.created_at())
-                .map(|value| value.with_timezone(&Utc))
-                .map_err(|_| PersistenceError::Invalid("観察の createdAt が不正です".to_owned()))?;
-            let path = directory.join(format!("{}.jsonl", local_date_at(created_at)));
-            JsonlStore::new(path).append_unique(record, |existing: &ObservationRecord| {
-                existing.id() == record.id()
-            })?;
+            append_observation_record(&directory, record)?;
             if let Some(retention_days) = self.observation_retention_days {
                 self.maintain_observation_retention(&directory, retention_days);
             }

@@ -10,6 +10,12 @@ mod adapters;
 mod foreground;
 
 #[cfg(target_os = "macos")]
+mod application_activation;
+
+#[cfg(target_os = "macos")]
+pub use application_activation::ApplicationActivationMonitor;
+
+#[cfg(target_os = "macos")]
 mod termination;
 
 #[cfg(target_os = "macos")]
@@ -32,12 +38,41 @@ mod keychain;
 
 #[cfg(target_os = "macos")]
 mod window_info;
+pub use window_info::{
+    screenshot_selection_windows, SelectionWindow, SelectionWindowCandidate,
+    SelectionWindowObservation,
+};
+
+#[cfg(target_os = "macos")]
+mod display_capture;
+
+#[cfg(target_os = "macos")]
+mod watch_capture;
+
+#[cfg(target_os = "macos")]
+pub use watch_capture::{capture_application_window, capture_screen};
+
+#[cfg(target_os = "macos")]
+mod panel;
+#[cfg(target_os = "macos")]
+mod window_key;
+#[cfg(target_os = "macos")]
+pub use window_key::WindowKeyMonitor;
+
+#[cfg(target_os = "macos")]
+mod mouse_monitor;
 
 #[cfg(target_os = "macos")]
 mod screen;
 
 #[cfg(target_os = "macos")]
 pub use macos::*;
+
+#[cfg(target_os = "macos")]
+pub use panel::*;
+
+#[cfg(target_os = "macos")]
+pub use mouse_monitor::*;
 
 #[cfg(target_os = "macos")]
 pub use adapters::*;
@@ -80,3 +115,37 @@ pub async fn open_external_url(_url: &str) -> Result<(), coosenpai_core::ports::
         "外部リンクは macOS でのみ開けます".to_owned(),
     ))
 }
+
+#[cfg(not(target_os = "macos"))]
+pub async fn open_file(_path: &std::path::Path) -> Result<(), coosenpai_core::ports::PortError> {
+    Err(coosenpai_core::ports::PortError::Unavailable(
+        "ファイルは macOS でのみ開けます".to_owned(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+mod voice_output;
+#[cfg(target_os = "macos")]
+pub use voice_output::MacSystemVoiceProvider;
+
+#[cfg(target_os = "macos")]
+mod voicevox;
+#[cfg(target_os = "macos")]
+pub use voicevox::{voicevox_voices, VoicevoxProvider, VoicevoxVoice};
+
+#[cfg(target_os = "macos")]
+pub mod region_screenshot;
+#[cfg(target_os = "macos")]
+pub use region_screenshot::SCREENSHOT_ACCESS_REQUIRED;
+
+#[cfg(target_os = "macos")]
+mod own_windows;
+
+#[cfg(target_os = "macos")]
+pub use own_windows::current_process_window_bounds;
+
+#[cfg(target_os = "macos")]
+mod own_window_changes;
+
+#[cfg(target_os = "macos")]
+pub use own_window_changes::OwnWindowChanges;

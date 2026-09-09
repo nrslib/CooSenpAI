@@ -1,4 +1,5 @@
 import type { AppSnapshot, ConversationEntry, DebugCatalog, DebugDetail } from "./types.js";
+import { t, type Locale } from "./i18n/index.js";
 
 export function effectiveAssertiveness(
   snapshot: AppSnapshot,
@@ -10,60 +11,13 @@ export function effectiveAssertiveness(
     : snapshot.config.companion.assertiveness;
 }
 
-export type PresenceMode = "resting" | "watching" | "thinking" | "attention" | "switching";
-
-export interface PresenceView {
-  readonly mode: PresenceMode;
-  readonly text: string;
-}
-
 export function avatarColor(configured?: string | null): string {
   if (configured !== undefined && configured !== null) return configured;
   return "var(--logo-body)";
 }
 
-export function companionThought(snapshot: AppSnapshot): string {
-  return snapshot.latestCompanionThought ?? "まだありません";
-}
-
-export function presenceView(snapshot: AppSnapshot, watchChanging: boolean): PresenceView {
-  if (snapshot.onboarding.setupRequired) return { mode: "resting", text: "セットアップ待ち" };
-  if (watchChanging) return { mode: "switching", text: "切り替えています…" };
-  const observerError = observerErrorMessage(snapshot);
-  if (observerError !== undefined) return { mode: "attention", text: `見守りエラー: ${observerError}` };
-  if (companionResponseInProgress(snapshot)) return { mode: "thinking", text: "考えています…" };
-  if (snapshot.lastError !== undefined || snapshot.deliveryOutboxBlocked) {
-    return { mode: "attention", text: "確認が必要です" };
-  }
-  return snapshot.observerRunning
-    ? { mode: "watching", text: "見ています" }
-    : { mode: "resting", text: "休憩中" };
-}
-
-export interface StablePresence {
-  readonly view: PresenceView;
-  readonly candidate?: {
-    readonly view: PresenceView;
-    readonly since: number;
-  };
-}
-
-export function stabilizePresence(
-  current: StablePresence,
-  next: PresenceView,
-  now: number,
-  minimumDurationMs = 2_000,
-): StablePresence {
-  if (current.view.mode === next.mode) {
-    return current.candidate === undefined ? current : { view: current.view };
-  }
-  if (current.candidate?.view.mode !== next.mode) {
-    return { view: current.view, candidate: { view: next, since: now } };
-  }
-  if (now - current.candidate.since < minimumDurationMs) {
-    return { view: current.view, candidate: { view: next, since: current.candidate.since } };
-  }
-  return { view: next };
+export function companionThought(snapshot: AppSnapshot, locale: Locale = "ja"): string {
+  return snapshot.latestCompanionThought ?? t(locale, "view.noThought");
 }
 
 export type NowLineView = {
@@ -75,8 +29,8 @@ export type NowLineView = {
   readonly lastCapturedAt?: string;
 };
 
-export function nowLineView(snapshot: AppSnapshot): NowLineView {
-  const observerError = observerErrorMessage(snapshot);
+export function nowLineView(snapshot: AppSnapshot, locale: Locale = "ja"): NowLineView {
+  const observerError = observerErrorMessage(snapshot, locale);
   if (observerError !== undefined) return { mode: "error", errorMessage: observerError };
   return {
     mode: !snapshot.observerRunning
@@ -89,69 +43,53 @@ export function nowLineView(snapshot: AppSnapshot): NowLineView {
   };
 }
 
-export function nowLine(snapshot: AppSnapshot, now = Date.now()): string {
-  const view = nowLineView(snapshot);
-  if (view.mode === "error") return `いま: 見守りエラー ・ ${view.errorMessage}`;
+export function nowLine(snapshot: AppSnapshot, now = Date.now(), locale: Locale = "ja"): string {
+  const view = nowLineView(snapshot, locale);
+  if (view.mode === "error") return t(locale, "view.nowError", { message: view.errorMessage });
   const app = view.mode === "resting"
-    ? "休憩中"
+    ? t(locale, "view.resting")
     : view.mode === "watching"
-      ? "見ています"
-      : `${view.frontApp ?? ""} を見ている`;
-  return `いま: ${app} ・ ${relativeCaptureTime(view.lastCapturedAt, now)}`;
+      ? t(locale, "view.watching")
+      : t(locale, "view.watchingApp", { app: view.frontApp ?? "" });
+  return t(locale, "view.now", { app, time: relativeCaptureTime(view.lastCapturedAt, now, locale) });
 }
 
-export function companionResponseInProgress(snapshot: AppSnapshot): boolean {
-  const activeUserMessageId = snapshot.activeUserMessageId;
-  return activeUserMessageId !== undefined
-    && snapshot.lastError?.attachmentOcr?.inputId !== activeUserMessageId;
-}
-
-function observerErrorMessage(snapshot: AppSnapshot): string | undefined {
+function observerErrorMessage(snapshot: AppSnapshot, _locale: Locale): string | undefined {
   if (snapshot.observer.errorMessage !== undefined) return snapshot.observer.errorMessage;
-  return snapshot.observer.phase === "error" ? "見守りでエラーが発生しました。" : undefined;
+  return snapshot.observer.phase === "error" ? t(_locale, "view.observerErrorDefault") : undefined;
 }
 
-export function lastVisualActivity(snapshot: AppSnapshot): string {
-  return snapshot.observer.lastVisualObservation?.activity ?? "視覚の記録はまだありません";
+export function lastVisualActivity(snapshot: AppSnapshot, locale: Locale = "ja"): string {
+  return snapshot.observer.lastVisualObservation?.activity ?? t(locale, "view.noVisualRecord");
 }
 
-export function audioStatus(snapshot: AppSnapshot): string {
+export function audioStatus(snapshot: AppSnapshot, locale: Locale = "ja"): string {
   const audio = snapshot.audio;
-  if (audio === undefined) return "設定なし";
-  const sourceCount = Number(snapshot.config.audio.speaker);
-  if (!snapshot.config.audio.enabled) return "停止中";
-  if (sourceCount === 0) return "入力源未選択";
+  if (audio === undefined) return t(locale, "view.noSetting");
+  const sourceCount = Number(snapshot.config.audio.mic) + Number(snapshot.config.audio.speaker);
+  if (!snapshot.config.audio.enabled) return t(locale, "view.stopped");
+  if (sourceCount === 0) return t(locale, "view.noInputSource");
   switch (audio.phase) {
-    case "starting": return "開始中";
-    case "listening": return "聞いています";
-    case "stopping": return "停止中";
-    case "error": return audio.message ?? "エラー";
-    case "off": return "待機中";
+    case "starting": return t(locale, "view.starting");
+    case "listening": return t(locale, "view.listening");
+    case "stopping": return t(locale, "view.stopped");
+    case "error": return audio.message ?? t(locale, "view.error");
+    case "off": return t(locale, "view.waiting");
 }
 }
 
-export function thoughtBubbleText(snapshot: AppSnapshot): string | undefined {
-  if (!companionResponseInProgress(snapshot)) return undefined;
-  const raw = snapshot.companionDraft ?? "返事を考え中…";
-  const lines = raw.split(/\r?\n/u).filter((line) => line.trim() !== "");
-  const tail = (lines.length === 0 ? [raw] : lines).slice(-3).join("\n");
-  return tail.length <= 240 ? tail : `…${tail.slice(-239)}`;
-}
-
-function relativeCaptureTime(value: string | undefined, now: number): string {
-  if (value === undefined) return "まだ撮影していない";
+function relativeCaptureTime(value: string | undefined, now: number, locale: Locale): string {
+  if (value === undefined) return t(locale, "view.noCapture");
   const capturedAt = new Date(value).getTime();
-  if (Number.isNaN(capturedAt)) return "撮影時刻は不明";
+  if (Number.isNaN(capturedAt)) return t(locale, "view.unknownCaptureTime");
   const seconds = Math.max(0, Math.floor((now - capturedAt) / 1_000));
-  if (seconds < 60) return "たった今撮影";
+  if (seconds < 60) return t(locale, "view.capturedJustNow");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} 分前に撮影`;
+  if (minutes < 60) return t(locale, "view.capturedMinutes", { value: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 時間前に撮影`;
-  return `${Math.floor(hours / 24)} 日前に撮影`;
+  if (hours < 24) return t(locale, "view.capturedHours", { value: hours });
+  return t(locale, "view.capturedDays", { value: Math.floor(hours / 24) });
 }
-
-export type StatusBannerAction = "open-settings" | "open-speech-settings" | "relaunch" | "open-app-settings";
 
 export interface AttachmentTextView {
   readonly preview: string;
@@ -159,123 +97,24 @@ export interface AttachmentTextView {
   readonly truncationNotice?: string;
 }
 
-export function attachmentTextView(value: string): AttachmentTextView {
-  const match = value.match(/\n\n(末尾を切りました（\d+ 文字）)$/u);
+export function attachmentTextView(value: string, locale: Locale = "ja"): AttachmentTextView {
+  const marker = new RegExp(`\\n\\n(${truncationMarkerPattern("ja")}|${truncationMarkerPattern("en")})$`, "u");
+  const match = value.match(marker);
   const body = match === null ? value : value.slice(0, match.index);
+  const count = match?.[1]?.match(/\d+/u)?.[0];
   return {
     preview: body.slice(0, 2_000),
     previewTruncated: body.length > 2_000,
-    truncationNotice: match?.[1],
+    truncationNotice: count === undefined ? undefined : t(locale, "capture.textTruncated", { count }),
   };
 }
 
-export interface StatusBannerView {
-  readonly tone: "warning" | "error" | "info";
-  readonly message: string;
-  readonly action?: StatusBannerAction;
-  readonly actionLabel?: string;
+function truncationMarkerPattern(locale: Locale): string {
+  return escapeRegExp(t(locale, "capture.textTruncated", { count: "__COUNT__" })).replace("__COUNT__", "\\d+");
 }
 
-export function statusBanner(snapshot: AppSnapshot): StatusBannerView | undefined {
-  if (snapshot.onboarding.finishPending) {
-    return {
-      tone: "error",
-      message: "終了処理をやり直してください",
-    };
-  }
-  if (snapshot.captureShortcutError !== undefined) {
-    return {
-      tone: "warning",
-      message: snapshot.captureShortcutError,
-      action: "open-app-settings",
-      actionLabel: "設定を開く",
-    };
-  }
-  if (snapshot.speech?.message !== undefined) {
-    const permission = snapshot.speech.microphonePermission !== "granted"
-      || snapshot.speech.recognitionPermission !== "granted";
-    return {
-      tone: "warning",
-      message: snapshot.speech.message,
-      action: permission ? "open-speech-settings" : undefined,
-      actionLabel: permission ? "システム設定を開く" : undefined,
-    };
-  }
-  if (snapshot.audio?.message !== undefined && snapshot.config.audio.enabled) {
-    const screenPermission = snapshot.config.audio.speaker
-      && snapshot.audio.screenCapturePermission !== "granted";
-    const recognitionPermission = snapshot.audio.recognitionPermission !== "granted";
-    const openSpeechSettings = !screenPermission && recognitionPermission;
-    return {
-      tone: "warning",
-      message: snapshot.audio.message,
-      action: screenPermission ? "open-settings" : openSpeechSettings ? "open-speech-settings" : undefined,
-      actionLabel: screenPermission || openSpeechSettings ? "システム設定を開く" : undefined,
-    };
-  }
-  if (snapshot.lastError?.kind === "config") {
-    return {
-      tone: "error",
-      message: snapshot.lastError.message ?? "設定を確認してください。",
-      action: "open-app-settings",
-      actionLabel: "設定を開く",
-    };
-  }
-  const observerError = observerErrorMessage(snapshot);
-  if (observerError !== undefined) {
-    return {
-      tone: "error",
-      message: `見守りに失敗しました: ${observerError}`,
-      action: "open-app-settings",
-      actionLabel: "設定を開く",
-    };
-  }
-  if (snapshot.lastError?.attachmentOcr !== undefined) {
-    const retry = snapshot.lastError.attachmentOcr.retryable
-      && snapshot.companionRetryInSeconds !== undefined
-      ? ` ${snapshot.companionRetryInSeconds} 秒後に再試行します。`
-      : "";
-    return {
-      tone: "error",
-      message: `${attachmentOcrFailureMessage(snapshot.lastError.attachmentOcr.reason)}${retry}`,
-    };
-  }
-  if (snapshot.watchIntentActive
-      && snapshot.config !== undefined
-      && !snapshot.config.watch.fullscreen
-      && !snapshot.config.watch.apps.some((app) => app.enabled)) {
-    return {
-      tone: "info",
-      message: "設定の「見ていいもの」で、画面全体かアプリを追加してください。",
-      action: "open-app-settings",
-      actionLabel: "設定を開く",
-    };
-  }
-  if (snapshot.watchIntentActive && snapshot.screenRecordingStatus !== "granted") {
-    const restart = snapshot.screenRecordingRestartRequired;
-    return {
-      tone: "warning",
-      message: snapshot.screenRecordingMessage ?? "画面収録の権限が必要です。",
-      action: restart ? "relaunch" : "open-settings",
-      actionLabel: restart ? "再起動" : "システム設定を開く",
-    };
-  }
-  if (snapshot.deliveryOutboxBlocked) {
-    return {
-      tone: "warning",
-      message: `配信待ち ${snapshot.pendingDeliveries} 件。保存先へ書き込めません。`,
-    };
-  }
-  if (snapshot.lastError !== undefined) {
-    const retry = snapshot.companionRetryInSeconds === undefined
-      ? ""
-      : ` ${snapshot.companionRetryInSeconds} 秒後に再試行します。`;
-    return {
-      tone: "info",
-      message: `${snapshot.companionDisplayName}の準備に失敗しました（${snapshot.lastError.kind}）。${retry}`.trim(),
-    };
-  }
-  return undefined;
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 export function unreadBoundaryIndex(
@@ -286,107 +125,90 @@ export function unreadBoundaryIndex(
   return Math.max(0, conversation.length - Math.min(unreadCount, conversation.length));
 }
 
-export function conversationDate(value: string): string {
+export function conversationDate(value: string, locale: Locale = "ja"): string {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "日付不明";
-  return date.toLocaleDateString("ja-JP", { month: "long", day: "numeric", weekday: "short" });
+  if (Number.isNaN(date.getTime())) return t(locale, "view.unknownDate");
+  return date.toLocaleDateString(locale === "ja" ? "ja-JP" : "en-US", { month: "long", day: "numeric", weekday: "short" });
 }
 
-export function observerStatus(snapshot: AppSnapshot, now = Date.now()): string {
+export function observerStatus(snapshot: AppSnapshot, now = Date.now(), locale: Locale = "ja"): string {
   const observer = snapshot.observer;
-  const observerError = observerErrorMessage(snapshot);
-  if (observerError !== undefined) return `エラー: ${observerError}`;
+  const observerError = observerErrorMessage(snapshot, locale);
+  if (observerError !== undefined) return t(locale, "view.observerErrorStatus", { message: observerError });
   if (observer.pendingFrameCount > 0 && observer.nextSendAt !== undefined && observer.phase !== "thinking") {
     const seconds = Math.max(0, Math.ceil((new Date(observer.nextSendAt).getTime() - now) / 1_000));
-    return `次の送信まで ${seconds} 秒（フレーム ${observer.pendingFrameCount} 枚）`;
+    return t(locale, "view.nextSend", { seconds, frames: observer.pendingFrameCount });
   }
   switch (observer.phase) {
-    case "stopped": return "停止中";
-    case "idle": return "見守り中";
-    case "capturing": return "撮影中";
-    case "thinking": return "視覚が確認中";
-    case "suspended": return "一時停止中";
-    case "error": return "エラー";
+    case "stopped": return t(locale, "view.stopped");
+    case "idle": return t(locale, "view.observing");
+    case "capturing": return t(locale, "view.capturing");
+    case "thinking": return t(locale, "view.visualChecking");
+    case "suspended": return t(locale, "view.suspended");
+    case "error": return t(locale, "view.error");
   }
 }
 
-export function companionStatus(snapshot: AppSnapshot): string {
+export function companionStatus(snapshot: AppSnapshot, locale: Locale = "ja"): string {
   const name = snapshot.companionDisplayName;
   if (snapshot.lastError?.attachmentOcr !== undefined) {
-    return attachmentOcrFailureMessage(snapshot.lastError.attachmentOcr.reason);
+    return attachmentOcrFailureMessage(snapshot.lastError.attachmentOcr.reason, locale);
   }
   if (snapshot.lastError !== undefined && snapshot.companionRetryInSeconds !== undefined) {
-    return `${name}の準備に失敗（${snapshot.lastError.kind}）: ${snapshot.companionRetryInSeconds} 秒後に再試行`;
+    return t(locale, "view.companionRetry", { name, kind: snapshot.lastError.kind, seconds: snapshot.companionRetryInSeconds });
   }
-  if (snapshot.deliveryOutboxBlocked) return `配信待ち ${snapshot.pendingDeliveries} 件（outbox に書けません）`;
-  if (snapshot.companion.phase === "thinking") return `${name}が考え中`;
-  if (snapshot.companion.phase === "error") return `${name}: エラー`;
-  return `${name}: 話せます`;
+  if (snapshot.deliveryOutboxBlocked) return t(locale, "view.outboxBlocked", { count: snapshot.pendingDeliveries });
+  if (snapshot.companion.phase === "thinking") return t(locale, "view.companionThinking", { name });
+  if (snapshot.companion.phase === "error") return t(locale, "view.companionError", { name });
+  return t(locale, "view.companionReady", { name });
 }
 
-export function companionCallSummary(snapshot: AppSnapshot): string {
-  const limit = snapshot.companion.proactiveLimitReached ? "・上限" : "";
-  return `${snapshot.companionDisplayName} ${snapshot.companion.totalCallsToday} 回${limit}`;
+export function companionCallSummary(snapshot: AppSnapshot, locale: Locale = "ja"): string {
+  const limit = snapshot.companion.proactiveLimitReached ? t(locale, "view.limit") : "";
+  return t(locale, "view.calls", { name: snapshot.companionDisplayName, count: snapshot.companion.totalCallsToday, limit });
 }
 
 export function attachmentOcrFailureMessage(
   reason: NonNullable<NonNullable<AppSnapshot["lastError"]>["attachmentOcr"]>["reason"],
+  locale: Locale = "ja",
 ): string {
   switch (reason) {
-    case "capability": return "添付の画像対応を確認できませんでした";
-    case "helper-unavailable": return "添付の文字起こしに失敗しました（OCR helper が見つかりません）";
-    case "recognition": return "添付の文字起こしに失敗しました（画像を認識できません）";
-    case "no-text": return "添付の文字起こしに失敗しました（文字が見つかりません）";
+    case "capability": return t(locale, "view.attachmentCapability");
+    case "helper-unavailable": return t(locale, "view.attachmentHelper");
+    case "recognition": return t(locale, "view.attachmentRecognition");
+    case "no-text": return t(locale, "view.attachmentNoText");
   }
 }
 
 export function attachmentFailureState(
   failure: NonNullable<NonNullable<AppSnapshot["lastError"]>["attachmentOcr"]>,
+  locale: Locale = "ja",
 ): { readonly terminal: boolean; readonly message: string } {
   if (!failure.retryable) {
-    return { terminal: true, message: "添付を準備できませんでした" };
+    return { terminal: true, message: t(locale, "view.attachmentUnavailable") };
   }
   return {
     terminal: false,
-    message: `再試行を待っています（${Math.min(failure.attempts, 3)}/3）`,
+    message: t(locale, "view.attachmentRetry", { attempts: Math.min(failure.attempts, 3) }),
   };
 }
 
-export function triggerText(snapshot: AppSnapshot): string {
+export function triggerText(snapshot: AppSnapshot, locale: Locale = "ja"): string {
   const trigger = snapshot.observer.lastTrigger;
-  if (trigger === undefined) return "直近のきっかけ: なし";
-  const label = triggerLabel(trigger);
-  const disposition = snapshot.observer.lastCaptureDisposition ?? "撮影";
-  return `直近のきっかけ: ${label} → ${disposition}`;
+  if (trigger === undefined) return t(locale, "view.latestTrigger");
+  const label = triggerLabel(trigger, locale);
+  const disposition = snapshot.observer.lastCaptureDisposition ?? t(locale, "view.captureDisposition");
+  return t(locale, "view.latestTriggerWithDisposition", { trigger: label, disposition });
 }
 
-export function triggerLabel(trigger: string): string {
-  if (trigger === "typing-paused") return "入力が止まった";
-  if (trigger === "app-switched") return "アプリが切り替わった";
-  if (trigger === "timer") return "定期撮影";
+export function triggerLabel(trigger: string, locale: Locale = "ja"): string {
+  if (trigger === "typing-paused") return t(locale, "view.triggerTyping");
+  if (trigger === "app-switched") return t(locale, "view.triggerAppSwitch");
+  if (trigger === "timer") return t(locale, "view.triggerTimer");
   return trigger;
 }
 
-export function conversationThinking(snapshot: AppSnapshot, sending: boolean): boolean {
-  return sending || companionResponseInProgress(snapshot);
-}
-
 export type ComposerKeyAction = "send" | "newline" | "ignore";
-export type MicrophoneAction = "start" | "finish" | "cancel" | "ignore";
-
-export function microphoneAction(
-  mode: "pushToTalk" | "toggle",
-  recording: boolean,
-  gesture: "press" | "release" | "cancel" | "click",
-): MicrophoneAction {
-  if (mode === "toggle") {
-    return gesture === "click" ? recording ? "finish" : "start" : "ignore";
-  }
-  if (gesture === "press") return "start";
-  if (gesture === "release") return "finish";
-  if (gesture === "cancel") return "cancel";
-  return "ignore";
-}
 
 export function composerKeyAction(
   key: string,
@@ -402,22 +224,6 @@ export function composerKeyAction(
   return shiftKey ? "newline" : "send";
 }
 
-export type ConversationScrollCause = "panel-open" | "user-send" | "new-entry" | "selection" | "thinking" | "layout";
-
-export function shouldFollowConversation(cause: ConversationScrollCause, userScrolledUp: boolean): boolean {
-  return !userScrolledUp || (cause !== "layout" && cause !== "thinking");
-}
-
-export function shouldRevealNewestTutorialNotice(
-  entry: Pick<ConversationEntry, "role" | "tutorialResponseKey"> | undefined,
-): boolean {
-  return entry?.role === "companion" && entry.tutorialResponseKey !== undefined;
-}
-
-export function didUserScrollUp(previousTop: number, currentTop: number, programmatic: boolean): boolean {
-  return !programmatic && currentTop < previousTop;
-}
-
 export function findDebugDetail(catalog: DebugCatalog, sourceIds: readonly string[]): DebugDetail | undefined {
   const matches = catalog.details.filter((detail) => detail.sourceIds.some((id) => sourceIds.includes(id)));
   if (matches.length === 0) return undefined;
@@ -430,10 +236,10 @@ export function findDebugDetail(catalog: DebugCatalog, sourceIds: readonly strin
   };
 }
 
-export function formatTime(value: string | undefined): string {
-  if (value === undefined) return "なし";
+export function formatTime(value: string | undefined, locale: Locale = "ja"): string {
+  if (value === undefined) return t(locale, "common.none");
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "なし" : date.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return Number.isNaN(date.getTime()) ? t(locale, "common.none") : date.toLocaleTimeString(locale === "ja" ? "ja-JP" : "en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 export function acceptSnapshot(current: AppSnapshot | undefined, event: SnapshotEventLike): AppSnapshot | undefined {

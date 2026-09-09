@@ -1,104 +1,71 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement } from "react";
-import { speechPopupApi } from "../ipc.js";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactElement } from "react";
+import { setIpcLocale, speechPopupApi } from "../ipc.js";
 import type { SpeechPopupSnapshot } from "../types.js";
-import {
-  isSpeechPopupErrorCurrent,
-  shouldInitializeConfirmationDraft,
-  shouldKeepSpeechPopupError,
-  speechPopupErrorMessage,
-  speechPopupKeyAction,
-  type SpeechPopupTransientError,
-} from "./state.js";
 import { applyAppearance } from "../appearance.js";
 import { AvatarBlob } from "../components/AvatarBlob.js";
+import { t, type Locale } from "../i18n/index.js";
+import { usePresenterDraft } from "../usePresenterDraft.js";
 
-export function SpeechPopup(): ReactElement {
+export function SpeechPopupView(): ReactElement {
   const [snapshot, setSnapshot] = useState<SpeechPopupSnapshot>();
-  const [text, setText] = useState("");
-  const [error, setError] = useState<SpeechPopupTransientError>();
-  const [loadError, setLoadError] = useState<string>();
+  const { value: text, begin, receive, edit } = usePresenterDraft();
+  const generation = useRef<number | undefined>(undefined);
+  const [error, setError] = useState<string>();
   const [sending, setSending] = useState(false);
-  const sendingRef = useRef(false);
-  const nextErrorId = useRef(0);
+  const [focusRequest, setFocusRequest] = useState(0);
+  const [canSend, setCanSend] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const initializedGeneration = useRef<number | undefined>(undefined);
   useEffect(() => {
-    let revision = 0;
-    const apply = (next: SpeechPopupSnapshot): void => {
-      if (next.revision <= revision) return;
-      revision = next.revision;
+    const load = speechPopupApi.subscribeLoad((next) => {
+      if (generation.current !== undefined && next.speech.generation < generation.current) return;
+      generation.current = next.speech.generation;
+      begin(next.speech.generation);
+      setIpcLocale(next.language);
       applyAppearance({ theme: next.theme, font: next.font });
       setSnapshot(next);
-      setLoadError(undefined);
-      setError((current) => shouldKeepSpeechPopupError(current, next.speech) ? current : undefined);
-      if (shouldInitializeConfirmationDraft(initializedGeneration.current, next.speech)) {
-        initializedGeneration.current = next.speech.generation;
-        setText(next.speech.partial);
-      }
-    };
-    const events = speechPopupApi.subscribeSnapshots((event) => apply({
-      revision: event.revision,
-      companionDisplayName: event.snapshot.companionDisplayName,
-      speech: event.snapshot.speech,
-      theme: event.snapshot.config.ui.theme,
-      font: event.snapshot.config.ui.font,
-      avatarColor: event.snapshot.config.ui.avatarColor ?? undefined,
-      avatarImagePng: event.snapshot.avatarImagePng,
-    }));
-    void events.ready.then(() => speechPopupApi.getSnapshot()).then((result) => {
-      if (result.ok) apply(result.value); else setLoadError(result.error.message);
     });
-    return () => events.dispose();
-  }, []);
-  useEffect(() => {
-    if (snapshot?.speech.phase === "confirming") requestAnimationFrame(() => textarea.current?.focus());
-  }, [snapshot?.speech.phase]);
-  const cancel = (): void => {
-    if (sending || snapshot?.speech.phase === "sending") return;
-    void speechPopupApi.cancel();
-  };
-  const send = async (): Promise<void> => {
-    if (sendingRef.current) return;
-    sendingRef.current = true;
-    setSending(true);
-    const result = await speechPopupApi.send(text);
-    if (result.ok) {
-      setError(undefined);
-    } else {
-      const id = nextErrorId.current + 1;
-      nextErrorId.current = id;
-      setError({ id, generation: snapshot?.speech.generation, message: result.error.message });
-      window.setTimeout(() => {
-        setError((current) => isSpeechPopupErrorCurrent(current, id) ? undefined : current);
-      }, 3_000);
-    }
-    sendingRef.current = false;
-    setSending(false);
+    const input = speechPopupApi.subscribeInput((next) => {
+      if (generation.current !== undefined && next.generation < generation.current) return;
+      generation.current = next.generation;
+      receive(next, next.text);
+      setSending(next.sending);
+      setCanSend(next.canSend);
+      setError(next.error);
+    });
+    const focus = speechPopupApi.subscribeFocus(() => setFocusRequest((request) => request + 1));
+    void Promise.all([load.ready, input.ready, focus.ready]).then(() => speechPopupApi.ready());
+    return () => { load.dispose(); input.dispose(); focus.dispose(); };
+  }, [begin, receive]);
+  useLayoutEffect(() => { if (focusRequest > 0) textarea.current?.focus(); }, [focusRequest]);
+  const cancel = (): void => { if (snapshot) void speechPopupApi.cancel(snapshot.speech.generation); };
+  const send = (): void => {
+    if (snapshot) void speechPopupApi.send(snapshot.speech.generation);
   };
   const keyDown = (event: KeyboardEvent): void => {
-    const action = speechPopupKeyAction(
-      event.key,
-      event.shiftKey,
-      event.nativeEvent.isComposing,
-      event.keyCode,
-      snapshot?.speech.phase ?? "idle",
-    );
-    if (action === "ignore") return;
-    event.preventDefault();
-    if (action === "cancel") cancel();
-    if (action === "send") void send();
+    if (!snapshot) return;
+    if (event.key === "Escape" || (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229)) event.preventDefault();
+    void speechPopupApi.key(snapshot.speech.generation, {
+      key: event.key, metaKey: event.metaKey, shiftKey: event.shiftKey,
+      composing: event.nativeEvent.isComposing, keyCode: event.keyCode,
+    });
   };
   const speech = snapshot?.speech;
-  const errorMessage = speechPopupErrorMessage(speech, error, loadError);
+  const locale: Locale = snapshot?.language ?? "ja";
+  const errorMessage = error ?? speech?.message ?? undefined;
   return <main className="speech-card" onKeyDown={keyDown}>
-    <header><AvatarBlob color={snapshot?.avatarColor} image={snapshot?.avatarImagePng} size={24} state={speech?.phase === "recording" ? "thinking" : "open"} /><span className={`recording-dot${speech?.phase === "recording" ? " active" : ""}`} /><strong>{snapshot?.companionDisplayName ?? "Coo"} に話しかける</strong></header>
+    <header><AvatarBlob color={snapshot?.avatarColor} image={snapshot?.avatarImagePng} size={24} state={speech?.phase === "recording" ? "thinking" : "open"} /><span className={`recording-dot${speech?.phase === "recording" ? " active" : ""}`} /><strong>{t(locale, "speechPopup.title", { name: snapshot?.companionDisplayName ?? t(locale, "modelPopup.companionDefault") })}</strong></header>
     {speech?.phase === "confirming"
-      ? <textarea ref={textarea} value={text} disabled={sending} onChange={(event) => setText(event.target.value)} aria-label="文字起こしを確認" />
-      : <p className={speech?.partial ? "transcript" : "listening"}>{speech?.partial || "聞いています…"}</p>}
+      ? <textarea ref={textarea} value={text} disabled={sending} onChange={(event) => {
+        if (!snapshot) return;
+        const text = event.target.value;
+        const editRevision = edit(snapshot.speech.generation, text);
+        if (editRevision !== undefined) void speechPopupApi.edit(snapshot.speech.generation, editRevision, text);
+      }} aria-label={t(locale, "speechPopup.transcriptLabel")} />
+      : <p className={speech?.partial ? "transcript" : "listening"}>{speech?.partial || t(locale, "speechPopup.listening")}</p>}
     {errorMessage === undefined ? null : <p className="error">{errorMessage}</p>}
     <footer>
-      <button type="button" disabled={sending || speech?.phase === "sending"} onClick={cancel}>取り消し</button>
-      {speech?.phase === "confirming" ? <button className="primary" type="button" disabled={sending || text.trim().length === 0} onClick={() => void send()}>{sending ? "送信中…" : "送信"}</button> : null}
+      <button type="button" disabled={sending || speech?.phase === "sending"} onClick={cancel}>{t(locale, "common.cancel")}</button>
+      {speech?.phase === "confirming" ? <button className="primary" type="button" disabled={!canSend} onClick={() => void send()}>{sending ? t(locale, "common.sending") : t(locale, "common.send")}</button> : null}
     </footer>
   </main>;
 }

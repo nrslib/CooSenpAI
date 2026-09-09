@@ -1,9 +1,47 @@
 use super::*;
+use crate::locale::{text, Locale, TextKey};
 
 impl RuntimeHandle {
+    pub fn begin_hearing_context(
+        &self,
+        generation: u64,
+        cancellation: CancellationToken,
+    ) -> Result<String, RuntimeError> {
+        self.ensure_open()?;
+        self.user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .as_ref()
+            .ok_or(RuntimeError::CompanionUnavailable)?
+            .begin_hearing_context(generation, cancellation)
+            .map_err(RuntimeError::from)
+    }
+
+    pub fn update_hearing_context(
+        &self,
+        context: crate::hearing_context::HearingContext,
+    ) -> Result<bool, RuntimeError> {
+        self.ensure_open()?;
+        self.user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .as_ref()
+            .ok_or(RuntimeError::CompanionUnavailable)?
+            .update_hearing_context(context)
+            .map_err(RuntimeError::from)
+    }
+
     pub fn register_pending_frame_context(
         &self,
         context: crate::state::PendingFrameContext,
+    ) -> Result<(), RuntimeError> {
+        self.register_pending_frame_context_cancellable(context, None)
+    }
+
+    pub fn register_pending_frame_context_cancellable(
+        &self,
+        context: crate::state::PendingFrameContext,
+        publication: Option<&crate::persistence::PublicationGate>,
     ) -> Result<(), RuntimeError> {
         self.ensure_open()?;
         let preparer = self
@@ -13,7 +51,7 @@ impl RuntimeHandle {
             .clone()
             .ok_or(RuntimeError::CompanionUnavailable)?;
         preparer
-            .register_pending_frame_context(context)
+            .register_pending_frame_context(context, publication)
             .map_err(RuntimeError::from)
     }
 
@@ -239,10 +277,26 @@ impl RuntimeHandle {
                     .filter(|failure| !failure.retryable)
                     .map(|failure| failure.input_id)
             })
-            .ok_or_else(|| RuntimeError::Factory("取り消せる返事はありません".to_owned()))?;
+            .ok_or_else(|| {
+                RuntimeError::Factory(
+                    text(
+                        TextKey::RuntimeCancelableReplyMissing,
+                        Locale::from_config(&self.config().ui.language),
+                    )
+                    .to_owned(),
+                )
+            })?;
+        self.cancel_user_message_for(input_id).await
+    }
+
+    pub async fn cancel_user_message_for(&self, input_id: String) -> Result<String, RuntimeError> {
+        self.ensure_open()?;
         let (response, result) = oneshot::channel();
         self.priority_tx
-            .send(PriorityCommand::CancelUser { response })
+            .send(PriorityCommand::CancelUser {
+                input_id: Some(input_id.clone()),
+                response,
+            })
             .await
             .map_err(|_| RuntimeError::Closed)?;
         result.await.map_err(|_| RuntimeError::ResponseDropped)??;
@@ -253,11 +307,27 @@ impl RuntimeHandle {
         self.ensure_open()?;
         let (response, result) = oneshot::channel();
         self.priority_tx
-            .send(PriorityCommand::RetryUser { response })
+            .send(PriorityCommand::RetryUser {
+                input_id: None,
+                response,
+            })
             .await
             .map_err(|_| RuntimeError::Closed)?;
         let input_id = result.await.map_err(|_| RuntimeError::ResponseDropped)??;
         Ok(input_id)
+    }
+
+    pub async fn retry_user_message_for(&self, input_id: String) -> Result<String, RuntimeError> {
+        self.ensure_open()?;
+        let (response, result) = oneshot::channel();
+        self.priority_tx
+            .send(PriorityCommand::RetryUser {
+                input_id: Some(input_id),
+                response,
+            })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
     }
 
     pub fn has_pending_tutorial_response(&self, response_key: &str) -> Result<bool, RuntimeError> {

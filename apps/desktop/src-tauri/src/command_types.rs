@@ -1,3 +1,4 @@
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::onboarding::TutorialStep;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -5,6 +6,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DesktopCommand {
+    WorkApprove,
+    WorkConfigure,
     ChatSend,
     ChatCancel,
     ChatRetry,
@@ -12,11 +15,19 @@ pub(crate) enum DesktopCommand {
     CaptureStartText,
     CaptureSendImage,
     CaptureSendText,
-    CaptureCancel,
     SpeechStart,
     SpeechFinish,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "command authorization matrix retains cancel policy"
+        )
+    )]
     SpeechCancel,
     SpeechConfirm,
+    VoiceOutputTest,
+    VoiceOutputStop,
     SettingsAppearancePreview,
     ConfigDisplayUpdate,
     ConfigProviderUpdate,
@@ -25,6 +36,7 @@ pub(crate) enum DesktopCommand {
     ConfigKeymapUpdate,
     WatchTargetUpdate,
     PersonaSelect,
+    SetupPersonaSelect,
     PersonaSave,
     PersonaDelete,
     PersonaRestore,
@@ -36,10 +48,13 @@ pub(crate) enum DesktopCommand {
     MemoryDelete,
     MemoryConsolidate,
     ConversationReset,
+    ConversationSelect,
+    CompanionEmotionsReset,
     ConversationResetDismiss,
     BubbleDismiss,
     TutorialInteract,
-    TutorialFastForward,
+    BubbleFastForward,
+    BubbleNavigate,
     TutorialAdvance,
     TutorialSettingsPresented,
     TutorialFinish,
@@ -55,6 +70,7 @@ pub(crate) enum DesktopCommand {
     PresentTutorialResponse,
     CompanionPresence,
     CopyLastReply,
+    LicenseDocumentOpen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +80,7 @@ pub(crate) enum CommandSource {
     IpcCapturePopup,
     IpcSpeechPopup,
     IpcModelPopup,
+    IpcDetails,
     Tray,
     GlobalShortcut,
     SpeechCallback,
@@ -101,6 +118,7 @@ impl CommandEnvelope {
 pub(crate) enum TransitionOperation {
     FinishTutorial,
     ResetConversation,
+    SwitchConversation,
     ReplaceConfig,
 }
 
@@ -168,16 +186,18 @@ pub(crate) enum RejectReason {
 }
 
 impl RejectReason {
-    pub(crate) fn message(self) -> &'static str {
+    pub(crate) fn message_for_locale(self, locale: Locale) -> &'static str {
         match self {
-            Self::ShuttingDown => "終了処理中です",
-            Self::TransitionInProgress => "設定の反映処理中です",
-            Self::TutorialFinishing => "終了処理をやり直してください",
-            Self::SetupRequired => "初期設定を完了してください",
-            Self::TutorialOperationNotAllowed => "この操作は現在の案内では使えません",
-            Self::StaleGeneration => "古い操作の完了は反映されませんでした",
-            Self::RuntimeUnavailable => "設定エラーで停止中です",
-            Self::InvalidInput => "この状態では操作できません",
+            Self::ShuttingDown => text(TextKey::CommandShuttingDown, locale),
+            Self::TransitionInProgress => text(TextKey::CommandTransitionInProgress, locale),
+            Self::TutorialFinishing => text(TextKey::CommandTutorialFinishing, locale),
+            Self::SetupRequired => text(TextKey::CommandSetupRequired, locale),
+            Self::TutorialOperationNotAllowed => {
+                text(TextKey::CommandTutorialOperationNotAllowed, locale)
+            }
+            Self::StaleGeneration => text(TextKey::CommandStaleGeneration, locale),
+            Self::RuntimeUnavailable => text(TextKey::CommandRuntimeUnavailable, locale),
+            Self::InvalidInput => text(TextKey::CommandInvalidInput, locale),
         }
     }
 }
@@ -203,10 +223,21 @@ impl DispatchError {
         Self::Indeterminate(error.to_string())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn format_for_user(&self) -> String {
+        self.format_for_locale(Locale::Ja)
+    }
+
+    pub(crate) fn format_for_locale(&self, locale: Locale) -> String {
         match self {
-            Self::Rejected(reason) => reason.message().to_owned(),
-            Self::Failed(message) | Self::Indeterminate(message) => message.clone(),
+            Self::Rejected(reason) => reason.message_for_locale(locale).to_owned(),
+            Self::Failed(message) | Self::Indeterminate(message) => {
+                if message == text(TextKey::CommandResultUnavailable, Locale::Ja) {
+                    text(TextKey::CommandResultUnavailable, locale).to_owned()
+                } else {
+                    message.clone()
+                }
+            }
         }
     }
 }
@@ -238,7 +269,6 @@ pub(crate) enum Admission {
 pub(crate) enum GenerationResource {
     Conversation,
     Speech,
-    Capture,
     Bubble,
     Config,
     Finish,

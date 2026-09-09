@@ -1,16 +1,15 @@
 use crate::{
-    activate_application, capture_application_window, capture_interactive_region, capture_screen,
-    frontmost_application, frontmost_application_identity, read_front_app_name,
-    read_front_application, read_hid_idle_ms, recognize_text_with_helper, running_applications,
+    activate_application, frontmost_application, frontmost_application_identity,
+    read_front_app_name, read_front_application, read_hid_idle_ms, recognize_text_with_helper,
+    running_applications,
 };
 use async_trait::async_trait;
 use coosenpai_core::ports::{
-    ActivityPort, ActivitySnapshot, ApplicationCapture, ApplicationCapturePort,
-    ForegroundApplication, ForegroundApplicationPort, HelperResolverPort, InteractiveCapturePort,
-    NotificationPort, OcrPort, OcrTextBlock, OwnWindowBounds, OwnWindowBoundsPort, PortError,
-    PowerEvent, PowerEventPort, RunningApplication, ScreenCapturePermission,
+    ActivityPort, ActivitySnapshot, ApplicationCapture, ApplicationCapturePort, CapturedScreen,
+    ForegroundApplication, ForegroundApplicationPort, HelperResolverPort, NotificationPort,
+    OcrPort, OcrTextBlock, OwnWindowBounds, OwnWindowBoundsPort, PortError, PowerEvent,
+    PowerEventPort, RunningApplication, RuntimeLogger, ScreenCapturePermission,
     ScreenCapturePermissionKind, ScreenCapturePort, SystemSettingsPane, SystemSettingsPort,
-    WindowBounds,
 };
 use coosenpai_core::process::{ProcessRequest, ProcessRunner, TokioProcessRunner};
 use objc2::rc::Retained;
@@ -20,11 +19,11 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationName,
-    NSObjectProtocol, NSOperationQueue, NSString,
+    NSObjectProtocol, NSOperationQueue, NSString, NSURL,
 };
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -43,93 +42,37 @@ impl ForegroundApplicationPort for MacForegroundApplications {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct MacOwnWindowBounds {
-    captured: Option<(chrono::DateTime<chrono::Utc>, Vec<WindowBounds>)>,
-}
+pub struct MacOwnWindowBounds;
 
 impl MacOwnWindowBounds {
     pub fn empty() -> Self {
-        Self::default()
-    }
-
-    pub fn from_physical(bounds: Vec<WindowBounds>) -> Self {
-        Self::from_physical_at(chrono::Utc::now(), bounds)
-    }
-
-    pub fn from_physical_at(
-        captured_at: chrono::DateTime<chrono::Utc>,
-        bounds: Vec<WindowBounds>,
-    ) -> Self {
-        Self {
-            captured: Some((captured_at, bounds)),
-        }
-    }
-
-    /// Tauri が取得した論理座標の矩形を、capture/OCR と同じ物理座標へ固定する。
-    pub fn from_logical_at(
-        captured_at: chrono::DateTime<chrono::Utc>,
-        logical_bounds: &[WindowBounds],
-        display_scale: f64,
-    ) -> Result<Self, PortError> {
-        let physical = Self::to_physical(captured_at, logical_bounds, display_scale)?;
-        Ok(Self::from_physical_at(captured_at, physical.bounds))
-    }
-
-    pub fn to_physical(
-        captured_at: chrono::DateTime<chrono::Utc>,
-        logical_bounds: &[WindowBounds],
-        display_scale: f64,
-    ) -> Result<OwnWindowBounds, PortError> {
-        if !display_scale.is_finite() || display_scale <= 0.0 {
-            return Err(PortError::Unavailable("Retina 倍率が不正です".to_owned()));
-        }
-        let bounds = logical_bounds
-            .iter()
-            .map(|bound| {
-                if !bound.x.is_finite()
-                    || !bound.y.is_finite()
-                    || !bound.width.is_finite()
-                    || !bound.height.is_finite()
-                    || bound.width <= 0.0
-                    || bound.height <= 0.0
-                {
-                    return Err(PortError::Unavailable(
-                        "自ウィンドウの矩形が不正です".to_owned(),
-                    ));
-                }
-                Ok(WindowBounds {
-                    x: (bound.x * display_scale).round(),
-                    y: (bound.y * display_scale).round(),
-                    width: (bound.width * display_scale).round().max(1.0),
-                    height: (bound.height * display_scale).round().max(1.0),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(OwnWindowBounds {
-            captured_at,
-            bounds,
-        })
+        Self
     }
 }
 
 #[async_trait]
 impl OwnWindowBoundsPort for MacOwnWindowBounds {
     async fn read_own_window_bounds(&self) -> Result<OwnWindowBounds, PortError> {
-        match &self.captured {
-            Some((captured_at, bounds)) => Ok(OwnWindowBounds {
-                captured_at: *captured_at,
-                bounds: bounds.clone(),
-            }),
-            None => Ok(OwnWindowBounds {
-                captured_at: chrono::Utc::now(),
-                bounds: Vec::new(),
-            }),
-        }
+        Ok(OwnWindowBounds {
+            revision: 0,
+            captured_at: chrono::Utc::now(),
+            bounds: Vec::new(),
+        })
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MacScreenCapture;
+#[derive(Clone, Default)]
+pub struct MacScreenCapture {
+    logger: Option<Arc<dyn RuntimeLogger>>,
+}
+
+impl MacScreenCapture {
+    pub fn with_logger(logger: Arc<dyn RuntimeLogger>) -> Self {
+        Self {
+            logger: Some(logger),
+        }
+    }
+}
 
 #[async_trait]
 impl ScreenCapturePort for MacScreenCapture {
@@ -137,12 +80,14 @@ impl ScreenCapturePort for MacScreenCapture {
         &self,
         destination: &Path,
         cancellation: CancellationToken,
-    ) -> Result<PathBuf, PortError> {
-        capture_screen(destination.to_owned(), cancellation)
-            .await
-            .map_err(|error| {
-                map_screen_capture_error(&error.to_string(), crate::screen_capture_permission())
-            })
+    ) -> Result<Vec<CapturedScreen>, PortError> {
+        crate::watch_capture::capture_screen_with_logger(
+            destination.to_owned(),
+            cancellation,
+            self.logger.clone(),
+        )
+        .await
+        .map_err(|error| map_screen_capture_error(&error, crate::screen_capture_permission()))
     }
 }
 
@@ -162,76 +107,45 @@ impl SystemSettingsPort for MacSystemSettings {
             SystemSettingsPane::Microphone => "Privacy_Microphone",
             SystemSettingsPane::SpeechRecognition => "Privacy_SpeechRecognition",
         };
-        let output = TokioProcessRunner
-            .run(
-                ProcessRequest {
-                    executable: PathBuf::from("/usr/bin/open"),
-                    args: vec![format!(
-                        "x-apple.systempreferences:com.apple.preference.security?{section}"
-                    )],
-                    env: Vec::new(),
-                    cwd: None,
-                    stdin: Vec::new(),
-                    timeout: Duration::from_secs(5),
-                },
-                cancellation,
-            )
-            .await
-            .map_err(|error| PortError::Unavailable(error.to_string()))?;
-        if output.status == Some(0) {
-            Ok(())
-        } else {
-            Err(PortError::Unavailable(
-                "システム設定を開けませんでした".to_owned(),
-            ))
+        if cancellation.is_cancelled() {
+            return Err(PortError::Unavailable(
+                "システム設定の表示が取り消されました".to_owned(),
+            ));
         }
+        let url = NSURL::URLWithString(&NSString::from_str(&format!(
+            "x-apple.systempreferences:com.apple.preference.security?{section}"
+        )))
+        .ok_or_else(|| PortError::Unavailable("システム設定の URL が不正です".to_owned()))?;
+        open_workspace_url(&url, "システム設定を開けませんでした")
     }
 }
 
 pub async fn open_external_url(url: &str) -> Result<(), PortError> {
-    let output = TokioProcessRunner
-        .run(
-            ProcessRequest {
-                executable: PathBuf::from("/usr/bin/open"),
-                args: vec![url.to_owned()],
-                env: Vec::new(),
-                cwd: None,
-                stdin: Vec::new(),
-                timeout: Duration::from_secs(5),
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .map_err(|error| PortError::Unavailable(error.to_string()))?;
-    if output.status == Some(0) {
+    let url = NSURL::URLWithString(&NSString::from_str(url))
+        .ok_or_else(|| PortError::Unavailable("外部リンクの URL が不正です".to_owned()))?;
+    open_workspace_url(&url, "外部リンクを開けませんでした")
+}
+
+pub async fn open_file(path: &Path) -> Result<(), PortError> {
+    let path = path.to_str().ok_or_else(|| {
+        PortError::Unavailable("ファイルのパスが UTF-8 ではありません".to_owned())
+    })?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+    open_workspace_url(&url, "ファイルを開けませんでした")
+}
+
+fn open_workspace_url(url: &NSURL, failure: &str) -> Result<(), PortError> {
+    if NSWorkspace::sharedWorkspace().openURL(url) {
         Ok(())
     } else {
-        Err(PortError::Unavailable(
-            "外部リンクを開けませんでした".to_owned(),
-        ))
+        Err(PortError::Unavailable(failure.to_owned()))
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MacInteractiveCapture;
-
-#[async_trait]
-impl InteractiveCapturePort for MacInteractiveCapture {
-    async fn capture_interactive(
-        &self,
-        destination: &Path,
-        cancellation: CancellationToken,
-    ) -> Result<bool, PortError> {
-        capture_interactive_region(destination.to_owned(), cancellation)
-            .await
-            .map_err(|error| {
-                map_screen_capture_error(&error.to_string(), crate::screen_capture_permission())
-            })
-    }
+#[derive(Clone, Default)]
+pub struct MacApplicationCapture {
+    logger: Option<Arc<dyn RuntimeLogger>>,
 }
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MacApplicationCapture;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MacHelperResolver;
@@ -308,6 +222,12 @@ fn is_executable(path: &Path) -> bool {
 }
 
 impl MacApplicationCapture {
+    pub fn with_logger(logger: Arc<dyn RuntimeLogger>) -> Self {
+        Self {
+            logger: Some(logger),
+        }
+    }
+
     pub fn running() -> Result<Vec<RunningApplication>, PortError> {
         running_applications().map_err(|error| PortError::Unavailable(error.to_string()))
     }
@@ -325,17 +245,26 @@ impl ApplicationCapturePort for MacApplicationCapture {
         destination: &Path,
         cancellation: CancellationToken,
     ) -> Result<Option<ApplicationCapture>, PortError> {
-        capture_application_window(bundle_id, destination.to_owned(), cancellation)
-            .await
-            .map_err(|error| {
-                map_screen_capture_error(&error.to_string(), crate::screen_capture_permission())
-            })
+        crate::watch_capture::capture_application_window_with_logger(
+            bundle_id,
+            destination.to_owned(),
+            cancellation,
+            self.logger.clone(),
+        )
+        .await
+        .map_err(|error| map_screen_capture_error(&error, crate::screen_capture_permission()))
     }
 }
 
-fn map_screen_capture_error(error: &str, permission: ScreenCapturePermission) -> PortError {
+fn map_screen_capture_error(
+    error: &anyhow::Error,
+    permission: ScreenCapturePermission,
+) -> PortError {
+    if let Some(PortError::ScreenCapturePermission(message)) = error.downcast_ref::<PortError>() {
+        return PortError::ScreenCapturePermission(message.clone());
+    }
     if permission.kind == ScreenCapturePermissionKind::Granted {
-        PortError::Unavailable(format!("画面キャプチャに失敗しました: {error}"))
+        PortError::Unavailable(format!("画面キャプチャに失敗しました: {error:#}"))
     } else {
         PortError::ScreenCapturePermission(
             permission

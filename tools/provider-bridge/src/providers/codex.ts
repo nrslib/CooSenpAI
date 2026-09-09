@@ -15,6 +15,21 @@ function environment(): Record<string, string> {
   );
 }
 
+function hasApiKey(): boolean {
+  const value = process.env.OPENAI_API_KEY;
+  return value !== undefined && value.trim() !== "";
+}
+
+async function prepareAuth(root: string, sourceHome: string): Promise<void> {
+  if (hasApiKey()) {
+    await rm(join(root, "auth.json"), { force: true });
+    return;
+  }
+  await copyFile(join(sourceHome, "auth.json"), join(root, "auth.json")).catch((error: unknown) => {
+    throw new BridgeError("auth", "Codex のログイン情報を読み込めません", { cause: error });
+  });
+}
+
 function model(value: string | undefined): string | undefined {
   return value === undefined || value === "default" ? undefined : value;
 }
@@ -43,9 +58,7 @@ async function ephemeralEnvironment(): Promise<{ env: Record<string, string>; cl
   const root = await mkdtemp(join(tmpdir(), "coosenpai-codex-"));
   const sourceHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
   await mkdir(root, { recursive: true });
-  await copyFile(join(sourceHome, "auth.json"), join(root, "auth.json")).catch((error: unknown) => {
-    throw new BridgeError("auth", "Codex のログイン情報を読み込めません", { cause: error });
-  });
+  await prepareAuth(root, sourceHome);
   return {
     env: { ...environment(), CODEX_HOME: root },
     cleanup: () => rm(root, { recursive: true, force: true }),
@@ -61,11 +74,15 @@ async function persistentEnvironment(): Promise<Record<string, string>> {
     const sourceHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
     const temporaryAuth = join(root, `.auth.json.${process.pid}.tmp`);
     await mkdir(root, { recursive: true, mode: 0o700 });
-    await copyFile(join(sourceHome, "auth.json"), temporaryAuth).catch((error: unknown) => {
-      throw new BridgeError("auth", "Codex のログイン情報を読み込めません", { cause: error });
-    });
-    await chmod(temporaryAuth, 0o600);
-    await rename(temporaryAuth, join(root, "auth.json"));
+    if (hasApiKey()) {
+      await rm(join(root, "auth.json"), { force: true });
+    } else {
+      await copyFile(join(sourceHome, "auth.json"), temporaryAuth).catch((error: unknown) => {
+        throw new BridgeError("auth", "Codex のログイン情報を読み込めません", { cause: error });
+      });
+      await chmod(temporaryAuth, 0o600);
+      await rename(temporaryAuth, join(root, "auth.json"));
+    }
     return { ...environment(), CODEX_HOME: root };
   })();
   return persistentEnvironmentPromise;
@@ -76,6 +93,7 @@ export class CodexAgent implements ProviderAgent {
   readonly capabilities = PROVIDER_CAPABILITIES.codex;
 
   async send(options: ProviderCallOptions): Promise<ProviderCallResult> {
+    if (options.isolateTools === true) throw new BridgeError("unsupported", "Codex の作業用 tool 隔離は未対応です");
     const ephemeral = options.session.mode === "ephemeral" ? await ephemeralEnvironment() : undefined;
     try {
       const sdkEnvironment = ephemeral?.env ?? await persistentEnvironment();

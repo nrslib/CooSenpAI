@@ -9,6 +9,13 @@ impl RuntimeActor {
         config_tx: &watch::Sender<Config>,
     ) -> StartResult {
         match command {
+            ControlCommand::CompanionObservations { response, .. }
+            | ControlCommand::ProcessCompanionMailbox { response, .. }
+                if self.observation_delivery == ObservationDelivery::CallerOnly =>
+            {
+                let _ = response.send(Ok(crate::companion::silent_response()));
+                StartResult::Completed
+            }
             ControlCommand::Observe {
                 frames,
                 cancellation,
@@ -23,12 +30,11 @@ impl RuntimeActor {
                 StartResult::Completed
             }
             ControlCommand::AudioObservation {
-                source,
-                text,
+                observation,
                 cancellation,
                 response,
             } => {
-                self.process_audio_observation(source, text, cancellation, response, snapshot_tx);
+                self.process_audio_observation(observation, cancellation, response, snapshot_tx);
                 StartResult::Completed
             }
             ControlCommand::CompanionObservations {

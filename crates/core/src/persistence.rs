@@ -23,13 +23,55 @@ pub enum PersistenceError {
     AlreadyLocked,
 }
 
+/// Serializes cancellation with publication, without holding the gate during file I/O preparation.
+#[derive(Debug, Clone)]
+pub struct PublicationGate {
+    cancellation: tokio_util::sync::CancellationToken,
+    publication: std::sync::Arc<std::sync::Mutex<()>>,
+}
+
+impl PublicationGate {
+    pub fn new(cancellation: tokio_util::sync::CancellationToken) -> Self {
+        Self {
+            cancellation,
+            publication: Default::default(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        let _guard = self.publication.lock().expect("publication gate");
+        self.cancellation.cancel();
+    }
+
+    fn publish(&self, operation: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+        let _guard = self.publication.lock().expect("publication gate");
+        if self.cancellation.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "画面記録が取り消されました",
+            ));
+        }
+        operation()
+    }
+}
+
 /// 同一ディレクトリの一時ファイルを sync してから置き換える。
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_bytes_cancellable(path, bytes, None)
+}
+
+pub fn atomic_write_bytes_cancellable(
+    path: &Path,
+    bytes: &[u8],
+    publication: Option<&PublicationGate>,
+) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "親ディレクトリがありません"))?;
     fs::create_dir_all(parent)?;
     set_private_directory_mode(parent)?;
+    let directory_lock = File::open(parent)?;
+    directory_lock.lock()?;
     let temp = parent.join(format!(
         ".{}.{}.tmp",
         path.file_name()
@@ -45,8 +87,11 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
         set_private_file_mode(&file)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&temp, path)?;
-        File::open(parent)?.sync_all()?;
+        match publication {
+            Some(gate) => gate.publish(|| fs::rename(&temp, path))?,
+            None => fs::rename(&temp, path)?,
+        }
+        directory_lock.sync_all()?;
         set_private_path_mode(path)?;
         Ok::<(), io::Error>(())
     })();
@@ -60,6 +105,13 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
 pub fn cleanup_stale_temps(directory: &Path) -> io::Result<()> {
     if !directory.exists() {
         return Ok(());
+    }
+    let directory_lock = File::open(directory)?;
+    match directory_lock.try_lock() {
+        Ok(()) => {}
+        // 保存途中のtempを異常終了の残骸と区別できないため、保存中の掃除は見送る。
+        Err(TryLockError::WouldBlock) => return Ok(()),
+        Err(TryLockError::Error(error)) => return Err(error),
     }
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
@@ -78,6 +130,16 @@ pub fn cleanup_stale_temps(directory: &Path) -> io::Result<()> {
 pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), PersistenceError> {
     let bytes = serde_json::to_vec_pretty(value)?;
     atomic_write_bytes(path, &bytes)?;
+    Ok(())
+}
+
+pub fn atomic_write_json_cancellable<T: Serialize>(
+    path: &Path,
+    value: &T,
+    publication: Option<&PublicationGate>,
+) -> Result<(), PersistenceError> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    atomic_write_bytes_cancellable(path, &bytes, publication)?;
     Ok(())
 }
 

@@ -1,10 +1,11 @@
 use crate::command_guard::{CommandSource, DesktopCommand};
 use crate::commands::{
-    authorize_window, config_commit_failure, dispatch_result, validate_id, CommandOrigin,
-    IpcResult, TauriIpcResult,
+    authorize_window, config_commit_failure_for_locale, dispatch_result, validate_id_for_locale,
+    CommandOrigin, IpcResult, TauriIpcResult,
 };
 use crate::state::DesktopState;
 use coosenpai_core::config::{Config, WatchAppConfig};
+use coosenpai_core::locale::{localize_error_message, text, Locale, TextKey};
 use coosenpai_core::ports::RunningApplication;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -24,11 +25,19 @@ pub struct WatchTargetEnabledPayload {
 }
 
 #[tauri::command]
-pub async fn running_apps_list(window: WebviewWindow) -> TauriIpcResult<Vec<RunningApplication>> {
+pub async fn running_apps_list(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<Vec<RunningApplication>> {
     authorize_window(&window, CommandOrigin::Main)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     Ok(match crate::platform::MacApplicationCapture::running() {
         Ok(applications) => IpcResult::success(applications),
-        Err(error) => IpcResult::failure(error.to_string()),
+        Err(error) => IpcResult::failure(localize_error_message(
+            &error.to_string(),
+            TextKey::RunningApplicationsListFailed,
+            locale,
+        )),
     })
 }
 
@@ -39,7 +48,10 @@ pub async fn watch_target_add(
     payload: WatchTargetPayload,
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.bundle_id)?;
+    validate_id_for_locale(
+        &payload.bundle_id,
+        Locale::from_config(&state.runtime_config().ui.language),
+    )?;
     let selected = crate::platform::MacApplicationCapture::running()
         .ok()
         .and_then(|applications| {
@@ -48,7 +60,10 @@ pub async fn watch_target_add(
                 .find(|application| application.bundle_id == payload.bundle_id)
         });
     let Some(selected) = selected else {
-        return Ok(IpcResult::failure("起動中のアプリが見つかりません"));
+        return Ok(IpcResult::failure(text(
+            TextKey::WatchTargetMissing,
+            Locale::from_config(&state.runtime_config().ui.language),
+        )));
     };
     let state = state.inner().clone();
     let handler_state = state.clone();
@@ -79,7 +94,10 @@ pub async fn watch_target_add(
                 .await
             {
                 Ok(outcome) => IpcResult::success_with_issues(outcome.config, outcome.issues),
-                Err(error) => config_commit_failure(error),
+                Err(error) => config_commit_failure_for_locale(
+                    error,
+                    Locale::from_config(&handler_state.runtime_config().ui.language),
+                ),
             }
         },
     )
@@ -93,7 +111,10 @@ pub async fn watch_target_remove(
     payload: WatchTargetPayload,
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.bundle_id)?;
+    validate_id_for_locale(
+        &payload.bundle_id,
+        Locale::from_config(&state.runtime_config().ui.language),
+    )?;
     let state = state.inner().clone();
     let handler_state = state.clone();
     Ok(dispatch_result(
@@ -112,7 +133,10 @@ pub async fn watch_target_remove(
                 .await
             {
                 Ok(outcome) => IpcResult::success_with_issues(outcome.config, outcome.issues),
-                Err(error) => config_commit_failure(error),
+                Err(error) => config_commit_failure_for_locale(
+                    error,
+                    Locale::from_config(&handler_state.runtime_config().ui.language),
+                ),
             }
         },
     )
@@ -126,7 +150,10 @@ pub async fn watch_target_set_enabled(
     payload: WatchTargetEnabledPayload,
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.bundle_id)?;
+    validate_id_for_locale(
+        &payload.bundle_id,
+        Locale::from_config(&state.runtime_config().ui.language),
+    )?;
     let state = state.inner().clone();
     let handler_state = state.clone();
     Ok(dispatch_result(
@@ -145,7 +172,11 @@ pub async fn watch_target_set_enabled(
                         return Err(coosenpai_core::config::ConfigError::Validation(vec![
                             coosenpai_core::config::ConfigValidationIssue {
                                 path: "watch.apps".to_owned(),
-                                message: "見ていいものが見つかりません".to_owned(),
+                                message: text(
+                                    TextKey::WatchTargetMissing,
+                                    Locale::from_config(&config.ui.language),
+                                )
+                                .to_owned(),
                             },
                         ]));
                     };
@@ -155,7 +186,10 @@ pub async fn watch_target_set_enabled(
                 .await
             {
                 Ok(outcome) => IpcResult::success_with_issues(outcome.config, outcome.issues),
-                Err(error) => config_commit_failure(error),
+                Err(error) => config_commit_failure_for_locale(
+                    error,
+                    Locale::from_config(&handler_state.runtime_config().ui.language),
+                ),
             }
         },
     )

@@ -1,12 +1,13 @@
 use super::commands::{
-    authorize_window, validate_id, CommandOrigin, IpcResult, MemoryCatalog, MemoryConfirmPayload,
-    MemoryConfirmUpdatePayload, MemoryConsolidatePayload, MemoryDeletePayload, MemoryRejectPayload,
-    MemoryRejectUpdatePayload, TauriIpcResult,
+    authorize_window, validate_id_for_locale, CommandOrigin, IpcResult, MemoryCatalog,
+    MemoryConfirmPayload, MemoryConfirmUpdatePayload, MemoryConsolidatePayload,
+    MemoryDeletePayload, MemoryRejectPayload, MemoryRejectUpdatePayload, TauriIpcResult,
 };
 use crate::command_guard::{CommandSource, DesktopCommand};
 use crate::commands::dispatch_result;
 use crate::state::DesktopState;
 use coosenpai_core::config::ConfigPaths;
+use coosenpai_core::locale::{localize_error_message, text, Locale, TextKey};
 use coosenpai_core::memory::{FactStore, MemoryStore};
 use std::sync::Arc;
 use tauri::{State, WebviewWindow};
@@ -17,7 +18,8 @@ pub async fn memory_list(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<MemoryCatalog> {
     authorize_window(&window, CommandOrigin::Main)?;
-    Ok(match load_memory_catalog(&state.paths) {
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    Ok(match load_memory_catalog(&state.paths, locale) {
         Ok(value) => IpcResult::success(value),
         Err(error) => IpcResult::failure(error),
     })
@@ -30,8 +32,9 @@ pub async fn memory_confirm(
     payload: MemoryConfirmPayload,
 ) -> TauriIpcResult<MemoryCatalog> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.candidate_id)?;
-    validate_id(&payload.confirmation_id)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    validate_id_for_locale(&payload.candidate_id, locale)?;
+    validate_id_for_locale(&payload.confirmation_id, locale)?;
     let state = state.inner().clone();
     let handler_state = state.clone();
     Ok(dispatch_result(
@@ -47,15 +50,19 @@ pub async fn memory_confirm(
                 &timestamp(),
                 &config.memory,
             ) {
-                return IpcResult::failure(error.to_string());
+                return IpcResult::failure(localize_error_message(
+                    &error.to_string(),
+                    TextKey::MemoryOperationFailed,
+                    locale,
+                ));
             }
             if let Err(error) = handler_state
                 .command_sync_resolved_fact_prompt(&context, &payload.candidate_id)
                 .await
             {
-                return IpcResult::failure(error.format_for_user());
+                return IpcResult::failure(error.format_for_locale(locale));
             }
-            memory_catalog_result(&handler_state.paths)
+            memory_catalog_result(&handler_state.paths, locale)
         },
     )
     .await)
@@ -68,7 +75,8 @@ pub async fn memory_reject(
     payload: MemoryRejectPayload,
 ) -> TauriIpcResult<MemoryCatalog> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.candidate_id)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    validate_id_for_locale(&payload.candidate_id, locale)?;
     let state = state.inner().clone();
     let handler_state = state.clone();
     Ok(dispatch_result(
@@ -79,15 +87,19 @@ pub async fn memory_reject(
             if let Err(error) =
                 FactStore::new(handler_state.paths.clone()).reject(&payload.candidate_id)
             {
-                return IpcResult::failure(error.to_string());
+                return IpcResult::failure(localize_error_message(
+                    &error.to_string(),
+                    TextKey::MemoryOperationFailed,
+                    locale,
+                ));
             }
             if let Err(error) = handler_state
                 .command_sync_resolved_fact_prompt(&context, &payload.candidate_id)
                 .await
             {
-                return IpcResult::failure(error.format_for_user());
+                return IpcResult::failure(error.format_for_locale(locale));
             }
-            memory_catalog_result(&handler_state.paths)
+            memory_catalog_result(&handler_state.paths, locale)
         },
     )
     .await)
@@ -100,8 +112,9 @@ pub async fn memory_confirm_update(
     payload: MemoryConfirmUpdatePayload,
 ) -> TauriIpcResult<MemoryCatalog> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.update_id)?;
-    validate_id(&payload.confirmation_id)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    validate_id_for_locale(&payload.update_id, locale)?;
+    validate_id_for_locale(&payload.confirmation_id, locale)?;
     let state = state.inner().clone();
     let handler_state = state.clone();
     Ok(dispatch_result(
@@ -116,9 +129,13 @@ pub async fn memory_confirm_update(
                 &timestamp(),
                 &config.memory,
             ) {
-                return IpcResult::failure(error.to_string());
+                return IpcResult::failure(localize_error_message(
+                    &error.to_string(),
+                    TextKey::MemoryOperationFailed,
+                    locale,
+                ));
             }
-            memory_catalog_result(&handler_state.paths)
+            memory_catalog_result(&handler_state.paths, locale)
         },
     )
     .await)
@@ -131,7 +148,8 @@ pub async fn memory_reject_update(
     payload: MemoryRejectUpdatePayload,
 ) -> TauriIpcResult<MemoryCatalog> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.update_id)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    validate_id_for_locale(&payload.update_id, locale)?;
     let state = state.inner().clone();
     let handler_state = state.clone();
     Ok(dispatch_result(
@@ -142,9 +160,13 @@ pub async fn memory_reject_update(
             if let Err(error) =
                 FactStore::new(handler_state.paths.clone()).reject_update(&payload.update_id)
             {
-                return IpcResult::failure(error.to_string());
+                return IpcResult::failure(localize_error_message(
+                    &error.to_string(),
+                    TextKey::MemoryOperationFailed,
+                    locale,
+                ));
             }
-            memory_catalog_result(&handler_state.paths)
+            memory_catalog_result(&handler_state.paths, locale)
         },
     )
     .await)
@@ -157,8 +179,9 @@ pub async fn memory_delete(
     payload: MemoryDeletePayload,
 ) -> TauriIpcResult<MemoryCatalog> {
     authorize_window(&window, CommandOrigin::Main)?;
-    validate_id(&payload.fact_id)?;
-    validate_id(&payload.confirmation_id)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    validate_id_for_locale(&payload.fact_id, locale)?;
+    validate_id_for_locale(&payload.confirmation_id, locale)?;
     let state = state.inner().clone();
     let handler_state = state.clone();
     Ok(dispatch_result(
@@ -171,9 +194,13 @@ pub async fn memory_delete(
                 &payload.confirmation_id,
                 &timestamp(),
             ) {
-                return IpcResult::failure(error.to_string());
+                return IpcResult::failure(localize_error_message(
+                    &error.to_string(),
+                    TextKey::MemoryOperationFailed,
+                    locale,
+                ));
             }
-            memory_catalog_result(&handler_state.paths)
+            memory_catalog_result(&handler_state.paths, locale)
         },
     )
     .await)
@@ -186,8 +213,9 @@ pub async fn memory_consolidate(
     payload: MemoryConsolidatePayload,
 ) -> TauriIpcResult<MemoryCatalog> {
     authorize_window(&window, CommandOrigin::Main)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     coosenpai_core::memory::memory_job_kind_for_period(&payload.period)
-        .map_err(|_| "period は YYYY-MM-DD または YYYY-Www で指定してください".to_owned())?;
+        .map_err(|_| text(TextKey::MemoryPeriodInvalid, locale).to_owned())?;
     let state = state.inner().clone();
     let handler_state = state.clone();
     Ok(dispatch_result(
@@ -200,39 +228,49 @@ pub async fn memory_consolidate(
                 .consolidate_memory(payload.period)
                 .await
             {
-                return IpcResult::failure(error.to_string());
+                return IpcResult::failure(localize_error_message(
+                    &error.to_string(),
+                    TextKey::MemoryOperationFailed,
+                    locale,
+                ));
             }
-            memory_catalog_result(&handler_state.paths)
+            memory_catalog_result(&handler_state.paths, locale)
         },
     )
     .await)
 }
 
-fn memory_catalog_result(paths: &ConfigPaths) -> IpcResult<MemoryCatalog> {
-    match load_memory_catalog(paths) {
+fn memory_catalog_result(paths: &ConfigPaths, locale: Locale) -> IpcResult<MemoryCatalog> {
+    match load_memory_catalog(paths, locale) {
         Ok(value) => IpcResult::success(value),
         Err(error) => IpcResult::failure(error),
     }
 }
 
-fn load_memory_catalog(paths: &ConfigPaths) -> Result<MemoryCatalog, String> {
+fn load_memory_catalog(paths: &ConfigPaths, locale: Locale) -> Result<MemoryCatalog, String> {
     let facts = FactStore::new(paths.clone());
     let store = MemoryStore::new(paths.clone());
     let mut active = facts
         .active_facts()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| {
+            localize_error_message(&error.to_string(), TextKey::MemoryOperationFailed, locale)
+        })?
         .into_values()
         .collect::<Vec<_>>();
     active.sort_by(|left, right| right.confirmed_at.cmp(&left.confirmed_at));
-    let candidates = facts.load_candidates().map_err(|error| error.to_string())?;
+    let candidates = facts.load_candidates().map_err(|error| {
+        localize_error_message(&error.to_string(), TextKey::MemoryOperationFailed, locale)
+    })?;
     Ok(MemoryCatalog {
         facts: active,
         candidates: candidates.candidates,
         updates: candidates.updates,
-        daily: store.daily_summaries().map_err(|error| error.to_string())?,
-        weekly: store
-            .weekly_summaries()
-            .map_err(|error| error.to_string())?,
+        daily: store.daily_summaries().map_err(|error| {
+            localize_error_message(&error.to_string(), TextKey::MemoryOperationFailed, locale)
+        })?,
+        weekly: store.weekly_summaries().map_err(|error| {
+            localize_error_message(&error.to_string(), TextKey::MemoryOperationFailed, locale)
+        })?,
     })
 }
 

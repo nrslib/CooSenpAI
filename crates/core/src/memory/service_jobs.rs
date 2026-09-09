@@ -133,6 +133,7 @@ impl MemoryService {
                 images: Vec::new(),
                 tools_disabled: true,
                 output_schema: Some(memory_summary_schema()),
+                output_validation_schema: None,
                 session: SessionRequest::Ephemeral,
                 model,
                 effort,

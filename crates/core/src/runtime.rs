@@ -2,6 +2,7 @@ use crate::companion::{
     AttachmentOcrFailureKind, CompanionAgent, CompanionError, CompanionResponse,
 };
 use crate::config::{validate_config, Config};
+use crate::locale::{text, Locale, TextKey};
 use crate::memory::{MemoryService, MemoryStatus};
 use crate::observer::{ObservationFrameInput, ObserverAgent, ObserverError};
 use crate::ports::RuntimeLogger;
@@ -37,8 +38,9 @@ use operation_state::{
 #[path = "runtime_types.rs"]
 mod types;
 pub use types::{
-    RuntimeAgents, RuntimeAttachmentOcrFailure, RuntimeError, RuntimeErrorKind, RuntimeFactory,
-    RuntimeLastError, RuntimePhase, RuntimeSnapshot,
+    CompanionDecision, ObservationDelivery, RuntimeAgents, RuntimeAttachmentOcrFailure,
+    RuntimeError, RuntimeErrorKind, RuntimeFactory, RuntimeLastError, RuntimePhase,
+    RuntimeSnapshot, UserInterruption,
 };
 #[path = "runtime_handle_types.rs"]
 mod handle_types;
@@ -47,6 +49,9 @@ pub use handle_types::{ProviderStartGate, RuntimeHandle};
 #[path = "runtime_stream.rs"]
 mod stream;
 use stream::{ProviderStreamUpdate, RuntimeProviderEvents};
+#[cfg(test)]
+#[path = "runtime_test_barrier.rs"]
+pub(crate) mod test_barrier;
 #[path = "runtime_thought.rs"]
 mod thought;
 #[path = "runtime_user_handle.rs"]
@@ -59,6 +64,15 @@ const MAX_QUEUED_USER_COMMANDS_PER_TURN: usize = COMMAND_CAPACITY;
 const MAX_QUEUED_CONTROL_COMMANDS_PER_TURN: usize = 8;
 
 impl RuntimeHandle {
+    pub async fn reset_companion_emotions(&self) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        let (response, result) = oneshot::channel();
+        self.priority_tx
+            .send(PriorityCommand::ResetCompanionEmotions { response })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
     pub async fn update_config(&self, config: Config) -> Result<u64, RuntimeError> {
         self.ensure_open()?;
         validate_config(&config).map_err(RuntimeError::from)?;
@@ -179,6 +193,7 @@ pub struct RuntimeActor {
     config: Config,
     revision: u64,
     pending_observations: Vec<ObservationRecord>,
+    observation_delivery: ObservationDelivery,
     phase: RuntimePhase,
     factory: Option<std::sync::Arc<dyn RuntimeFactory>>,
     logger: Option<std::sync::Arc<dyn RuntimeLogger>>,
@@ -197,12 +212,17 @@ pub struct RuntimeActor {
     companion_display_name: String,
     runtime_user_queue:
         std::sync::Arc<std::sync::Mutex<VecDeque<crate::companion_storage::PendingUserMessage>>>,
+    hearing_context: std::sync::Arc<std::sync::Mutex<crate::hearing_context::HearingContextBuffer>>,
     user_preparer:
         std::sync::Arc<std::sync::RwLock<Option<crate::companion::user::UserMessagePreparer>>>,
     active_user_message_id: Option<String>,
     cancelled_user_message_ids: Vec<String>,
     companion_draft: Option<String>,
     latest_companion_thought: Option<String>,
+    latest_companion_decision: Option<CompanionDecision>,
+    latest_user_interruption: Option<UserInterruption>,
+    companion_decision_sequence: u64,
+    latest_companion_thought_generation: Option<u64>,
     provider_usage: ProviderUsage,
     companion_recovery_pending: bool,
     companion_recovery_at: Option<Instant>,
@@ -313,6 +333,7 @@ impl RuntimeActor {
             agents.observer.take(),
             agents.companion.take(),
             agents.memory.take(),
+            agents.observation_delivery,
             Some(factory),
             Some(logger),
             cancellation,
@@ -334,6 +355,7 @@ impl RuntimeActor {
             observer,
             companion,
             None,
+            ObservationDelivery::Companion,
             factory,
             logger,
             cancellation,
@@ -345,8 +367,9 @@ impl RuntimeActor {
     fn spawn_internal_with_memory(
         config: Config,
         observer: Option<ObserverAgent>,
-        companion: Option<CompanionAgent>,
+        mut companion: Option<CompanionAgent>,
         memory: Option<MemoryService>,
+        observation_delivery: ObservationDelivery,
         factory: Option<std::sync::Arc<dyn RuntimeFactory>>,
         logger: Option<std::sync::Arc<dyn RuntimeLogger>>,
         cancellation: CancellationToken,
@@ -357,6 +380,10 @@ impl RuntimeActor {
             |agent| agent.display_name().to_owned(),
         );
         let runtime_user_queue = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let hearing_context = std::sync::Arc::default();
+        if let Some(companion) = companion.as_mut() {
+            companion.set_hearing_context(std::sync::Arc::clone(&hearing_context));
+        }
         let user_preparer =
             std::sync::Arc::new(std::sync::RwLock::new(companion.as_ref().map(|agent| {
                 agent.user_message_preparer_with_runtime_queue(runtime_user_queue.clone())
@@ -366,6 +393,7 @@ impl RuntimeActor {
         let (user_tx, mut user_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
         let (snapshot_tx, snapshot_rx) = watch::channel(RuntimeSnapshot {
+            companion_emotions: crate::emotion::EmotionState::default(),
             revision: 0,
             phase: RuntimePhase::Idle,
             pending_observations: 0,
@@ -381,9 +409,13 @@ impl RuntimeActor {
                 .as_ref()
                 .is_some_and(CompanionAgent::proactive_limit_reached),
             active_user_message_id: None,
+            user_work_pending: false,
             cancelled_user_message_ids: Vec::new(),
             companion_draft: None,
             latest_companion_thought: None,
+            latest_companion_decision: None,
+            latest_user_interruption: None,
+            latest_companion_thought_generation: None,
             provider_usage: ProviderUsage::default(),
         });
         let (config_tx, config_rx) = watch::channel(config.clone());
@@ -416,6 +448,7 @@ impl RuntimeActor {
                 config,
                 revision: 0,
                 pending_observations: Vec::new(),
+                observation_delivery,
                 phase: RuntimePhase::Idle,
                 factory,
                 logger,
@@ -433,11 +466,16 @@ impl RuntimeActor {
                 turn_commit_lock: actor_turn_commit_lock,
                 companion_display_name,
                 runtime_user_queue,
+                hearing_context,
                 user_preparer: actor_user_preparer,
                 active_user_message_id: None,
                 cancelled_user_message_ids: Vec::new(),
                 companion_draft: None,
                 latest_companion_thought: None,
+                latest_companion_decision: None,
+                latest_user_interruption: None,
+                companion_decision_sequence: 0,
+                latest_companion_thought_generation: None,
                 provider_usage: ProviderUsage::default(),
                 companion_recovery_pending: false,
                 companion_recovery_at: None,
@@ -469,6 +507,7 @@ impl RuntimeActor {
                         command,
                         &mut volatile_users,
                         &mut running_coo,
+                        &mut running_observer,
                         &snapshot_tx,
                     );
                 }
@@ -481,16 +520,23 @@ impl RuntimeActor {
                         && actor.user_cancel_recovery.is_none()
                         && actor.pending_user_can_start()
                     {
+                        if let Some(operation) = running_observer.as_mut() {
+                            actor.preempt_operation_for_user(operation);
+                        }
                         match actor.start_pending_user_operation(
                             &mut volatile_users,
                             &snapshot_tx,
-                            running_observer.is_some(),
+                            running_observer
+                                .as_ref()
+                                .is_some_and(|operation| !operation.was_preempted_for_user()),
                         ) {
                             StartResult::Running(operation) => {
                                 running_coo = Some(*operation);
                             }
                             StartResult::Completed => {
-                                actor.user_work_pending = actor.queued_user_work(&volatile_users)
+                                actor.user_work_pending = actor.queued_user_work(&volatile_users);
+                                actor.revision = actor.revision.saturating_add(1);
+                                actor.publish(&snapshot_tx);
                             }
                         }
                     }
@@ -528,6 +574,7 @@ impl RuntimeActor {
                     };
                     let observer_command = control_uses_observer(&command);
                     if matches!(&command, ControlCommand::CompanionObservations { .. })
+                        && actor.observation_delivery == ObservationDelivery::Companion
                         && actor.user_work_is_pending(&volatile_users)
                     {
                         if let ControlCommand::CompanionObservations {
@@ -630,6 +677,7 @@ impl RuntimeActor {
                                 command,
                                 &mut volatile_users,
                                 &mut running_coo,
+                                &mut running_observer,
                                 &snapshot_tx,
                             );
                         }
@@ -651,8 +699,21 @@ impl RuntimeActor {
                         actor.publish(&snapshot_tx);
                     }
                     Some(command) = priority_rx.recv() => {
+                        if let Err(error) = actor.validate_user_target(&command) {
+                            match command {
+                                PriorityCommand::CancelUser { response, .. } => { let _ = response.send(Err(error)); }
+                                PriorityCommand::RetryUser { response, .. } => { let _ = response.send(Err(error)); }
+                                _ => unreachable!("only targeted user commands are validated"),
+                            }
+                            continue;
+                        }
                         match command {
-                            PriorityCommand::CancelUser { response } => {
+                            PriorityCommand::ResetCompanionEmotions { response } => {
+                                let result = actor.reset_companion_emotions();
+                                actor.publish(&snapshot_tx);
+                                let _ = response.send(result);
+                            }
+                            PriorityCommand::CancelUser { response, .. } => {
                                 let input_id = actor
                                     .active_user_message_id
                                     .clone()
@@ -691,6 +752,10 @@ impl RuntimeActor {
                                 }
                                 let _ = response.send(result);
                                 actor.publish(&snapshot_tx);
+                            }
+                            PriorityCommand::UpdateWorkConfig { work, response } => {
+                                let revision = actor.update_work_config(work, &snapshot_tx, &config_tx);
+                                let _ = response.send(Ok(revision));
                             }
                             PriorityCommand::UpdateWatchEnabled { enabled, response } => {
                                 let revision = actor.update_watch_enabled(
@@ -818,6 +883,7 @@ impl RuntimeActor {
                             command,
                             &mut volatile_users,
                             &mut running_coo,
+                            &mut running_observer,
                             &snapshot_tx,
                         );
                     }
@@ -858,17 +924,26 @@ impl RuntimeActor {
         config_tx: &watch::Sender<Config>,
     ) -> bool {
         match command {
-            PriorityCommand::CancelUser { response } => {
+            PriorityCommand::ResetCompanionEmotions { response } => {
+                let result = self.reset_companion_emotions();
+                self.publish(snapshot_tx);
+                let _ = response.send(result);
+            }
+            PriorityCommand::CancelUser { response, .. } => {
                 let _ = response.send(self.cancel_active_user());
                 self.publish(snapshot_tx);
             }
-            PriorityCommand::RetryUser { response } => {
-                let result = self.retry_user();
+            PriorityCommand::RetryUser { input_id, response } => {
+                let result = self.retry_user(input_id.as_deref());
                 if result.is_ok() {
                     self.user_work_pending = true;
                 }
                 let _ = response.send(result);
                 self.publish(snapshot_tx);
+            }
+            PriorityCommand::UpdateWorkConfig { work, response } => {
+                let revision = self.update_work_config(work, snapshot_tx, config_tx);
+                let _ = response.send(Ok(revision));
             }
             PriorityCommand::UpdateWatchEnabled { enabled, response } => {
                 let revision = self.update_watch_enabled(enabled, snapshot_tx, config_tx);
@@ -878,8 +953,11 @@ impl RuntimeActor {
                 self.advance_watch_scope_generation(&config);
                 let result = if interrupted_operation && self.factory.is_none() {
                     Err(RuntimeError::Factory(
-                        "実行中の操作を設定変更後に再構築する RuntimeFactory がありません"
-                            .to_owned(),
+                        text(
+                            TextKey::RuntimeFactoryRebuildUnavailable,
+                            Locale::from_config(&self.config.ui.language),
+                        )
+                        .to_owned(),
                     ))
                 } else {
                     self.update_config(*config).await
@@ -887,7 +965,10 @@ impl RuntimeActor {
                 if result.is_ok() {
                     let _ = config_tx.send(self.config.clone());
                 } else if let Err(error) = &result {
-                    self.enter_degraded(config_update_last_error(error));
+                    self.enter_degraded(config_update_last_error(
+                        error,
+                        Locale::from_config(&self.config.ui.language),
+                    ));
                 }
                 let _ = response.send(result);
                 self.publish(snapshot_tx);

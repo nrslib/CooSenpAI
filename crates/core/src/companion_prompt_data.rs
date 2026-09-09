@@ -27,6 +27,7 @@ pub(super) fn build_observation_prompt_data(
     observation_log_directory: Option<String>,
 ) -> Result<CompanionPromptData, CompanionError> {
     Ok(CompanionPromptData {
+        companion_emotions: None,
         companion_name: companion_name.to_owned(),
         observations: selected
             .iter()

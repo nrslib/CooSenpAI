@@ -3,9 +3,9 @@ use super::user::common_prepared_response;
 use super::*;
 use crate::companion_storage::{
     ActiveTurnCommit, ObservationAttempt, ObservationConsumption, PendingDelivery, PendingInput,
-    TurnCommitKind,
+    PendingObservation, TurnCommitKind,
 };
-use crate::prompts::ordered_json_string;
+use crate::prompts::{companion_system_prompt_for_locale, ordered_json_string};
 use crate::state::ConversationRole;
 
 impl CompanionAgent {
@@ -58,7 +58,13 @@ impl CompanionAgent {
     ) -> Result<Vec<ObservationRecord>, CompanionError> {
         let mut observations = self.pending_observations.clone();
         if let Some(storage) = &self.storage {
-            observations.extend(storage.load_cursor()?.pending);
+            observations.extend(
+                storage
+                    .load_cursor()?
+                    .pending
+                    .into_iter()
+                    .map(|pending| pending.observation),
+            );
         }
         let mut seen = HashSet::new();
         observations.retain(|observation| seen.insert(observation.id().to_owned()));
@@ -113,16 +119,25 @@ impl CompanionAgent {
         if self.storage_loaded {
             return Ok(());
         }
-        let Some(storage) = self.storage.clone() else {
+        let Some(mut storage) = self.storage.clone() else {
+            self.emotions
+                .configure(None, self.config.emotions_enabled)?;
             self.storage_loaded = true;
             return Ok(());
         };
+        storage.pin_conversation_generation()?;
+        self.emotions
+            .configure(Some(&storage), self.config.emotions_enabled)?;
+        self.storage = Some(storage.clone());
         if prune_conversation {
             storage.prune_attachments()?;
         }
         self.conversation = storage.load_conversation()?;
         if let Some(summary) = storage.load_summary()? {
             self.previous_summary = Some(summary);
+        }
+        if self.session.is_none() {
+            self.session = storage.load_session()?;
         }
         self.refresh_usage(true)?;
         if self.delivery_ownership == DeliveryOwnership::None {
@@ -142,7 +157,11 @@ impl CompanionAgent {
             .into_iter()
             .map(|attempt| (attempt.observation_id, attempt.attempts))
             .collect();
-        self.pending_observations = cursor.pending.clone();
+        self.pending_observations = cursor
+            .pending
+            .into_iter()
+            .map(|pending| pending.observation)
+            .collect();
         self.pending_user_messages = cursor
             .pending_inputs
             .into_iter()
@@ -342,6 +361,12 @@ impl CompanionAgent {
         message_kind: &str,
     ) -> Result<Option<PendingDelivery>, CompanionError> {
         let delivery = PendingDelivery {
+            conversation_generation: self
+                .storage
+                .as_ref()
+                .map(CompanionStorage::conversation_generation)
+                .transpose()?
+                .unwrap_or(0),
             remark_id: entry.id.clone(),
             created_at: entry.created_at.clone(),
             proactive_date: local_date_at(self.clock.now()),
@@ -571,6 +596,7 @@ impl CompanionAgent {
         let Some(storage) = &self.storage else {
             return Ok(());
         };
+        let conversation_generation = storage.conversation_generation()?;
         storage.update_cursor(|cursor| {
             for observation in observations {
                 if self.completed_observation_ids.contains(observation.id())
@@ -582,7 +608,10 @@ impl CompanionAgent {
                 {
                     continue;
                 }
-                cursor.pending.push(observation.clone());
+                cursor.pending.push(PendingObservation::new(
+                    conversation_generation,
+                    observation.clone(),
+                ));
             }
             if cursor.pending.len() > MAX_PENDING_OBSERVATIONS {
                 cursor
@@ -702,6 +731,7 @@ impl CompanionAgent {
                 .drain(..self.pending_observations.len() - MAX_PENDING_OBSERVATIONS);
         }
         if let Some(storage) = &self.storage {
+            let conversation_generation = storage.conversation_generation()?;
             let failed_for_write = failed.clone();
             storage.update_cursor(|cursor| {
                 for (id, attempts) in &next_attempts {
@@ -727,6 +757,20 @@ impl CompanionAgent {
                 cursor
                     .pending
                     .retain(|observation| !failed.contains(observation.id()));
+                for observation in observations {
+                    if failed.contains(observation.id())
+                        || cursor
+                            .pending
+                            .iter()
+                            .any(|pending| pending.id() == observation.id())
+                    {
+                        continue;
+                    }
+                    cursor.pending.push(PendingObservation::new(
+                        conversation_generation,
+                        observation.clone(),
+                    ));
+                }
                 cursor.failed.extend(failed_for_write.iter().cloned());
                 if cursor.failed.len() > 500 {
                     cursor.failed.drain(..cursor.failed.len() - 500);
@@ -826,7 +870,12 @@ impl CompanionAgent {
         let assertiveness = self
             .temporary_assertiveness
             .effective(&self.config.assertiveness, self.clock.now());
-        companion_system_prompt(&assertiveness, &self.display_name, &self.persona)
+        companion_system_prompt_for_locale(
+            &assertiveness,
+            &self.display_name,
+            &self.persona,
+            self.locale,
+        )
     }
 
     pub(super) fn accept_session(
@@ -858,7 +907,12 @@ impl CompanionAgent {
                 self.session = Some(session);
             }
             (SessionRequest::Resume(_), None) => {}
-            (SessionRequest::Ephemeral, _) => {}
+            (SessionRequest::Ephemeral | SessionRequest::Isolated, _) => {}
+        }
+        if !matches!(request, SessionRequest::Ephemeral) {
+            if let Some(storage) = &self.storage {
+                storage.save_session(self.session.as_ref())?;
+            }
         }
         self.needs_session_context = context_compacted;
         Ok(())
@@ -915,9 +969,21 @@ impl CompanionAgent {
         self.session = None;
         self.session_calls = 0;
         self.needs_session_context = true;
+        if let Some(storage) = &self.storage {
+            if let Err(error) = storage.save_session(None) {
+                if let Some(logger) = &self.logger {
+                    let _ = logger.write(
+                        "WARN",
+                        &format!("会話 session の破棄を保存できませんでした: {error}"),
+                    );
+                }
+            }
+        }
     }
 
-    pub fn update_config(&mut self, config: CompanionConfig) {
+    pub fn update_config(&mut self, config: CompanionConfig) -> Result<(), CompanionError> {
+        self.emotions
+            .configure(self.storage.as_ref(), config.emotions_enabled)?;
         if self.config.provider != config.provider
             || self.config.model != config.model
             || self.config.executable != config.executable
@@ -926,6 +992,7 @@ impl CompanionAgent {
         }
         self.display_name = config.display_name.clone();
         self.config = config;
+        Ok(())
     }
 
     pub fn session(&self) -> Option<ProviderSession> {

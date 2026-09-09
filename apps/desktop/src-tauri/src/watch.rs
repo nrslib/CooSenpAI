@@ -1,25 +1,25 @@
 use crate::platform;
-use crate::snapshot::ObserverViewPhase;
 use crate::state::DesktopState;
+use crate::watch_presenter::WatchResult;
 use anyhow::{Context, Result};
+use coosenpai_core::capture_mask::{capture_with_window_mask, CaptureWithMaskError};
 use coosenpai_core::config::Config;
 use coosenpai_core::debug::{ocr_preview, DebugGateRecord, DebugStore};
 use coosenpai_core::frame_buffer::FrameBuffer;
-use coosenpai_core::image_processing::{own_window_exclusions, png_dimensions, process_png};
 use coosenpai_core::observer::ObservationFrameInput;
 use coosenpai_core::onboarding::TutorialStep;
 use coosenpai_core::ports::{
-    ActivityPort, HelperResolverPort, OcrPort, OwnWindowBounds, OwnWindowBoundsPort, PortError,
-    RuntimeLogger, ScreenCapturePort,
+    ActivityPort, HelperResolverPort, PortError, RuntimeLogger, ScreenCapturePort,
 };
+use coosenpai_core::screen_frames::prepare_screen_frames;
 use coosenpai_core::state::{ActivityTriggerKind, PendingFrameContext, StagnationObservation};
 use coosenpai_core::watch_coordinator::{
     effective_max_interval_ms, evaluate_activity_poll, frame_target_is_enabled,
-    is_self_application, normalize_ocr_blocks, retain_enabled_frames, watch_send_due,
-    StagnationFingerprint, StagnationReportIntent, StagnationTracker, TriggerCoordinator,
-    WatchStagnationStore,
+    is_self_application, retain_enabled_frames, watch_send_due, StagnationFingerprint,
+    StagnationReportIntent, StagnationTracker, TriggerCoordinator, WatchStagnationStore,
 };
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -33,48 +33,83 @@ mod watch_heartbeat;
 use watch_heartbeat::{heartbeat_if_due, mark_meaningful_change};
 #[path = "watch_recovery.rs"]
 mod watch_recovery;
-use watch_recovery::{record_watch_failure, WatchRecovery, WatchRecoveryDecision};
+pub(crate) use watch_recovery::WatchErrorPublisher;
+use watch_recovery::{
+    record_watch_exit, record_watch_failure, WatchRecovery, WatchRecoveryDecision, WatchSessionKind,
+};
+#[path = "watch_worker.rs"]
+mod watch_worker;
+
+#[async_trait::async_trait]
+pub(crate) trait WatchWorker: Send {
+    async fn poll(&mut self) -> Result<ControlFlow<()>>;
+}
+
+#[async_trait::async_trait]
+pub(crate) trait WatchHost: WatchErrorPublisher + 'static {
+    type Worker: WatchWorker;
+
+    fn logger(&self) -> &dyn RuntimeLogger;
+    fn cancellation(&self) -> &CancellationToken;
+    fn frame_buffer(&self) -> FrameBuffer;
+    async fn create_worker(
+        self: Arc<Self>,
+        generation: u64,
+        cancellation: CancellationToken,
+        publication: coosenpai_core::persistence::PublicationGate,
+    ) -> Result<Self::Worker>;
+    async fn clear_watch_error(&self, generation: u64);
+    async fn watch_finished(&self, generation: u64, failed: bool);
+}
 
 pub struct WatchTask {
-    cancellation: CancellationToken,
+    publication: coosenpai_core::persistence::PublicationGate,
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl WatchTask {
-    pub async fn stop(self) {
-        self.cancellation.cancel();
+    pub fn cancel(&self) {
+        self.publication.cancel();
+    }
+
+    pub async fn wait(self) {
         let _ = self.task.await;
     }
 
+    // 停止を待っても完了しない worker を再現する
 }
 
-pub fn spawn(state: Arc<DesktopState>, generation: u64) -> Result<WatchTask> {
-    let cancellation = state.cancellation.child_token();
-    let frame_buffer = FrameBuffer::new(state.paths.frame_buffer.clone());
+pub(crate) fn spawn<H: WatchHost>(
+    state: Arc<H>,
+    generation: u64,
+    tutorial_active: bool,
+) -> Result<WatchTask> {
+    let session_kind = WatchSessionKind::for_tutorial(tutorial_active);
+    let cancellation = state.cancellation().child_token();
+    let frame_buffer = state.frame_buffer();
+    let publication = coosenpai_core::persistence::PublicationGate::new(cancellation.clone());
+    let task_publication = publication.clone();
     let task_cancellation = cancellation.clone();
     let worker = tauri::async_runtime::spawn({
         let state = state.clone();
-        async move { run(state, task_cancellation).await }
+        async move {
+            run(
+                state,
+                generation,
+                task_cancellation,
+                task_publication,
+                session_kind,
+            )
+            .await
+        }
     });
     let task =
         tauri::async_runtime::spawn(supervise_watch_worker(worker, move |result| async move {
-            let failed = result.is_err();
-            if let Err(error) = result {
-                let detail = watch_error_detail(&error);
-                let _ = state.logger.write(
-                    "ERROR",
-                    &format!("見守りに失敗しました: error-type=watch error={detail}"),
-                );
-                state
-                    .publish(|snapshot| {
-                        snapshot.observer.record_error(detail);
-                    })
-                    .await;
-            }
+            let failed = record_watch_exit(&state, generation, result, session_kind).await;
             state.watch_finished(generation, failed).await;
             let _ = frame_buffer.cleanup_expired(chrono::Utc::now());
         }));
-    Ok(WatchTask { cancellation, task })
+    Ok(WatchTask { publication, task })
 }
 
 async fn await_watch_worker(worker: tauri::async_runtime::JoinHandle<Result<()>>) -> Result<()> {
@@ -95,6 +130,7 @@ async fn supervise_watch_worker<F, Fut>(
 }
 
 pub(super) struct WatchMemory {
+    publication: coosenpai_core::persistence::PublicationGate,
     frames: Vec<ObservationFrameInput>,
     directories: Vec<tempfile::TempDir>,
     last_hash: Option<String>,
@@ -114,236 +150,38 @@ fn watch_error_detail(error: &anyhow::Error) -> String {
     format!("{error:#}")
 }
 
-async fn run(state: Arc<DesktopState>, cancellation: CancellationToken) -> Result<()> {
-    let screen_capture = platform::MacScreenCapture;
-    let activity = platform::MacActivity;
-    let initial_config = state.runtime_config();
-    let mut helper = resolve_desktop_ocr_helper(&state, &initial_config);
-    state.logger.write(
-        "INFO",
-        if helper.is_some() {
-            "Vision OCR: subprocess-helper"
-        } else {
-            "Vision OCR: disabled-no-helper"
-        },
-    )?;
-    let ocr = platform::MacOcr::new(helper.clone());
-    let mut ocr_enabled = initial_config.watch.ocr_gate.enabled && helper.is_some();
-    state
-        .publish(|snapshot| snapshot.observer.ocr_gate_enabled = ocr_enabled)
-        .await;
-    let display = platform::read_display_geometry().await;
-    let semaphore = Arc::new(Semaphore::new(2));
-    let now = Instant::now();
-    let now_utc = chrono::Utc::now();
-    let initial = activity.read_activity().await.ok();
-    let stagnation_store = WatchStagnationStore::new(state.paths.watch_stagnation.clone());
-    let stagnation_snapshot = match stagnation_store.load(now_utc) {
-        Ok(value) => value,
-        Err(error) => {
-            let _ = state.logger.write(
-                "WARN",
-                &format!("停滞状態を読み込めませんでした: error-type=persistence ({error})"),
-            );
-            coosenpai_core::watch_coordinator::StagnationSnapshot {
-                last_meaningful_change_at: now_utc,
-                reported: false,
-                pending_report: None,
-                fingerprints: Default::default(),
-            }
-        }
-    };
-    let mut trigger_coordinator =
-        TriggerCoordinator::new(&state.runtime_config(), initial.as_ref());
-    let mut application_watch = ApplicationWatchSet::new(
-        &initial_config,
-        initial.as_ref(),
-        now,
-        &stagnation_snapshot.fingerprints,
-    );
-    let application_capture = platform::MacApplicationCapture;
-    let mut on_battery =
-        state.runtime_config().watch.battery.enabled && platform::is_on_battery().await;
-    let initial_interval = effective_max_interval_ms(&state.runtime_config(), on_battery);
-    let mut memory = WatchMemory {
-        frames: Vec::new(),
-        directories: Vec::new(),
-        last_hash: stagnation_snapshot
-            .fingerprints
-            .get("fullscreen")
-            .map(|value| value.image_hash.clone()),
-        last_ocr: stagnation_snapshot
-            .fingerprints
-            .get("fullscreen")
-            .and_then(|value| value.ocr_signature.clone()),
-        last_capture: now
-            .checked_sub(Duration::from_millis(initial_interval))
-            .unwrap_or(now),
-        last_observation: now,
-        window_start: now,
-        last_accepted: None,
-        front_app: initial.as_ref().and_then(|value| value.front_app.clone()),
-        stagnation: StagnationTracker::resume(
-            now,
-            stagnation_snapshot.elapsed(now_utc),
-            initial.as_ref(),
-            stagnation_snapshot.reported,
-        ),
-        stagnation_store,
-        pending_stagnation_report: stagnation_snapshot.pending_report,
-        last_meaningful_change_at: stagnation_snapshot.last_meaningful_change_at,
-    };
-    let mut tutorial_initial_capture_pending =
-        state.tutorial_current_step().await == Some(TutorialStep::Watch);
-    let mut recovery = WatchRecovery::default();
+async fn run<H: WatchHost>(
+    state: Arc<H>,
+    generation: u64,
+    cancellation: CancellationToken,
+    publication: coosenpai_core::persistence::PublicationGate,
+    session_kind: WatchSessionKind,
+) -> Result<()> {
+    let mut worker = state
+        .clone()
+        .create_worker(generation, cancellation.clone(), publication)
+        .await?;
+    let mut recovery = WatchRecovery::new(session_kind);
     loop {
-        let config = state.runtime_config();
-        let next_helper = resolve_desktop_ocr_helper(&state, &config);
-        if next_helper != helper {
-            if let Err(error) = ocr.set_helper(next_helper.clone()) {
+        match worker.poll().await {
+            Ok(ControlFlow::Break(())) => break,
+            Ok(ControlFlow::Continue(())) => {
+                recovery.reset();
+                state.clear_watch_error(generation).await;
+            }
+            Err(error) => {
                 if cancellation.is_cancelled() {
                     break;
                 }
-                let error = anyhow::Error::new(error);
-                match record_watch_failure(&state, &mut recovery, &error, &cancellation).await {
-                    WatchRecoveryDecision::Retry => {}
+                match record_watch_failure(&state, &mut recovery, &error, generation, &cancellation)
+                    .await
+                {
+                    WatchRecoveryDecision::Retry | WatchRecoveryDecision::ConfigUpdateCancelled => {
+                    }
                     WatchRecoveryDecision::Stop => return Err(error),
                     WatchRecoveryDecision::Cancelled => break,
-                    WatchRecoveryDecision::ConfigUpdateCancelled => {}
                 }
-                continue;
             }
-            helper = next_helper;
-        }
-        let next_ocr_enabled = config.watch.ocr_gate.enabled && helper.is_some();
-        if next_ocr_enabled != ocr_enabled {
-            ocr_enabled = next_ocr_enabled;
-            state
-                .publish(|snapshot| snapshot.observer.ocr_gate_enabled = ocr_enabled)
-                .await;
-        }
-        let poll_delay = if tutorial_initial_capture_pending {
-            Duration::ZERO
-        } else {
-            Duration::from_millis(config.watch.triggers.poll_ms)
-        };
-        let iteration = tokio::select! {
-            _ = cancellation.cancelled() => break,
-            _ = tokio::time::sleep(poll_delay) => (async {
-                if config.watch.battery.enabled {
-                    on_battery = platform::is_on_battery().await;
-                }
-                let activity_snapshot = activity.read_activity().await.ok();
-                let fresh_activity = memory.stagnation.observe_activity(
-                    activity_snapshot.as_ref(),
-                    config.watch.triggers.active_threshold_ms,
-                );
-                if fresh_activity && memory.stagnation.is_reported() {
-                    let reacted_at = chrono::Utc::now();
-                    match memory.stagnation_store.record_reaction(reacted_at) {
-                        Ok(true) => {
-                            memory.stagnation.mark_meaningful_change(Instant::now());
-                            memory.pending_stagnation_report = None;
-                            memory.last_meaningful_change_at = reacted_at;
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            let _ = state.logger.write(
-                                "WARN",
-                                &format!("停滞エピソードの操作反応を保存できませんでした: error-type=persistence ({error})"),
-                            );
-                        }
-                    }
-                }
-                let effective_interval = effective_max_interval_ms(&config, on_battery);
-                let tutorial_initial_capture = tutorial_initial_capture_pending
-                    && state.tutorial_current_step().await == Some(TutorialStep::Watch);
-                let now = Instant::now();
-                let decision = evaluate_activity_poll(
-                    &mut trigger_coordinator,
-                    &config,
-                    activity_snapshot.as_ref(),
-                    now,
-                    memory.last_capture.elapsed().as_millis() as u64,
-                    effective_interval,
-                );
-                memory.front_app = decision.front_app;
-                let trigger = config
-                    .watch
-                    .fullscreen
-                    .then(|| capture_trigger(tutorial_initial_capture, decision.trigger))
-                    .flatten();
-                if let Some(trigger) = trigger {
-                    let elapsed = memory.last_capture.elapsed().as_millis() as u64;
-                    if capture_is_allowed(
-                        tutorial_initial_capture,
-                        elapsed,
-                        config.watch.triggers.min_spacing_ms,
-                    ) {
-                        let disposition = capture(&state, &config, ocr_enabled, &screen_capture, &ocr, display.as_ref(), &semaphore, &mut memory, trigger, cancellation.clone())
-                            .await
-                            .context("画面の観察準備")?;
-                        record_capture_decision(&state, trigger, &memory.front_app, disposition).await;
-                    } else {
-                        record_gate(
-                            &state,
-                            &config,
-                            trigger,
-                            None,
-                            None,
-                            false,
-                            "最低間隔",
-                        )?;
-                        record_capture_decision(&state, trigger, &memory.front_app, CaptureDisposition::MinSpacing).await;
-                    }
-                }
-                application_watch
-                    .poll(
-                        &state,
-                        &config,
-                        activity_snapshot.as_ref(),
-                        effective_interval,
-                        tutorial_initial_capture,
-                        ocr_enabled,
-                        &application_capture,
-                        &ocr,
-                        &semaphore,
-                        &mut memory,
-                        cancellation.clone(),
-                    )
-                    .await
-                    .context("アプリ観察")?;
-                tutorial_initial_capture_pending = false;
-                flush_if_due(&state, &config, &mut memory, cancellation.clone())
-                    .await
-                    .context("観察の送信と配達")?;
-                heartbeat_if_due(
-                    &state,
-                    &config,
-                    &mut memory,
-                    effective_interval,
-                    cancellation.clone(),
-                )
-                .await
-                .context("見守り heartbeat")?;
-                Ok(())
-            }).await
-        };
-        if let Err(error) = iteration {
-            if cancellation.is_cancelled() {
-                break;
-            }
-            match record_watch_failure(&state, &mut recovery, &error, &cancellation).await {
-                WatchRecoveryDecision::Retry => {}
-                WatchRecoveryDecision::Stop => return Err(error),
-                WatchRecoveryDecision::Cancelled => break,
-                WatchRecoveryDecision::ConfigUpdateCancelled => {}
-            }
-        } else {
-            recovery.reset();
-            state
-                .publish(|snapshot| snapshot.observer.clear_error())
-                .await;
         }
     }
     Ok(())
@@ -371,190 +209,204 @@ async fn capture(
     ocr_enabled: bool,
     screen_capture: &platform::MacScreenCapture,
     ocr: &platform::MacOcr,
-    display: Option<&platform::DisplayGeometry>,
     semaphore: &Arc<Semaphore>,
     memory: &mut WatchMemory,
     trigger: ActivityTriggerKind,
+    generation: u64,
     cancellation: CancellationToken,
 ) -> Result<CaptureDisposition> {
     let tutorial_watch = state.tutorial_current_step().await == Some(TutorialStep::Watch);
     if should_skip_self_application(memory.front_app.as_deref(), tutorial_watch) {
         memory.last_capture = Instant::now();
-        record_gate(state, config, trigger, None, None, false, "自ウィンドウ")?;
+        record_gate(
+            state,
+            config,
+            trigger,
+            None,
+            None,
+            false,
+            "自ウィンドウ",
+            &memory.publication,
+        )?;
         return Ok(CaptureDisposition::SelfApplication);
     }
     state
-        .publish(|snapshot| snapshot.observer.phase = ObserverViewPhase::Capturing)
+        .publish_watch_view(generation, WatchResult::CaptureStarted)
         .await;
-    let captured_at = chrono::Utc::now();
-    let Some(exclusions) =
-        capture_exclusions(state.own_bounds.read_own_window_bounds().await, captured_at)
+    // 画面全体とアプリ対象の見守り撮影を直列化する。
+    let Some(_screen_gate) =
+        crate::screen_capture_gate::acquire_screen_capture_gate(state, &cancellation).await
     else {
-        state
-            .publish(|snapshot| snapshot.observer.phase = ObserverViewPhase::Idle)
-            .await;
-        record_gate(state, config, trigger, None, None, false, "自ウィンドウ")?;
-        return Ok(CaptureDisposition::OwnBoundsUnavailable);
+        return Err(anyhow::anyhow!("見守りの撮影が取り消されました"));
     };
+    let scope_generation = state.core_runtime().watch_scope_generation();
+    ensure_capture_active(&cancellation)?;
     let directory = tempfile::tempdir()?;
-    let source = directory.path().join("screen.png");
-    let captured_path = match screen_capture.capture(&source, cancellation.clone()).await {
-        Ok(path) => {
-            state.record_screen_capture_result(true).await;
-            path
+    let source = directory.path().join("screens");
+    let stable = capture_with_window_mask(state.own_bounds.as_ref(), async {
+        let capture_started = Instant::now();
+        let _ = state.logger.write("INFO", "見守り: 段階=capture-start target=fullscreen backend=in-process");
+        let captured = screen_capture.capture(&source, cancellation.clone()).await;
+        let _ = state.logger.write("INFO", &format!(
+            "見守り: 段階=capture-done target=fullscreen backend=in-process elapsed-ms={} success={} display-count={}",
+            capture_started.elapsed().as_millis(), captured.is_ok(), captured.as_ref().map_or(0, Vec::len),
+        ));
+        if cancellation.is_cancelled() {
+            return Err(PortError::Unavailable("見守りの撮影が取り消されました".to_owned()));
         }
-        Err(error @ PortError::ScreenCapturePermission(_)) => {
-            state.record_screen_capture_result(false).await;
-            return Err(anyhow::Error::new(error));
+        match &captured {
+            Ok(_) => state.record_screen_capture_result(true).await,
+            Err(PortError::ScreenCapturePermission(_)) => state.record_screen_capture_result(false).await,
+            Err(_) => {},
         }
-        Err(error) => return Err(anyhow::Error::new(error)),
+        captured
+    }).await;
+    let stable = match stable {
+        Ok(stable) => stable,
+        Err(CaptureWithMaskError::Capture(error)) => return Err(anyhow::Error::new(error)),
+        Err(CaptureWithMaskError::OwnWindows) => {
+            state
+                .publish_watch_view(generation, WatchResult::CaptureSkipped)
+                .await;
+            record_gate(
+                state,
+                config,
+                trigger,
+                None,
+                None,
+                false,
+                "自ウィンドウ",
+                &memory.publication,
+            )?;
+            return Ok(CaptureDisposition::OwnBoundsUnavailable);
+        }
     };
-    let bytes = tokio::fs::read(captured_path).await?;
-    let (width, height) = png_dimensions(&bytes).context("画面 PNG が不正です")?;
-    let ignored_top = platform::comparison_top_pixels(display, width, height);
-    let processed = process_png(
-        bytes,
-        config.watch.downscale_width,
-        ignored_top,
-        exclusions.clone(),
+    let captured_at = stable.captured_at;
+    ensure_capture_active(&cancellation)?;
+    let prepared = prepare_screen_frames(
+        stable.screens,
+        directory.path(),
+        config,
+        &stable.exclusions,
+        ocr,
+        ocr_enabled,
         semaphore.clone(),
+        &cancellation,
     )
     .await?;
-    let provider_path = directory.path().join("provider.png");
-    tokio::fs::write(&provider_path, &processed.provider_png).await?;
-    let ocr_signature = if ocr_enabled {
-        let ocr_path = directory.path().join("ocr.png");
-        tokio::fs::write(&ocr_path, &processed.masked_png).await?;
-        match ocr
-            .recognize(
-                &ocr_path,
-                &config.watch.ocr_gate.level,
-                Duration::from_millis(config.watch.ocr_gate.timeout_ms),
-                cancellation,
-            )
-            .await
-        {
-            Ok(blocks) => Some(normalize_ocr_blocks(
-                &blocks,
-                width,
-                height,
-                &exclusions,
-                ignored_top,
-            )),
-            Err(_) => {
-                let _ = state
-                    .logger
-                    .write("WARN", "Vision OCR に失敗しました: error-type=ocr");
-                None
-            }
-        }
-    } else {
-        None
+    let changed_by_ocr = prepared.ocr_signature.is_some() && memory.last_ocr.is_some();
+    let changed = match (&prepared.ocr_signature, &memory.last_ocr) {
+        (Some(current), Some(previous)) => current != previous,
+        _ => memory.last_hash.as_deref() != Some(prepared.comparison_hash.as_str()),
     };
-    let changed_by_ocr = matches!((&ocr_signature, &memory.last_ocr), (Some(_), Some(_)));
-    let changed = match (&ocr_signature, &memory.last_ocr) {
-        (Some(current), Some(previous)) => current.signature != *previous,
-        _ => memory.last_hash.as_deref() != Some(processed.comparison_hash.as_str()),
-    };
-    let context_id = DebugStore::new_id();
-    let debug_id = config.debug.enabled.then(|| context_id.clone());
-    if let Some(id) = &debug_id {
-        DebugStore::from_paths(&state.paths).record_frame(
-            id,
-            captured_at,
-            &processed.provider_png,
-            ocr_signature.as_ref().map(|value| value.text.as_str()),
-        )?;
-    }
     memory.last_capture = Instant::now();
-    if !changed {
+    if changed && !frame_target_is_enabled(&state.runtime_config(), "fullscreen") {
+        return Ok(CaptureDisposition::Suppressed);
+    }
+    let mut frames = Vec::with_capacity(prepared.frames.len());
+    for screen in prepared.frames {
+        ensure_capture_active(&cancellation)?;
+        let frame = screen.observation_frame(
+            scope_generation,
+            captured_at,
+            memory
+                .last_capture
+                .duration_since(memory.window_start)
+                .as_secs_f64(),
+            trigger,
+            memory.front_app.clone(),
+            config.debug.enabled,
+        );
+        let debug_id = frame.debug_id.clone();
+        let ocr_text = frame.ocr_text.clone();
+        if ocr_enabled && ocr_text.is_none() {
+            let _ = state
+                .logger
+                .write("WARN", "Vision OCR に失敗しました: error-type=ocr");
+        }
+        if let Some(id) = &debug_id {
+            DebugStore::from_paths(&state.paths)
+                .with_publication_gate(memory.publication.clone())
+                .record_frame(
+                    id,
+                    captured_at,
+                    &screen.image.provider_png,
+                    ocr_text.as_deref(),
+                )?;
+        }
         record_gate(
             state,
             config,
             trigger,
             debug_id.as_deref(),
-            ocr_signature.as_ref().map(|value| value.text.as_str()),
-            false,
-            if changed_by_ocr {
+            ocr_text.as_deref(),
+            changed,
+            if changed {
+                "送った"
+            } else if changed_by_ocr {
                 "OCR 一致"
             } else {
                 "画素一致"
             },
+            &memory.publication,
         )?;
+        frames.push(frame);
+    }
+    if !changed {
         state
-            .publish(|snapshot| snapshot.observer.phase = ObserverViewPhase::Idle)
+            .publish_watch_view(generation, WatchResult::CaptureSkipped)
             .await;
         return Ok(CaptureDisposition::Unchanged);
     }
-    memory.last_hash = Some(processed.comparison_hash);
-    memory.last_ocr = ocr_signature.as_ref().map(|value| value.signature.clone());
-    let stagnation_hash = memory.last_hash.clone().unwrap_or_default();
-    let stagnation_ocr = memory.last_ocr.clone();
+    ensure_capture_active(&cancellation)?;
+    for frame in &frames {
+        state.core_runtime().register_pending_frame_context(
+            PendingFrameContext::bounded(
+                frame.context_id.clone(),
+                captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                trigger,
+                frame.front_app.clone(),
+                None,
+                frame.target.clone(),
+                frame.ocr_text.clone(),
+            ),
+            &memory.publication,
+        )?;
+    }
+    memory.last_hash = Some(prepared.comparison_hash.clone());
+    memory.last_ocr = prepared.ocr_signature.clone();
     mark_meaningful_change(
         memory,
         "fullscreen",
-        stagnation_hash,
-        stagnation_ocr,
+        prepared.comparison_hash,
+        prepared.ocr_signature,
         captured_at,
     )?;
-    if !frame_target_is_enabled(&state.runtime_config(), "fullscreen") {
-        return Ok(CaptureDisposition::Suppressed);
-    }
-    let ocr_text = ocr_signature.map(|value| value.text);
-    state
-        .core_runtime()
-        .register_pending_frame_context(PendingFrameContext::bounded(
-            context_id.clone(),
-            captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            trigger,
-            memory.front_app.clone(),
-            None,
-            "fullscreen".to_owned(),
-            ocr_text.clone(),
-        ))?;
-    memory.frames.push(ObservationFrameInput {
-        scope_generation: state.core_runtime().watch_scope_generation(),
-        context_id,
-        captured_at,
-        debug_id: debug_id.clone(),
-        relative_seconds: memory
-            .last_capture
-            .duration_since(memory.window_start)
-            .as_secs_f64(),
-        trigger,
-        front_app: memory.front_app.clone(),
-        app: None,
-        target: "fullscreen".to_owned(),
-        ocr_text,
-        image_path: provider_path,
-    });
+    memory.frames.extend(frames);
     memory.last_accepted = Some(memory.last_capture);
     memory.directories.push(directory);
-    record_gate(
-        state,
-        config,
-        trigger,
-        debug_id.as_deref(),
-        memory
-            .frames
-            .last()
-            .and_then(|frame| frame.ocr_text.as_deref()),
-        true,
-        "送った",
-    )?;
     let next_send =
         chrono::Utc::now() + chrono::Duration::milliseconds(config.watch.send_debounce_ms as i64);
     state
-        .publish(|snapshot| {
-            snapshot.observer.phase = ObserverViewPhase::Idle;
-            snapshot.observer.last_captured_at = Some(captured_at.to_rfc3339());
-            snapshot.observer.last_trigger = Some(trigger_name(trigger).to_owned());
-            snapshot.observer.front_app = memory.front_app.clone();
-            snapshot.observer.pending_frame_count = memory.frames.len();
-            snapshot.observer.next_send_at = Some(next_send.to_rfc3339());
-        })
+        .publish_watch_view(
+            generation,
+            WatchResult::Buffered {
+                captured_at: captured_at.to_rfc3339(),
+                trigger,
+                front_app: memory.front_app.clone(),
+                frame_count: memory.frames.len(),
+                next_send: next_send.to_rfc3339(),
+            },
+        )
         .await;
     Ok(CaptureDisposition::Accepted)
+}
+
+fn ensure_capture_active(cancellation: &CancellationToken) -> Result<()> {
+    if cancellation.is_cancelled() {
+        anyhow::bail!("見守りの撮影が取り消されました");
+    }
+    Ok(())
 }
 
 fn should_skip_self_application(front_app: Option<&str>, tutorial_watch: bool) -> bool {
@@ -570,21 +422,24 @@ fn record_gate(
     ocr_text: Option<&str>,
     sent: bool,
     reason: &str,
+    publication: &coosenpai_core::persistence::PublicationGate,
 ) -> Result<()> {
     if !config.debug.enabled {
         return Ok(());
     }
     let image_file = id.map(|value| format!("frame-{value}.png"));
     let id = id.map_or_else(DebugStore::new_id, str::to_owned);
-    DebugStore::from_paths(&state.paths).record_gate(&DebugGateRecord {
-        id: id.clone(),
-        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        trigger: trigger_name(trigger).to_owned(),
-        sent,
-        reason: reason.to_owned(),
-        image_file,
-        ocr_preview: ocr_preview(ocr_text),
-    })?;
+    DebugStore::from_paths(&state.paths)
+        .with_publication_gate(publication.clone())
+        .record_gate(&DebugGateRecord {
+            id: id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            trigger: trigger_name(trigger).to_owned(),
+            sent,
+            reason: reason.to_owned(),
+            image_file,
+            ocr_preview: ocr_preview(ocr_text),
+        })?;
     Ok(())
 }
 
@@ -605,7 +460,7 @@ fn resolve_desktop_ocr_helper(state: &DesktopState, config: &Config) -> Option<s
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CaptureDisposition {
+pub(crate) enum CaptureDisposition {
     Accepted,
     Unchanged,
     Suppressed,
@@ -627,10 +482,30 @@ impl CaptureDisposition {
             Self::MinSpacing => "見送り（撮影間隔が短すぎます）",
         }
     }
+
+    pub(crate) fn display_for_locale(self, locale: coosenpai_core::locale::Locale) -> &'static str {
+        let key = match self {
+            Self::Accepted => coosenpai_core::locale::TextKey::CaptureDispositionAccepted,
+            Self::Unchanged => coosenpai_core::locale::TextKey::CaptureDispositionUnchanged,
+            Self::Suppressed => coosenpai_core::locale::TextKey::CaptureDispositionSuppressed,
+            Self::SelfApplication => {
+                coosenpai_core::locale::TextKey::CaptureDispositionSelfApplication
+            }
+            Self::OwnBoundsUnavailable => {
+                coosenpai_core::locale::TextKey::CaptureDispositionOwnBoundsUnavailable
+            }
+            Self::WindowUnavailable => {
+                coosenpai_core::locale::TextKey::CaptureDispositionWindowUnavailable
+            }
+            Self::MinSpacing => coosenpai_core::locale::TextKey::CaptureDispositionMinSpacing,
+        };
+        coosenpai_core::locale::text(key, locale)
+    }
 }
 
 async fn record_capture_decision(
     state: &Arc<DesktopState>,
+    generation: u64,
     trigger: ActivityTriggerKind,
     front_app: &Option<String>,
     disposition: CaptureDisposition,
@@ -644,11 +519,14 @@ async fn record_capture_decision(
         ),
     );
     state
-        .publish(|snapshot| {
-            snapshot.observer.last_trigger = Some(trigger_name(trigger).to_owned());
-            snapshot.observer.front_app = front_app.clone();
-            snapshot.observer.last_capture_disposition = Some(disposition.display().to_owned());
-        })
+        .publish_watch_view(
+            generation,
+            WatchResult::CaptureDecision {
+                trigger,
+                front_app: front_app.clone(),
+                disposition,
+            },
+        )
         .await;
     state.refresh_debug().await;
 }
@@ -675,17 +553,11 @@ fn notify_tutorial_observation(state: &Arc<DesktopState>) {
     });
 }
 
-fn capture_exclusions(
-    bounds: Result<OwnWindowBounds, PortError>,
-    captured_at: chrono::DateTime<chrono::Utc>,
-) -> Option<Vec<coosenpai_core::image_processing::ExcludedBounds>> {
-    own_window_exclusions(&bounds.ok()?, captured_at)
-}
-
 async fn flush_if_due(
     state: &Arc<DesktopState>,
     config: &Config,
     memory: &mut WatchMemory,
+    generation: u64,
     cancellation: CancellationToken,
 ) -> Result<()> {
     let latest_config = state.runtime_config();
@@ -715,7 +587,7 @@ async fn flush_if_due(
         return Ok(());
     }
     state
-        .publish(|snapshot| snapshot.observer.phase = ObserverViewPhase::Thinking)
+        .publish_watch_view(generation, WatchResult::ObservationStarted)
         .await;
     if tutorial_watch {
         tokio::select! {
@@ -738,30 +610,21 @@ async fn flush_if_due(
                 .map(|usage| usage.ai_calls)
                 .unwrap_or(0);
             state
-                .publish(|snapshot| {
-                    snapshot.observer.phase = ObserverViewPhase::Idle;
-                    snapshot.observer.error_message = None;
-                    snapshot.observer.pending_frame_count = 0;
-                    snapshot.observer.next_send_at = None;
-                    snapshot.observer.record_observation(observation);
-                    snapshot.observer.ai_calls_today = calls;
-                })
+                .publish_watch_view(generation, WatchResult::Observed { observation, calls })
                 .await;
             if tutorial_watch {
                 notify_tutorial_observation(state);
             }
         }
-        Err(coosenpai_core::runtime::RuntimeError::StaleWatchScope) => {
+        Err(
+            coosenpai_core::runtime::RuntimeError::StaleWatchScope
+            | coosenpai_core::runtime::RuntimeError::ObservationCancelled,
+        ) => {
             memory.directories.clear();
             memory.last_accepted = None;
             memory.window_start = Instant::now();
             state
-                .publish(|snapshot| {
-                    snapshot.observer.phase = ObserverViewPhase::Idle;
-                    snapshot.observer.error_message = None;
-                    snapshot.observer.pending_frame_count = 0;
-                    snapshot.observer.next_send_at = None;
-                })
+                .publish_watch_view(generation, WatchResult::NotDelivered)
                 .await;
         }
         Err(error) => {
@@ -779,7 +642,7 @@ async fn flush_if_due(
     Ok(())
 }
 
-fn trigger_name(trigger: ActivityTriggerKind) -> &'static str {
+pub(crate) fn trigger_name(trigger: ActivityTriggerKind) -> &'static str {
     match trigger {
         ActivityTriggerKind::TypingPaused => "typing-paused",
         ActivityTriggerKind::AppSwitched => "app-switched",

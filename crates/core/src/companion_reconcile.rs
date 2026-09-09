@@ -38,7 +38,8 @@ impl CompanionStorage {
             .filter(|entry| entry.role == ConversationRole::User)
             .map(|entry| entry.id.as_str())
             .collect::<HashSet<_>>();
-        self.update_cursor(|cursor| {
+        let conversation_generation = self.conversation_generation()?;
+        let cursor = self.update_cursor(|cursor| {
             cursor
                 .cancelled_input_ids
                 .retain(|id| retained_user_ids.contains(id.as_str()));
@@ -64,6 +65,7 @@ impl CompanionStorage {
                     .pending_inputs
                     .push(PendingInput::UserMessage(PendingUserMessage {
                         id: entry.id.clone(),
+                        conversation_generation,
                         user_seq,
                         created_at: entry.created_at.clone(),
                         message: entry.message.clone(),
@@ -77,6 +79,10 @@ impl CompanionStorage {
                             .screen_context
                             .as_ref()
                             .map_or_else(Vec::new, |context| context.pending_frames.clone()),
+                        hearing_context: entry
+                            .screen_context
+                            .as_ref()
+                            .map_or_else(Vec::new, |context| context.hearing_context.clone()),
                         observation_in_progress: false,
                         prepared_response: None,
                         response_commit_started: false,
@@ -85,7 +91,8 @@ impl CompanionStorage {
                     }));
             }
             Ok(cursor.clone())
-        })
+        })?;
+        Ok(self.scope_cursor_to_generation(cursor))
     }
 }
 

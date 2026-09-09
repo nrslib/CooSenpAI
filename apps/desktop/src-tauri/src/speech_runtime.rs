@@ -1,8 +1,6 @@
-use super::support::{
-    apply_warning, present_speech_error, wait_for_push_to_talk_end, KeyReleaseOutcome,
-};
+use super::support::{present_speech_error, wait_for_push_to_talk_end, KeyReleaseOutcome};
 use super::SpeechController;
-use crate::command_guard::{CommandSource, DesktopCommand};
+
 use crate::state::DesktopState;
 use std::sync::Arc;
 
@@ -85,10 +83,11 @@ impl SpeechController {
                     .to_owned();
                 if self.lifecycle().is_current(generation) {
                     state
-                        .publish(|snapshot| {
-                            if self.lifecycle().is_current(generation) {
-                                apply_warning(&mut snapshot.speech, "key-state", message.clone());
-                            }
+                        .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                            generation,
+                            event: crate::speech_presenter::SpeechResult::KeyStateFailed(
+                                message.clone(),
+                            ),
                         })
                         .await;
                     crate::capture::publish_speech_transient_shortcut_error(
@@ -105,38 +104,11 @@ impl SpeechController {
         state: Arc<DesktopState>,
         generation: u64,
     ) {
-        let controller = self.clone();
-        let handler_state = state.clone();
-        let _ = state
-            .dispatch(
-                CommandSource::GlobalShortcut,
-                DesktopCommand::SpeechFinish,
-                move |_| async move {
-                    controller.finish_generation(handler_state, generation);
-                    Ok(())
-                },
-            )
-            .await;
-    }
-
-    fn finish_generation(self: &Arc<Self>, state: Arc<DesktopState>, generation: u64) {
-        let Some(outcome) = self.lifecycle().finish_generation(generation) else {
-            return;
-        };
-        let controller = self.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Some(control) = outcome.control {
-                let _ = control.finish().await;
-            }
-            state
-                .publish(|snapshot| {
-                    if controller.lifecycle().is_finalizing(generation)
-                        && snapshot.speech.generation == generation
-                    {
-                        snapshot.speech.phase = "finalizing".to_owned();
-                    }
-                })
-                .await;
-        });
+        state.ui.input(
+            crate::ui_events::UiView::Application,
+            crate::ui_events::UiEvent::CaptureCompleted(Box::new(
+                crate::capture::CaptureEvent::VoiceReleaseObserved { generation },
+            )),
+        );
     }
 }

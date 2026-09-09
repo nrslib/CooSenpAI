@@ -1,13 +1,11 @@
-use crate::command_guard::{CommandSource, DesktopCommand, DispatchError};
+use crate::command_guard::CommandSource;
+use crate::placement_presenter::{MainWindowPlacement, PlacementEvent};
 use crate::state::DesktopState;
-use coosenpai_core::onboarding::OnboardingStore;
-use coosenpai_core::persistence::atomic_write_bytes;
+use crate::tray_presenter::{shortcut_menu_labels_for_locale, TrayIcon, TrayView};
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::ports::RuntimeLogger;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{IsMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
@@ -17,26 +15,42 @@ use tauri::{App, AppHandle, LogicalPosition, Manager, Runtime, WindowEvent};
 #[path = "windows_tray.rs"]
 mod tray;
 #[path = "window_focus.rs"]
-mod window_focus;
+pub(crate) mod window_focus;
 use tray::recording_icon;
-pub(crate) use window_focus::{
-    activate_and_focus_window, focus_bubble_if_capture_popup_idle, focus_capture_popup,
-    focus_failure_details, log_focus_failure, show_capture_popup, CapturePopupPresentation,
-    FocusRequestError,
-};
+pub(crate) use window_focus::activate_and_focus_window;
 
 struct TrayControls {
+    open: MenuItem<tauri::Wry>,
     start: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
+    settings: MenuItem<tauri::Wry>,
     reset_conversation: MenuItem<tauri::Wry>,
+    shortcuts: Submenu<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
     shortcut_items: Vec<MenuItem<tauri::Wry>>,
-    setup_required: std::sync::atomic::AtomicBool,
-    running: std::sync::atomic::AtomicBool,
-    recording: std::sync::atomic::AtomicBool,
 }
 
 pub fn configure(app: &mut App) -> tauri::Result<()> {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    let avatar = app
+        .get_webview_window("avatar")
+        .ok_or(tauri::Error::WindowNotFound)?;
+    avatar.set_visible_on_all_workspaces(true)?;
+    configure_full_screen_space_behavior(&avatar)?;
+    avatar.on_window_event({
+        let app = app.handle().clone();
+        move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Some(state) = app.try_state::<Arc<DesktopState>>() {
+                    state.ui.input(
+                        crate::ui_events::UiView::Avatar,
+                        crate::ui_events::UiEvent::AvatarVisibility(Some(false)),
+                    );
+                }
+            }
+        }
+    });
     let bubble = create_bubble_window(app)?;
     let bubble_focus_state = app
         .try_state::<Arc<DesktopState>>()
@@ -44,7 +58,10 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
     bubble.on_window_event(move |event| {
         if let WindowEvent::Focused(focused) = event {
             if let Some(state) = bubble_focus_state.as_ref() {
-                state.set_bubble_focused(*focused);
+                state.ui.input(
+                    crate::ui_events::UiView::Bubble,
+                    crate::ui_events::UiEvent::BubbleFocused(*focused),
+                );
             }
         }
     });
@@ -62,44 +79,29 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
     if let Some(path) = placement.as_ref() {
         restore_main_window(&main, path);
     }
-    let placement_revision = Arc::new(AtomicU64::new(0));
     main.on_window_event({
         let app = app.handle().clone();
         move |event| match event {
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                hide_main(&app);
-            }
-            WindowEvent::Focused(true) => {
                 if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-                    state
-                        .main_window_visible
-                        .store(true, std::sync::atomic::Ordering::Release);
-                    state
-                        .main_window_focused
-                        .store(true, std::sync::atomic::Ordering::Release);
+                    state.ui.input(
+                        crate::ui_events::UiView::Chat,
+                        crate::ui_events::UiEvent::Close,
+                    );
                 }
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-                        crate::bubbles::clear_for_main_window(state.inner().as_ref()).await;
-                    }
-                });
             }
-            WindowEvent::Focused(false) => {
+            WindowEvent::Focused(focused) => {
                 if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-                    state
-                        .main_window_focused
-                        .store(false, std::sync::atomic::Ordering::Release);
+                    state.ui.input(
+                        crate::ui_events::UiView::Chat,
+                        crate::ui_events::UiEvent::MainFocused(*focused),
+                    );
                 }
             }
             WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
                 if let Some(path) = placement.as_ref() {
-                    schedule_main_window_save(
-                        app.clone(),
-                        path.clone(),
-                        placement_revision.clone(),
-                    );
+                    observe_main_window_placement(&app, path);
                 }
             }
             _ => {}
@@ -114,31 +116,13 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
         let state = app
             .try_state::<Arc<DesktopState>>()
             .map(|state| state.inner().clone());
-        move |event| match event {
-            WindowEvent::Focused(focused) => {
-                if let Some(state) = state.as_ref() {
-                    state.set_capture_popup_focused(*focused);
-                }
-            }
-            WindowEvent::CloseRequested { api, .. } => {
+        move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 if let Some(state) = state.clone() {
-                    tauri::async_runtime::spawn(async move {
-                        let handler_state = state.clone();
-                        let _ = state
-                            .dispatch(
-                                CommandSource::IpcCapturePopup,
-                                DesktopCommand::CaptureCancel,
-                                move |context| async move {
-                                    crate::capture::cancel(&handler_state, &context).await;
-                                    Ok(())
-                                },
-                            )
-                            .await;
-                    });
+                    dispatch_capture_cancel(state);
                 }
             }
-            _ => {}
         }
     });
     let speech = app
@@ -154,20 +138,10 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 if let Some(state) = state.clone() {
-                    tauri::async_runtime::spawn(async move {
-                        let handler_state = state.clone();
-                        let _ = state
-                            .dispatch(
-                                CommandSource::IpcSpeechPopup,
-                                DesktopCommand::SpeechCancel,
-                                move |context| async move {
-                                    handler_state
-                                        .command_speech_cancel(&context)
-                                        .map_err(DispatchError::handler)
-                                },
-                            )
-                            .await;
-                    });
+                    state.ui.input(
+                        crate::ui_events::UiView::SpeechPopup,
+                        crate::ui_events::UiEvent::Voice(crate::ui_events::VoiceAction::Cancel),
+                    );
                 }
             }
         }
@@ -177,11 +151,27 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
     configure_full_screen_space_behavior(&model)?;
     position_model_popup(&model, &main)?;
-    let model_for_close = model.clone();
+    let model_ui = app.state::<Arc<DesktopState>>().ui.clone();
     model.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
-            let _ = model_for_close.hide();
+            model_ui.input(
+                crate::ui_events::UiView::ModelPicker,
+                crate::ui_events::UiEvent::Close,
+            );
+        }
+    });
+    let details = app
+        .get_webview_window("details")
+        .ok_or_else(|| tauri::Error::WindowNotFound)?;
+    let details_ui = app.state::<Arc<DesktopState>>().ui.clone();
+    details.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            details_ui.input(
+                crate::ui_events::UiView::Details,
+                crate::ui_events::UiEvent::Close,
+            );
         }
     });
     create_tray(app)?;
@@ -205,6 +195,16 @@ fn configure_full_screen_space_behavior(window: &tauri::WebviewWindow) -> tauri:
 #[cfg(not(target_os = "macos"))]
 fn configure_full_screen_space_behavior(_window: &tauri::WebviewWindow) -> tauri::Result<()> {
     Ok(())
+}
+
+/// 送信ポップアップの取消（Esc・閉じる要求・ウインドウ外クリック）を共通の経路で dispatch する。
+pub(crate) fn dispatch_capture_cancel(state: Arc<DesktopState>) {
+    state
+        .capture
+        .post(crate::capture::CaptureEvent::PopupCancel {
+            generation: state.capture.view().generation,
+            source: crate::capture::CancelSource::CloseButton,
+        });
 }
 
 fn create_bubble_window(app: &App) -> tauri::Result<tauri::WebviewWindow> {
@@ -235,143 +235,69 @@ fn create_bubble_window(app: &App) -> tauri::Result<tauri::WebviewWindow> {
         .build()
 }
 
-pub fn show_main(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = show_main_now(&app).await;
-    });
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendOutcome {
+    Accepted,
+    Failed,
+    #[cfg(test)]
+    Rejected,
 }
 
-pub(crate) fn main_is_visible(app: &AppHandle) -> bool {
-    app.try_state::<Arc<DesktopState>>().is_some_and(|state| {
-        state
-            .main_window_visible
-            .load(std::sync::atomic::Ordering::Acquire)
-    })
+/// ポップアップからの送信が受理・失敗・拒否のどれで終わっても、
+/// 結果と理由を読めるようメイン画面を表示して前面に出す。
+#[cfg(test)]
+pub(crate) fn present_main_after_send(
+    logger: &dyn RuntimeLogger,
+    outcome: SendOutcome,
+    present_main: impl FnOnce(),
+) {
+    let label = match outcome {
+        SendOutcome::Accepted => "受理",
+        SendOutcome::Failed => "失敗",
+        #[cfg(test)]
+        SendOutcome::Rejected => "拒否",
+    };
+    let _ = logger.write(
+        "INFO",
+        &format!("送信の{label}にあわせてメイン画面を前面に出します"),
+    );
+    present_main();
 }
 
-pub(crate) fn main_is_focused(app: &AppHandle) -> bool {
-    app.try_state::<Arc<DesktopState>>().is_some_and(|state| {
-        state
-            .main_window_focused
-            .load(std::sync::atomic::Ordering::Acquire)
-    })
+pub(crate) fn apply_main_hide<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("メインウィンドウがありません")?;
+    window
+        .hide()
+        .map_err(|error| format!("メインウィンドウを閉じられません: {error}"))
 }
 
-pub(crate) fn hide_main(app: &AppHandle) {
-    if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-        state
-            .main_window_visible
-            .store(false, std::sync::atomic::Ordering::Release);
-        state
-            .main_window_focused
-            .store(false, std::sync::atomic::Ordering::Release);
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
-    if let Some(window) = app.get_webview_window("model-popup") {
-        let _ = window.hide();
-    }
-}
-
-pub(crate) async fn show_main_now(app: &AppHandle) -> Result<(), String> {
+pub(crate) async fn apply_main_show(app: &AppHandle) -> Result<(), String> {
     let Some(state) = app.try_state::<Arc<DesktopState>>() else {
-        return Err("desktop state がありません".to_owned());
+        return Err(text(TextKey::WindowStateUnavailable, Locale::Ja).to_owned());
     };
     let state = state.inner().clone();
-    let onboarding_phase = state.onboarding_policy_phase().await;
-    if main_open_action(onboarding_phase) == MainOpenAction::SetupPrompt {
-        hide_main(&state.app);
-        let handler_state = state.clone();
-        state
-            .dispatch(
-                CommandSource::TutorialAutomation,
-                DesktopCommand::SetupPrompt,
-                move |context| async move {
-                    handler_state
-                        .command_announce_initial_onboarding(&context)
-                        .await
-                        .map_err(DispatchError::handler)
-                },
-            )
-            .await
-            .map_err(|error| error.format_for_user())?;
-        return Ok(());
-    }
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
     let window = state
         .app
         .get_webview_window("main")
-        .ok_or_else(|| "メインウィンドウがありません".to_owned())?;
-    window
-        .show()
-        .map_err(|error| format!("メインウィンドウを表示できません: {error}"))?;
-    state
-        .main_window_visible
-        .store(true, std::sync::atomic::Ordering::Release);
-    window
-        .set_focus()
-        .map_err(|error| format!("メインウィンドウを前面にできません: {error}"))?;
-    state
-        .main_window_focused
-        .store(true, std::sync::atomic::Ordering::Release);
-    crate::bubbles::clear_for_main_window(state.as_ref()).await;
-    if should_notify_tutorial_main_opened(onboarding_phase) {
-        let handler_state = state.clone();
-        let _ = state
-            .dispatch(
-                CommandSource::TutorialAutomation,
-                DesktopCommand::TutorialAdvance,
-                move |context| async move {
-                    handler_state.command_tutorial_main_opened(&context).await;
-                    Ok(())
-                },
-            )
-            .await;
-    }
+        .ok_or_else(|| text(TextKey::MainWindowMissing, locale).to_owned())?;
+    window.show().map_err(|error| {
+        text(TextKey::MainWindowShowFailed, locale).replace("{error}", &error.to_string())
+    })?;
+    window.set_focus().map_err(|error| {
+        text(TextKey::MainWindowFocusFailed, locale).replace("{error}", &error.to_string())
+    })?;
     Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 enum MainOpenAction {
     SetupPrompt,
     ShowMain,
-}
-
-fn main_open_action(phase: crate::command_guard::OnboardingPhase) -> MainOpenAction {
-    match phase {
-        crate::command_guard::OnboardingPhase::Setup => MainOpenAction::SetupPrompt,
-        crate::command_guard::OnboardingPhase::TutorialFinishing
-        | crate::command_guard::OnboardingPhase::Tutorial { .. }
-        | crate::command_guard::OnboardingPhase::Normal => MainOpenAction::ShowMain,
-    }
-}
-
-fn should_notify_tutorial_main_opened(phase: crate::command_guard::OnboardingPhase) -> bool {
-    matches!(
-        phase,
-        crate::command_guard::OnboardingPhase::Tutorial {
-            step: coosenpai_core::onboarding::TutorialStep::Chat,
-            ..
-        }
-    )
-}
-
-pub fn toggle_main(app: &AppHandle) {
-    if main_is_visible(app) {
-        hide_main(app);
-    } else {
-        show_main(app);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MainWindowPlacement {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
 }
 
 fn restore_main_window(window: &tauri::WebviewWindow, path: &PathBuf) {
@@ -388,73 +314,79 @@ fn restore_main_window(window: &tauri::WebviewWindow, path: &PathBuf) {
     let _ = window.set_position(tauri::PhysicalPosition::new(placement.x, placement.y));
 }
 
-fn schedule_main_window_save(app: AppHandle, path: PathBuf, revision: Arc<AtomicU64>) {
-    let expected = revision.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        if revision.load(Ordering::Acquire) != expected {
-            return;
-        }
-        let Some(window) = app.get_webview_window("main") else {
-            return;
-        };
-        let placement = match (window.outer_position(), window.outer_size()) {
-            (Ok(position), Ok(size)) => MainWindowPlacement {
-                x: position.x,
-                y: position.y,
-                width: size.width,
-                height: size.height,
-            },
-            _ => return,
-        };
-        let result = tokio::task::spawn_blocking(move || {
-            let bytes = serde_json::to_vec_pretty(&placement)?;
-            atomic_write_bytes(&path, &bytes).map_err(serde_json::Error::io)
-        })
-        .await;
-        let error = match result {
-            Ok(Ok(())) => return,
-            Ok(Err(error)) => format!("error-type=persistence detail={error}"),
-            Err(error) => format!("error-type=join detail={error}"),
-        };
-        if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-            let _ = state.logger.write(
-                "WARN",
-                &format!("ウィンドウ位置の保存に失敗しました: {error}"),
-            );
-        }
-    });
+fn observe_main_window_placement(app: &AppHandle, path: &std::path::Path) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) {
+        crate::ui_root::application_input(
+            app,
+            crate::ui_events::UiEvent::Placement(PlacementEvent::Changed {
+                path: path.to_owned(),
+                placement: MainWindowPlacement {
+                    x: position.x,
+                    y: position.y,
+                    width: size.width,
+                    height: size.height,
+                },
+            }),
+        );
+    }
 }
 
 fn create_tray(app: &App) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "CooSenpAI を開く", true, None::<&str>)?;
-    let start = MenuItem::with_id(app, "start", "見る", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "休憩する", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "設定", true, None::<&str>)?;
-    let reset_conversation = MenuItem::with_id(
+    let locale = app
+        .try_state::<Arc<DesktopState>>()
+        .map(|state| Locale::from_config(&state.runtime_config().ui.language))
+        .unwrap_or(Locale::Ja);
+    let open = MenuItem::with_id(
         app,
-        "reset-conversation",
-        "会話をリセット",
+        "open",
+        text(TextKey::WindowOpen, locale),
         true,
         None::<&str>,
     )?;
-    let onboarding = app
-        .try_state::<Arc<DesktopState>>()
-        .and_then(|state| {
-            OnboardingStore::new(state.paths.onboarding.clone())
-                .load()
-                .ok()
-        })
-        .unwrap_or_default();
-    let tutorial_active = onboarding.tutorial_active();
-    let setup_required = onboarding.needs_setup();
-    let quit = MenuItem::with_id(app, "quit", "終了", true, None::<&str>)?;
+    let start = MenuItem::with_id(
+        app,
+        "start",
+        text(TextKey::WindowWatchStart, locale),
+        true,
+        None::<&str>,
+    )?;
+    let stop = MenuItem::with_id(
+        app,
+        "stop",
+        text(TextKey::WindowWatchStop, locale),
+        true,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(
+        app,
+        "settings",
+        text(TextKey::WindowSettings, locale),
+        true,
+        None::<&str>,
+    )?;
+    let reset_conversation = MenuItem::with_id(
+        app,
+        "reset-conversation",
+        text(TextKey::WindowResetConversation, locale),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        text(TextKey::WindowQuit, locale),
+        true,
+        None::<&str>,
+    )?;
     let config = app
         .try_state::<Arc<DesktopState>>()
         .map(|state| state.runtime_config());
     let shortcut_labels = config
         .as_ref()
-        .map(shortcut_menu_labels)
+        .map(|config| shortcut_menu_labels_for_locale(config, locale))
         .unwrap_or_default();
     let shortcut_items = shortcut_labels
         .iter()
@@ -473,7 +405,12 @@ fn create_tray(app: &App) -> tauri::Result<()> {
         .iter()
         .map(|item| item as &dyn IsMenuItem<tauri::Wry>)
         .collect::<Vec<_>>();
-    let shortcuts = Submenu::with_items(app, "ショートカット", true, &shortcut_refs)?;
+    let shortcuts = Submenu::with_items(
+        app,
+        text(TextKey::WindowShortcuts, locale),
+        true,
+        &shortcut_refs,
+    )?;
     let menu = Menu::with_items(
         app,
         &[
@@ -495,120 +432,34 @@ fn create_tray(app: &App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
             if matches!(event, TrayIconEvent::Click { .. }) {
-                show_main(tray.app_handle());
+                crate::ui_root::application_input(
+                    tray.app_handle(),
+                    crate::ui_events::UiEvent::OpenMain,
+                );
             }
         })
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
-            match id {
-                "open" => show_main(app),
-                "start" => {
-                    if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-                        let state = state.inner().clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ = state.dispatch_watch_start(CommandSource::Tray).await;
-                        });
-                    }
-                }
-                "stop" => {
-                    if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-                        let state = state.inner().clone();
-                        tauri::async_runtime::spawn(async move {
-                            let handler_state = state.clone();
-                            let _ = state
-                                .dispatch(
-                                    CommandSource::Tray,
-                                    DesktopCommand::WatchStop,
-                                    move |context| async move {
-                                        handler_state
-                                            .command_stop_watch(&context)
-                                            .await
-                                            .map(|_| ())
-                                            .map_err(DispatchError::handler)
-                                    },
-                                )
-                                .await;
-                        });
-                    }
-                }
-                "reset-conversation" => {
-                    if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-                        let state = state.inner().clone();
-                        tauri::async_runtime::spawn(async move {
-                            crate::bubble_conversation::show_reset_prompt(state).await;
-                        });
-                    }
-                }
-                "settings" => {
-                    if let Some(state) = app.try_state::<Arc<DesktopState>>() {
-                        let state = state.inner().clone();
-                        tauri::async_runtime::spawn(async move {
-                            let handler_state = state.clone();
-                            let _ = state
-                                .dispatch(
-                                    CommandSource::Tray,
-                                    DesktopCommand::SettingsOpen,
-                                    move |context| async move {
-                                        handler_state
-                                            .command_tutorial_settings_opened(&context)
-                                            .await
-                                            .map_err(DispatchError::handler)?;
-                                        show_main(&handler_state.app);
-                                        let _ = tauri::Emitter::emit(
-                                            &handler_state.app,
-                                            "coosenpai:settings:requested",
-                                            (),
-                                        );
-                                        Ok(())
-                                    },
-                                )
-                                .await;
-                        });
-                    }
-                }
-                "quit" => app.exit(0),
-                _ => {}
+            if let Some(event) = tray_ui_event(id) {
+                crate::ui_root::application_input(app, event);
             }
         })
         .build(app)?;
     stop.set_enabled(false)?;
-    start.set_enabled(!setup_required)?;
-    reset_conversation.set_enabled(!setup_required && !tutorial_active)?;
+    start.set_enabled(false)?;
+    reset_conversation.set_enabled(false)?;
     app.manage(TrayControls {
+        open,
         start,
         stop,
+        settings,
         reset_conversation,
+        shortcuts,
+        quit,
         shortcut_items,
-        setup_required: std::sync::atomic::AtomicBool::new(setup_required),
-        running: std::sync::atomic::AtomicBool::new(false),
-        recording: std::sync::atomic::AtomicBool::new(false),
     });
-    refresh_tray_tooltip(app.handle());
+    crate::ui_root::application_input(app.handle(), crate::ui_events::UiEvent::TrayMounted);
     Ok(())
-}
-
-pub fn sync_onboarding(app: &AppHandle, setup_required: bool, active: bool) {
-    if let Some(controls) = app.try_state::<TrayControls>() {
-        controls
-            .setup_required
-            .store(setup_required, Ordering::Release);
-        let intent_active = controls.running.load(Ordering::Acquire);
-        let (start_enabled, stop_enabled, reset_enabled) =
-            tray_availability(setup_required, intent_active);
-        let _ = controls
-            .reset_conversation
-            .set_enabled(reset_enabled && !active);
-        let _ = controls.start.set_enabled(start_enabled);
-        let _ = controls.stop.set_enabled(stop_enabled);
-    }
-}
-
-pub fn sync_tutorial(app: &AppHandle, active: bool) {
-    sync_onboarding(app, false, active);
-}
-
-pub fn sync_persona(app: &AppHandle, _selected: &str) {
-    refresh_tray_tooltip(app);
 }
 
 pub fn position_capture_popup(window: &tauri::WebviewWindow) -> tauri::Result<()> {
@@ -633,6 +484,14 @@ pub(crate) fn show_model_popup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
     position_model_popup(&window, &main)?;
     window.set_focusable(true)?;
+    window.show()?;
+    window.set_focus()
+}
+
+pub(crate) fn show_details<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let window = app
+        .get_webview_window("details")
+        .ok_or_else(|| tauri::Error::WindowNotFound)?;
     window.show()?;
     window.set_focus()
 }
@@ -666,123 +525,71 @@ pub fn position_speech_popup(window: &tauri::WebviewWindow) -> tauri::Result<()>
     ))
 }
 
-fn tray_watch_actions(intent_active: bool) -> (bool, bool) {
-    (!intent_active, intent_active)
+pub(crate) fn render_tray(app: &AppHandle, view: &TrayView) -> Result<(), String> {
+    let controls = app
+        .try_state::<TrayControls>()
+        .ok_or("トレイのメニューがありません")?;
+    apply_tray(&controls, app, view).map_err(|error| format!("トレイの更新に失敗しました: {error}"))
 }
 
-fn tray_availability(setup_required: bool, intent_active: bool) -> (bool, bool, bool) {
-    let (start, stop) = tray_watch_actions(intent_active);
-    (
-        !setup_required && start,
-        !setup_required && stop,
-        !setup_required,
-    )
-}
-
-pub fn sync_tray(app: &AppHandle, intent_active: bool) {
-    if let Some(controls) = app.try_state::<TrayControls>() {
-        let setup_required = controls.setup_required.load(Ordering::Acquire);
-        let (start_enabled, stop_enabled, _) = tray_availability(setup_required, intent_active);
-        let _ = controls.start.set_enabled(start_enabled);
-        let _ = controls.stop.set_enabled(stop_enabled);
-        controls
-            .running
-            .store(intent_active, std::sync::atomic::Ordering::Release);
-    }
-    update_tray_icon(app);
-    refresh_tray_tooltip(app);
-}
-
-fn shortcut_menu_labels(config: &coosenpai_core::config::Config) -> Vec<String> {
-    [
-        ("文章を渡す", config.keymap.send_text.as_deref()),
-        ("画面を渡す", config.keymap.capture_region.as_deref()),
-        ("声で話す", config.keymap.microphone.as_deref()),
-        ("パネルを開く", config.keymap.toggle_panel.as_deref()),
-        ("見る / 休憩する", config.keymap.toggle_watch.as_deref()),
-        (
-            "直近の返事をコピー",
-            config.keymap.copy_last_reply.as_deref(),
-        ),
+fn apply_tray(controls: &TrayControls, app: &AppHandle, view: &TrayView) -> tauri::Result<()> {
+    controls.start.set_enabled(view.start_enabled)?;
+    controls.stop.set_enabled(view.stop_enabled)?;
+    controls
+        .reset_conversation
+        .set_enabled(view.reset_enabled)?;
+    for (item, title) in [
+        &controls.open,
+        &controls.start,
+        &controls.stop,
+        &controls.settings,
+        &controls.reset_conversation,
     ]
     .into_iter()
-    .map(|(label, shortcut)| format!("{label}: {}", shortcut.unwrap_or("未設定")))
-    .collect()
-}
-
-pub fn sync_shortcut_menu(app: &AppHandle, config: &coosenpai_core::config::Config) {
-    let Some(controls) = app.try_state::<TrayControls>() else {
-        return;
-    };
-    for (item, label) in controls
-        .shortcut_items
-        .iter()
-        .zip(shortcut_menu_labels(config))
+    .zip(&view.titles)
     {
-        let _ = item.set_text(label);
+        item.set_text(title)?;
     }
+    controls.shortcuts.set_text(&view.titles[5])?;
+    controls.quit.set_text(&view.titles[6])?;
+    for (item, label) in controls.shortcut_items.iter().zip(&view.shortcuts) {
+        item.set_text(label)?;
+    }
+    let tray = app
+        .tray_by_id("main-tray")
+        .ok_or(tauri::Error::WindowNotFound)?;
+    let icon = match view.icon {
+        TrayIcon::Recording => recording_icon(),
+        TrayIcon::Watching => Image::from_bytes(include_bytes!("../icons/trayWatching@2x.png"))?,
+        TrayIcon::Paused => Image::from_bytes(include_bytes!("../icons/trayTemplate@2x.png"))?,
+    };
+    tray.set_icon_with_as_template(Some(icon), view.icon != TrayIcon::Recording)?;
+    tray.set_tooltip(Some(&view.tooltip))?;
+    Ok(())
 }
 
-pub fn sync_recording(app: &AppHandle, recording: bool) {
-    if let Some(controls) = app.try_state::<TrayControls>() {
-        controls
-            .recording
-            .store(recording, std::sync::atomic::Ordering::Release);
+pub(crate) fn tray_ui_event(id: &str) -> Option<crate::ui_events::UiEvent> {
+    use crate::ui_events::UiEvent;
+    match id {
+        "start" | "stop" => {
+            let (reply, _) = tokio::sync::oneshot::channel();
+            Some(UiEvent::UserCommand(if id == "start" {
+                crate::ui_commands::UserCommand::WatchStart {
+                    source: CommandSource::Tray,
+                    reply,
+                }
+            } else {
+                crate::ui_commands::UserCommand::WatchStop {
+                    source: CommandSource::Tray,
+                    reply,
+                }
+            }))
+        }
+        "open" => Some(UiEvent::OpenMain),
+        "reset-conversation" => Some(UiEvent::ResetPromptRequested),
+        "settings" => Some(UiEvent::OpenSettings),
+        "quit" => Some(UiEvent::Shutdown),
+        _ => None,
     }
-    update_tray_icon(app);
-    refresh_tray_tooltip(app);
-}
-
-fn update_tray_icon(app: &AppHandle) {
-    let Some(tray) = app.tray_by_id("main-tray") else {
-        return;
-    };
-    let (running, recording) = app
-        .try_state::<TrayControls>()
-        .map(|controls| {
-            (
-                controls.running.load(std::sync::atomic::Ordering::Acquire),
-                controls
-                    .recording
-                    .load(std::sync::atomic::Ordering::Acquire),
-            )
-        })
-        .unwrap_or_default();
-    let icon = if recording {
-        Ok(recording_icon())
-    } else if running {
-        Image::from_bytes(include_bytes!("../icons/trayWatching@2x.png"))
-    } else {
-        Image::from_bytes(include_bytes!("../icons/trayTemplate@2x.png"))
-    };
-    if let Ok(icon) = icon {
-        let _ = tray.set_icon_with_as_template(Some(icon), !recording);
-    }
-}
-
-fn refresh_tray_tooltip(app: &AppHandle) {
-    let Some(tray) = app.tray_by_id("main-tray") else {
-        return;
-    };
-    let running = app
-        .try_state::<TrayControls>()
-        .is_some_and(|controls| controls.running.load(std::sync::atomic::Ordering::Acquire));
-    let recording = app.try_state::<TrayControls>().is_some_and(|controls| {
-        controls
-            .recording
-            .load(std::sync::atomic::Ordering::Acquire)
-    });
-    let display_name = app
-        .try_state::<Arc<DesktopState>>()
-        .map(|state| state.runtime_snapshot().companion_display_name)
-        .unwrap_or_else(|| "CooSenpAI".to_owned());
-    let state = if recording {
-        "録音中"
-    } else if running {
-        "見ています"
-    } else {
-        "休憩中"
-    };
-    let _ = tray.set_tooltip(Some(format!("{display_name}: {state}")));
 }
 

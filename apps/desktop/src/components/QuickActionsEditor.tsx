@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 
+import { t, useI18n, type Locale } from "../i18n/index.js";
 import type { PopupQuickAction } from "../types.js";
 import { AddIcon } from "./LineIcons.js";
 
@@ -37,25 +38,25 @@ export function moveQuickAction(
   return next;
 }
 
-function localFieldError(actions: readonly PopupQuickAction[], index: number, field: QuickActionField): string | undefined {
+function localFieldError(actions: readonly PopupQuickAction[], index: number, field: QuickActionField, locale: Locale): string | undefined {
   const action = actions[index];
   if (action === undefined) return undefined;
   const value = action[field].trim();
   if (field === "label") {
     if (value.length === 0 || Array.from(value).length > MAX_LABEL_CHARS || CONTROL_CHARACTER.test(value)) {
-      return `1以上${MAX_LABEL_CHARS}以下の表示文字列を指定してください。`;
+      return t(locale, "settings.quickActions.labelInvalid", { count: MAX_LABEL_CHARS });
     }
     if (actions.some((other, current) => current !== index && other.label.trim() === value)) {
-      return "同じ種類の定型文内で表示ラベルを重複させないでください。";
+      return t(locale, "settings.quickActions.duplicateLabel");
     }
   } else if (value.length === 0 || new TextEncoder().encode(value).byteLength > MAX_MESSAGE_BYTES) {
-    return `1以上${MAX_MESSAGE_BYTES}以下の UTF-8 byte で指定してください。`;
+    return t(locale, "settings.quickActions.messageInvalid", { count: MAX_MESSAGE_BYTES });
   }
   return undefined;
 }
 
-export function newQuickAction(actions: readonly PopupQuickAction[]): PopupQuickAction {
-  const baseLabel = "新しい定型文";
+export function newQuickAction(actions: readonly PopupQuickAction[], locale: Locale = "ja"): PopupQuickAction {
+  const baseLabel = t(locale, "settings.quickActions.newLabel");
   const labels = new Set(actions.map((action) => action.label.trim()));
   let label = baseLabel;
   let suffix = 2;
@@ -67,8 +68,9 @@ export function newQuickAction(actions: readonly PopupQuickAction[]): PopupQuick
 }
 
 export function QuickActionsEditor({ title, kind, actions, update, errorFor }: Props): ReactElement {
-  const path = `popup.quickActions.${kind}`;
-  const listError = errorFor(path) ?? (actions.length > MAX_QUICK_ACTIONS ? `${MAX_QUICK_ACTIONS}件以下で指定してください。` : undefined);
+  const { locale, t: translate } = useI18n();
+ const path = `popup.quickActions.${kind}`;
+  const listError = errorFor(path) ?? (actions.length > MAX_QUICK_ACTIONS ? translate("settings.quickActions.maxCount", { count: MAX_QUICK_ACTIONS }) : undefined);
   const replace = (index: number, field: QuickActionField, value: string): void => {
     update(actions.map((action, current) => current === index
       ? { ...action, [field]: value }
@@ -83,18 +85,18 @@ export function QuickActionsEditor({ title, kind, actions, update, errorFor }: P
     {actions.map((action, index) => {
       const labelPath = `${path}[${index}].label`;
       const messagePath = `${path}[${index}].message`;
-      const labelError = errorFor(labelPath) ?? localFieldError(actions, index, "label");
-      const messageError = errorFor(messagePath) ?? localFieldError(actions, index, "message");
+      const labelError = errorFor(labelPath) ?? localFieldError(actions, index, "label", locale);
+      const messageError = errorFor(messagePath) ?? localFieldError(actions, index, "message", locale);
       return <div className="quick-action-row" key={index}>
-      <label><span>表示</span><input id={`setting-${labelPath.replaceAll(".", "-")}`} aria-invalid={labelError === undefined ? undefined : true} value={action.label} onChange={(event) => replace(index, "label", event.target.value)} />{labelError === undefined ? null : <span className="field-error" role="alert">{labelError}</span>}</label>
-      <label><span>送る文</span><input id={`setting-${messagePath.replaceAll(".", "-")}`} aria-invalid={messageError === undefined ? undefined : true} value={action.message} onChange={(event) => replace(index, "message", event.target.value)} />{messageError === undefined ? null : <span className="field-error" role="alert">{messageError}</span>}</label>
+      <label><span>{translate("settings.quickActions.display")}</span><input id={`setting-${labelPath.replaceAll(".", "-")}`} aria-invalid={labelError === undefined ? undefined : true} value={action.label} onChange={(event) => replace(index, "label", event.target.value)} />{labelError === undefined ? null : <span className="field-error" role="alert">{labelError}</span>}</label>
+      <label><span>{translate("settings.quickActions.message")}</span><input id={`setting-${messagePath.replaceAll(".", "-")}`} aria-invalid={messageError === undefined ? undefined : true} value={action.message} onChange={(event) => replace(index, "message", event.target.value)} />{messageError === undefined ? null : <span className="field-error" role="alert">{messageError}</span>}</label>
       <span className="quick-action-order">
-        <button type="button" aria-label={`${action.label || index + 1} を上へ`} disabled={index === 0} onClick={() => move(index, "up")}>↑</button>
-        <button type="button" aria-label={`${action.label || index + 1} を下へ`} disabled={index === actions.length - 1} onClick={() => move(index, "down")}>↓</button>
+        <button type="button" aria-label={translate("settings.quickActions.moveUp", { label: action.label || String(index + 1) })} disabled={index === 0} onClick={() => move(index, "up")}>↑</button>
+        <button type="button" aria-label={translate("settings.quickActions.moveDown", { label: action.label || String(index + 1) })} disabled={index === actions.length - 1} onClick={() => move(index, "down")}>↓</button>
       </span>
-      <button type="button" aria-label={`${action.label || index + 1} を削除`} onClick={() => update(actions.filter((_, current) => current !== index))}>削除</button>
+      <button type="button" aria-label={translate("settings.quickActions.delete", { label: action.label || String(index + 1) })} onClick={() => update(actions.filter((_, current) => current !== index))}>{translate("common.delete")}</button>
     </div>;
     })}
-    <button type="button" disabled={actions.length >= MAX_QUICK_ACTIONS} onClick={() => update([...actions, newQuickAction(actions)])}><AddIcon /> 追加</button>
+    <button type="button" disabled={actions.length >= MAX_QUICK_ACTIONS} onClick={() => update([...actions, newQuickAction(actions, locale)])}><AddIcon /> {translate("settings.quickActions.add")}</button>
   </div>;
 }

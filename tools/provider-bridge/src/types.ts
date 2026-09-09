@@ -43,6 +43,7 @@ export interface ProviderCallOptions {
   readonly executable?: string;
   readonly cwd: string;
   readonly toolsDisabled: boolean;
+  readonly isolateTools?: boolean;
   readonly signal: AbortSignal;
   readonly emitDelta: (text: string) => void;
   readonly resetDelta: () => void;

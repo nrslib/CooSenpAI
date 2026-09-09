@@ -8,6 +8,7 @@ pub struct ConfigPaths {
     pub personas: PathBuf,
     pub builtin_personas: Option<PathBuf>,
     pub builtin_tutorial: Option<PathBuf>,
+    pub builtin_tutorial_en: Option<PathBuf>,
     pub mailbox: PathBuf,
     pub state: PathBuf,
     pub provider: PathBuf,
@@ -51,6 +52,7 @@ impl ConfigPaths {
             personas: root.join("personas"),
             builtin_personas: None,
             builtin_tutorial: None,
+            builtin_tutorial_en: None,
             mailbox: root.join("mailbox"),
             state: root.join("state"),
             provider: root.join("state/provider"),
@@ -100,6 +102,11 @@ impl ConfigPaths {
 
     pub fn with_builtin_tutorial(mut self, path: PathBuf) -> Self {
         self.builtin_tutorial = Some(path);
+        self
+    }
+
+    pub fn with_builtin_tutorial_en(mut self, path: PathBuf) -> Self {
+        self.builtin_tutorial_en = Some(path);
         self
     }
 }

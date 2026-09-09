@@ -6,6 +6,8 @@ export interface AttachmentHistoryItem {
   readonly kind: "image" | "text";
 }
 
+export type AttachmentHistoryFilter = "all" | AttachmentHistoryItem["kind"];
+
 export function attachmentHistory(entries: readonly ConversationEntry[]): readonly AttachmentHistoryItem[] {
   const replies = new Map<string, ConversationEntry>();
   for (const entry of entries) {

@@ -1,5 +1,17 @@
 import Foundation
 
+func boundedPartialTranscript(_ text: String) -> String {
+    var byteCount = 0
+    var kept = String.UnicodeScalarView()
+    for scalar in text.unicodeScalars {
+        let size = String(scalar).utf8.count
+        guard byteCount + size <= 4096 else { break }
+        kept.append(scalar)
+        byteCount += size
+    }
+    return String(kept)
+}
+
 enum RecognitionRestartThrottle {
     static let minimumIntervalNanoseconds: UInt64 = 2_000_000_000
 }
@@ -114,6 +126,7 @@ struct RecognitionState<Request, Task, Recognizer> {
     var taskTerminalArrived: Bool
     var taskCancellationRequested: Bool
     var closeReason: RecognitionSegmentCloseReason?
+    var transcriptSequence: UInt64
 }
 
 struct RecognitionStateStore<Request, Task, Recognizer> {
@@ -161,9 +174,21 @@ struct RecognitionStateStore<Request, Task, Recognizer> {
             lifecycle: taskTerminalArrived ? .terminal : .accepting,
             taskTerminalArrived: taskTerminalArrived,
             taskCancellationRequested: false,
-            closeReason: nil
+            closeReason: nil,
+            transcriptSequence: 0
         )
         return true
+    }
+
+    mutating func nextTranscriptSequence(source: AudioSource, generation: Int) -> UInt64? {
+        guard var state = states[source],
+              isCurrentState(source, generation),
+              state.lifecycle != .cancelling else {
+            return nil
+        }
+        state.transcriptSequence += 1
+        states[source] = state
+        return state.transcriptSequence
     }
 
     mutating func markTaskTerminal(source: AudioSource, generation: Int) -> Bool {

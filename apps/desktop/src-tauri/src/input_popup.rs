@@ -1,5 +1,3 @@
-use crate::command_types::CommandSource;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputPopupKind {
     CaptureImage,
@@ -11,38 +9,18 @@ pub(crate) enum InputPopupKind {
 pub(crate) enum InputPopupStartAction {
     Start,
     Focus,
-    Cancel,
     CancelThenStart,
+    #[cfg(test)]
     FinishSpeech,
 }
 
-pub(crate) fn start_action(
-    current: Option<InputPopupKind>,
-    requested: InputPopupKind,
-    source: CommandSource,
-) -> InputPopupStartAction {
+pub(crate) fn speech_start_action(current: Option<InputPopupKind>) -> InputPopupStartAction {
     match current {
         None => InputPopupStartAction::Start,
-        Some(kind)
-            if kind == requested
-                && source == CommandSource::GlobalShortcut
-                && matches!(
-                    requested,
-                    InputPopupKind::CaptureImage | InputPopupKind::CaptureText
-                ) =>
-        {
-            InputPopupStartAction::Cancel
+        Some(InputPopupKind::Speech) => InputPopupStartAction::Focus,
+        Some(InputPopupKind::CaptureImage | InputPopupKind::CaptureText) => {
+            InputPopupStartAction::CancelThenStart
         }
-        Some(kind) if kind == requested => InputPopupStartAction::Focus,
-        Some(_) => InputPopupStartAction::CancelThenStart,
-    }
-}
-
-pub(crate) fn microphone_action(mode: &str, recording: bool) -> InputPopupStartAction {
-    if mode == "toggle" && recording {
-        InputPopupStartAction::FinishSpeech
-    } else {
-        InputPopupStartAction::Start
     }
 }
 

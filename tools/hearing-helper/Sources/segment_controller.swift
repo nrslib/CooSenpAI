@@ -48,6 +48,7 @@ enum RecognitionSegmentCloseReason: String {
     case trailing
     case max
     case forced
+    case music
     case steadyNoise = "steady-noise"
     case recognizerFinal = "recognizer-final"
     case noSpeech
@@ -57,6 +58,7 @@ enum RecognitionSegmentCloseReason: String {
 enum RecognitionTaskCancelReason: String {
     case finalTimeout = "final-timeout"
     case sourceDisabled = "source-disabled"
+    case inputChanged = "input-changed"
     case sessionClosed = "session-closed"
     case registrationRejected = "registration-rejected"
 }
@@ -297,6 +299,10 @@ struct RecognitionSegmentController<Request, Task, Recognizer> {
         states.markTaskTerminal(source: source, generation: generation)
     }
 
+    mutating func nextTranscriptSequence(source: AudioSource, generation: Int) -> UInt64? {
+        states.nextTranscriptSequence(source: source, generation: generation)
+    }
+
     mutating func beginEnding(
         source: AudioSource,
         generation: Int,
@@ -358,6 +364,18 @@ struct RecognitionSegmentController<Request, Task, Recognizer> {
 
     mutating func retireGeneration(source: AudioSource, generation: Int) {
         states.retireGeneration(source: source, generation: generation)
+    }
+
+    mutating func resetInput(for source: AudioSource) -> State? {
+        let state: State?
+        if let generation = currentGeneration(for: source) {
+            state = remove(source: source, generation: generation)
+            if state == nil { retireGeneration(source: source, generation: generation) }
+        } else {
+            state = nil
+        }
+        clearPendingAndPreRoll(for: source)
+        return state
     }
 
     mutating func removeAll() -> [State] {

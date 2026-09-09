@@ -1,4 +1,7 @@
 export type ProviderName = "codex" | "claude" | "opencode";
+export interface WorkAllowedRoot { readonly path: string; readonly read: boolean; readonly write: boolean }
+export interface WorkConfigPatch { readonly approvalMode?: "manual" | "auto"; readonly allowedRoots?: readonly WorkAllowedRoot[] }
+export type LicenseDocument = "license" | "eula" | "eula-en";
 export type NotificationPriority = "none" | "info" | "warning" | "critical";
 export interface PersonaOption { readonly id: string; readonly displayName: string; readonly builtin: boolean }
 export interface ProviderModelOptions { readonly provider: ProviderName; readonly defaultModel: string; readonly candidates: readonly string[] }
@@ -17,6 +20,7 @@ export interface CompanionModelCatalog {
 export interface ProviderApiKeyStatus { readonly codex: boolean; readonly claude: boolean; readonly opencode: boolean }
 
 export interface CooSenpaiConfig {
+  readonly work: { readonly approvalMode: "manual" | "auto"; readonly allowedRoots: readonly WorkAllowedRoot[] };
   readonly configVersion: number;
   readonly revision: number;
   readonly app: { readonly launchAtLogin: boolean; readonly checkForUpdates: boolean };
@@ -41,6 +45,7 @@ export interface CooSenpaiConfig {
     readonly ocrGate: { readonly enabled: boolean; readonly level: "fast" | "accurate"; readonly timeoutMs: number; readonly executable?: string | null };
   };
   readonly audio: { readonly enabled: boolean; readonly mic: boolean; readonly speaker: boolean };
+  readonly voiceOutput: { readonly enabled: boolean; readonly provider: "system" | "voicevox"; readonly rate: number; readonly voicevoxStyleId: number | null };
   readonly speech: {
     readonly locale: string;
     readonly mode: "pushToTalk" | "toggle";
@@ -52,12 +57,14 @@ export interface CooSenpaiConfig {
     readonly avatarPath?: string | null;
     readonly theme: "system" | "light" | "dark";
     readonly font: string;
+    readonly language: "ja" | "en";
     readonly thoughtBubble: boolean;
   };
   readonly keymap: {
     readonly captureRegion?: string | null;
     readonly microphone?: string | null;
     readonly togglePanel?: string | null;
+    readonly toggleAvatar?: string | null;
     readonly toggleWatch?: string | null;
     readonly sendText?: string | null;
     readonly copyLastReply?: string | null;
@@ -116,6 +123,7 @@ export interface AgentConfig {
 }
 
 export interface CompanionConfig {
+  readonly emotionsEnabled: boolean;
   readonly provider: ProviderName;
   readonly model: string;
   readonly effort: string;
@@ -168,20 +176,97 @@ export interface ConversationEntry {
   readonly notificationPriority: NotificationPriority;
 }
 
-export interface ObservationSummary {
-  readonly kind: "visual" | "no-change" | "audio";
-  readonly id: string;
-  readonly createdAt: string;
-  readonly activity?: string;
-  readonly changes?: readonly string[];
-  readonly wakeCompanion?: boolean;
-  readonly source?: "microphone" | "speaker";
-  readonly text?: string;
+export interface ConversationGeneration {
+  readonly generation: number;
+  readonly startedAt?: string;
+  readonly firstMessage?: string;
+  readonly entryCount: number;
 }
 
-export interface VisualObservationSummary extends ObservationSummary {
+export interface ObservationFrame {
+  readonly trigger: "typing-paused" | "app-switched" | "timer";
+  readonly frontApp: string | null;
+  readonly app: string | null;
+  readonly target: string;
+}
+
+export interface ObservationEvent {
+  readonly type: "error" | "test-failed" | "test-passed" | "build-failed" | "build-passed" | "commit" | "milestone" | "other";
+  readonly detail: string;
+}
+
+export interface VisualObservation {
   readonly kind: "visual";
+  readonly schemaVersion: number;
+  readonly id: string;
+  readonly createdAt: string;
+  readonly windowStart: string;
+  readonly windowEnd: string;
+  readonly frameCount: number;
+  readonly frames: readonly ObservationFrame[];
+  readonly sourceFrameIds?: readonly string[];
   readonly activity: string;
+  readonly outline: string;
+  readonly changes: readonly string[];
+  readonly events: readonly ObservationEvent[];
+  readonly guess?: string;
+  readonly confidence?: "high" | "medium" | "low";
+  readonly wakeCompanion: boolean;
+}
+
+export interface StagnationObservation {
+  readonly eventId?: string;
+  readonly eventCreatedAt?: string;
+  readonly lastMeaningfulChangeAt: string;
+  readonly elapsedMs: number;
+  readonly activitySignals: boolean;
+  readonly detail: string;
+}
+
+export interface NoChangeObservation {
+  readonly kind: "no-change";
+  readonly schemaVersion: number;
+  readonly id: string;
+  readonly createdAt: string;
+  readonly windowStart: string;
+  readonly windowEnd: string;
+  readonly stagnation?: StagnationObservation;
+}
+
+export interface AudioObservation {
+  readonly kind: "audio";
+  readonly schemaVersion: number;
+  readonly id: string;
+  readonly createdAt: string;
+  readonly windowStart: string;
+  readonly windowEnd: string;
+  readonly source: "microphone" | "speaker";
+  readonly text: string;
+}
+
+export type ObservationRecord = VisualObservation | NoChangeObservation | AudioObservation;
+
+export interface TranscriptRecord {
+  readonly observationId?: string;
+  readonly time: string;
+  readonly source: string;
+  readonly text: string;
+  readonly speakerTag?: string;
+}
+
+export interface DataFlowLog {
+  readonly observations: readonly ObservationRecord[];
+  readonly transcripts: readonly TranscriptRecord[];
+}
+
+export interface CompanionDecision {
+  readonly sequence: number;
+  readonly occurredAt: string;
+  readonly emit: boolean;
+  readonly messageKind: string;
+  readonly message?: string;
+  readonly thought?: string;
+  readonly observationIds?: readonly string[];
 }
 
 export interface RuntimeLastError {
@@ -197,7 +282,17 @@ export interface RuntimeLastError {
   };
 }
 
+export interface CompanionEmotions {
+  readonly joy: number;
+  readonly embarrassment: number;
+  readonly concern: number;
+  readonly surprise: number;
+  readonly curiosity: number;
+  readonly frustration: number;
+}
+
 export interface AppSnapshot {
+  readonly companionEmotions: CompanionEmotions;
   readonly revision: number;
   readonly configRevision: number;
   readonly config: CooSenpaiConfig;
@@ -212,8 +307,8 @@ export interface AppSnapshot {
     readonly frontApp?: string;
     readonly pendingFrameCount: number;
     readonly nextSendAt?: string;
-    readonly lastObservation?: ObservationSummary;
-    readonly lastVisualObservation?: VisualObservationSummary;
+    readonly lastObservation?: ObservationRecord;
+    readonly lastVisualObservation?: VisualObservation;
     readonly ocrGateEnabled: boolean;
     readonly activitySignalsEnabled: boolean;
     readonly batteryMultiplier: number;
@@ -230,6 +325,8 @@ export interface AppSnapshot {
     readonly expiresAt: string;
   };
   readonly conversation: readonly ConversationEntry[];
+  readonly conversationGenerations: readonly ConversationGeneration[];
+  readonly selectedConversationGeneration: number;
   readonly unreadCount: number;
   readonly screenRecordingStatus: "granted" | "not-granted" | "unknown";
   readonly screenRecordingMessage?: string;
@@ -243,9 +340,12 @@ export interface AppSnapshot {
   readonly debugCatalog: DebugCatalog;
   readonly captureShortcutError?: string;
   readonly activeUserMessageId?: string;
+  readonly userWorkPending: boolean;
   readonly cancelledUserMessageIds: readonly string[];
   readonly companionDraft?: string;
   readonly latestCompanionThought?: string;
+  readonly latestCompanionDecision?: CompanionDecision;
+  readonly latestUserInterruption?: { readonly sequence: number; readonly occurredAt: string; readonly observer: boolean; readonly proactive: boolean };
   readonly avatarImagePng?: readonly number[];
   readonly avatarImageLoadFailed: boolean;
   readonly providerUsage: {
@@ -268,6 +368,7 @@ export interface AppSnapshot {
     readonly currentStep?: "chat" | "text" | "image" | "voice" | "persona" | "watch";
     readonly skipHint?: string;
     readonly settingsHighlight?: "persona" | "watch";
+    readonly highlightedSettings?: readonly string[];
   };
 }
 
@@ -290,6 +391,15 @@ export interface SpeechView {
   readonly source?: "shortcut" | "composer";
 }
 
+export type AudioLogEvent = {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly source: "microphone" | "speaker";
+} & (
+  | { readonly stage: "recognizing" | "no-speech" }
+  | { readonly stage: "confirmed"; readonly text: string }
+);
+
 export interface AudioView {
   readonly generation: number;
   readonly phase: "off" | "starting" | "listening" | "stopping" | "error";
@@ -298,6 +408,7 @@ export interface AudioView {
   readonly screenCapturePermission: "granted" | "not-granted" | "unknown";
   readonly warningKind?: string;
   readonly message?: string;
+  readonly recentEvents: readonly AudioLogEvent[];
   readonly latestObservation?: {
     readonly id: string;
     readonly createdAt: string;
@@ -312,6 +423,7 @@ export interface SpeechPopupSnapshot {
   readonly speech: SpeechView;
   readonly theme: "system" | "light" | "dark";
   readonly font: string;
+  readonly language: "ja" | "en";
   readonly avatarColor?: string;
   readonly avatarImagePng?: readonly number[];
 }
@@ -325,7 +437,9 @@ export interface WatchTargetView {
   readonly lastTrigger?: string;
 }
 
+
 export interface CapturePopupSnapshot {
+  readonly generation: number;
   readonly revision: number;
   readonly captureId: string;
   readonly attachmentKind: "image" | "text";
@@ -342,6 +456,7 @@ export interface CapturePopupSnapshot {
   readonly font: string;
   readonly avatarColor?: string;
   readonly avatarImagePng?: readonly number[];
+  readonly language: "ja" | "en";
 }
 
 export interface PopupQuickAction {
@@ -430,7 +545,7 @@ export interface BubbleRecord {
   readonly id: string;
   readonly createdAt: string;
   readonly message: string;
-  readonly messageKind: "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "chat" | "thought" | "tutorial" | "tutorial-typing" | "setup" | "notice" | "fact-confirmation";
+  readonly messageKind: "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "chat" | "thought" | "tutorial" | "setup" | "notice" | "fact-confirmation";
   readonly notificationPriority: NotificationPriority;
   readonly causedBy?: string;
   readonly displayName: string;
@@ -438,7 +553,6 @@ export interface BubbleRecord {
   readonly avatarColor?: string;
   readonly conversationGeneration: number;
   readonly persistent: boolean;
-  readonly openUrl?: string;
   readonly interaction?: BubbleInteraction;
 }
 
@@ -449,6 +563,12 @@ export interface BubbleInteraction {
     readonly action: string;
     readonly confirmLabel: string;
   };
+  readonly secretInput?: {
+    readonly label: string;
+    readonly placeholder: string;
+    readonly action: string;
+    readonly submitLabel: string;
+  };
   readonly actions: readonly { readonly id: string; readonly label: string }[];
   readonly detail?: string;
   readonly technicalDetail?: string;
@@ -457,8 +577,12 @@ export interface BubbleInteraction {
 export interface BubbleSnapshot {
   readonly generation: number;
   readonly records: readonly BubbleRecord[];
+  readonly frontId: string | null;
+  readonly historyIds: readonly string[];
+  readonly reading: boolean;
   readonly theme: "system" | "light" | "dark";
   readonly font: string;
+  readonly language: "ja" | "en";
   readonly position: "bottom-right" | "top-right" | "bottom-left" | "top-left";
   readonly avatarColor?: string;
   readonly avatarImagePng?: readonly number[];

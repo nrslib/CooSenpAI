@@ -1,36 +1,90 @@
 use crate::state::DesktopState;
+use crate::watch_presenter::WatchResult;
 use anyhow::Error;
 use coosenpai_core::ports::RuntimeLogger;
 use coosenpai_core::runtime::RuntimeError;
 use coosenpai_core::watch_coordinator::RetryBackoff;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub(super) const MAX_CONSECUTIVE_FAILURES: u32 = 5;
-const RECOVERABLE_ERROR_DISPLAY_ATTEMPT: u32 = 3;
-const RECOVERABLE_ERROR_DISPLAY_GRACE: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum WatchSessionKind {
+    #[default]
+    Normal,
+    Tutorial,
+}
+
+impl WatchSessionKind {
+    pub(super) fn for_tutorial(tutorial_active: bool) -> Self {
+        if tutorial_active {
+            Self::Tutorial
+        } else {
+            Self::Normal
+        }
+    }
+}
 
 #[async_trait::async_trait]
-trait WatchErrorPublisher: Send + Sync {
-    async fn publish_recoverable_error(&self, detail: String, cancellation: CancellationToken);
-    async fn publish_exhausted_error(&self, detail: String);
+pub(crate) trait WatchErrorPublisher: Send + Sync {
+    async fn observe_watch_failure(
+        &self,
+        generation: u64,
+        attempt: u32,
+        detail: String,
+        tutorial: bool,
+        cancellation: CancellationToken,
+    );
+    async fn observe_watch_exit(&self, generation: u64, detail: String, tutorial: bool) -> bool;
 }
 
 #[async_trait::async_trait]
 impl WatchErrorPublisher for DesktopState {
-    async fn publish_recoverable_error(&self, detail: String, cancellation: CancellationToken) {
-        self.publish(|snapshot| {
-            if !cancellation.is_cancelled() {
-                snapshot.observer.record_recoverable_error(detail);
-            }
-        })
+    async fn observe_watch_failure(
+        &self,
+        generation: u64,
+        attempt: u32,
+        detail: String,
+        tutorial: bool,
+        cancellation: CancellationToken,
+    ) {
+        self.publish_watch_view(
+            generation,
+            WatchResult::FailureObserved {
+                attempt,
+                detail,
+                tutorial,
+                cancellation,
+            },
+        )
         .await;
     }
 
-    async fn publish_exhausted_error(&self, detail: String) {
-        self.publish(|snapshot| snapshot.observer.record_error(detail))
-            .await;
+    async fn observe_watch_exit(&self, generation: u64, detail: String, tutorial: bool) -> bool {
+        match self
+            .ui
+            .query(crate::ui_events::UiView::Application, |reply| {
+                crate::ui_events::UiEvent::SnapshotCompleted(Box::new(
+                    crate::snapshot_presenter::SnapshotEvent::Watch {
+                        generation,
+                        event: WatchResult::ExitObserved {
+                            detail,
+                            tutorial,
+                            reply,
+                        },
+                    },
+                ))
+            })
+            .await
+        {
+            Ok(failed) => failed,
+            Err(error) => {
+                let _ = self.logger.write("WARN", &error);
+                false
+            }
+        }
     }
 }
 
@@ -44,24 +98,22 @@ pub(super) enum WatchRecoveryDecision {
 
 #[derive(Debug, Default)]
 pub(super) struct WatchRecovery {
+    session_kind: WatchSessionKind,
     consecutive_failures: u32,
     backoff: RetryBackoff,
-    pending_error_presentation: Option<PendingErrorPresentation>,
-}
-
-#[derive(Debug)]
-struct PendingErrorPresentation {
-    cancellation: CancellationToken,
-    detail: Arc<Mutex<String>>,
 }
 
 impl WatchRecovery {
+    pub(super) fn new(session_kind: WatchSessionKind) -> Self {
+        Self {
+            session_kind,
+            ..Default::default()
+        }
+    }
     pub(super) fn reset(&mut self) {
-        self.cancel_pending_error_presentation();
         self.consecutive_failures = 0;
         self.backoff.reset();
     }
-
     pub(super) fn next_delay(&mut self) -> Option<Duration> {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         if self.consecutive_failures > MAX_CONSECUTIVE_FAILURES {
@@ -73,77 +125,22 @@ impl WatchRecovery {
             .next_attempt()
             .map(|deadline| deadline.saturating_duration_since(now))
     }
-
-    fn should_present_immediately(&self) -> bool {
-        self.consecutive_failures >= RECOVERABLE_ERROR_DISPLAY_ATTEMPT
-    }
-
-    fn schedule_error_presentation(
-        &mut self,
-        publisher: Arc<dyn WatchErrorPublisher>,
-        detail: String,
-    ) {
-        if let Some(pending) = &self.pending_error_presentation {
-            *pending
-                .detail
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = detail;
-            return;
-        }
-        let cancellation = CancellationToken::new();
-        let latest_detail = Arc::new(Mutex::new(detail));
-        self.pending_error_presentation = Some(PendingErrorPresentation {
-            cancellation: cancellation.clone(),
-            detail: latest_detail.clone(),
-        });
-        let task_cancellation = cancellation.clone();
-        let _task = tokio::spawn(async move {
-            tokio::select! {
-                _ = task_cancellation.cancelled() => {}
-                _ = tokio::time::sleep(RECOVERABLE_ERROR_DISPLAY_GRACE) => {
-                    if task_cancellation.is_cancelled() {
-                        return;
-                    }
-                    let detail = latest_detail
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone();
-                    if !task_cancellation.is_cancelled() {
-                        publisher
-                            .publish_recoverable_error(detail, task_cancellation.clone())
-                            .await;
-                    }
-                }
-            }
-        });
-    }
-
-    fn cancel_pending_error_presentation(&mut self) {
-        if let Some(pending) = self.pending_error_presentation.take() {
-            pending.cancellation.cancel();
-        }
-    }
 }
 
-impl Drop for WatchRecovery {
-    fn drop(&mut self) {
-        self.cancel_pending_error_presentation();
-    }
-}
-
-pub(super) async fn record_watch_failure(
-    state: &Arc<DesktopState>,
+pub(super) async fn record_watch_failure<H: super::WatchHost>(
+    state: &Arc<H>,
     recovery: &mut WatchRecovery,
     error: &Error,
+    generation: u64,
     cancellation: &CancellationToken,
 ) -> WatchRecoveryDecision {
-    let publisher: Arc<dyn WatchErrorPublisher> = state.clone();
     record_watch_failure_inner(
         recovery,
         error,
+        generation,
         cancellation,
-        state.logger.as_ref(),
-        publisher,
+        state.logger(),
+        state.as_ref(),
     )
     .await
 }
@@ -151,50 +148,55 @@ pub(super) async fn record_watch_failure(
 async fn record_watch_failure_inner(
     recovery: &mut WatchRecovery,
     error: &Error,
+    generation: u64,
     cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
-    publisher: Arc<dyn WatchErrorPublisher>,
+    publisher: &dyn WatchErrorPublisher,
 ) -> WatchRecoveryDecision {
     let detail = super::watch_error_detail(error);
     if is_config_update_cancellation(error) {
-        let _ = logger.write(
-            "INFO",
-            &format!(
-                "見守り: 設定反映に伴う provider キャンセルを処理しました: error-type=watch-config-cancellation error={detail}"
-            ),
-        );
+        let _ = logger.write("INFO", &format!("見守り: 設定反映に伴う provider キャンセルを処理しました: error-type=watch-config-cancellation error={detail}"));
         return WatchRecoveryDecision::ConfigUpdateCancelled;
     }
-
+    let tutorial = recovery.session_kind == WatchSessionKind::Tutorial;
     let Some(delay) = recovery.next_delay() else {
-        recovery.cancel_pending_error_presentation();
         let _ = logger.write(
             "ERROR",
             &format!("見守りを停止しました: error-type=watch recovery-exhausted error={detail}"),
         );
-        publisher.publish_exhausted_error(detail).await;
+        publisher
+            .observe_watch_exit(generation, detail, tutorial)
+            .await;
         return WatchRecoveryDecision::Stop;
     };
     let attempt = recovery.consecutive_failures;
-    let _ = logger.write(
-        "WARN",
-        &format!(
-            "見守りで一時的なエラーが発生しました: error-type=watch attempt={attempt}/{MAX_CONSECUTIVE_FAILURES} retry-ms={} error={detail}",
-            delay.as_millis()
-        ),
-    );
-    if recovery.should_present_immediately() {
-        recovery.cancel_pending_error_presentation();
-        publisher
-            .publish_recoverable_error(detail, CancellationToken::new())
-            .await;
-    } else {
-        recovery.schedule_error_presentation(publisher, detail);
-    }
+    let _ = logger.write("WARN", &format!("見守りで一時的なエラーが発生しました: error-type=watch attempt={attempt}/{MAX_CONSECUTIVE_FAILURES} retry-ms={} error={detail}", delay.as_millis()));
+    publisher
+        .observe_watch_failure(generation, attempt, detail, tutorial, cancellation.clone())
+        .await;
     tokio::select! {
         _ = cancellation.cancelled() => WatchRecoveryDecision::Cancelled,
         _ = tokio::time::sleep(delay) => WatchRecoveryDecision::Retry,
     }
+}
+
+pub(super) async fn record_watch_exit<H: super::WatchHost>(
+    state: &Arc<H>,
+    generation: u64,
+    result: Result<(), Error>,
+    kind: WatchSessionKind,
+) -> bool {
+    let Err(error) = result else {
+        return false;
+    };
+    let detail = super::watch_error_detail(&error);
+    let _ = state.logger().write(
+        "ERROR",
+        &format!("見守りに失敗しました: error-type=watch error={detail}"),
+    );
+    state
+        .observe_watch_exit(generation, detail, kind == WatchSessionKind::Tutorial)
+        .await
 }
 
 fn is_config_update_cancellation(error: &Error) -> bool {
