@@ -42,7 +42,7 @@
     }
 
     @media (prefers-color-scheme: dark) {
-      :root {
+      :root:not([data-theme="light"]) {
         color-scheme: dark;
         --color-base: #1c1b1a;
         --color-surface: #282726;
@@ -62,6 +62,36 @@
         --color-accent-ink: #cfc5ae;
       }
     }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --color-base: #1c1b1a;
+      --color-surface: #282726;
+      --color-surface-step: #232220;
+      --color-bubble: #2e2c28;
+      --color-text: #cecdc3;
+      --color-muted: #aaa79e;
+      --color-faint: #a09d94;
+      --color-line: rgba(255, 255, 255, .08);
+      --color-line-strong: rgba(255, 255, 255, .16);
+      --color-accent-face: #4a4437;
+      --logo-body: #efead8;
+      --logo-eye: #9c9484;
+      --logo-text: #efead8;
+      --mark-body: #efead8;
+      --mark-line: rgba(255, 255, 255, .28);
+      --color-accent-ink: #cfc5ae;
+    }
+    .theme-toggle {
+      position: fixed; top: 14px; right: 14px; z-index: 50;
+      display: inline-flex; gap: 2px; padding: 3px;
+      background: var(--color-surface); border: 1px solid var(--color-line-strong); border-radius: 999px;
+      font-family: var(--font-system); font-size: 12px; line-height: 1;
+    }
+    .theme-toggle button {
+      appearance: none; border: 0; background: transparent; color: var(--color-muted);
+      padding: 6px 10px; border-radius: 999px; cursor: pointer; font: inherit;
+    }
+    .theme-toggle button[aria-pressed="true"] { background: var(--color-accent-face); color: var(--color-accent-ink); }
 
 
     * { box-sizing: border-box; }
@@ -827,6 +857,11 @@
 </head>
 
 <body>
+  <div class="theme-toggle" role="group" aria-label="配色">
+    <button type="button" data-theme-choice="system" aria-pressed="true">自動</button>
+    <button type="button" data-theme-choice="light" aria-pressed="false">ライト</button>
+    <button type="button" data-theme-choice="dark" aria-pressed="false">ダーク</button>
+  </div>
   <main>
     <section class="hero">
       <div class="container">
@@ -867,7 +902,7 @@
           </figcaption>
           <div class="recording-media" data-video="hero-loop.mp4">
             <!-- 動画の差し込み口。作業中のデスクトップの上に Coo の吹き出しが出る 30 秒を hero-loop.mp4 に置いたら、video に src を付け、play-button と video の hidden を外し、picture を消す。ボタンで再生を始める（自動再生しない） -->
-            <video class="recording-video" preload="none" playsinline muted loop poster="media/kun/hero-poster-kun.jpg" src="media/kun/hero-loop-kun.mp4"></video>
+            <video class="recording-video" preload="none" playsinline muted loop poster="media/kun/hero-poster-kun.jpg" src="media/kun/hero-loop-kun.mp4" data-light-poster="media/kun/light/hero-poster-kun.jpg" data-light-src="media/kun/light/hero-loop-kun.mp4"></video>
             <button class="play-button" type="button">30 秒で見る</button>
           </div>
         </figure>
@@ -887,7 +922,10 @@
             <div class="container feature-layout">
               <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="text.gif"> をこの figure の中に置き、figure-bubble を外す -->
               <figure class="feature-figure" id="gif-text" data-gif="text.gif">
-                <img class="feature-gif" src="media/kun/text.gif" alt="文章を選んで ⌥⇧C で小窓を開き、要約が返る様子" loading="lazy">
+                <picture>
+                  <source srcset="media/kun/light/text.gif" media="(prefers-color-scheme: light)">
+                  <img class="feature-gif" src="media/kun/text.gif" alt="文章を選んで ⌥⇧C で小窓を開き、要約が返る様子" loading="lazy">
+                </picture>
               </figure>
               <div class="feature-copy">
                 <span class="feature-number" aria-hidden="true"></span>
@@ -901,7 +939,10 @@
             <div class="container feature-layout">
               <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="capture.gif"> をこの figure の中に置き、figure-bubble を外す -->
               <figure class="feature-figure" id="gif-capture" data-gif="capture.gif">
-                <img class="feature-gif" src="media/kun/capture.gif" alt="範囲を選んでスクショを送り、Coo が答える様子" loading="lazy">
+                <picture>
+                  <source srcset="media/kun/light/capture.gif" media="(prefers-color-scheme: light)">
+                  <img class="feature-gif" src="media/kun/capture.gif" alt="範囲を選んでスクショを送り、Coo が答える様子" loading="lazy">
+                </picture>
               </figure>
               <div class="feature-copy">
                 <span class="feature-number" aria-hidden="true"></span>
@@ -915,7 +956,10 @@
             <div class="container feature-layout">
               <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="voice.gif"> をこの figure の中に置き、figure-bubble を外す -->
               <figure class="feature-figure" id="gif-voice" data-gif="voice.gif">
-                <img class="feature-gif" src="media/kun/voice.gif" alt="⌥Space で音声入力して返事が返る様子" loading="lazy">
+                <picture>
+                  <source srcset="media/kun/light/voice.gif" media="(prefers-color-scheme: light)">
+                  <img class="feature-gif" src="media/kun/voice.gif" alt="⌥Space で音声入力して返事が返る様子" loading="lazy">
+                </picture>
               </figure>
               <div class="feature-copy">
                 <span class="feature-number" aria-hidden="true"></span>
@@ -930,7 +974,10 @@
             <div class="container feature-layout">
               <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="chat.gif"> をこの figure の中に置き、figure-bubble を外す -->
               <figure class="feature-figure" id="gif-chat" data-gif="chat.gif">
-                <img class="feature-gif" src="media/kun/chat.gif" alt="チャットで一言送って返事が返る様子" loading="lazy">
+                <picture>
+                  <source srcset="media/kun/light/chat.gif" media="(prefers-color-scheme: light)">
+                  <img class="feature-gif" src="media/kun/chat.gif" alt="チャットで一言送って返事が返る様子" loading="lazy">
+                </picture>
               </figure>
               <div class="feature-copy">
                 <span class="feature-number" aria-hidden="true"></span>
@@ -955,7 +1002,10 @@
             <div class="container feature-layout">
               <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="notice.gif"> をこの figure の中に置き、figure-bubble を外す -->
               <figure class="feature-figure" id="gif-notice" data-gif="notice.gif">
-                <img class="feature-gif" src="media/kun/notice.gif" alt="同じエラーが続く画面に Coo が自分から声をかける様子" loading="lazy">
+                <picture>
+                  <source srcset="media/kun/light/notice.gif" media="(prefers-color-scheme: light)">
+                  <img class="feature-gif" src="media/kun/notice.gif" alt="同じエラーが続く画面に Coo が自分から声をかける様子" loading="lazy">
+                </picture>
               </figure>
               <div class="feature-copy">
                 <span class="feature-number" aria-hidden="true"></span>
@@ -969,7 +1019,10 @@
             <div class="container feature-layout">
               <!-- GIF 差し込み口。撮れたら figure-compact クラスを外し、<img src="listen.gif"> をこの figure の中に置き、figure-bubble を外す -->
               <figure class="feature-figure" id="gif-listen" data-gif="listen.gif">
-                <img class="feature-gif" src="media/kun/listen.gif" alt="スピーカーの音声を聞いたあとに締切を聞き返す様子" loading="lazy">
+                <picture>
+                  <source srcset="media/kun/light/listen.gif" media="(prefers-color-scheme: light)">
+                  <img class="feature-gif" src="media/kun/listen.gif" alt="スピーカーの音声を聞いたあとに締切を聞き返す様子" loading="lazy">
+                </picture>
               </figure>
               <div class="feature-copy">
                 <span class="feature-number" aria-hidden="true"></span>
@@ -1080,8 +1133,60 @@
   </footer>
   <script>
     (function () {
-      var button = document.querySelector(".play-button");
+      var root = document.documentElement;
+      var systemLight = window.matchMedia("(prefers-color-scheme: light)");
+      var choice = "system";
+      try { choice = localStorage.getItem("theme") || "system"; } catch (e) {}
+
+      function isLight() {
+        if (choice === "light") return true;
+        if (choice === "dark") return false;
+        return systemLight.matches;
+      }
+
+      function applyTheme() {
+        if (choice === "system") root.removeAttribute("data-theme"); else root.setAttribute("data-theme", choice);
+        var light = isLight();
+        // GIF: <picture> の source を有効・無効にして light/ 配下と切り替える
+        var sources = document.querySelectorAll("picture > source[srcset*='/light/']");
+        for (var i = 0; i < sources.length; i++) {
+          sources[i].setAttribute("media", light ? "all" : "not all");
+        }
+        // hero 動画
+        var video = document.querySelector(".recording-video");
+        if (video) {
+          var src = light ? video.dataset.lightSrc : video.dataset.darkSrc;
+          var poster = light ? video.dataset.lightPoster : video.dataset.darkPoster;
+          if (video.getAttribute("src") !== src) {
+            var playing = !video.paused;
+            video.setAttribute("poster", poster);
+            video.setAttribute("src", src);
+            if (playing) video.play();
+          }
+        }
+        var buttons = document.querySelectorAll(".theme-toggle button");
+        for (var j = 0; j < buttons.length; j++) {
+          buttons[j].setAttribute("aria-pressed", buttons[j].dataset.themeChoice === choice ? "true" : "false");
+        }
+      }
+
       var video = document.querySelector(".recording-video");
+      if (video) {
+        video.dataset.darkSrc = video.getAttribute("src");
+        video.dataset.darkPoster = video.getAttribute("poster");
+      }
+      applyTheme();
+      systemLight.addEventListener("change", applyTheme);
+      var toggles = document.querySelectorAll(".theme-toggle button");
+      for (var k = 0; k < toggles.length; k++) {
+        toggles[k].addEventListener("click", function () {
+          choice = this.dataset.themeChoice;
+          try { localStorage.setItem("theme", choice); } catch (e) {}
+          applyTheme();
+        });
+      }
+
+      var button = document.querySelector(".play-button");
       if (!button || !video) return;
       button.addEventListener("click", function () {
         video.play();
