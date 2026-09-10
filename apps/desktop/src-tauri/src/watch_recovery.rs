@@ -159,6 +159,20 @@ async fn record_watch_failure_inner(
         return WatchRecoveryDecision::ConfigUpdateCancelled;
     }
     let tutorial = recovery.session_kind == WatchSessionKind::Tutorial;
+    if let Some(mailbox_error) = error
+        .downcast_ref::<RuntimeError>()
+        .and_then(RuntimeError::mailbox_error)
+        .filter(|error| !error.is_retryable())
+    {
+        let _ = logger.write(
+            "ERROR",
+            &format!("見守りを停止しました: error-type=mailbox reason={} retryable=false action=stop error={detail}", mailbox_error.reason()),
+        );
+        publisher
+            .observe_watch_exit(generation, detail, tutorial)
+            .await;
+        return WatchRecoveryDecision::Stop;
+    }
     let Some(delay) = recovery.next_delay() else {
         let _ = logger.write(
             "ERROR",
@@ -209,4 +223,3 @@ fn is_config_update_cancellation(error: &Error) -> bool {
         })
     })
 }
-

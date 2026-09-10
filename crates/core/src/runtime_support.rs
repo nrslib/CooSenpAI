@@ -33,20 +33,112 @@ impl RuntimeHandle {
         &self,
         work: crate::work::WorkConfig,
     ) -> Result<u64, RuntimeError> {
+        self.update_work_config_inner(work, None).await
+    }
+
+    pub async fn update_work_config_at(
+        &self,
+        work: crate::work::WorkConfig,
+        config_revision: u64,
+    ) -> Result<u64, RuntimeError> {
+        self.update_work_config_inner(work, Some(config_revision))
+            .await
+    }
+
+    async fn update_work_config_inner(
+        &self,
+        work: crate::work::WorkConfig,
+        config_revision: Option<u64>,
+    ) -> Result<u64, RuntimeError> {
         self.ensure_open()?;
         let (response, result) = oneshot::channel();
         self.priority_tx
-            .send(PriorityCommand::UpdateWorkConfig { work, response })
+            .send(PriorityCommand::UpdateWorkConfig {
+                work,
+                config_revision,
+                response,
+            })
             .await
             .map_err(|_| RuntimeError::Closed)?;
         result.await.map_err(|_| RuntimeError::ResponseDropped)?
     }
 
     pub async fn update_watch_enabled(&self, enabled: bool) -> Result<u64, RuntimeError> {
+        self.update_watch_enabled_inner(enabled, None).await
+    }
+
+    pub async fn update_watch_enabled_at(
+        &self,
+        enabled: bool,
+        config_revision: u64,
+    ) -> Result<u64, RuntimeError> {
+        self.update_watch_enabled_inner(enabled, Some(config_revision))
+            .await
+    }
+
+    async fn update_watch_enabled_inner(
+        &self,
+        enabled: bool,
+        config_revision: Option<u64>,
+    ) -> Result<u64, RuntimeError> {
         self.ensure_open()?;
         let (response, result) = oneshot::channel();
         self.priority_tx
-            .send(PriorityCommand::UpdateWatchEnabled { enabled, response })
+            .send(PriorityCommand::UpdateWatchEnabled {
+                enabled,
+                config_revision,
+                response,
+            })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
+
+    pub async fn update_keymap(
+        &self,
+        keymap: crate::config::KeymapConfig,
+        config_revision: u64,
+    ) -> Result<u64, RuntimeError> {
+        self.ensure_open()?;
+        let (response, result) = oneshot::channel();
+        self.priority_tx
+            .send(PriorityCommand::UpdateKeymap {
+                keymap,
+                config_revision,
+                response,
+            })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
+
+    pub async fn update_config_without_factory(&self, config: Config) -> Result<u64, RuntimeError> {
+        self.ensure_open()?;
+        validate_config(&config).map_err(RuntimeError::from)?;
+        let (response, result) = oneshot::channel();
+        self.priority_tx
+            .send(PriorityCommand::UpdateConfigWithoutFactory {
+                config: Box::new(config),
+                response,
+            })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
+
+    pub async fn update_audio_config(
+        &self,
+        audio: crate::config::AudioConfig,
+        config_revision: u64,
+    ) -> Result<u64, RuntimeError> {
+        self.ensure_open()?;
+        let (response, result) = oneshot::channel();
+        self.priority_tx
+            .send(PriorityCommand::UpdateAudioConfig {
+                audio,
+                config_revision,
+                response,
+            })
             .await
             .map_err(|_| RuntimeError::Closed)?;
         result.await.map_err(|_| RuntimeError::ResponseDropped)?
@@ -118,8 +210,11 @@ pub(super) fn drain_closed_commands(
     while let Ok(command) = priority_rx.try_recv() {
         match command {
             PriorityCommand::UpdateConfig { response, .. }
+            | PriorityCommand::UpdateConfigWithoutFactory { response, .. }
             | PriorityCommand::UpdateWorkConfig { response, .. }
             | PriorityCommand::UpdateWatchEnabled { response, .. }
+            | PriorityCommand::UpdateKeymap { response, .. }
+            | PriorityCommand::UpdateAudioConfig { response, .. }
             | PriorityCommand::ReplaceConfig { response, .. }
             | PriorityCommand::EnterDegraded { response, .. } => {
                 let _ = response.send(Err(RuntimeError::Closed));
@@ -357,10 +452,14 @@ impl RuntimeActor {
     pub(super) fn update_work_config(
         &mut self,
         work: crate::work::WorkConfig,
+        config_revision: Option<u64>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
         config_tx: &watch::Sender<Config>,
     ) -> u64 {
         self.config.work = work;
+        if let Some(config_revision) = config_revision {
+            self.config.revision = config_revision;
+        }
         self.revision = self.revision.saturating_add(1);
         config_tx.send_replace(self.config.clone());
         self.publish(snapshot_tx);
@@ -370,16 +469,64 @@ impl RuntimeActor {
     pub(super) fn update_watch_enabled(
         &mut self,
         enabled: bool,
+        config_revision: Option<u64>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
         config_tx: &watch::Sender<Config>,
     ) -> u64 {
-        if self.config.watch.enabled != enabled {
+        let config_revision_changed =
+            config_revision.is_some_and(|revision| self.config.revision != revision);
+        if self.config.watch.enabled != enabled || config_revision_changed {
             self.config.watch.enabled = enabled;
+            if let Some(config_revision) = config_revision {
+                self.config.revision = config_revision;
+            }
             self.revision = self.revision.saturating_add(1);
             let _ = config_tx.send(self.config.clone());
             self.publish(snapshot_tx);
         }
         self.revision
+    }
+
+    pub(super) fn update_keymap(
+        &mut self,
+        keymap: crate::config::KeymapConfig,
+        config_revision: u64,
+        snapshot_tx: &watch::Sender<RuntimeSnapshot>,
+        config_tx: &watch::Sender<Config>,
+    ) -> u64 {
+        self.config.keymap = keymap;
+        self.config.revision = config_revision;
+        self.revision = self.revision.saturating_add(1);
+        config_tx.send_replace(self.config.clone());
+        self.publish(snapshot_tx);
+        self.revision
+    }
+
+    pub(super) fn update_audio_config(
+        &mut self,
+        audio: crate::config::AudioConfig,
+        config_revision: u64,
+        snapshot_tx: &watch::Sender<RuntimeSnapshot>,
+        config_tx: &watch::Sender<Config>,
+    ) -> Result<u64, RuntimeError> {
+        if config_revision < self.config.revision
+            || (config_revision == self.config.revision && audio != self.config.audio)
+        {
+            return Err(crate::config::ConfigError::RevisionConflict {
+                expected: config_revision,
+                actual: self.config.revision,
+            }
+            .into());
+        }
+        let mut config = self.config.clone();
+        config.audio = audio;
+        config.revision = config_revision;
+        validate_config(&config)?;
+        self.config = config;
+        self.revision = self.revision.saturating_add(1);
+        config_tx.send_replace(self.config.clone());
+        self.publish(snapshot_tx);
+        Ok(self.revision)
     }
 
     pub(super) fn append_pending_user_inputs(
@@ -611,12 +758,16 @@ impl RuntimeActor {
         companion: CompanionAgent,
         config: Option<Config>,
     ) -> Result<u64, RuntimeError> {
-        if let Some(config) = &config {
-            validate_config(config)?;
-        }
+        let config_revision = config.as_ref().map(|config| config.revision);
+        let config = config
+            .map(|config| self.merge_config_update(config))
+            .transpose()?;
         companion.synchronize_emotions()?;
         if let Some(config) = config {
             self.config = config;
+        }
+        if let Some(revision) = config_revision {
+            self.full_config_revision = revision;
         }
         self.companion = Some(companion);
         self.refresh_user_preparer();
@@ -632,7 +783,8 @@ impl RuntimeActor {
     }
 
     pub(super) async fn update_config(&mut self, config: Config) -> Result<u64, RuntimeError> {
-        validate_config(&config)?;
+        let config_revision = config.revision;
+        let config = self.merge_config_update(config)?;
         if let Some(factory) = &self.factory {
             let mut agents = factory
                 .build(&config)
@@ -677,6 +829,44 @@ impl RuntimeActor {
             }
         }
         self.operation_cancellation.renew();
+        self.full_config_revision = config_revision;
+        self.config = config;
+        self.revision = self.revision.saturating_add(1);
+        Ok(self.revision)
+    }
+
+    pub(super) fn update_config_without_factory(
+        &mut self,
+        config: Config,
+    ) -> Result<u64, RuntimeError> {
+        let config_revision = config.revision;
+        let config = self.merge_config_update(config)?;
+        if config.observer.provider != self.config.observer.provider
+            || config.observer.model != self.config.observer.model
+            || config.observer.executable != self.config.observer.executable
+            || config.companion.provider != self.config.companion.provider
+            || config.companion.model != self.config.companion.model
+            || config.companion.executable != self.config.companion.executable
+        {
+            return Err(RuntimeError::Factory(
+                text(
+                    TextKey::RuntimeFactoryRebuildUnavailable,
+                    Locale::from_config(&self.config.ui.language),
+                )
+                .to_owned(),
+            ));
+        }
+        if config.companion != self.config.companion {
+            if let Some(companion) = self.companion.as_mut() {
+                companion.update_config(config.companion.clone())?;
+            }
+        }
+        if config.observer != self.config.observer {
+            if let Some(observer) = self.observer.as_mut() {
+                observer.update_config(config.observer.clone());
+            }
+        }
+        self.full_config_revision = config_revision;
         self.config = config;
         self.revision = self.revision.saturating_add(1);
         Ok(self.revision)
@@ -728,7 +918,8 @@ impl RuntimeActor {
         config: Config,
         mut agents: RuntimeAgents,
     ) -> Result<u64, RuntimeError> {
-        validate_config(&config)?;
+        let config_revision = config.revision;
+        let config = self.merge_config_update(config)?;
         if let Some(companion) = &agents.companion {
             companion.synchronize_emotions()?;
         }
@@ -741,6 +932,7 @@ impl RuntimeActor {
         self.refresh_user_preparer();
         self.memory = agents.memory.take();
         self.memory_run_at = self.memory.as_ref().map(|_| Instant::now());
+        self.full_config_revision = config_revision;
         self.config = config;
         self.user_commands_blocked = false;
         self.initialization_retry_delay = Duration::from_secs(1);
@@ -748,6 +940,25 @@ impl RuntimeActor {
         self.operation_cancellation.renew();
         self.revision = self.revision.saturating_add(1);
         Ok(self.revision)
+    }
+
+    fn merge_config_update(&self, mut config: Config) -> Result<Config, RuntimeError> {
+        if config.revision < self.full_config_revision
+            || (config.revision == self.config.revision && config.audio != self.config.audio)
+        {
+            return Err(crate::config::ConfigError::RevisionConflict {
+                expected: config.revision,
+                actual: self.config.revision,
+            }
+            .into());
+        }
+        // provider 候補の構築中に確定した音声 intent は、古い full config で戻さない。
+        if config.revision < self.config.revision {
+            config.audio = self.config.audio.clone();
+            config.revision = self.config.revision;
+        }
+        validate_config(&config)?;
+        Ok(config)
     }
 }
 

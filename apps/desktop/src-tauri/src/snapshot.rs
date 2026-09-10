@@ -505,8 +505,10 @@ impl AppSnapshot {
         }
     }
 
-    pub fn apply_config(&mut self, config: Config) {
-        let locale = Locale::from_config(&config.ui.language);
+    pub fn apply_config(&mut self, config: Config) -> bool {
+        if !self.apply_saved_config(config) {
+            return false;
+        }
         if self
             .last_error
             .as_ref()
@@ -514,6 +516,14 @@ impl AppSnapshot {
         {
             self.last_error = None;
         }
+        true
+    }
+
+    pub(crate) fn apply_saved_config(&mut self, config: Config) -> bool {
+        if config.revision < self.config.revision.max(self.config_revision) {
+            return false;
+        }
+        let locale = Locale::from_config(&config.ui.language);
         self.observer_provider_label = provider_label(&config.observer.provider);
         self.companion_provider_label = provider_label(&config.companion.provider);
         self.companion_display_name = config.companion.display_name.clone();
@@ -551,7 +561,9 @@ impl AppSnapshot {
             .message
             .take()
             .map(|message| localize_audio_message(audio_warning_kind, &message, locale));
+        self.config_revision = config.revision;
         self.config = config;
+        true
     }
 }
 

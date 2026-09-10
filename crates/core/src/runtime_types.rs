@@ -1,8 +1,10 @@
 use crate::companion::{AttachmentOcrFailureKind, CompanionAgent, CompanionError};
 use crate::config::{Config, ConfigError, ConfigValidationIssue};
 use crate::locale::{text, Locale, TextKey};
+use crate::mailbox::MailboxError;
 use crate::memory::{MemoryService, MemoryStatus};
 use crate::observer::{ObserverAgent, ObserverError};
+use crate::outbox::OutboxError;
 use crate::provider::ProviderUsage;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -149,6 +151,19 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    pub fn mailbox_error(&self) -> Option<&MailboxError> {
+        match self {
+            Self::Observer(
+                ObserverError::Mailbox(error) | ObserverError::Outbox(OutboxError::Mailbox(error)),
+            )
+            | Self::Companion(
+                CompanionError::Mailbox(error)
+                | CompanionError::Outbox(OutboxError::Mailbox(error)),
+            ) => Some(error),
+            _ => None,
+        }
+    }
+
     pub fn format_for_user(&self) -> String {
         self.format_for_locale(Locale::Ja)
     }

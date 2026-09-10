@@ -97,6 +97,11 @@ pub(crate) fn command_for_config_patch(
     signed_build: bool,
 ) -> Result<DesktopCommand, ConfigError> {
     let next = apply_config_patch(current.clone(), patch.clone(), signed_build)?;
+    if patch.get("audio").is_some()
+        && coosenpai_core::config::audio_config_is_only_difference(current, &next)
+    {
+        return Ok(DesktopCommand::ConfigAudioUpdate);
+    }
     Ok(command_for_config_change(current, &next))
 }
 

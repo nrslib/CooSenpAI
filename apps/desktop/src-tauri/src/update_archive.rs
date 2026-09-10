@@ -1,6 +1,7 @@
 use crate::update_format::{
     VerifiedArchive, BUNDLE_IDENTIFIER, BUNDLE_NAME, EXECUTABLE_NAME, MAX_ARCHIVE_BYTES,
 };
+use crate::update_system::SystemVersion;
 use coosenpai_core::locale::{text, Locale, TextKey};
 use flate2::read::GzDecoder;
 use semver::Version;
@@ -16,6 +17,7 @@ const MAX_ENTRIES: usize = 10_000;
 
 pub(crate) struct StagedBundle {
     directory: TempDir,
+    minimum_system_version: SystemVersion,
 }
 
 impl StagedBundle {
@@ -29,6 +31,17 @@ impl StagedBundle {
 
     pub(crate) fn close(self) -> io::Result<()> {
         self.directory.close()
+    }
+
+    pub(crate) fn validate_minimum_system_version(
+        &self,
+        expected: SystemVersion,
+        locale: Locale,
+    ) -> Result<(), String> {
+        if self.minimum_system_version != expected {
+            return Err(text(TextKey::UpdateBundleMinimumMismatch, locale).to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -62,9 +75,16 @@ pub(crate) fn prepare_for_locale(
     extract_for_locale(archive.bytes(), directory.path(), locale).map_err(|error| {
         text(TextKey::UpdateArchiveInvalid, locale).replace("{error}", &error.to_string())
     })?;
-    let staged = StagedBundle { directory };
-    validate_bundle_for_locale(&staged.path(), expected, architecture, locale)?;
-    Ok(staged)
+    let minimum_system_version = validate_bundle_for_locale(
+        &directory.path().join(BUNDLE_NAME),
+        expected,
+        architecture,
+        locale,
+    )?;
+    Ok(StagedBundle {
+        directory,
+        minimum_system_version,
+    })
 }
 
 fn extract_for_locale(bytes: &[u8], destination: &Path, locale: Locale) -> io::Result<()> {
@@ -143,12 +163,21 @@ fn validate_path_for_locale(path: &Path, locale: Locale) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+fn validate_bundle(
+    bundle: &Path,
+    expected: &Version,
+    architecture: &str,
+) -> Result<SystemVersion, String> {
+    validate_bundle_for_locale(bundle, expected, architecture, Locale::Ja)
+}
+
 fn validate_bundle_for_locale(
     bundle: &Path,
     expected: &Version,
     architecture: &str,
     locale: Locale,
-) -> Result<(), String> {
+) -> Result<SystemVersion, String> {
     let info = bundle.join("Contents/Info.plist");
     let metadata = fs::symlink_metadata(&info)
         .map_err(|_| text(TextKey::UpdateInfoPlistMissing, locale).to_owned())?;
@@ -180,7 +209,10 @@ fn validate_bundle_for_locale(
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(text(TextKey::UpdateExecutableInvalid, locale).to_owned());
     }
-    validate_macho_for_locale(&executable, architecture, locale)
+    validate_macho_for_locale(&executable, architecture, locale)?;
+    get("LSMinimumSystemVersion")
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| text(TextKey::UpdateBundleMinimumInvalid, locale).to_owned())
 }
 
 fn validate_macho_for_locale(

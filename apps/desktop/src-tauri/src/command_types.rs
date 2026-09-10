@@ -30,6 +30,7 @@ pub(crate) enum DesktopCommand {
     VoiceOutputStop,
     SettingsAppearancePreview,
     ConfigDisplayUpdate,
+    ConfigAudioUpdate,
     ConfigProviderUpdate,
     ProviderApiKeyUpdate,
     ConfigWatchUpdate,

@@ -279,6 +279,7 @@ export const ja = {
     label: "アプリの更新",
     checking: "更新を確認しています…",
     upToDate: "最新バージョンです。",
+    incompatible: "この更新は macOS {version} 以降が必要です。",
     available: "新しいバージョン v{version} があります。",
     notes: "変更内容",
     downloading: "v{version} をダウンロードしています…",

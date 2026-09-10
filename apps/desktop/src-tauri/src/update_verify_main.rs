@@ -1,5 +1,11 @@
+#[allow(
+    dead_code,
+    reason = "verifier はアプリと共有するモジュールの検証部分だけを使う"
+)]
 mod update_archive;
 mod update_format;
+#[allow(dead_code, reason = "実行 OS の照会と適用判定はアプリ側だけで使う")]
+mod update_system;
 
 use std::fs::File;
 use std::io::Read;
@@ -19,8 +25,8 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, Box<dyn std::error
 
 fn verify() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() != 2 {
-        return Err("使い方: coosenpai-update-verify ARCHIVE VERSION".into());
+    if args.len() != 3 {
+        return Err("使い方: coosenpai-update-verify ARCHIVE VERSION TAURI_CONFIG".into());
     }
     let path = Path::new(&args[0]);
     let version: semver::Version = args[1]
@@ -35,7 +41,11 @@ fn verify() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter()
         .find(|architecture| filename == format!("CooSenpAI_{version}_{architecture}.app.tar.gz"))
         .ok_or("更新ファイル名の版または architecture が不正です")?;
-    let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))?;
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&args[2])?)?;
+    let minimum = config["bundle"]["macOS"]["minimumSystemVersion"]
+        .as_str()
+        .ok_or("最低 macOS 版がありません")?
+        .parse()?;
     let pubkey = config["plugins"]["updater"]["pubkey"]
         .as_str()
         .ok_or("公開鍵がありません")?;
@@ -51,8 +61,9 @@ fn verify() -> Result<(), Box<dyn std::error::Error>> {
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()?;
     let staged = update_archive::prepare(&archive, temporary.path(), &version, None, architecture)?;
+    staged.validate_minimum_system_version(minimum, coosenpai_core::locale::Locale::Ja)?;
     staged.close()?;
-    println!("更新署名・アーカイブ構造・アプリ識別子・版の検証が完了しました");
+    println!("更新署名・アーカイブ構造・アプリ識別子・版・最低 macOS 版の検証が完了しました");
     Ok(())
 }
 

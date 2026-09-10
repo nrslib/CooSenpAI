@@ -704,6 +704,29 @@ fn initial_status_failure_does_not_overwrite_notification_or_newer_operation_err
         assert_eq!(s.last.state["error"], "current failure");
     }
 }
+
+#[test]
+fn incompatible_update_is_visible_and_cannot_install_or_restart() {
+    for show_controls in [false, true] {
+        let mut screen = Screen::new(
+            PanelKind::Update,
+            json!({"enabled":true,"showControls":show_controls}),
+        );
+        let load = screen.command("load");
+        screen.done(&load, json!({"revision":1,"status":{"phase":"incompatible","version":"1.1.0","minimumSystemVersion":"26.0"}}));
+        assert_eq!(screen.last.state["visible"], true);
+        assert_eq!(screen.last.state["canCheck"], true);
+        assert_eq!(screen.last.state["canInstall"], false);
+        assert_eq!(screen.last.state["showInstall"], false);
+        assert_eq!(screen.last.state["canRestart"], false);
+        assert_eq!(screen.last.state["showRestart"], false);
+        assert!(screen.last.state["error"].is_null());
+        screen.action("install", Value::Null);
+        assert!(screen.last.commands.is_empty());
+        screen.action("restart", Value::Null);
+        assert!(screen.last.commands.is_empty());
+    }
+}
 #[test]
 fn persona_ime_escape_and_delete_confirmation_priority() {
     let mut s = Screen::new(

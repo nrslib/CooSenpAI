@@ -1,6 +1,6 @@
 use super::{
-    is_valid_avatar_path, is_valid_persona_name, issue, shortcut_identity, Config, ConfigError,
-    ConfigValidationIssue, CONFIG_VERSION, PENDING_DELIVERY_ITEM_MAX_BYTES,
+    is_macos_shortcut_key, is_valid_avatar_path, is_valid_persona_name, issue, shortcut_identity,
+    Config, ConfigError, ConfigValidationIssue, CONFIG_VERSION, PENDING_DELIVERY_ITEM_MAX_BYTES,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -376,6 +376,13 @@ fn validate_watch_targets(config: &Config, issues: &mut Vec<ConfigValidationIssu
                 ));
                 continue;
             };
+            if !is_macos_shortcut_key(&identity) {
+                issues.push(issue(
+                    path,
+                    "macOS で登録できる物理キーを指定してください（F1〜F20、英数字、矢印、編集キー、記号、テンキーなど）。",
+                ));
+                continue;
+            }
             if identity == "escape" || identity.ends_with("+escape") {
                 issues.push(issue(
                     path,

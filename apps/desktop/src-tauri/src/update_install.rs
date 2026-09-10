@@ -1,5 +1,6 @@
 use crate::update_archive::StagedBundle;
 use crate::update_format::{BUNDLE_NAME, EXECUTABLE_NAME};
+use crate::update_system::{SystemVersion, UpdateError};
 use coosenpai_core::locale::{text, Locale, TextKey};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -83,7 +84,23 @@ impl InstallLocation {
         &self.parent
     }
 
-    pub(crate) fn swap(&self, staged: &StagedBundle) -> io::Result<()> {
+    pub(crate) fn apply(
+        &self,
+        staged: &StagedBundle,
+        minimum: SystemVersion,
+        system: SystemVersion,
+    ) -> Result<(), UpdateError> {
+        staged.validate_minimum_system_version(minimum, self.locale)?;
+        minimum.ensure_supported(system)?;
+        self.swap(staged).map_err(|error| {
+            UpdateError::Failed(
+                text(TextKey::UpdatePreviousPreserved, self.locale)
+                    .replace("{error}", &error.to_string()),
+            )
+        })
+    }
+
+    fn swap(&self, staged: &StagedBundle) -> io::Result<()> {
         let parent_metadata = self.parent_fd.metadata()?;
         let current_parent = fs::symlink_metadata(&self.parent)?;
         let current = fs::symlink_metadata(self.parent.join(BUNDLE_NAME))?;

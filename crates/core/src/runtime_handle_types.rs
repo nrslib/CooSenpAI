@@ -67,12 +67,28 @@ pub(super) enum PriorityCommand {
         config: Box<Config>,
         response: oneshot::Sender<Result<u64, RuntimeError>>,
     },
+    UpdateConfigWithoutFactory {
+        config: Box<Config>,
+        response: oneshot::Sender<Result<u64, RuntimeError>>,
+    },
     UpdateWorkConfig {
         work: crate::work::WorkConfig,
+        config_revision: Option<u64>,
         response: oneshot::Sender<Result<u64, RuntimeError>>,
     },
     UpdateWatchEnabled {
         enabled: bool,
+        config_revision: Option<u64>,
+        response: oneshot::Sender<Result<u64, RuntimeError>>,
+    },
+    UpdateKeymap {
+        keymap: crate::config::KeymapConfig,
+        config_revision: u64,
+        response: oneshot::Sender<Result<u64, RuntimeError>>,
+    },
+    UpdateAudioConfig {
+        audio: crate::config::AudioConfig,
+        config_revision: u64,
         response: oneshot::Sender<Result<u64, RuntimeError>>,
     },
     ReplaceConfig {
@@ -96,9 +112,13 @@ impl PriorityCommand {
             Self::ResetCompanionEmotions { .. } => "emotion-reset",
             Self::CancelUser { .. } => "user-cancel",
             Self::RetryUser { .. } => "user-retry",
-            Self::UpdateConfig { .. } | Self::ReplaceConfig { .. } => "config-update",
+            Self::UpdateConfig { .. }
+            | Self::UpdateConfigWithoutFactory { .. }
+            | Self::ReplaceConfig { .. }
+            | Self::UpdateKeymap { .. } => "config-update",
             Self::UpdateWorkConfig { .. } => "work-config",
             Self::UpdateWatchEnabled { .. } => "watch-intent",
+            Self::UpdateAudioConfig { .. } => "audio-config",
             Self::EnterDegraded { .. } => "degraded",
             Self::Quiesce { .. } => "quiesce",
         }

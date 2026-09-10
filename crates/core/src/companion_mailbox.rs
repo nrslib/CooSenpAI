@@ -1,5 +1,18 @@
 use super::*;
+use crate::mailbox::{ClaimedEnvelope, MailboxDisposition};
 use crate::state::{parse_observation, DEFAULT_OBSERVATION_LIMITS};
+
+pub(super) struct PendingMailboxAck {
+    mailbox: Mailbox,
+    claimed: ClaimedEnvelope,
+    outcome: MailboxOutcome,
+}
+
+enum MailboxOutcome {
+    Complete(Option<CompanionResponse>),
+    Retry(CompanionError),
+    InvalidObservation,
+}
 
 impl CompanionAgent {
     pub async fn process_incoming_mailbox(
@@ -19,6 +32,10 @@ impl CompanionAgent {
             self.initialize_storage()?;
             return Ok(None);
         }
+        // 新しい claim や配達を始める前に、元の所有者が ACK だけを再試行する。
+        if self.pending_mailbox_ack.is_some() {
+            return self.retry_mailbox_ack();
+        }
         self.initialize_storage()?;
         let delivery_was_blocked = self.delivery_backpressure_active();
         self.deliver_outbox()?;
@@ -33,40 +50,59 @@ impl CompanionAgent {
         };
         let mut response = None;
         while let Some(claimed) = mailbox.claim()? {
-            let observation = match parse_observation(
+            let outcome = match parse_observation(
                 claimed.envelope.payload.clone(),
                 DEFAULT_OBSERVATION_LIMITS,
             ) {
-                Ok(observation) => observation,
-                Err(_) => {
-                    mailbox.fail(claimed)?;
-                    continue;
+                Err(_) => MailboxOutcome::InvalidObservation,
+                Ok(observation) if !observation.is_companion_signal() => {
+                    MailboxOutcome::Complete(None)
+                }
+                Ok(observation) => {
+                    match self
+                        .process_mailbox_observations(vec![observation], cancellation.clone())
+                        .await
+                    {
+                        Ok(next) => MailboxOutcome::Complete(next),
+                        Err(error) => MailboxOutcome::Retry(error),
+                    }
                 }
             };
-            if !observation.is_companion_signal() {
-                mailbox.complete(claimed)?;
-                continue;
+            self.pending_mailbox_ack = Some(PendingMailboxAck {
+                mailbox: mailbox.clone(),
+                claimed,
+                outcome,
+            });
+            if let Some(next) = self.retry_mailbox_ack()? {
+                response = Some(next);
             }
-            match self
-                .process_mailbox_observations(vec![observation], cancellation.clone())
-                .await
-            {
-                Ok(next) => {
-                    if next.is_some() {
-                        response = next;
-                    }
-                    mailbox.complete(claimed)?;
-                    if self.delivery_backpressure_active() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    mailbox.retry(claimed)?;
-                    return Err(error);
-                }
+            if self.delivery_backpressure_active() {
+                break;
             }
         }
         Ok(response)
+    }
+
+    fn retry_mailbox_ack(&mut self) -> Result<Option<CompanionResponse>, CompanionError> {
+        let Some(pending) = &self.pending_mailbox_ack else {
+            return Ok(None);
+        };
+        let disposition = match pending.outcome {
+            MailboxOutcome::Complete(_) => MailboxDisposition::Complete,
+            MailboxOutcome::Retry(_) => MailboxDisposition::Retry,
+            MailboxOutcome::InvalidObservation => MailboxDisposition::Fail,
+        };
+        pending.mailbox.acknowledge(&pending.claimed, disposition)?;
+        match self
+            .pending_mailbox_ack
+            .take()
+            .expect("acknowledged claim")
+            .outcome
+        {
+            MailboxOutcome::Complete(response) => Ok(response),
+            MailboxOutcome::Retry(error) => Err(error),
+            MailboxOutcome::InvalidObservation => Err(MailboxError::InvalidEnvelope.into()),
+        }
     }
 
     async fn process_mailbox_observations(

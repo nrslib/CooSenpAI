@@ -37,6 +37,50 @@ where
         .map(|(config, ())| config)
 }
 
+/// 設定を保存せずに検証済みの更新候補を作る。
+///
+/// 候補を使った外部リソースの準備（runtime や OS 登録）を保存前に行うための境界。
+/// 保存時は `save_config_if_revision` を使い、候補作成後の別プロセス更新を検出する。
+pub fn prepare_config_update<F>(
+    paths: &ConfigPaths,
+    malformed_recovery_base: Option<&Config>,
+    expected_revision: Option<u64>,
+    patch: F,
+) -> Result<(Config, Config), ConfigError>
+where
+    F: FnOnce(Config) -> Result<Config, ConfigError>,
+{
+    fs::create_dir_all(&paths.root)?;
+    let lock_path = paths.config.with_file_name(".config.lock");
+    let _lock = SiblingLock::acquire(&lock_path)?;
+    let current = load_current_for_update(paths, malformed_recovery_base)?;
+    ensure_expected_revision(&current, expected_revision)?;
+    let previous = current.clone();
+    let updated = prepare_updated_config(previous.clone(), patch)?;
+    Ok((previous, updated))
+}
+
+/// 検証済み候補を期待 revision と一致する場合だけ保存する。
+pub fn save_config_if_revision(
+    paths: &ConfigPaths,
+    malformed_recovery_base: Option<&Config>,
+    expected_revision: u64,
+    candidate: &Config,
+) -> Result<Config, ConfigError> {
+    fs::create_dir_all(&paths.root)?;
+    let lock_path = paths.config.with_file_name(".config.lock");
+    let _lock = SiblingLock::acquire(&lock_path)?;
+    let current = load_current_for_update(paths, malformed_recovery_base)?;
+    ensure_expected_revision(&current, Some(expected_revision))?;
+    let mut updated = super::normalize_config(candidate.clone());
+    updated.revision = current.revision.saturating_add(1);
+    validate_config(&updated)?;
+    validate_executable_overrides(&updated)?;
+    let bytes = serde_json::to_vec_pretty(&updated)?;
+    atomic_write_bytes(&paths.config, &bytes).map_err(ConfigError::Io)?;
+    Ok(updated)
+}
+
 pub fn patch_config_before_save<F, B, T>(
     paths: &ConfigPaths,
     malformed_recovery_base: Option<&Config>,
@@ -85,11 +129,53 @@ where
     super::normalize_audio_sources_on_enable(previous.audio.enabled, &mut updated);
     updated.revision = previous.revision.saturating_add(1);
     validate_config(&updated)?;
-    validate_executable_overrides(&updated)?;
+    // 音声操作は、変更していない provider の準備状態に依存しない。
+    if !super::audio_config_is_only_difference(&previous, &updated) {
+        validate_executable_overrides(&updated)?;
+    }
     let before_save_result = before_save(&previous, &updated)?;
     let bytes = serde_json::to_vec_pretty(&updated)?;
     atomic_write_bytes(&paths.config, &bytes).map_err(ConfigError::Io)?;
     Ok((updated, before_save_result))
+}
+
+fn load_current_for_update(
+    paths: &ConfigPaths,
+    malformed_recovery_base: Option<&Config>,
+) -> Result<Config, ConfigError> {
+    match load_config_locked(paths) {
+        Ok(config) => Ok(config),
+        Err(error @ ConfigError::Json(_)) => malformed_recovery_base.cloned().ok_or(error),
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_expected_revision(
+    current: &Config,
+    expected_revision: Option<u64>,
+) -> Result<(), ConfigError> {
+    if let Some(expected_revision) = expected_revision {
+        if current.revision != expected_revision {
+            return Err(ConfigError::RevisionConflict {
+                expected: expected_revision,
+                actual: current.revision,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn prepare_updated_config<F>(previous: Config, patch: F) -> Result<Config, ConfigError>
+where
+    F: FnOnce(Config) -> Result<Config, ConfigError>,
+{
+    let audio_was_enabled = previous.audio.enabled;
+    let mut updated = super::normalize_config(patch(previous.clone())?);
+    super::normalize_audio_sources_on_enable(audio_was_enabled, &mut updated);
+    updated.revision = previous.revision.saturating_add(1);
+    validate_config(&updated)?;
+    validate_executable_overrides(&updated)?;
+    Ok(updated)
 }
 
 pub fn save_config(paths: &ConfigPaths, config: &Config) -> Result<(), ConfigError> {

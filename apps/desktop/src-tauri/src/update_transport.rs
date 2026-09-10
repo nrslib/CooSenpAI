@@ -1,4 +1,5 @@
 use crate::update_format::{self, MAX_ARCHIVE_BYTES};
+use crate::update_system::{SystemVersion, UpdateError};
 use coosenpai_core::locale::{text, Locale, TextKey};
 use minisign_verify::{PublicKey, Signature};
 use reqwest::{redirect::Policy, Client, Url};
@@ -16,12 +17,14 @@ pub(crate) struct UpdateClient {
     key: PublicKey,
     current: Version,
     architecture: String,
+    system: SystemVersion,
     locale: Locale,
 }
 
 pub(crate) struct PendingUpdate {
     pub(crate) version: Version,
     pub(crate) notes: Option<String>,
+    pub(crate) minimum_system_version: SystemVersion,
     url: Url,
     signature: Signature,
 }
@@ -43,6 +46,8 @@ struct Manifest {
 struct Artifact {
     url: Url,
     signature: String,
+    #[serde(rename = "minimumSystemVersion")]
+    minimum_system_version: SystemVersion,
 }
 
 impl UpdateClient {
@@ -51,14 +56,16 @@ impl UpdateClient {
         config: &serde_json::Value,
         current: Version,
         architecture: &str,
+        system: SystemVersion,
     ) -> Result<Self, String> {
-        Self::new_for_locale(config, current, architecture, Locale::Ja)
+        Self::new_for_locale(config, current, architecture, system, Locale::Ja)
     }
 
     pub(crate) fn new_for_locale(
         config: &serde_json::Value,
         current: Version,
         architecture: &str,
+        system: SystemVersion,
         locale: Locale,
     ) -> Result<Self, String> {
         let config: UpdateConfig = serde_json::from_value(config.clone())
@@ -85,6 +92,7 @@ impl UpdateClient {
             key: update_format::public_key_for_locale(&config.pubkey, locale)?,
             current,
             architecture: architecture.to_owned(),
+            system,
             locale,
         })
     }
@@ -121,6 +129,7 @@ impl UpdateClient {
         Ok(Some(PendingUpdate {
             version: manifest.version,
             notes: manifest.notes,
+            minimum_system_version: artifact.minimum_system_version,
             url: artifact.url.clone(),
             signature: update_format::signature_for_locale(&artifact.signature, self.locale)?,
         }))
@@ -130,7 +139,10 @@ impl UpdateClient {
         &self,
         update: &PendingUpdate,
         progress: impl FnMut(u64, Option<u64>),
-    ) -> Result<update_format::VerifiedArchive, String> {
+    ) -> Result<update_format::VerifiedArchive, UpdateError> {
+        update
+            .minimum_system_version
+            .ensure_supported(self.system)?;
         let bytes = self
             .get(
                 update.url.clone(),
@@ -139,7 +151,12 @@ impl UpdateClient {
                 progress,
             )
             .await?;
-        update_format::verify_for_locale(bytes, &update.signature, &self.key, self.locale)
+        Ok(update_format::verify_for_locale(
+            bytes,
+            &update.signature,
+            &self.key,
+            self.locale,
+        )?)
     }
 
     async fn get(
@@ -210,3 +227,6 @@ fn allowed_distribution_url(url: &Url) -> bool {
         )
 }
 
+#[cfg(test)]
+#[path = "update_transport_tests.rs"]
+pub(crate) mod tests;

@@ -39,6 +39,77 @@ pub fn shortcut_identity(value: &str) -> Option<String> {
     })
 }
 
+/// macOS の global-hotkey 0.8 が実際に登録できる主キーかを判定する。
+///
+/// parser が受理するキー集合には、他のプラットフォーム専用キーや macOS で
+/// scan code に変換できない F21 以降も含まれるため、設定境界ではこの集合を正本にする。
+pub fn is_macos_shortcut_key(identity: &str) -> bool {
+    let key = identity.rsplit('+').next().unwrap_or(identity);
+    if key.len() == 1 && key.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return true;
+    }
+    if let Some(number) = key
+        .strip_prefix('f')
+        .and_then(|value| value.parse::<u8>().ok())
+    {
+        return (1..=20).contains(&number) && key == format!("f{number}");
+    }
+    matches!(
+        key,
+        "backquote"
+            | "backslash"
+            | "bracketleft"
+            | "bracketright"
+            | "comma"
+            | "equal"
+            | "minus"
+            | "period"
+            | "quote"
+            | "semicolon"
+            | "slash"
+            | "backspace"
+            | "capslock"
+            | "enter"
+            | "space"
+            | "tab"
+            | "delete"
+            | "end"
+            | "home"
+            | "insert"
+            | "pagedown"
+            | "pageup"
+            | "printscreen"
+            | "arrowdown"
+            | "arrowleft"
+            | "arrowright"
+            | "arrowup"
+            | "numlock"
+            | "numpad0"
+            | "numpad1"
+            | "numpad2"
+            | "numpad3"
+            | "numpad4"
+            | "numpad5"
+            | "numpad6"
+            | "numpad7"
+            | "numpad8"
+            | "numpad9"
+            | "numpadadd"
+            | "numpaddecimal"
+            | "numpaddivide"
+            | "numpadenter"
+            | "numpadequal"
+            | "numpadmultiply"
+            | "numpadsubtract"
+            | "audiovolumedown"
+            | "audiovolumeup"
+            | "audiovolumemute"
+            | "mediaplaypause"
+            | "mediatracknext"
+            | "mediatrackprevious"
+    )
+}
+
 fn normalize_key(key: &str) -> Option<String> {
     if let Some(character) = key
         .strip_prefix("key")

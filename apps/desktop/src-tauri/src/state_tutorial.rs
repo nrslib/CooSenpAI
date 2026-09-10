@@ -10,7 +10,7 @@ use crate::bubbles;
 use crate::tutorial_notice;
 use coosenpai_core::conversation_archive::{archive_conversation, reset_conversation};
 use coosenpai_core::locale::{text, Locale, TextKey};
-use coosenpai_core::onboarding::{TutorialPlaceholders, TutorialStep};
+use coosenpai_core::onboarding::{TutorialPlaceholders, TutorialProvider, TutorialStep};
 use coosenpai_core::state::ConversationRole;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -31,24 +31,11 @@ impl TutorialFinishEntry {
 }
 
 impl DesktopState {
-    pub(crate) async fn replace_config_for_current_mode(
+    pub(crate) async fn prepare_config_for_current_mode(
         &self,
-        config: Config,
-        invalidates_operations: bool,
-    ) -> Result<(), ConfigCommitError> {
-        self.replace_config_for_current_mode_with_notice(config, invalidates_operations, None)
-            .await
-    }
-
-    pub(crate) async fn replace_config_for_current_mode_with_notice(
-        &self,
-        config: Config,
-        invalidates_operations: bool,
+        config: &Config,
         context_notice: Option<String>,
-    ) -> Result<(), ConfigCommitError> {
-        if invalidates_operations {
-            self.runtime.quiesce_for_config_update().await?;
-        }
+    ) -> Result<PreparedConfigRuntime, ConfigCommitError> {
         let current_config = self.runtime.config();
         let language_changed = current_config.ui.language != config.ui.language;
         let tutorial_provider = {
@@ -59,7 +46,7 @@ impl DesktopState {
                 .then(|| {
                     if language_changed {
                         Some(self.factory.tutorial_provider_for_locale(
-                            super::tutorial_state::tutorial_placeholders(&config),
+                            super::tutorial_state::tutorial_placeholders(config),
                             Locale::from_config(&config.ui.language),
                         ))
                     } else {
@@ -69,15 +56,36 @@ impl DesktopState {
                 .flatten()
                 .transpose()?
         };
-        let agents = match tutorial_provider.as_ref() {
-            Some(provider) => self
-                .factory
-                .build_tutorial_agents(&config, provider.clone())?,
-            None => {
-                self.factory
-                    .build_candidate_with_notice(&config, context_notice)
-                    .await?
-            }
+        let runtime = match tutorial_provider {
+            Some(provider) => PreparedConfigRuntime::Tutorial {
+                agents: self
+                    .factory
+                    .build_tutorial_agents(config, provider.clone())?,
+                provider: language_changed.then_some(provider),
+            },
+            None => PreparedConfigRuntime::Production {
+                agents: self
+                    .factory
+                    .build_candidate_with_notice(config, context_notice)
+                    .await?,
+            },
+        };
+        Ok(runtime)
+    }
+
+    pub(crate) async fn apply_prepared_config(
+        &self,
+        config: Config,
+        invalidates_operations: bool,
+        prepared: PreparedConfigRuntime,
+    ) -> Result<(), ConfigCommitError> {
+        let provider = match &prepared {
+            PreparedConfigRuntime::Tutorial { provider, .. } => provider.clone(),
+            PreparedConfigRuntime::Production { .. } => None,
+        };
+        let agents = match prepared {
+            PreparedConfigRuntime::Tutorial { agents, .. }
+            | PreparedConfigRuntime::Production { agents } => agents,
         };
         if invalidates_operations {
             self.runtime.replace_config(config, agents).await?;
@@ -86,10 +94,8 @@ impl DesktopState {
                 .replace_config_when_idle(config, agents)
                 .await?;
         }
-        if language_changed {
-            if let Some(provider) = tutorial_provider {
-                self.tutorial.lock().await.replace_provider(provider);
-            }
+        if let Some(provider) = provider {
+            self.tutorial.lock().await.replace_provider(provider);
         }
         Ok(())
     }
@@ -586,6 +592,16 @@ impl DesktopState {
         }
         accepted || self.tutorial_step_response_presented().await
     }
+}
+
+pub(crate) enum PreparedConfigRuntime {
+    Tutorial {
+        agents: coosenpai_core::runtime::RuntimeAgents,
+        provider: Option<TutorialProvider>,
+    },
+    Production {
+        agents: coosenpai_core::runtime::RuntimeAgents,
+    },
 }
 
 #[derive(Debug)]

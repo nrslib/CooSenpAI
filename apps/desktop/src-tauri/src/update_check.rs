@@ -6,13 +6,16 @@ use coosenpai_core::persistence::{atomic_write_json, SiblingLock};
 use coosenpai_core::ports::RuntimeLogger;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
-const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const STATE_SCHEMA_VERSION: u8 = 1;
 
 #[async_trait]
@@ -27,6 +30,7 @@ struct TauriReleaseClient {
 #[async_trait]
 impl LatestReleaseClient for TauriReleaseClient {
     async fn latest_tag(&self) -> Result<Option<String>, String> {
+        // OS 要件を満たさない更新は AppUpdater が画面に案内し、通常の更新通知には渡さない。
         self.state
             .app
             .state::<crate::app_update::AppUpdater>()
@@ -187,6 +191,7 @@ struct UpdateChecker {
     client: Arc<dyn LatestReleaseClient>,
     state: Arc<UpdateCheckStateStore>,
     logger: Arc<dyn RuntimeLogger>,
+    notified_versions: Mutex<BTreeSet<Version>>,
 }
 
 impl UpdateChecker {
@@ -199,6 +204,26 @@ impl UpdateChecker {
             client,
             state: Arc::new(UpdateCheckStateStore::new(state_path)),
             logger,
+            notified_versions: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    async fn run(
+        &self,
+        updates_enabled: impl Fn() -> bool,
+        current_version: &str,
+        notice: &dyn UpdateNoticeSink,
+        cancellation: &CancellationToken,
+    ) {
+        loop {
+            if cancellation.is_cancelled() {
+                return;
+            }
+            self.check(updates_enabled(), current_version, notice).await;
+            tokio::select! {
+                _ = cancellation.cancelled() => return,
+                _ = tokio::time::sleep(CHECK_INTERVAL) => {}
+            }
         }
     }
 
@@ -222,6 +247,10 @@ impl UpdateChecker {
             self.log_info("更新確認をスキップしました: reason=not-newer-or-invalid-tag");
             return;
         };
+        let mut notified_versions = self.notified_versions.lock().await;
+        if notified_versions.contains(&latest) {
+            return;
+        }
         let state = match self.load_state().await {
             Ok(state) => state,
             Err(_) => {
@@ -230,12 +259,15 @@ impl UpdateChecker {
             }
         };
         if state.last_notified_version.as_deref() == Some(latest.to_string().as_str()) {
+            notified_versions.insert(latest);
             return;
         }
         if !notice.show_update(&latest).await {
             self.log_info("更新通知をスキップしました: reason=notice");
             return;
         }
+        // 保存に失敗しても、表示済みの版を次の周期で再通知しない。
+        notified_versions.insert(latest.clone());
         match self.mark_notified(&latest).await {
             Ok(_) => {}
             Err(_) => self.log_info("更新通知を表示済みとして保存できませんでした: reason=state"),
@@ -272,23 +304,17 @@ pub(crate) fn start(state: Arc<DesktopState>) {
             }),
             logger,
         );
-        loop {
-            if state.cancellation.is_cancelled() {
-                return;
-            }
-            if state.runtime_config().app.check_for_updates {
-                let notice = DesktopUpdateNoticeSink {
-                    state: state.clone(),
-                };
-                checker
-                    .check(true, env!("CARGO_PKG_VERSION"), &notice)
-                    .await;
-            }
-            tokio::select! {
-                _ = state.cancellation.cancelled() => return,
-                _ = tokio::time::sleep(CHECK_INTERVAL) => {}
-            }
-        }
+        let notice = DesktopUpdateNoticeSink {
+            state: state.clone(),
+        };
+        checker
+            .run(
+                || state.runtime_config().app.check_for_updates,
+                env!("CARGO_PKG_VERSION"),
+                &notice,
+                &state.cancellation,
+            )
+            .await;
     });
 }
 

@@ -30,7 +30,7 @@ mod watch_app;
 use watch_app::ApplicationWatchSet;
 #[path = "watch_heartbeat.rs"]
 mod watch_heartbeat;
-use watch_heartbeat::{heartbeat_if_due, mark_meaningful_change};
+use watch_heartbeat::{heartbeat_if_due, mark_meaningful_change, process_mailbox_if_possible};
 #[path = "watch_recovery.rs"]
 mod watch_recovery;
 pub(crate) use watch_recovery::WatchErrorPublisher;
@@ -567,12 +567,7 @@ async fn flush_if_due(
         memory.last_accepted = None;
     }
     let Some(accepted) = memory.last_accepted else {
-        let _ = state
-            .core_runtime()
-            .process_mailbox(cancellation)
-            .await
-            .map_err(anyhow::Error::new)
-            .context("Manager の mailbox ACK")?;
+        process_mailbox_if_possible(state, cancellation, "flush").await?;
         return Ok(());
     };
     let tutorial_watch = state.tutorial_current_step().await == Some(TutorialStep::Watch);
@@ -632,12 +627,7 @@ async fn flush_if_due(
             return Err(anyhow::Error::new(error).context("Manager の観察 ACK"));
         }
     }
-    let _ = state
-        .core_runtime()
-        .process_mailbox(cancellation)
-        .await
-        .map_err(anyhow::Error::new)
-        .context("Manager の観察後 mailbox ACK")?;
+    process_mailbox_if_possible(state, cancellation, "observation").await?;
     state.refresh_conversation().await;
     Ok(())
 }

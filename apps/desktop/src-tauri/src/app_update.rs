@@ -1,6 +1,7 @@
 use crate::commands::{authorize_window, CommandOrigin, IpcResult, TauriIpcResult};
 use crate::state::DesktopState;
 use crate::update_install::InstallLocation;
+use crate::update_system::{SystemVersion, UpdateError};
 use crate::update_transport::{PendingUpdate, UpdateClient};
 use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::ports::RuntimeLogger;
@@ -25,6 +26,11 @@ pub(crate) enum UpdateStatus {
     Available {
         version: String,
         notes: Option<String>,
+    },
+    Incompatible {
+        version: String,
+        #[serde(rename = "minimumSystemVersion")]
+        minimum_system_version: String,
     },
     Downloading {
         version: String,
@@ -111,28 +117,20 @@ impl AppUpdater {
         let previous_status = self.snapshot.borrow().status.clone();
         self.publish(state, UpdateStatus::Checking);
         let result = async {
-            let updater = update_client(&state.app, locale)?;
-            tokio::select! {
+            let system = SystemVersion::current(locale)?;
+            let updater = update_client(&state.app, system, locale)?;
+            let update = tokio::select! {
                 _ = state.cancellation.cancelled() => Err(text(TextKey::UpdateShuttingDown, locale).to_owned()),
                 result = updater.check() => result.map_err(|error| error.to_string()),
-            }
+            }?;
+            Ok::<_, String>((update, system))
         }
         .await;
         match result {
-            Ok(Some(update)) => {
-                let version = update.version.to_string();
-                let status = UpdateStatus::Available {
-                    version: version.clone(),
-                    notes: update.notes.clone(),
-                };
-                *self.pending.lock().await = Some(update);
+            Ok((update, system)) => {
+                let (status, version) = self.record_check(update, system).await;
                 self.publish(state, status);
-                Ok(Some(version))
-            }
-            Ok(None) => {
-                self.pending.lock().await.take();
-                self.publish(state, UpdateStatus::UpToDate);
-                Ok(None)
+                Ok(version)
             }
             Err(error) => {
                 let message = with_error(TextKey::UpdateCheckFailed, locale, &error);
@@ -143,6 +141,63 @@ impl AppUpdater {
                         Err(message)
                     }
                 }
+            }
+        }
+    }
+
+    async fn record_check(
+        &self,
+        update: Option<PendingUpdate>,
+        system: SystemVersion,
+    ) -> (UpdateStatus, Option<String>) {
+        let mut pending = self.pending.lock().await;
+        *pending = None;
+        let Some(update) = update else {
+            return (UpdateStatus::UpToDate, None);
+        };
+        let version = update.version.to_string();
+        if update
+            .minimum_system_version
+            .ensure_supported(system)
+            .is_err()
+        {
+            return (
+                UpdateStatus::Incompatible {
+                    version,
+                    minimum_system_version: update.minimum_system_version.to_string(),
+                },
+                None,
+            );
+        }
+        let status = UpdateStatus::Available {
+            version: version.clone(),
+            notes: update.notes.clone(),
+        };
+        *pending = Some(update);
+        (status, Some(version))
+    }
+
+    fn install_error(
+        &self,
+        state: &DesktopState,
+        version: String,
+        error: UpdateError,
+        failure_key: TextKey,
+        locale: Locale,
+    ) -> Result<(), String> {
+        match error {
+            UpdateError::IncompatibleSystem(minimum) => {
+                self.publish(
+                    state,
+                    UpdateStatus::Incompatible {
+                        version,
+                        minimum_system_version: minimum.to_string(),
+                    },
+                );
+                Ok(())
+            }
+            UpdateError::Failed(error) => {
+                Err(self.failed(state, with_error(failure_key, locale, &error)))
             }
         }
     }
@@ -162,7 +217,8 @@ impl AppUpdater {
                 .map_err(|error| error.to_string())?,
             locale,
         )?;
-        let client = update_client(&state.app, locale)?;
+        let system = SystemVersion::current(locale)?;
+        let client = update_client(&state.app, system, locale)?;
         let _operation = self
             .operation
             .try_lock()
@@ -174,6 +230,15 @@ impl AppUpdater {
             .take()
             .ok_or_else(|| text(TextKey::UpdatePendingMissing, locale).to_owned())?;
         let version = update.version.to_string();
+        if let Err(error) = update.minimum_system_version.ensure_supported(system) {
+            return self.install_error(
+                state,
+                version,
+                error,
+                TextKey::UpdateDownloadVerifyFailed,
+                locale,
+            );
+        }
         self.publish(
             state,
             UpdateStatus::Downloading {
@@ -192,13 +257,21 @@ impl AppUpdater {
                 },
             );
         });
-        let bytes = tokio::select! {
-            _ = state.cancellation.cancelled() => Err(text(TextKey::UpdateShuttingDown, locale).to_owned()),
-            result = download => result.map_err(|error| error.to_string()),
-        }
-        .map_err(|error| {
-            self.failed(state, with_error(TextKey::UpdateDownloadVerifyFailed, locale, &error))
-        })?;
+        let bytes = match tokio::select! {
+            _ = state.cancellation.cancelled() => Err(UpdateError::Failed(text(TextKey::UpdateShuttingDown, locale).to_owned())),
+            result = download => result,
+        } {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return self.install_error(
+                    state,
+                    version,
+                    error,
+                    TextKey::UpdateDownloadVerifyFailed,
+                    locale,
+                )
+            }
+        };
 
         let installation = self.installation.clone().lock_owned().await;
         if state.cancellation.is_cancelled() {
@@ -223,13 +296,17 @@ impl AppUpdater {
                 locale,
             )?;
             if cancellation.is_cancelled() {
-                return Err(text(TextKey::UpdateShuttingDown, locale).to_owned());
+                return Err(UpdateError::Failed(
+                    text(TextKey::UpdateShuttingDown, locale).to_owned(),
+                ));
             }
-            location
-                .swap(&staged)
-                .map_err(|error| with_error(TextKey::UpdatePreviousPreserved, locale, &error))?;
+            location.apply(
+                &staged,
+                update.minimum_system_version,
+                SystemVersion::current(locale)?,
+            )?;
             // 交換は完了しているため、旧版の掃除に失敗しても適用済みとして扱う。
-            Ok::<_, String>(staged.close().err())
+            Ok::<_, UpdateError>(staged.close().err())
         })
         .await;
         match result {
@@ -243,10 +320,9 @@ impl AppUpdater {
                 self.publish(state, UpdateStatus::Installed { version });
                 Ok(())
             }
-            Ok(Err(error)) => Err(self.failed(
-                state,
-                with_error(TextKey::UpdateApplyFailed, locale, &error),
-            )),
+            Ok(Err(error)) => {
+                self.install_error(state, version, error, TextKey::UpdateApplyFailed, locale)
+            }
             Err(error) => Err(self.failed(
                 state,
                 with_error(TextKey::UpdateProcessFailed, locale, &error),
@@ -259,7 +335,11 @@ impl AppUpdater {
     }
 }
 
-fn update_client(app: &tauri::AppHandle, locale: Locale) -> Result<UpdateClient, String> {
+fn update_client(
+    app: &tauri::AppHandle,
+    system: SystemVersion,
+    locale: Locale,
+) -> Result<UpdateClient, String> {
     let config = app
         .config()
         .plugins
@@ -270,6 +350,7 @@ fn update_client(app: &tauri::AppHandle, locale: Locale) -> Result<UpdateClient,
         config,
         app.package_info().version.clone(),
         std::env::consts::ARCH,
+        system,
         locale,
     )
 }

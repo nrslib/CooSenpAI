@@ -52,6 +52,7 @@ pub(crate) enum SnapshotEvent {
         event: crate::watch_presenter::WatchResult,
     },
     ConfigLoaded(coosenpai_core::config::Config),
+    ConfigSaved(coosenpai_core::config::Config),
     CompanionStopped,
     CompanionReconfigured(coosenpai_core::config::Config),
     CompanionFailed(coosenpai_core::runtime::RuntimeLastError),
@@ -258,13 +259,19 @@ impl SnapshotPresenter {
                     return effects;
                 }
             }
-            SnapshotEvent::ConfigLoaded(config) => snapshot.apply_config(config),
+            SnapshotEvent::ConfigLoaded(config) => {
+                snapshot.apply_config(config);
+            }
+            SnapshotEvent::ConfigSaved(config) => {
+                snapshot.apply_saved_config(config);
+            }
             SnapshotEvent::CompanionStopped => {
                 snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle
             }
             SnapshotEvent::CompanionReconfigured(config) => {
-                snapshot.apply_config(config);
-                snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle;
+                if snapshot.apply_config(config) {
+                    snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle;
+                }
             }
             SnapshotEvent::CompanionFailed(error) => {
                 snapshot.last_error = Some(error);
@@ -353,8 +360,10 @@ impl SnapshotPresenter {
             }));
         }
         if let Some((revision, work)) = metadata {
-            snapshot.config.work = work;
-            snapshot.config_revision = revision;
+            if revision >= snapshot.config_revision {
+                snapshot.config.work = work;
+                snapshot.config_revision = revision;
+            }
         }
         if before == serde_json::to_value(&*snapshot).expect("snapshot serialization") {
             return effects;
@@ -421,7 +430,9 @@ impl SnapshotEvent {
             | Self::TemporaryExpired(_)
             | Self::TemporaryCleared { .. } => "TemporaryAssertiveness",
             Self::Shortcut(_) => "Shortcut",
-            Self::ConfigLoaded(_) | Self::CompanionReconfigured(_) => "Config",
+            Self::ConfigLoaded(_) | Self::ConfigSaved(_) | Self::CompanionReconfigured(_) => {
+                "Config"
+            }
             Self::CompanionStopped | Self::CompanionFailed(_) => "Companion",
             Self::AvatarRefresh | Self::AvatarLoaded { .. } => "Avatar",
             Self::SpeechDevicesLoaded(_) => "SpeechDevices",

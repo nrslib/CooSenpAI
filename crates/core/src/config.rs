@@ -19,7 +19,7 @@ mod validate;
 use chrono::{DateTime, Local, TimeZone, Utc};
 pub use config_issue_paths::config_issue_path_patterns;
 pub use config_presence::{AppConfig, CompanionReminder};
-pub use config_shortcut::shortcut_identity;
+pub use config_shortcut::{is_macos_shortcut_key, shortcut_identity};
 use defaults::*;
 pub use paths::ConfigPaths;
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,8 @@ use serde_json::Value;
 use std::io;
 pub use storage::{
     ensure_layout, load_config, patch_config, patch_config_before_save,
-    patch_config_before_save_if_revision, save_config,
+    patch_config_before_save_if_revision, prepare_config_update, save_config,
+    save_config_if_revision,
 };
 use thiserror::Error;
 pub use validate::validate_config;
@@ -149,6 +150,13 @@ impl Default for Config {
             app: AppConfig::default(),
         }
     }
+}
+
+pub fn audio_config_is_only_difference(current: &Config, next: &Config) -> bool {
+    let mut comparable = current.clone();
+    comparable.audio = next.audio.clone();
+    comparable.revision = next.revision;
+    comparable == *next
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

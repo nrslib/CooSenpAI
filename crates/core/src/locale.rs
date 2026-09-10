@@ -55,6 +55,9 @@ pub enum TextKey {
     UpdateRedirectNotAllowed,
     UpdateMetadataTooLarge,
     UpdateMetadataInvalid,
+    UpdateSystemVersionUnavailable,
+    UpdateBundleMinimumInvalid,
+    UpdateBundleMinimumMismatch,
     UpdateArtifactMissing,
     UpdateArtifactUrlInvalid,
     UpdateDestinationNotAllowed,
@@ -531,6 +534,12 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::UpdateMetadataTooLarge, Locale::En) => "The update metadata is too large.",
         (TextKey::UpdateMetadataInvalid, Locale::Ja) => "更新情報の形式が不正です",
         (TextKey::UpdateMetadataInvalid, Locale::En) => "The update metadata is invalid.",
+        (TextKey::UpdateSystemVersionUnavailable, Locale::Ja) => "実行中の macOS の版を取得できません",
+        (TextKey::UpdateSystemVersionUnavailable, Locale::En) => "Could not determine the running macOS version.",
+        (TextKey::UpdateBundleMinimumInvalid, Locale::Ja) => "署名済みアプリの最低 macOS 版が欠落しているか不正です",
+        (TextKey::UpdateBundleMinimumInvalid, Locale::En) => "The signed app's minimum macOS version is missing or invalid.",
+        (TextKey::UpdateBundleMinimumMismatch, Locale::Ja) => "署名済みアプリの最低 macOS 版が更新情報と一致しません",
+        (TextKey::UpdateBundleMinimumMismatch, Locale::En) => "The signed app's minimum macOS version does not match the update metadata.",
         (TextKey::UpdateArtifactMissing, Locale::Ja) => {
             "この architecture 用の更新ファイルがありません"
         }

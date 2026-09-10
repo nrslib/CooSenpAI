@@ -13,6 +13,7 @@ pub(crate) struct ConfigUpdateOutcome {
 #[derive(Default)]
 pub(crate) struct ConfigUpdateCoordinator {
     pub(crate) serial: Mutex<()>,
+    pub(crate) audio: Mutex<()>,
     revision: AtomicU64,
     config_revision: AtomicU64,
 }
@@ -28,6 +29,7 @@ impl ConfigUpdateCoordinator {
     pub(crate) fn new(config_revision: u64) -> Self {
         Self {
             serial: Mutex::new(()),
+            audio: Mutex::new(()),
             revision: AtomicU64::new(0),
             config_revision: AtomicU64::new(config_revision),
         }
@@ -48,7 +50,7 @@ impl ConfigUpdateCoordinator {
     }
 
     pub(crate) fn observe_config_revision(&self, revision: u64) {
-        self.config_revision.store(revision, Ordering::Release);
+        self.config_revision.fetch_max(revision, Ordering::AcqRel);
     }
 }
 
@@ -97,9 +99,7 @@ impl ConfigUpdateTransaction<'_> {
 
     pub(crate) fn commit_config(self, config_revision: u64) -> Result<(), ConfigCommitError> {
         self.commit_generation()?;
-        self.coordinator
-            .config_revision
-            .store(config_revision, Ordering::Release);
+        self.coordinator.observe_config_revision(config_revision);
         Ok(())
     }
 }

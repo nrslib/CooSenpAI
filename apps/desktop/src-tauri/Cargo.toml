@@ -66,4 +66,5 @@ libc = "0.2"
 tauri = { version = "2.11.5", default-features = false, features = ["wry", "tray-icon", "image-png", "macos-private-api", "test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow"] }

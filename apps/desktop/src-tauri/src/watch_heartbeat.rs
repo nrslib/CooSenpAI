@@ -1,5 +1,44 @@
 use super::*;
 use crate::watch_presenter::WatchResult;
+use coosenpai_core::runtime::RuntimeError;
+
+pub(super) async fn process_mailbox_if_possible(
+    state: &DesktopState,
+    cancellation: CancellationToken,
+    stage: &'static str,
+) -> Result<()> {
+    let result = state
+        .core_runtime()
+        .process_mailbox(cancellation)
+        .await
+        .map(|_| ());
+    handle_mailbox_result(result, state.logger.as_ref(), stage)
+}
+
+fn handle_mailbox_result(
+    result: std::result::Result<(), RuntimeError>,
+    logger: &dyn RuntimeLogger,
+    stage: &'static str,
+) -> Result<()> {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if let Some(mailbox_error) = error.mailbox_error() {
+        let retryable = mailbox_error.is_retryable();
+        let action = if retryable { "retry" } else { "stop" };
+        let _ = logger.write(
+            if retryable { "WARN" } else { "ERROR" },
+            &format!(
+                "見守り mailbox 処理に失敗しました: error-type=mailbox stage={stage} reason={} retryable={retryable} action={action}",
+                mailbox_error.reason(),
+            ),
+        );
+        if retryable {
+            return Ok(());
+        }
+    }
+    Err(anyhow::Error::new(error).context(format!("Manager の {stage} mailbox ACK")))
+}
 
 pub(super) async fn heartbeat_if_due(
     state: &DesktopState,
@@ -88,12 +127,7 @@ pub(super) async fn heartbeat_if_due(
             }
         }
     }
-    let _ = state
-        .core_runtime()
-        .process_mailbox(cancellation)
-        .await
-        .map_err(anyhow::Error::new)
-        .context("Manager の heartbeat 後 mailbox ACK")?;
+    process_mailbox_if_possible(state, cancellation, "heartbeat").await?;
     memory.last_observation = Instant::now();
     memory.window_start = memory.last_observation;
     state

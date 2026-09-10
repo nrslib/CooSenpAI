@@ -309,7 +309,8 @@ fn deliver_entry(entry: &mut OutboxEntry, mailbox_root: &Path) -> Result<(), Out
     recipients.dedup();
     let mut targets = Vec::with_capacity(recipients.len());
     for recipient in recipients {
-        let mailbox = Mailbox::new(mailbox_root.to_owned(), recipient.clone())?;
+        // 配達中の mailbox claim を起動時回収で inbox へ戻さない。
+        let mailbox = Mailbox::open(mailbox_root.to_owned(), recipient.clone())?;
         let lock = mailbox.acquire_delivery_lock()?;
         targets.push((recipient, mailbox, lock));
     }

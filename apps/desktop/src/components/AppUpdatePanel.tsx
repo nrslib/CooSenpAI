@@ -26,6 +26,7 @@ export function UpdateControls({ enabled, showCheck, status, controls, error, on
     <div role="status" aria-live="polite">
       {status?.phase === "checking" && <p>{t("update.checking")}</p>}
       {status?.phase === "upToDate" && <p>{t("update.upToDate")}</p>}
+      {status?.phase === "incompatible" && <p>{t("update.incompatible", { version: status.minimumSystemVersion })}</p>}
       {status?.phase === "available" && <>
         <p>{t("update.available", { version: status.version })}</p>
         {status.notes && <details><summary>{t("update.notes")}</summary><p className="update-notes">{status.notes}</p></details>}

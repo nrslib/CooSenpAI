@@ -6,6 +6,7 @@ use coosenpai_core::onboarding::TutorialStep;
 pub(crate) enum PermitClass {
     Shared,
     Exclusive,
+    Audio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +52,7 @@ enum CommandClass {
 
 pub(crate) fn permit_class(command: DesktopCommand) -> PermitClass {
     match command {
+        DesktopCommand::ConfigAudioUpdate => PermitClass::Audio,
         DesktopCommand::ConfigProviderUpdate
         | DesktopCommand::ProviderApiKeyUpdate
         | DesktopCommand::ConfigWatchUpdate
@@ -120,7 +122,11 @@ pub(crate) fn admit_command(context: &PolicyContext, envelope: &CommandEnvelope)
     if manager.lifecycle == LifecyclePhase::ShuttingDown {
         return Admission::Reject(RejectReason::ShuttingDown);
     }
-    if matches!(manager.transition, ExclusiveTransition::InProgress(_)) {
+    if matches!(manager.transition, ExclusiveTransition::InProgress(_))
+        && !(envelope.command == DesktopCommand::ConfigAudioUpdate
+            && manager.transition
+                == ExclusiveTransition::InProgress(TransitionOperation::ReplaceConfig))
+    {
         return Admission::Reject(RejectReason::TransitionInProgress);
     }
     if envelope.command == DesktopCommand::VoiceOutputTest
@@ -409,7 +415,9 @@ fn command_class(command: DesktopCommand) -> CommandClass {
         DesktopCommand::ConfigWatchUpdate | DesktopCommand::WatchTargetUpdate => {
             CommandClass::WatchTargetConfig
         }
-        DesktopCommand::ConfigDisplayUpdate => CommandClass::ConfigDisplay,
+        DesktopCommand::ConfigDisplayUpdate | DesktopCommand::ConfigAudioUpdate => {
+            CommandClass::ConfigDisplay
+        }
         DesktopCommand::SetupPersonaSelect => CommandClass::SetupPersona,
         DesktopCommand::PersonaSelect
         | DesktopCommand::PersonaSave
@@ -479,6 +487,7 @@ fn requires_runtime(command: DesktopCommand) -> bool {
         | DesktopCommand::BubbleNavigate
         | DesktopCommand::SettingsAppearancePreview
         | DesktopCommand::ConfigDisplayUpdate
+        | DesktopCommand::ConfigAudioUpdate
         | DesktopCommand::ConfigProviderUpdate
         | DesktopCommand::ProviderApiKeyUpdate
         | DesktopCommand::ConfigWatchUpdate

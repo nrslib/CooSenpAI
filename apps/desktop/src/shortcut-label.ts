@@ -12,6 +12,28 @@ const modifierLabels: Readonly<Record<string, ModifierLabel>> = {
   Super: { label: "⌘", order: 3 },
 };
 
+const keyLabels: Readonly<Record<string, string>> = {
+  Equal: "=",
+  Minus: "-",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Quote: "'",
+  Semicolon: ";",
+  Backslash: "\\",
+  Comma: ",",
+  Slash: "/",
+  Period: ".",
+  Backquote: "`",
+  ArrowUp: "↑",
+  ArrowDown: "↓",
+  ArrowLeft: "←",
+  ArrowRight: "→",
+  Backspace: "⌫",
+  Delete: "⌦",
+  Space: "Space",
+  Tab: "Tab",
+};
+
 export function formatShortcutLabel(shortcut: string): string {
   const modifiers: Array<ModifierLabel & { readonly index: number }> = [];
   const keys: string[] = [];
@@ -19,7 +41,7 @@ export function formatShortcutLabel(shortcut: string): string {
   for (const [index, part] of shortcut.split("+").entries()) {
     const modifier = modifierLabels[part];
     if (modifier === undefined) {
-      keys.push(part);
+      keys.push(keyLabels[part] ?? part);
     } else {
       modifiers.push({ ...modifier, index });
     }

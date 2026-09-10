@@ -191,6 +191,7 @@ pub struct RuntimeActor {
     observer: Option<ObserverAgent>,
     companion: Option<CompanionAgent>,
     config: Config,
+    full_config_revision: u64,
     revision: u64,
     pending_observations: Vec<ObservationRecord>,
     observation_delivery: ObservationDelivery,
@@ -445,6 +446,7 @@ impl RuntimeActor {
             let mut actor = Self {
                 observer,
                 companion,
+                full_config_revision: config.revision,
                 config,
                 revision: 0,
                 pending_observations: Vec::new(),
@@ -753,17 +755,61 @@ impl RuntimeActor {
                                 let _ = response.send(result);
                                 actor.publish(&snapshot_tx);
                             }
-                            PriorityCommand::UpdateWorkConfig { work, response } => {
-                                let revision = actor.update_work_config(work, &snapshot_tx, &config_tx);
-                                let _ = response.send(Ok(revision));
-                            }
-                            PriorityCommand::UpdateWatchEnabled { enabled, response } => {
-                                let revision = actor.update_watch_enabled(
-                                    enabled,
+                            PriorityCommand::UpdateWorkConfig {
+                                work,
+                                config_revision,
+                                response,
+                            } => {
+                                let revision = actor.update_work_config(
+                                    work,
+                                    config_revision,
                                     &snapshot_tx,
                                     &config_tx,
                                 );
                                 let _ = response.send(Ok(revision));
+                            }
+                            PriorityCommand::UpdateWatchEnabled {
+                                enabled,
+                                config_revision,
+                                response,
+                            } => {
+                                let revision = actor.update_watch_enabled(
+                                    enabled,
+                                    config_revision,
+                                    &snapshot_tx,
+                                    &config_tx,
+                                );
+                                let _ = response.send(Ok(revision));
+                            }
+                            PriorityCommand::UpdateKeymap {
+                                keymap,
+                                config_revision,
+                                response,
+                            } => {
+                                let revision = actor.update_keymap(
+                                    keymap,
+                                    config_revision,
+                                    &snapshot_tx,
+                                    &config_tx,
+                                );
+                                let _ = response.send(Ok(revision));
+                            }
+                            PriorityCommand::UpdateConfigWithoutFactory { config, response } => {
+                                let result = actor.update_config_without_factory(*config);
+                                if result.is_ok() {
+                                    let _ = config_tx.send(actor.config.clone());
+                                }
+                                let _ = response.send(result);
+                                actor.publish(&snapshot_tx);
+                            }
+                            PriorityCommand::UpdateAudioConfig { audio, config_revision, response } => {
+                                let result = actor.update_audio_config(
+                                    audio,
+                                    config_revision,
+                                    &snapshot_tx,
+                                    &config_tx,
+                                );
+                                let _ = response.send(result);
                             }
                             command => {
                                 let clear_user_state = matches!(
@@ -941,13 +987,40 @@ impl RuntimeActor {
                 let _ = response.send(result);
                 self.publish(snapshot_tx);
             }
-            PriorityCommand::UpdateWorkConfig { work, response } => {
-                let revision = self.update_work_config(work, snapshot_tx, config_tx);
+            PriorityCommand::UpdateWorkConfig {
+                work,
+                config_revision,
+                response,
+            } => {
+                let revision =
+                    self.update_work_config(work, config_revision, snapshot_tx, config_tx);
                 let _ = response.send(Ok(revision));
             }
-            PriorityCommand::UpdateWatchEnabled { enabled, response } => {
-                let revision = self.update_watch_enabled(enabled, snapshot_tx, config_tx);
+            PriorityCommand::UpdateWatchEnabled {
+                enabled,
+                config_revision,
+                response,
+            } => {
+                let revision =
+                    self.update_watch_enabled(enabled, config_revision, snapshot_tx, config_tx);
                 let _ = response.send(Ok(revision));
+            }
+            PriorityCommand::UpdateKeymap {
+                keymap,
+                config_revision,
+                response,
+            } => {
+                let revision = self.update_keymap(keymap, config_revision, snapshot_tx, config_tx);
+                let _ = response.send(Ok(revision));
+            }
+            PriorityCommand::UpdateAudioConfig {
+                audio,
+                config_revision,
+                response,
+            } => {
+                let result =
+                    self.update_audio_config(audio, config_revision, snapshot_tx, config_tx);
+                let _ = response.send(result);
             }
             PriorityCommand::UpdateConfig { config, response } => {
                 self.advance_watch_scope_generation(&config);
@@ -965,10 +1038,23 @@ impl RuntimeActor {
                 if result.is_ok() {
                     let _ = config_tx.send(self.config.clone());
                 } else if let Err(error) = &result {
-                    self.enter_degraded(config_update_last_error(
+                    if !matches!(
                         error,
-                        Locale::from_config(&self.config.ui.language),
-                    ));
+                        RuntimeError::Config(crate::config::ConfigError::RevisionConflict { .. })
+                    ) {
+                        self.enter_degraded(config_update_last_error(
+                            error,
+                            Locale::from_config(&self.config.ui.language),
+                        ));
+                    }
+                }
+                let _ = response.send(result);
+                self.publish(snapshot_tx);
+            }
+            PriorityCommand::UpdateConfigWithoutFactory { config, response } => {
+                let result = self.update_config_without_factory(*config);
+                if result.is_ok() {
+                    let _ = config_tx.send(self.config.clone());
                 }
                 let _ = response.send(result);
                 self.publish(snapshot_tx);

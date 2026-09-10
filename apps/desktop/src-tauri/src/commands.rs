@@ -590,6 +590,11 @@ pub(crate) async fn update_config_for_source(
             )
         }
     };
+    let command = if normalized_avatar.is_some() && command == DesktopCommand::ConfigAudioUpdate {
+        DesktopCommand::ConfigDisplayUpdate
+    } else {
+        command
+    };
     let staged_avatar = match normalized_avatar {
         None => None,
         Some(bytes) => {

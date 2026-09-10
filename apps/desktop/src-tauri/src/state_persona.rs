@@ -1,7 +1,8 @@
 use super::*;
 use crate::commands_config::{invalidates_running_operations, work_config_is_only_difference};
 use crate::config_update::ConfigUpdateOutcome;
-use coosenpai_core::locale::{localize_shortcut_message, text, Locale, TextKey};
+use coosenpai_core::config::audio_config_is_only_difference;
+use coosenpai_core::locale::{text, Locale, TextKey};
 
 impl DesktopState {
     pub(super) async fn update_config_with_raw<F>(
@@ -9,6 +10,26 @@ impl DesktopState {
         permit: &crate::command_guard::CommandContext,
         update: F,
         staged_avatar: Option<crate::avatar::StagedAvatar>,
+        expected_revision: Option<u64>,
+    ) -> Result<ConfigUpdateOutcome, ConfigCommitError>
+    where
+        F: FnOnce(Config) -> Result<Config, coosenpai_core::config::ConfigError>,
+    {
+        if permit.command() == crate::command_guard::DesktopCommand::ConfigAudioUpdate {
+            return self
+                .update_audio_config_with_raw(update, expected_revision)
+                .await;
+        }
+        // 通常設定の大きな Future を音声操作や呼び出し元のスタックへ持ち回らない。
+        Box::pin(self.update_config_transaction(permit, update, staged_avatar, expected_revision))
+            .await
+    }
+
+    async fn update_config_transaction<F>(
+        self: &Arc<Self>,
+        permit: &crate::command_guard::CommandContext,
+        update: F,
+        mut staged_avatar: Option<crate::avatar::StagedAvatar>,
         expected_revision: Option<u64>,
     ) -> Result<ConfigUpdateOutcome, ConfigCommitError>
     where
@@ -26,12 +47,11 @@ impl DesktopState {
             crate::commands_config::validate_work_config_change(&current, &next, normal_mode)?;
             Ok(next)
         };
-        let persisted = match persist_config_update(
+        let prepared = match prepare_config_update(
             &self.paths,
             &self.runtime,
             &previous,
             guarded_update,
-            staged_avatar,
             expected_revision,
         ) {
             Ok(persisted) => persisted,
@@ -41,38 +61,34 @@ impl DesktopState {
             }
             Err(error) => return Err(error.into()),
         };
-        let requested = persisted.requested.ok_or_else(|| {
-            ConfigCommitError::Runtime(RuntimeError::Factory(
-                text(
-                    TextKey::ConfigCandidateBuildFailed,
-                    Locale::from_config(&previous.ui.language),
-                )
-                .to_owned(),
-            ))
-        })?;
-        self.work.approvals.set_mode(requested.work.approval_mode);
-        self.work.set_roots(requested.work.allowed_roots.clone());
-        let persisted_before = persisted.previous;
-        let staged = persisted.staged;
-        let provider_start_gate = persisted.provider_start_gate;
-        if let Some(error) = persisted.avatar_cleanup_error.as_deref() {
-            let _ = self.logger.write(
-                "WARN",
-                &format!("アバター旧ファイルの cleanup に失敗しました: {error}"),
-            );
-        }
-        let watch_scope_changed = persisted_before.watch.fullscreen != requested.watch.fullscreen
-            || persisted_before.watch.apps != requested.watch.apps;
-        let language_changed = persisted_before.ui.language != staged.ui.language;
-        let bubble_stack_changed = persisted_before.bubble.max_stack != requested.bubble.max_stack;
-        let bubble_appearance_changed = bubble_appearance_changed(&persisted_before, &requested);
+        let persisted_before = prepared.previous.clone();
+        let requested = prepared.requested.clone();
+        let staged = prepared.staged.clone();
+        let mut provider_start_gate = prepared.provider_start_gate;
         let persona_notice = persona_change_notice(
             &persisted_before,
             &staged,
             Locale::from_config(&staged.ui.language),
         );
         let invalidates_operations = invalidates_running_operations(&persisted_before, &staged);
-        let watch_enabled_is_only_difference = watch_enabled_is_only_difference(&previous, &staged);
+        let work_mode_only = work_config_is_only_difference(&persisted_before, &staged);
+        let watch_enabled_is_only_difference =
+            watch_enabled_is_only_difference(&persisted_before, &staged);
+        let keymap_only = only_keymap_difference(&persisted_before, &requested);
+        let audio_only = audio_config_is_only_difference(&persisted_before, &requested);
+        let requires_factory =
+            !work_mode_only && !watch_enabled_is_only_difference && !keymap_only && !audio_only;
+        // この permit だけは、構築中も別の音声 intent を保存・反映できる。
+        let provider_update =
+            permit.command() == crate::command_guard::DesktopCommand::ConfigProviderUpdate;
+        let prepared_runtime = if requires_factory && !provider_update {
+            Some(
+                self.prepare_config_for_current_mode(&staged, persona_notice.clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
         let _voice_start = if previous.voice_output != requested.voice_output {
             let gate = self.voice_output.start_gate.lock().await;
             self.voice_output.stop().await;
@@ -80,49 +96,134 @@ impl DesktopState {
         } else {
             None
         };
-        if Self::audio_session_needs_stop(&persisted_before, &requested) {
-            self.cancel_audio().await;
+        let shortcut_result = crate::capture::sync_shortcuts(
+            self,
+            crate::capture::ShortcutBindings::from_config(&requested),
+            shortcut_version,
+        )
+        .await;
+        let (config, mut issues) = match shortcut_result {
+            Ok(()) => (requested.clone(), Vec::new()),
+            Err(message) => (staged.clone(), vec![keymap_issue(message)]),
+        };
+        let saved = match save_config_candidate(
+            &self.paths,
+            &persisted_before,
+            &config,
+            &mut staged_avatar,
+        ) {
+            Ok(saved) => saved,
+            Err(error) => {
+                restore_shortcuts_after_failed_commit(self, &persisted_before, shortcut_version)
+                    .await;
+                if let coosenpai_core::config::ConfigError::RevisionConflict { actual, .. } = error
+                {
+                    self.config_update.observe_config_revision(actual);
+                }
+                return Err(error.into());
+            }
+        };
+        let config = saved.config;
+        let rollback_base = saved.previous;
+        if provider_update {
+            self.work.approvals.set_mode(config.work.approval_mode);
+            self.work.set_roots(config.work.allowed_roots.clone());
         }
+        self.config_update.observe_config_revision(config.revision);
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
+            config.clone(),
+        ))
+        .await;
+        if let Some(error) = saved.avatar_cleanup_error.as_deref() {
+            let _ = self.logger.write(
+                "WARN",
+                &format!("アバター旧ファイルの cleanup に失敗しました: {error}"),
+            );
+        }
+        let watch_scope_changed = persisted_before.watch.fullscreen != config.watch.fullscreen
+            || persisted_before.watch.apps != config.watch.apps;
+        let language_changed = persisted_before.ui.language != config.ui.language;
+        let bubble_stack_changed = persisted_before.bubble.max_stack != config.bubble.max_stack;
+        let bubble_appearance_changed = bubble_appearance_changed(&persisted_before, &config);
+        let watch_was_running = self.snapshot().await.observer_running;
         if watch_scope_changed {
             self.runtime.invalidate_watch_scope();
         }
-        let watch_was_running = self.snapshot().await.observer_running;
-        let work_mode_only = work_config_is_only_difference(&previous, &staged);
-        let config_update = if work_mode_only {
+        let config_update = if requires_factory {
+            async {
+                let prepared_runtime = match prepared_runtime {
+                    Some(prepared_runtime) => prepared_runtime,
+                    None => {
+                        self.prepare_config_for_current_mode(&config, persona_notice)
+                            .await?
+                    }
+                };
+                if invalidates_operations {
+                    self.runtime.quiesce_for_config_update().await?;
+                }
+                self.apply_prepared_config(config.clone(), invalidates_operations, prepared_runtime)
+                    .await
+            }
+            .await
+        } else if audio_only {
             self.runtime
-                .update_work_config(staged.work.clone())
-                .await
-                .map(|_| ())
-                .map_err(ConfigCommitError::Runtime)
-        } else if watch_enabled_is_only_difference {
-            self.runtime
-                .update_watch_enabled(staged.watch.enabled)
+                .update_audio_config(config.audio.clone(), config.revision)
                 .await
                 .map(|_| ())
                 .map_err(ConfigCommitError::Runtime)
         } else {
-            self.replace_config_for_current_mode_with_notice(
-                staged.clone(),
-                invalidates_operations,
-                persona_notice,
-            )
-            .await
+            self.runtime
+                .update_config_without_factory(config.clone())
+                .await
+                .map(|_| ())
+                .map_err(ConfigCommitError::Runtime)
         };
         if let Err(error) = config_update {
+            if !provider_update {
+                rollback_after_runtime_failure(self, &rollback_base, &config, shortcut_version)
+                    .await;
+            } else if let Some(avatar) = staged_avatar.as_mut() {
+                if let Err(error) = avatar.finalize() {
+                    let _ = self.logger.write(
+                        "WARN",
+                        &format!("アバター旧ファイルの cleanup に失敗しました: {error}"),
+                    );
+                }
+            }
             self.runtime
                 .enter_degraded(config_commit_last_error_for_locale(
                     &error,
-                    Locale::from_config(&staged.ui.language),
+                    Locale::from_config(&persisted_before.ui.language),
                 ))
                 .await?;
             self.finish_config_degraded_state(&error).await;
+            transaction.commit_config(self.config_update.current_revision())?;
             return Err(error);
         }
-        if watch_enabled_is_only_difference || work_mode_only {
-            transaction.commit_config(staged.revision)?;
+        let config = self.runtime.config();
+        if Self::audio_session_needs_stop(&persisted_before, &config) {
+            self.cancel_audio().await;
+        }
+        if !provider_update {
+            self.work.approvals.set_mode(config.work.approval_mode);
+            self.work.set_roots(config.work.allowed_roots.clone());
+        }
+        if let Some(gate) = provider_start_gate.take() {
+            gate.release();
+        }
+        if let Some(avatar) = staged_avatar.as_mut() {
+            if let Err(error) = avatar.finalize() {
+                let _ = self.logger.write(
+                    "WARN",
+                    &format!("アバター旧ファイルの cleanup に失敗しました: {error}"),
+                );
+            }
+        }
+        transaction.commit_config(config.revision)?;
+        if watch_enabled_is_only_difference || work_mode_only || audio_only {
             self.activate_runtime();
-            self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(
-                staged.clone(),
+            self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
+                config.clone(),
             ))
             .await;
             if avatar_updated {
@@ -133,89 +234,8 @@ impl DesktopState {
                     ConfigCommitError::Runtime(RuntimeError::Factory(error.to_string()))
                 })?;
             }
-            return Ok(ConfigUpdateOutcome {
-                config: staged,
-                issues: Vec::new(),
-            });
+            return Ok(ConfigUpdateOutcome { config, issues });
         }
-        if let Some(gate) = provider_start_gate {
-            gate.release();
-        }
-        let shortcut_result = crate::capture::sync_shortcuts(
-            self,
-            crate::capture::ShortcutBindings::from_config(&requested),
-            shortcut_version,
-        )
-        .await;
-        let (config, mut issues) = match shortcut_result {
-            Ok(()) if requested.keymap != staged.keymap => {
-                let keymap_base = persisted_before.clone();
-                let keymap_candidate = requested.clone();
-                match persist_keymap_patch(
-                    &self.paths,
-                    staged.revision,
-                    &keymap_base,
-                    &keymap_candidate,
-                ) {
-                    Ok(config) => (config, Vec::new()),
-                    Err(error) => {
-                        let restore = crate::capture::sync_shortcuts(
-                            self,
-                            crate::capture::ShortcutBindings::from_config(&staged),
-                            shortcut_version,
-                        )
-                        .await
-                        .err();
-                        if let coosenpai_core::config::ConfigError::RevisionConflict {
-                            actual,
-                            ..
-                        } = &error
-                        {
-                            if let Some(restore) = restore.as_deref() {
-                                let _ = self.logger.write(
-                                    "WARN",
-                                    &format!(
-                                        "設定競合後のショートカット復元に失敗しました: {restore}"
-                                    ),
-                                );
-                            }
-                            self.config_update.observe_config_revision(*actual);
-                            return Err(error.into());
-                        }
-                        let locale = Locale::from_config(&staged.ui.language);
-                        let message = restore.map_or_else(
-                            || error.format_for_locale(locale),
-                            |restore| {
-                                format!(
-                                    "{}; {}",
-                                    error.format_for_locale(locale),
-                                    localize_shortcut_message(&restore, locale)
-                                )
-                            },
-                        );
-                        (staged.clone(), vec![keymap_issue(message)])
-                    }
-                }
-            }
-            Ok(()) => (staged.clone(), Vec::new()),
-            Err(message) => (staged.clone(), vec![keymap_issue(message)]),
-        };
-        if config != staged {
-            if let Err(error) = self
-                .replace_config_for_current_mode(config.clone(), false)
-                .await
-            {
-                self.runtime
-                    .enter_degraded(config_commit_last_error_for_locale(
-                        &error,
-                        Locale::from_config(&config.ui.language),
-                    ))
-                    .await?;
-                self.finish_config_degraded_state(&error).await;
-                return Err(error);
-            }
-        }
-        transaction.commit_config(config.revision)?;
         record_companion_model_history(
             &self.paths,
             &persisted_before,
@@ -275,6 +295,54 @@ impl DesktopState {
             })?;
         }
         Ok(ConfigUpdateOutcome { config, issues })
+    }
+
+    async fn update_audio_config_with_raw<F>(
+        self: &Arc<Self>,
+        update: F,
+        expected_revision: Option<u64>,
+    ) -> Result<ConfigUpdateOutcome, ConfigCommitError>
+    where
+        F: FnOnce(Config) -> Result<Config, coosenpai_core::config::ConfigError>,
+    {
+        let _audio = self.config_update.audio.lock().await;
+        let recovery = self.runtime.config();
+        let (config, stop_session) = coosenpai_core::config::patch_config_before_save_if_revision(
+            &self.paths,
+            Some(&recovery),
+            expected_revision,
+            |current| {
+                let next = update(current.clone())?;
+                if !audio_config_is_only_difference(&current, &next) {
+                    return Err(coosenpai_core::config::ConfigError::Validation(vec![
+                        coosenpai_core::config::ConfigValidationIssue {
+                            path: "audio".to_owned(),
+                            message: "音声専用の更新で他の設定は変更できません".to_owned(),
+                        },
+                    ]));
+                }
+                Ok(next)
+            },
+            |previous, next| Ok(Self::audio_session_needs_stop(previous, next)),
+        )?;
+        self.config_update.observe_config_revision(config.revision);
+        if stop_session {
+            self.cancel_audio().await;
+        }
+        let applied = self
+            .runtime
+            .update_audio_config(config.audio.clone(), config.revision)
+            .await;
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
+            config.clone(),
+        ))
+        .await;
+        applied?;
+        self.activate_runtime();
+        Ok(ConfigUpdateOutcome {
+            config,
+            issues: Vec::new(),
+        })
     }
 
     pub(super) async fn reload_persona_raw(&self) -> Result<(), ConfigCommitError> {
@@ -444,14 +512,104 @@ fn keymap_issue(message: String) -> coosenpai_core::config::ConfigValidationIssu
     }
 }
 
-struct PersistedConfigUpdate {
+struct PreparedConfigUpdate {
     previous: Config,
     staged: Config,
-    requested: Option<Config>,
+    requested: Config,
     provider_start_gate: Option<coosenpai_core::runtime::ProviderStartGate>,
+}
+
+struct SavedConfig {
+    config: Config,
+    previous: Config,
     avatar_cleanup_error: Option<String>,
 }
 
+fn prepare_config_update<F>(
+    paths: &ConfigPaths,
+    runtime: &RuntimeHandle,
+    recovery: &Config,
+    update: F,
+    expected_revision: Option<u64>,
+) -> Result<PreparedConfigUpdate, coosenpai_core::config::ConfigError>
+where
+    F: FnOnce(Config) -> Result<Config, coosenpai_core::config::ConfigError>,
+{
+    let (previous, requested) = coosenpai_core::config::prepare_config_update(
+        paths,
+        Some(recovery),
+        expected_revision,
+        update,
+    )?;
+    let staged = stage_without_keymap(&requested, &previous);
+    let provider_start_gate = invalidates_running_operations(&previous, &staged)
+        .then(|| runtime.block_provider_starts_for_config_update());
+    Ok(PreparedConfigUpdate {
+        previous,
+        staged,
+        requested,
+        provider_start_gate,
+    })
+}
+
+fn save_config_candidate(
+    paths: &ConfigPaths,
+    previous: &Config,
+    candidate: &Config,
+    staged_avatar: &mut Option<crate::avatar::StagedAvatar>,
+) -> Result<SavedConfig, coosenpai_core::config::ConfigError> {
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = crate::avatar::cleanup_stale_files(paths) {
+        cleanup_errors.push(format!("保存前: {error}"));
+    }
+    if let Some(avatar) = staged_avatar.as_mut() {
+        avatar
+            .install()
+            .map_err(coosenpai_core::config::ConfigError::Io)?;
+    }
+    let (config, previous) = save_config_preserving_audio(paths, previous, candidate)?;
+    Ok(SavedConfig {
+        config,
+        previous,
+        avatar_cleanup_error: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; ")),
+    })
+}
+
+fn save_config_preserving_audio(
+    paths: &ConfigPaths,
+    previous: &Config,
+    candidate: &Config,
+) -> Result<(Config, Config), coosenpai_core::config::ConfigError> {
+    coosenpai_core::config::patch_config_before_save_if_revision(
+        paths,
+        Some(previous),
+        None,
+        |current| {
+            if current.revision < previous.revision
+                || !audio_config_is_only_difference(previous, &current)
+            {
+                return Err(coosenpai_core::config::ConfigError::RevisionConflict {
+                    expected: previous.revision,
+                    actual: current.revision,
+                });
+            }
+            let mut config = candidate.clone();
+            if current.revision > previous.revision {
+                config.audio = current.audio;
+            }
+            Ok(config)
+        },
+        |current, _| Ok(current.clone()),
+    )
+}
+
+#[cfg(test)]
+struct PersistedConfigUpdate {
+    staged: Config,
+    provider_start_gate: Option<coosenpai_core::runtime::ProviderStartGate>,
+}
+
+#[cfg(test)]
 fn persist_config_update<F>(
     paths: &ConfigPaths,
     runtime: &RuntimeHandle,
@@ -463,79 +621,84 @@ fn persist_config_update<F>(
 where
     F: FnOnce(Config) -> Result<Config, coosenpai_core::config::ConfigError>,
 {
-    let mut persisted_before = recovery.clone();
-    let mut requested = None;
-    let mut avatar_cleanup_errors = Vec::new();
-    let (staged, provider_start_gate) =
-        coosenpai_core::config::patch_config_before_save_if_revision(
-            paths,
-            Some(recovery),
-            expected_revision,
-            |current| {
-                let keymap_base = current.clone();
-                let audio_was_enabled = current.audio.enabled;
-                let mut config = update(current)?;
-                coosenpai_core::config::normalize_audio_sources_on_enable(
-                    audio_was_enabled,
-                    &mut config,
-                );
-                let staged = stage_without_keymap(&config, &keymap_base);
-                requested = Some(config);
-                Ok(staged)
-            },
-            |current, staged| {
-                if let Err(error) = crate::avatar::cleanup_stale_files(paths) {
-                    avatar_cleanup_errors.push(format!("保存前: {error}"));
-                }
-                if let Some(avatar) = staged_avatar.as_mut() {
-                    avatar
-                        .install()
-                        .map_err(coosenpai_core::config::ConfigError::Io)?;
-                }
-                persisted_before = current.clone();
-                Ok(invalidates_running_operations(current, staged)
-                    .then(|| runtime.block_provider_starts_for_config_update()))
-            },
-        )?;
-    if let Some(error) = staged_avatar
-        .as_mut()
-        .and_then(|avatar| avatar.finalize().err())
-    {
-        avatar_cleanup_errors.push(format!("確定後: {error}"));
+    let prepared = prepare_config_update(paths, runtime, recovery, update, expected_revision)?;
+    let saved = save_config_candidate(
+        paths,
+        &prepared.previous,
+        &prepared.staged,
+        &mut staged_avatar,
+    )?;
+    if let Some(avatar) = staged_avatar.as_mut() {
+        avatar
+            .finalize()
+            .map_err(coosenpai_core::config::ConfigError::Io)?;
     }
     Ok(PersistedConfigUpdate {
-        previous: persisted_before,
-        staged,
-        requested,
-        provider_start_gate,
-        avatar_cleanup_error: (!avatar_cleanup_errors.is_empty())
-            .then(|| avatar_cleanup_errors.join("; ")),
+        staged: saved.config,
+        provider_start_gate: prepared.provider_start_gate,
     })
+}
+
+async fn restore_shortcuts_after_failed_commit(
+    state: &DesktopState,
+    previous: &Config,
+    shortcut_version: u64,
+) {
+    if let Err(error) = crate::capture::sync_shortcuts(
+        state,
+        crate::capture::ShortcutBindings::from_config(previous),
+        shortcut_version,
+    )
+    .await
+    {
+        let _ = state.logger.write(
+            "WARN",
+            &format!("設定保存失敗後のショートカット復元に失敗しました: {error}"),
+        );
+    }
+}
+
+async fn rollback_after_runtime_failure(
+    state: &DesktopState,
+    previous: &Config,
+    committed: &Config,
+    shortcut_version: u64,
+) {
+    restore_shortcuts_after_failed_commit(state, previous, shortcut_version).await;
+    match save_config_preserving_audio(&state.paths, committed, previous) {
+        Ok((rollback, _)) => {
+            state
+                .config_update
+                .observe_config_revision(rollback.revision);
+            if let Err(error) = state
+                .runtime
+                .update_config_without_factory(rollback.clone())
+                .await
+            {
+                let _ = state.logger.write(
+                    "WARN",
+                    &format!("runtime の設定復元に失敗しました: {error}"),
+                );
+            }
+            state
+                .publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
+                    rollback,
+                ))
+                .await;
+        }
+        Err(error) => {
+            let _ = state.logger.write(
+                "WARN",
+                &format!("設定ファイルの rollback に失敗しました: {error}"),
+            );
+        }
+    }
 }
 
 fn stage_without_keymap(requested: &Config, previous: &Config) -> Config {
     let mut staged = requested.clone();
     staged.keymap = previous.keymap.clone();
     staged
-}
-
-fn persist_keymap_patch(
-    paths: &ConfigPaths,
-    expected_revision: u64,
-    keymap_base: &Config,
-    keymap_candidate: &Config,
-) -> Result<Config, coosenpai_core::config::ConfigError> {
-    coosenpai_core::config::patch_config_before_save_if_revision(
-        paths,
-        None,
-        Some(expected_revision),
-        |mut current| {
-            apply_keymap_changes(&mut current, keymap_base, keymap_candidate);
-            Ok(current)
-        },
-        |_, _| Ok(()),
-    )
-    .map(|(config, ())| config)
 }
 
 fn watch_enabled_is_only_difference(current: &Config, next: &Config) -> bool {
@@ -545,6 +708,13 @@ fn watch_enabled_is_only_difference(current: &Config, next: &Config) -> bool {
     current_without_intent.watch.enabled = false;
     next_without_intent.watch.enabled = false;
     current_without_intent == next_without_intent
+}
+
+fn only_keymap_difference(current: &Config, next: &Config) -> bool {
+    let mut current_without_keymap = current.clone();
+    current_without_keymap.keymap = next.keymap.clone();
+    current_without_keymap.revision = next.revision;
+    current_without_keymap == *next
 }
 
 fn bubble_appearance_changed(previous: &Config, next: &Config) -> bool {
@@ -562,24 +732,6 @@ fn persona_change_notice(previous: &Config, next: &Config, locale: Locale) -> Op
             .replace("{previous}", &previous.companion.persona)
             .replace("{next}", &next.companion.persona)
     })
-}
-
-fn apply_keymap_changes(current: &mut Config, previous: &Config, requested: &Config) {
-    macro_rules! apply {
-        ($field:ident) => {
-            if previous.keymap.$field != requested.keymap.$field {
-                current.keymap.$field = requested.keymap.$field.clone();
-            }
-        };
-    }
-    apply!(capture_region);
-    apply!(microphone);
-    apply!(toggle_panel);
-    apply!(toggle_avatar);
-    apply!(toggle_watch);
-    apply!(send_text);
-    apply!(copy_last_reply);
-    apply!(send_key);
 }
 
 #[cfg(test)]

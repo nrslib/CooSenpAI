@@ -32,6 +32,35 @@ pub enum MailboxError {
     Lock(#[from] PersistenceError),
 }
 
+impl MailboxError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Lock(PersistenceError::AlreadyLocked))
+    }
+
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Lock(PersistenceError::AlreadyLocked) => "already-locked",
+            Self::Io(error) | Self::Lock(PersistenceError::Io(error)) => match error.kind() {
+                io::ErrorKind::PermissionDenied => "permission-denied",
+                io::ErrorKind::NotADirectory => "not-a-directory",
+                io::ErrorKind::NotFound => "not-found",
+                _ => "io",
+            },
+            Self::Json(_) | Self::Lock(PersistenceError::Json(_)) => "invalid-json",
+            Self::Lock(PersistenceError::Invalid(_)) => "invalid-lock",
+            Self::InvalidRecipient => "invalid-recipient",
+            Self::InvalidEnvelope => "invalid-envelope",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MailboxDisposition {
+    Complete,
+    Retry,
+    Fail,
+}
+
 #[derive(Debug, Clone)]
 pub struct Mailbox {
     root: PathBuf,
@@ -156,9 +185,18 @@ impl Mailbox {
         let destination = processing.join(path.file_name().ok_or(MailboxError::InvalidEnvelope)?);
         fs::rename(&path, &destination)?;
         let bytes = fs::read(&destination)?;
-        let envelope = match serde_json::from_slice::<MailboxEnvelope>(&bytes) {
-            Ok(envelope) if valid_envelope(&envelope) => envelope,
-            _ => {
+        let envelope = serde_json::from_slice::<MailboxEnvelope>(&bytes)
+            .map_err(MailboxError::from)
+            .and_then(|envelope| {
+                if valid_envelope(&envelope) {
+                    Ok(envelope)
+                } else {
+                    Err(MailboxError::InvalidEnvelope)
+                }
+            });
+        let envelope = match envelope {
+            Ok(envelope) => envelope,
+            Err(error) => {
                 fs::rename(
                     &destination,
                     self.directory("failed").join(
@@ -167,12 +205,9 @@ impl Mailbox {
                             .ok_or(MailboxError::InvalidEnvelope)?,
                     ),
                 )?;
-                return Ok(None);
+                return Err(error);
             }
         };
-        if !valid_envelope(&envelope) {
-            return Err(MailboxError::InvalidEnvelope);
-        }
         Ok(Some(ClaimedEnvelope {
             envelope,
             path: destination,
@@ -180,23 +215,32 @@ impl Mailbox {
     }
 
     pub fn complete(&self, claimed: ClaimedEnvelope) -> Result<(), MailboxError> {
-        let file_name = claimed.file_name().to_owned();
-        let _lock = self.lock()?;
-        fs::rename(claimed.path, self.directory("done").join(file_name))?;
-        Ok(())
+        self.acknowledge(&claimed, MailboxDisposition::Complete)
     }
 
     pub fn retry(&self, claimed: ClaimedEnvelope) -> Result<(), MailboxError> {
-        let file_name = claimed.file_name().to_owned();
-        let _lock = self.lock()?;
-        fs::rename(claimed.path, self.directory("inbox").join(file_name))?;
-        Ok(())
+        self.acknowledge(&claimed, MailboxDisposition::Retry)
     }
 
     pub fn fail(&self, claimed: ClaimedEnvelope) -> Result<(), MailboxError> {
-        let file_name = claimed.file_name().to_owned();
+        self.acknowledge(&claimed, MailboxDisposition::Fail)
+    }
+
+    pub(crate) fn acknowledge(
+        &self,
+        claimed: &ClaimedEnvelope,
+        disposition: MailboxDisposition,
+    ) -> Result<(), MailboxError> {
+        let phase = match disposition {
+            MailboxDisposition::Complete => "done",
+            MailboxDisposition::Retry => "inbox",
+            MailboxDisposition::Fail => "failed",
+        };
         let _lock = self.lock()?;
-        fs::rename(claimed.path, self.directory("failed").join(file_name))?;
+        fs::rename(
+            &claimed.path,
+            self.directory(phase).join(claimed.file_name()),
+        )?;
         Ok(())
     }
 
@@ -292,7 +336,10 @@ pub fn archive_mailbox_kind(
         };
         let mailbox = Mailbox::open(root.to_path_buf(), name.clone())?;
         let _lock = mailbox.lock()?;
-        for phase in ["inbox", "processing", "done"] {
+        // processing は別の consumer が所有している可能性があるため移動しない。
+        // active claim の終端処理を archive が先に行うと、consumer の complete/retry が
+        // ENOENT になり、同じ envelope の処理状態も失われる。
+        for phase in ["inbox", "done"] {
             let source = mailbox.directory(phase);
             let target = destination.join(&name).join(phase);
             fs::create_dir_all(&target)?;
@@ -394,4 +441,3 @@ fn set_private_mode(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
-

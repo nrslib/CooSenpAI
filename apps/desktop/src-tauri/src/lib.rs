@@ -75,6 +75,7 @@ mod update_archive;
 mod update_check;
 mod update_format;
 mod update_install;
+mod update_system;
 mod update_transport;
 mod voice_output;
 mod watch;

@@ -282,6 +282,7 @@ export const en = {
     label: "App update",
     checking: "Checking for updates…",
     upToDate: "You are up to date.",
+    incompatible: "This update requires macOS {version} or later.",
     available: "A new version, v{version}, is available.",
     notes: "What’s changed",
     downloading: "Downloading v{version}…",

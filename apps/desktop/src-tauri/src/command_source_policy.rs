@@ -84,6 +84,7 @@ fn main_allows(command: DesktopCommand) -> bool {
         | DesktopCommand::VoiceOutputStop
         | DesktopCommand::SettingsAppearancePreview
         | DesktopCommand::ConfigDisplayUpdate
+        | DesktopCommand::ConfigAudioUpdate
         | DesktopCommand::ConfigProviderUpdate
         | DesktopCommand::ProviderApiKeyUpdate
         | DesktopCommand::ConfigWatchUpdate

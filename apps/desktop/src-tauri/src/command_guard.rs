@@ -76,11 +76,16 @@ impl ResourceGenerations {
 
 pub(crate) struct CommandContext {
     command_id: String,
+    command: DesktopCommand,
     reservation: Reservation,
     fences: GenerationFences,
 }
 
 impl CommandContext {
+    pub(crate) fn command(&self) -> DesktopCommand {
+        self.command
+    }
+
     pub(crate) fn command_id(&self) -> &str {
         &self.command_id
     }
@@ -100,6 +105,7 @@ impl CommandContext {
 
 pub(crate) struct CommandFirewall {
     pub(super) permit: RwLock<()>,
+    audio_permit: RwLock<()>,
     transition: Mutex<Option<TransitionOperation>>,
     generations: ResourceGenerations,
     #[cfg(test)]
@@ -116,6 +122,7 @@ impl Default for CommandFirewall {
     fn default() -> Self {
         Self {
             permit: RwLock::new(()),
+            audio_permit: RwLock::new(()),
             transition: Mutex::new(None),
             generations: ResourceGenerations::default(),
             #[cfg(test)]
@@ -174,6 +181,11 @@ impl CommandFirewall {
         DISPATCH_ACTIVE
             .scope((), async {
                 match permit_class(envelope.command) {
+                    PermitClass::Audio => {
+                        let _permit = self.audio_permit.read().await;
+                        self.execute_permitted(state, envelope, watch_stop_target, handler)
+                            .await
+                    }
                     PermitClass::Shared => {
                         let _permit =
                             self.read_permit(&envelope.expected)
@@ -186,6 +198,11 @@ impl CommandFirewall {
                             .await
                     }
                     PermitClass::Exclusive => {
+                        let _audio = if envelope.command == DesktopCommand::ConfigProviderUpdate {
+                            None
+                        } else {
+                            Some(self.audio_permit.write().await)
+                        };
                         let _permit = self.permit.write().await;
                         self.execute_permitted(state, envelope, watch_stop_target, handler)
                             .await
@@ -265,6 +282,7 @@ impl CommandFirewall {
         }
         let context = CommandContext {
             command_id: envelope.command_id.clone(),
+            command: envelope.command,
             reservation,
             fences,
         };
@@ -324,6 +342,7 @@ impl CommandFirewall {
             }
             DesktopCommand::WorkConfigure
             | DesktopCommand::ConfigDisplayUpdate
+            | DesktopCommand::ConfigAudioUpdate
             | DesktopCommand::ConfigProviderUpdate
             | DesktopCommand::ProviderApiKeyUpdate
             | DesktopCommand::ConfigKeymapUpdate
