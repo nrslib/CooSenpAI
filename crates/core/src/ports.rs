@@ -136,6 +136,7 @@ pub trait ProviderApiKeyStore: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemSettingsPane {
     ScreenCapture,
+    SystemAudio,
     Accessibility,
     Microphone,
     SpeechRecognition,

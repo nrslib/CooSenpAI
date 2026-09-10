@@ -6,6 +6,8 @@
   <string>話しかけた内容を文字にするためにマイクを使用します。</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>話しかけた内容を端末内で文字にするために音声認識を使用します。</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>音声観察でスピーカーの音を文字にするためにシステムオーディオを録音します。</string>
   <key>NSScreenCaptureUsageDescription</key>
   <string>音声観察でスピーカーの音を取得するために画面収録を使用します。</string>
 </dict>

@@ -45,7 +45,7 @@ interface Props {
   readonly providerApiKeysError?: string;
   readonly focusSection?: "watch";
   readonly onClose: () => void;
-  readonly onSave: (patch: ConfigPatch, avatarImage?: readonly number[], baseConfigRevision?: number) => Promise<IpcResult<CooSenpaiConfig>>;
+  readonly onSave: (patch: ConfigPatch, avatarImage: readonly number[] | undefined, baseConfigRevision: number) => Promise<IpcResult<CooSenpaiConfig>>;
   readonly onSelectPersona: (persona: string) => Promise<IpcResult<CooSenpaiConfig>>;
   readonly onReloadConfig: () => Promise<IpcResult<CooSenpaiConfig>>;
   readonly onReloadPersona: () => Promise<IpcResult<null>>;

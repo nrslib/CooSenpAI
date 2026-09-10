@@ -5,6 +5,7 @@ use crate::ui_commands::UserCommand;
 use crate::ui_events::{PresenterId, UiEffect, UiEvent, UiTask, UiView};
 use crate::ui_load::WindowContent;
 use coosenpai_core::config::Config;
+use coosenpai_core::ports::RuntimeLogger;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -620,6 +621,7 @@ async fn operation_result(
     use crate::command_guard::CommandSource;
     match operation {
         AppOperation::Audio(enabled) => {
+            let _ = state.logger.write("INFO", &format!("audio-toggle origin=ui-toggle desired-enabled={enabled} base-config-revision={config_revision}"));
             ipc_value(
                 crate::commands::update_config_for_source(
                     state.clone(),
@@ -647,6 +649,7 @@ async fn operation_result(
                 RecoveryAction::Microphone => SystemSettingsPane::Microphone,
                 RecoveryAction::Recognition => SystemSettingsPane::SpeechRecognition,
                 RecoveryAction::ScreenCapture => SystemSettingsPane::ScreenCapture,
+                RecoveryAction::SystemAudio => SystemSettingsPane::SystemAudio,
                 _ => return Err("復旧操作が不正です".into()),
             };
             ipc_value(

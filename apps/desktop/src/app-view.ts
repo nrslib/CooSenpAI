@@ -18,5 +18,5 @@ export type AppInput = { readonly type: "mounted" | "retry" | "startupSettings" 
   | { readonly type: "settingsPresented"; readonly generation: number }
   | { readonly type: "report"; readonly error: string | null };
 export interface ThoughtView { readonly text: UiText; readonly leaving: boolean }
-export interface BannerView { readonly tone: "error" | "warning" | "info"; readonly message: UiText; readonly action: "settings" | "screen-capture" | "microphone" | "recognition" | "relaunch" | null; readonly actionLabel: UiText | null }
+export interface BannerView { readonly tone: "error" | "warning" | "info"; readonly message: UiText; readonly action: "settings" | "screen-capture" | "system-audio" | "microphone" | "recognition" | "relaunch" | null; readonly actionLabel: UiText | null }
 export interface StatusView { readonly presence: { readonly mode: "resting" | "watching" | "thinking" | "attention" | "switching"; readonly text: UiText }; readonly thought: ThoughtView | null; readonly banner: BannerView | null }

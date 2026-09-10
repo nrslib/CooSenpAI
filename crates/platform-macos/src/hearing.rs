@@ -112,6 +112,8 @@ struct SourceStatus {
     ready: Option<HearingEvent>,
     generation_offset: u64,
     latest_generation: u64,
+    system_audio_failed: bool,
+    last_error: Option<PortError>,
 }
 
 struct HearingAggregation {
@@ -132,6 +134,8 @@ impl HearingAggregation {
                     ready: None,
                     generation_offset: 0,
                     latest_generation: 0,
+                    system_audio_failed: false,
+                    last_error: None,
                 })
                 .collect(),
             ready_sent: false,
@@ -193,6 +197,7 @@ impl HearingAggregation {
         if let Some(status) = self.status_mut(source) {
             status.required = true;
             status.ready = Some(event);
+            status.last_error = None;
         }
     }
 
@@ -307,7 +312,21 @@ async fn run_session(
                         }
                         match event {
                         event @ HearingEvent::Ready { .. } => {
+                            let restored = aggregation.status_mut(source_event.source)
+                                .is_some_and(|status| std::mem::take(&mut status.system_audio_failed));
                             aggregation.mark_ready(source_event.source, event);
+                            if restored && !send_hearing_event(
+                                &events,
+                                Ok(HearingEvent::Warning {
+                                    kind: "system-audio-restored".to_owned(),
+                                    message: "スピーカー音声の取得を再開しました".to_owned(),
+                                }),
+                                &cancel_requested,
+                                &parent_cancellation,
+                            ).await {
+                                let _ = stop_workers(&worker_cancellation, workers).await;
+                                return;
+                            }
                             if !emit_ready_if_possible(
                                 &mut aggregation,
                                 &events,
@@ -352,6 +371,20 @@ async fn run_session(
                         HearingEvent::Error { ref kind, .. } if kind == "no-input-source" => {}
                         event @ HearingEvent::Warning { .. }
                         | event @ HearingEvent::Error { .. } => {
+                            if let HearingEvent::Error { ref kind, ref message } = event {
+                                if let Some(status) = aggregation.status_mut(source_event.source) {
+                                    status.last_error = Some(PortError::Unavailable(format!(
+                                        "source={} kind={kind}: {message}", source_name(source_event.source)
+                                    )));
+                                }
+                                if source_event.source == AudioObservationSource::Speaker
+                                    && (kind == "system-audio" || kind.starts_with("system-audio-"))
+                                {
+                                    if let Some(status) = aggregation.status_mut(source_event.source) {
+                                        status.system_audio_failed = true;
+                                    }
+                                }
+                            }
                             if !send_hearing_event(
                                 &events,
                                 Ok(event),
@@ -391,6 +424,8 @@ async fn run_session(
                             }
                     }
                     SourceProcessEventKind::Exhausted { error } => {
+                        let error = aggregation.status_mut(source_event.source)
+                            .and_then(|status| status.last_error.take()).or(error);
                         aggregation.mark_unavailable(source_event.source);
                         if terminal_error.is_none() {
                             terminal_error = error;
@@ -398,6 +433,7 @@ async fn run_session(
                         if aggregation.no_required_sources() {
                             let event = terminal_error
                                 .take()
+                                .or_else(|| aggregation.sources.iter_mut().find_map(|status| status.last_error.take()))
                                 .map(Err)
                                 .unwrap_or_else(|| Ok(HearingEvent::Closed));
                             let _ = stop_workers(&worker_cancellation, workers).await;

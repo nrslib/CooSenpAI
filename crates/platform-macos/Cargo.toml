@@ -26,7 +26,7 @@ objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["libc", "NSApplication", "NSResponder", "NSWindow", "NSEvent", "NSView", "block2", "NSWorkspace", "NSRunningApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSPasteboard", "NSPasteboardItem", "objc2-core-graphics"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["CFCGTypes"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["libc", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation", "CGGeometry", "CGImage", "CGWindow"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSNotification", "NSDistributedNotificationCenter", "NSEnumerator", "NSOperation", "NSObject", "NSString", "NSURL", "block2"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSNotification", "NSDistributedNotificationCenter", "NSEnumerator", "NSOperation", "NSProcessInfo", "NSObject", "NSString", "NSURL", "block2"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
 objc2-speech = { version = "0.3.2", default-features = false, features = ["std", "SFSpeechRecognizer", "block2"] }
 objc2-vision = { version = "0.3.2", default-features = false, features = ["VNObservation", "VNRecognizeTextRequest", "VNRequest", "VNRequestHandler", "VNTypes", "objc2-core-foundation", "objc2-core-graphics"] }

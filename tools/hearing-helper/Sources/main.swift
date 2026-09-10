@@ -74,6 +74,8 @@ private enum RecognitionCancellationTimeoutStage {
 }
 
 final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private let startupStartedAt = monotonicNanoseconds()
+    private var reportedFirstAudioSamples: Set<AudioSource> = []
     private let locale: Locale
     private let inputDevice: String
     private let sources: Set<AudioSource>
@@ -119,6 +121,8 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var appendedAudioDump: AppendedAudioDump?
     private var debugDumpOnlyRequest: SFSpeechAudioBufferRecognitionRequest?
     private var debugDumpOnlyGeneration: Int?
+    private let speakerDeviceFactory: (() throws -> SpeakerAudioCapture)?
+    private var speakerAudioTap: SpeakerAudioTap?
     private var speakerStream: SCStream?
     private var microphoneStarted = false
     private var speakerStarted = false
@@ -153,8 +157,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         sources: Set<AudioSource>,
         debugInputWavPath: String?,
         debugDumpAppendedPath: String?,
-        debugRequestAuth: Bool
+        debugRequestAuth: Bool,
+        speakerDeviceFactory: (() throws -> SpeakerAudioCapture)? = nil
     ) {
+        self.speakerDeviceFactory = speakerDeviceFactory
         self.locale = locale
         self.inputDevice = inputDevice
         self.sources = sources
@@ -176,12 +182,34 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         return audioProcessingQueue.sync(execute: body)
     }
 
+    private func emitStartupStage(for source: AudioSource, stage: String, phase: String) {
+        let elapsedMilliseconds = (monotonicNanoseconds() - startupStartedAt) / 1_000_000
+        emitStderr(
+            "audio-startup source=\(source.rawValue) stage=\(stage) phase=\(phase) elapsed-ms=\(elapsedMilliseconds) main-thread=\(Thread.isMainThread)"
+        )
+    }
+
+    private func recordFirstAudioSample(for source: AudioSource) {
+        sourceLock.lock()
+        let isFirst = reportedFirstAudioSamples.insert(source).inserted
+        sourceLock.unlock()
+        if isFirst {
+            emitStartupStage(for: source, stage: "first-sample", phase: "received")
+        }
+    }
+
     func authorizeAndStart() {
         if debugRequestAuth {
             requestSpeechAuthorizationForDebug()
             return
         }
+        for source in sources {
+            emitStartupStage(for: source, stage: "speech-authorization", phase: "begin")
+        }
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
+        for source in sources {
+            emitStartupStage(for: source, stage: "speech-authorization", phase: "end")
+        }
         emitStderr("speech-auth status=\(speechAuthorizationStatusName(speechStatus))")
         guard speechStatus == .authorized else {
             if let debugInputWavPath,
@@ -294,7 +322,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     private func requestMicrophone(_ completion: @escaping @Sendable (AVAuthorizationStatus) -> Void) {
+        emitStartupStage(for: .microphone, stage: "authorization", phase: "begin")
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        emitStartupStage(for: .microphone, stage: "authorization", phase: "end")
         guard status == .notDetermined else {
             completion(status)
             return
@@ -314,11 +344,14 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             startDebugInput(debugInputWavPath, microphone, recognition)
             return
         }
+        emitStartupStage(for: .microphone, stage: "input-device", phase: "begin")
         let token = beginMicrophoneInputGeneration()
         let initialDefaultDevice = defaultInputDeviceID()
         var followsDefaultInput = inputDevice == "default"
+        emitStartupStage(for: .microphone, stage: "engine-create", phase: "begin")
         let engine = AVAudioEngine()
         let input = engine.inputNode
+        emitStartupStage(for: .microphone, stage: "engine-create", phase: "end")
         if inputDevice != "default" {
             do {
                 try selectInputDevice(inputDevice, inputNode: input)
@@ -341,14 +374,17 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 ])
             }
         }
+        emitStartupStage(for: .microphone, stage: "input-device", phase: "end")
         audioEngine = engine
         do {
+            emitStartupStage(for: .microphone, stage: "tap-install", phase: "begin")
             let format = input.outputFormat(forBus: 0)
             try installAudioTap(on: input, bufferSize: 1_024, format: format) {
                 [weak self] buffer, _ in
                 self?.receiveMicrophone(buffer, generation: token)
             }
             tapInstalled = true
+            emitStartupStage(for: .microphone, stage: "tap-install", phase: "end")
             emitStderr(
                 "audio-format microphone tap=\(audioFormatDescription(format)) append=pending"
             )
@@ -361,8 +397,12 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             return
         }
         do {
+            emitStartupStage(for: .microphone, stage: "engine-prepare", phase: "begin")
             engine.prepare()
+            emitStartupStage(for: .microphone, stage: "engine-prepare", phase: "end")
+            emitStartupStage(for: .microphone, stage: "engine-start", phase: "begin")
             try engine.start()
+            emitStartupStage(for: .microphone, stage: "engine-start", phase: "end")
             microphoneStarted = true
             observeMicrophoneInput(engine, generation: token,
                                    followsDefaultInput: followsDefaultInput,
@@ -450,32 +490,38 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         guard !isTerminal(), isSourceActive(.microphone),
               let microphoneAuthorization, let recognitionAuthorization else { return }
         stopMicrophoneInput()
+        resetRecognitionInput(for: .microphone)
+        emitStderr("microphone input changed; rebuilding audio engine")
+        startMicrophone(microphoneAuthorization, recognitionAuthorization)
+    }
+
+    private func resetRecognitionInput(for source: AudioSource) {
         sourceLock.lock()
-        let timeout = recognitionTimeoutWorkItems.removeValue(forKey: .microphone)
-        let cancellation = recognitionCancellationWorkItems.removeValue(forKey: .microphone)
-        audioInputFailureTrackers.removeValue(forKey: .microphone)
-        pendingSourceDisables.remove(.microphone)
+        let timeout = recognitionTimeoutWorkItems.removeValue(forKey: source)
+        let cancellation = recognitionCancellationWorkItems.removeValue(forKey: source)
+        audioInputFailureTrackers.removeValue(forKey: source)
+        pendingSourceDisables.remove(source)
         sourceLock.unlock()
         timeout?.cancel()
         cancellation?.cancel()
         let state = syncOnAudioProcessingQueue {
-            let state = recognitionStates.resetInput(for: .microphone)
-            pendingDrainWorkItems.removeValue(forKey: .microphone)?.cancel()
-            voiceActivity[.microphone]?.resetToWaiting()
+            let state = recognitionStates.resetInput(for: source)
+            pendingDrainWorkItems.removeValue(forKey: source)?.cancel()
+            voiceActivity[source]?.resetToWaiting()
+            if source == .speaker { speakerMusicGate = nil }
             return state
         }
         if let state, !state.taskTerminalArrived, !state.taskCancellationRequested {
-            cancelRecognitionTask(state.task, for: .microphone,
+            cancelRecognitionTask(state.task, for: source,
                                   generation: state.generation, reason: .inputChanged)
         }
-        emitStderr("microphone input changed; rebuilding audio engine")
-        startMicrophone(microphoneAuthorization, recognitionAuthorization)
     }
 
     private func receiveMicrophone(
         _ buffer: AVAudioPCMBuffer, generation: MicrophoneInputGeneration
     ) {
         guard generation.isValid, !isTerminal(), isSourceActive(.microphone) else { return }
+        recordFirstAudioSample(for: .microphone)
         processReceivedAudioBuffer(
             buffer, for: .microphone, frameCount: UInt64(buffer.frameLength),
             generation: generation, appendTo: EnqueuedAudioBufferAppendTarget { [weak self] buffer, rms in
@@ -575,17 +621,25 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         _ recognition: SFSpeechRecognizerAuthorizationStatus
     ) {
         guard !isTerminal(), isSourceActive(.speaker) else { return }
+        if #available(macOS 14.2, *) {
+            startSpeakerAudioTap(microphone, recognition)
+            return
+        }
+        emitStartupStage(for: .speaker, stage: "task", phase: "scheduled")
         Task { [weak self] in
             guard let self else { return }
             guard self.isSourceActive(.speaker) else { return }
             do {
+                self.emitStartupStage(for: .speaker, stage: "shareable-content", phase: "begin")
                 let content = try await SCShareableContent.excludingDesktopWindows(
                     false,
                     onScreenWindowsOnly: true
                 )
+                self.emitStartupStage(for: .speaker, stage: "shareable-content", phase: "end")
                 guard let display = content.displays.first else {
                     throw HearingError.noDisplay
                 }
+                self.emitStartupStage(for: .speaker, stage: "stream-create", phase: "begin")
                 let filter = SCContentFilter(display: display, excludingWindows: [])
                 let configuration = SCStreamConfiguration()
                 configuration.capturesAudio = true
@@ -596,13 +650,19 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                     "audio-format speaker capture=sampleRate=\(configuration.sampleRate) channels=\(configuration.channelCount) commonFormat=unknown-until-first-sample converted-append=mono-float32"
                 )
                 let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+                self.emitStartupStage(for: .speaker, stage: "stream-create", phase: "end")
+                self.emitStartupStage(for: .speaker, stage: "add-output", phase: "begin")
                 try stream.addStreamOutput(
                     self,
                     type: .audio,
                     sampleHandlerQueue: DispatchQueue(label: "dev.nrslib.coosenpai.hearing.audio")
                 )
+                self.emitStartupStage(for: .speaker, stage: "add-output", phase: "end")
+                self.emitStartupStage(for: .speaker, stage: "start-capture", phase: "begin")
                 try await stream.startCapture()
+                self.emitStartupStage(for: .speaker, stage: "start-capture", phase: "end")
                 DispatchQueue.main.async {
+                    self.emitStartupStage(for: .speaker, stage: "ready-dispatch", phase: "received")
                     guard !self.isTerminal(), self.isSourceActive(.speaker) else {
                         Task { try? await stream.stopCapture() }
                         return
@@ -622,6 +682,53 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 }
             }
         }
+    }
+
+    @available(macOS 14.2, *)
+    private func startSpeakerAudioTap(
+        _ microphone: AVAuthorizationStatus,
+        _ recognition: SFSpeechRecognizerAuthorizationStatus
+    ) {
+        // ScreenCaptureKit shares replayd's queue with screenshots from other apps.
+        // Core Audio taps keep audio startup independent of that queue.
+        let capture = SpeakerAudioTap(diagnostic: emitStderr, makeDevice: { [weak self] in
+            if let factory = self?.speakerDeviceFactory { return try factory() }
+            return try CoreAudioSpeakerDevice(diagnostic: emitStderr, onStage: { stage, phase in
+                self?.emitStartupStage(for: .speaker, stage: stage, phase: phase)
+            })
+        })
+        speakerAudioTap = capture
+        capture.start(
+            onReady: { [weak self] format, reconfigured in
+                guard let self, !self.isTerminal(), self.isSourceActive(.speaker) else { return }
+                if reconfigured {
+                    self.resetRecognitionInput(for: .speaker)
+                    emitStderr("speaker output changed; rebuilt audio tap")
+                    emit(["event": "warning", "kind": "system-audio-restored", "message": "スピーカー音声の取得を再開しました"])
+                }
+                emitStderr(
+                    "audio-format speaker capture=sampleRate=\(Int(format.sampleRate)) channels=\(format.channelCount) commonFormat=unknown-until-first-sample converted-append=mono-float32"
+                )
+                emitStderr("audio-tap format=\(audioFormatDescription(format))")
+                self.speakerStarted = true
+                self.emitReadyIfPossible(microphone, recognition)
+            },
+            onBuffer: { [weak self] buffer in
+                guard let self, !self.isTerminal(), self.isSourceActive(.speaker) else { return }
+                self.recordFirstAudioSample(for: .speaker)
+                self.receive(buffer, for: .speaker)
+            },
+            onInterruption: { [weak self] error in
+                guard let self, !self.isTerminal(), self.isSourceActive(.speaker) else { return }
+                self.resetRecognitionInput(for: .speaker)
+                emit(["event": "warning", "kind": error.kind, "message": error.localizedDescription])
+            },
+            onFailure: { [weak self] error in
+                guard let self else { return }
+                self.disableSource(.speaker, kind: error.kind,
+                    message: "スピーカーの音声入力を継続できませんでした: \(self.errorDetails(error))")
+            }
+        )
     }
 
     private func installAudioTap(
@@ -1065,6 +1172,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         of outputType: SCStreamOutputType
     ) {
         guard outputType == .audio, !isTerminal(), isSourceActive(.speaker) else { return }
+        recordFirstAudioSample(for: .speaker)
         let frameCount = UInt64(CMSampleBufferGetNumSamples(sampleBuffer))
         do {
             let buffer = try pcmBuffer(from: sampleBuffer)
@@ -1175,6 +1283,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             debugInputPlayer = nil
             stopMicrophoneInput()
         case .speaker:
+            if !noActiveSources {
+                speakerAudioTap?.stop {}
+                speakerAudioTap = nil
+            }
             if let stream = speakerStream {
                 speakerStream = nil
                 Task { try? await stream.stopCapture() }
@@ -1271,10 +1383,20 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         debugInputPlayer?.stop()
         debugInputPlayer = nil
         stopMicrophoneInput()
+        let speakerCapture = speakerAudioTap
+        speakerAudioTap = nil
         if let stream = speakerStream {
             Task { try? await stream.stopCapture() }
         }
         appendedAudioDump?.close()
+        if let speakerCapture {
+            speakerCapture.stop { self.emitClosedAndExit() }
+        } else {
+            emitClosedAndExit()
+        }
+    }
+
+    private func emitClosedAndExit() {
         emit(["event": "closed"])
         fflush(stdout)
         exit(0)

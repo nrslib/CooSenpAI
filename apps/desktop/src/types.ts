@@ -405,7 +405,7 @@ export interface AudioView {
   readonly phase: "off" | "starting" | "listening" | "stopping" | "error";
   readonly microphonePermission: "not-determined" | "granted" | "denied" | "restricted" | "unavailable";
   readonly recognitionPermission: "not-determined" | "granted" | "denied" | "restricted" | "unavailable";
-  readonly screenCapturePermission: "granted" | "not-granted" | "unknown";
+  readonly screenCapturePermission: "granted" | "not-granted" | "unknown" | "not-required";
   readonly warningKind?: string;
   readonly message?: string;
   readonly recentEvents: readonly AudioLogEvent[];

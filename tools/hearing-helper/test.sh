@@ -2,18 +2,23 @@
 set -eu
 
 request_auth=0
-case "${1:-}" in
-  --request-auth) request_auth=1; shift ;;
-esac
-if [ "$#" -ne 0 ]; then
-  printf '使い方: %s [--request-auth]\n' "$0" >&2
-  exit 2
-fi
+process_tap=0
+speaker_failures=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --request-auth) request_auth=1 ;;
+    --process-tap) process_tap=1 ;;
+    --speaker-failures) speaker_failures=1 ;;
+    *) printf '使い方: %s [--request-auth] [--process-tap] [--speaker-failures]\n' "$0" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 temporary_path=$(mktemp /tmp/coosenpai-hearing-test.XXXXXX)
 temporary_object_path="${temporary_path}.o"
+temporary_ring_object_path="${temporary_path}.ring.o"
 module_cache_dir="$script_dir/../../target/helpers/test-module-cache"
 e2e_root="$repository_dir/target/helpers/hearing-e2e"
 e2e_directory="$e2e_root/data"
@@ -37,7 +42,7 @@ stop_e2e_runner() {
 
 cleanup() {
   stop_e2e_runner
-  rm -f "$temporary_path" "$temporary_object_path"
+  rm -f "$temporary_path" "$temporary_object_path" "$temporary_ring_object_path"
   rm -rf "$e2e_directory"
   rm -f "$e2e_config"
 }
@@ -47,10 +52,14 @@ mkdir -p "$module_cache_dir"
 sdk_path=$(xcrun --sdk macosx --show-sdk-path)
 clang -isysroot "$sdk_path" -fobjc-arc -c \
   "$script_dir/Sources/audio_tap_installer.m" -o "$temporary_object_path"
+clang -isysroot "$sdk_path" -std=c11 -O2 -c \
+  "$script_dir/Sources/speaker_audio_ring.c" -o "$temporary_ring_object_path"
 swiftc \
   -parse-as-library \
   -module-cache-path "$module_cache_dir" \
   -import-objc-header "$script_dir/Sources/audio_tap_installer.h" \
+  "$script_dir/Sources/speaker_audio_tap.swift" \
+  "$script_dir/Sources/speaker_audio_device.swift" \
   "$script_dir/Sources/audio_stats.swift" \
   "$script_dir/Sources/audio_scaling.swift" \
   "$script_dir/Sources/audio_buffer_copy.swift" \
@@ -64,8 +73,9 @@ swiftc \
   "$script_dir/Sources/wav_input.swift" \
   "$script_dir/Sources/appended_audio_dump.swift" \
   "$script_dir/Sources/main.swift" \
-  "$temporary_object_path" \
+  "$temporary_object_path" "$temporary_ring_object_path" \
   "$script_dir/Tests/audio_stats_test.swift" \
+  "$script_dir/Tests/speaker_audio_test.swift" \
   "$script_dir/Tests/audio_scaling_test.swift" \
   "$script_dir/Tests/audio_buffer_copy_test.swift" \
   "$script_dir/Tests/audio_conversion_test.swift" \
@@ -77,6 +87,19 @@ swiftc \
   "$script_dir/Tests/microphone_input_recovery_test.swift" \
   -o "$temporary_path"
 "$temporary_path"
+python3 - "$temporary_path" <<'PYTEST'
+import subprocess, sys
+result = subprocess.run([sys.argv[1], "--speaker-stop-timeout"], capture_output=True, text=True, timeout=5)
+assert result.returncode == 1, result
+assert "operation=stop-timeout action=terminate-process" in result.stderr, result.stderr
+assert "completion before release" not in result.stderr, result.stderr
+print("Speaker blocked cleanup: process exited without completion")
+result = subprocess.run([sys.argv[1], "--speaker-stop-failure"], capture_output=True, text=True, timeout=5)
+assert result.returncode == 1, result
+assert "operation=stop-device" in result.stderr and "action=terminate-process" in result.stderr, result.stderr
+assert "completion after stop failure" not in result.stderr, result.stderr
+print("Speaker stop failure: process exited without completion")
+PYTEST
 
 "$script_dir/build.sh" >/dev/null
 mkdir -p "$e2e_root"
@@ -107,6 +130,8 @@ cat > "$e2e_app/Contents/Info.plist" <<'PLIST'
   <string>1.0</string>
   <key>LSBackgroundOnly</key>
   <true/>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>スピーカー録音の E2E テストにシステムオーディオを使用します。</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>音声認識の E2E テストにマイクを使用します。</string>
   <key>NSSpeechRecognitionUsageDescription</key>
@@ -124,6 +149,7 @@ config_value() {
 }
 helper_path=$(config_value helper_path)
 mode=$(config_value mode)
+test_state=$(config_value test_state)
 input_wav=$(config_value input_wav)
 dump_dir=$(config_value dump_dir)
 stdin_path=$(config_value stdin_path)
@@ -150,7 +176,7 @@ mkfifo "$stdin_path"
 tail -f /dev/null > "$stdin_path" &
 stdin_pid=$!
 
-if [ "$mode" = auth ]; then
+if [ "$mode" = auth ] || [ "$mode" = failure-auth ]; then
   "$helper_path" \
     --locale ja-JP \
     --input-device default \
@@ -159,6 +185,14 @@ if [ "$mode" = auth ]; then
     < "$stdin_path" \
     > "$stdout_path" \
     2> "$stderr_path" &
+elif [ "$mode" = speaker-failure ]; then
+  COOSENPAI_SPEAKER_TEST_STATE="$test_state" "$helper_path" \
+    --locale ja-JP --input-device default --sources microphone,speaker \
+    --debug-input-wav "$input_wav" \
+    < "$stdin_path" > "$stdout_path" 2> "$stderr_path" &
+elif [ "$mode" = process-tap ] || [ "$mode" = speaker-recovered ]; then
+  "$helper_path" --locale ja-JP --input-device default --sources speaker \
+    < "$stdin_path" > "$stdout_path" 2> "$stderr_path" &
 else
   "$helper_path" \
     --locale ja-JP \
@@ -214,9 +248,12 @@ clang "$e2e_directory/e2e-launcher.c" \
 codesign --force --deep --sign - "$e2e_app" >/dev/null
 
 write_e2e_config() {
+  helper_name=coosenpai-hearing
+  case "$1" in speaker-failure|speaker-recovered|failure-auth) helper_name=coosenpai-hearing-failure-test ;; esac
   cat > "$e2e_config" <<EOF
-helper_path=$repository_dir/target/helpers/coosenpai-hearing
+helper_path=$repository_dir/target/helpers/$helper_name
 mode=$1
+test_state=$e2e_directory/failure-state
 input_wav=$e2e_directory/input-two-stereo.wav
 dump_dir=$e2e_directory/dump
 stdin_path=$e2e_directory/stdin
@@ -426,6 +463,36 @@ if [ "$close_count" -ne 2 ]; then
   exit 1
 fi
 printf '%s\n' 'WAV E2E final-count=2 (一つ目・二つ目)' >&2
+
+if [ "$process_tap" -eq 1 ]; then
+  for cycle in 1 2 3; do
+    launch_e2e process-tap
+    python3 "$script_dir/Tests/process_tap_e2e.py" "$e2e_directory" normal "$request_auth"
+    printf 'Process tap E2E cycle=%s PASS\n' "$cycle" >&2
+  done
+fi
+
+if [ "$speaker_failures" -eq 1 ]; then
+  "$script_dir/build.sh" '' --test-speaker-failure >/dev/null
+  if [ "$request_auth" -eq 1 ]; then
+    launch_e2e failure-auth
+    wait_for_e2e 60 || { printf '%s\n' 'Failure fixture authorization timed out' >&2; exit 1; }
+    if ! grep -q '^speech-auth status=authorized$' "$e2e_directory/stderr"; then
+      cat "$e2e_directory/stderr" >&2
+      exit 1
+    fi
+  fi
+  for failure in permission no-output recovered; do
+    printf '%s\n' "$failure" > "$e2e_directory/failure-state"
+    if [ "$failure" = recovered ]; then
+      launch_e2e speaker-recovered
+    else
+      launch_e2e speaker-failure
+    fi
+    python3 "$script_dir/Tests/process_tap_e2e.py" "$e2e_directory" "$failure" "$request_auth"
+    printf 'Speaker failure E2E scenario=%s PASS\n' "$failure" >&2
+  done
+fi
 
 if [ -n "${COOSENPAI_HEARING_RESULT_FILE:-}" ]; then
   printf 'PASS\n' >"$COOSENPAI_HEARING_RESULT_FILE"

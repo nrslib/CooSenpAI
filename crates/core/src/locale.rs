@@ -228,6 +228,13 @@ pub enum TextKey {
     ScreenPermissionUnavailable,
     AudioSourceRequired,
     AudioScreenPermissionRequired,
+    AudioSystemPermissionRequired,
+    AudioSystemFailed,
+    AudioSystemDeviceUnavailable,
+    AudioSystemFormatFailed,
+    AudioSystemOverflow,
+    AudioSystemStartupTimeout,
+
     AudioHelperMissing,
     AudioHelperUnexpectedExit,
     AudioObservationSaveFailed,
@@ -1110,6 +1117,18 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::AudioScreenPermissionRequired, Locale::En) => {
             "Screen Recording permission is required to hear speaker audio."
         }
+        (TextKey::AudioSystemPermissionRequired, Locale::Ja) => "スピーカーの音を聞くには、システム設定の「画面収録とシステムオーディオ録音」でシステムオーディオ録音を許可してください。",
+        (TextKey::AudioSystemPermissionRequired, Locale::En) => "Allow System Audio Recording in System Settings > Screen & System Audio Recording to hear speaker audio.",
+        (TextKey::AudioSystemFailed, Locale::Ja) => "スピーカー音声を取得できません。システムオーディオ録音の許可と出力デバイスを確認してください。",
+        (TextKey::AudioSystemFailed, Locale::En) => "Could not capture speaker audio. Check System Audio Recording permission and the output device.",
+        (TextKey::AudioSystemDeviceUnavailable, Locale::Ja) => "音声出力デバイスがありません。出力デバイスの接続を確認してください。",
+        (TextKey::AudioSystemDeviceUnavailable, Locale::En) => "No audio output device is available. Check the output device connection.",
+        (TextKey::AudioSystemFormatFailed, Locale::Ja) => "スピーカー音声の形式を取得できません。出力デバイスを確認し、Hearing を入れ直してください。",
+        (TextKey::AudioSystemFormatFailed, Locale::En) => "Could not read the speaker audio format. Check the output device and restart Hearing.",
+        (TextKey::AudioSystemOverflow, Locale::Ja) => "スピーカー音声の処理が追いつかず停止しました。負荷を減らして Hearing を入れ直してください。",
+        (TextKey::AudioSystemOverflow, Locale::En) => "Speaker capture stopped because processing could not keep up. Reduce system load and restart Hearing.",
+        (TextKey::AudioSystemStartupTimeout, Locale::Ja) => "スピーカー音声の開始がタイムアウトしました。システムオーディオ録音の許可と出力デバイスを確認してください。",
+        (TextKey::AudioSystemStartupTimeout, Locale::En) => "Speaker capture timed out during startup. Check System Audio Recording permission and the output device.",
         (TextKey::AudioHelperMissing, Locale::Ja) => "coosenpai-hearing が見つかりません",
         (TextKey::AudioHelperMissing, Locale::En) => "The coosenpai-hearing helper was not found.",
         (TextKey::AudioHelperUnexpectedExit, Locale::Ja) => "聴覚観察 helper が予期せず終了しました",
@@ -1746,6 +1765,13 @@ pub fn localize_capture_message(message: &str, locale: Locale) -> String {
 
 pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> String {
     let key = match kind {
+        "system-audio-permission" => Some(TextKey::AudioSystemPermissionRequired),
+        "system-audio" => Some(TextKey::AudioSystemFailed),
+        "system-audio-device" => Some(TextKey::AudioSystemDeviceUnavailable),
+        "system-audio-format" => Some(TextKey::AudioSystemFormatFailed),
+        "system-audio-overflow" => Some(TextKey::AudioSystemOverflow),
+        "system-audio-start-timeout" => Some(TextKey::AudioSystemStartupTimeout),
+
         "input-device-fallback"
             if matches_text(message, TextKey::SpeechInputDeviceFallbackShort) =>
         {

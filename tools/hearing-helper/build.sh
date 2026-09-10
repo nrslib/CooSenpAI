@@ -16,17 +16,30 @@ if [ -n "$target_triple" ]; then
 else
   output_path="$output_dir/coosenpai-hearing"
 fi
+entrypoint="$script_dir/Sources/entrypoint.swift"
+if [ "${2:-}" = "--test-speaker-failure" ]; then
+  entrypoint="$script_dir/Tests/speaker_failure_entrypoint.swift"
+  output_path="$output_path-failure-test"
+elif [ -n "${2:-}" ]; then
+  printf 'Unknown build option: %s\n' "$2" >&2
+  exit 2
+fi
 temporary_path="$output_dir/.$(basename "$output_path").$$"
 temporary_object_path="$output_dir/.$(basename "$output_path").$$.o"
+temporary_ring_object_path="$output_dir/.$(basename "$output_path").$$.ring.o"
 
 mkdir -p "$module_cache_dir"
-trap 'rm -f "$temporary_path" "$temporary_object_path"' EXIT HUP INT TERM
+trap 'rm -f "$temporary_path" "$temporary_object_path" "$temporary_ring_object_path"' EXIT HUP INT TERM
 sdk_path=$(xcrun --sdk macosx --show-sdk-path)
 if [ -n "$target_triple" ]; then
   clang -target "$swift_target" -isysroot "$sdk_path" -fobjc-arc -c \
     "$script_dir/Sources/audio_tap_installer.m" -o "$temporary_object_path"
+  clang -target "$swift_target" -isysroot "$sdk_path" -std=c11 -O2 -c \
+    "$script_dir/Sources/speaker_audio_ring.c" -o "$temporary_ring_object_path"
   swiftc -target "$swift_target" -O -parse-as-library -module-cache-path "$module_cache_dir" \
     -import-objc-header "$script_dir/Sources/audio_tap_installer.h" \
+    "$script_dir/Sources/speaker_audio_tap.swift" \
+    "$script_dir/Sources/speaker_audio_device.swift" \
     "$script_dir/Sources/audio_stats.swift" \
     "$script_dir/Sources/audio_scaling.swift" \
     "$script_dir/Sources/audio_buffer_copy.swift" \
@@ -40,15 +53,19 @@ if [ -n "$target_triple" ]; then
     "$script_dir/Sources/wav_input.swift" \
     "$script_dir/Sources/appended_audio_dump.swift" \
     "$script_dir/Sources/main.swift" \
-    "$script_dir/Sources/entrypoint.swift" \
-    "$temporary_object_path" \
+    "$entrypoint" \
+    "$temporary_object_path" "$temporary_ring_object_path" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$script_dir/Info.plist" \
     -o "$temporary_path"
 else
   clang -isysroot "$sdk_path" -fobjc-arc -c \
     "$script_dir/Sources/audio_tap_installer.m" -o "$temporary_object_path"
+  clang -isysroot "$sdk_path" -std=c11 -O2 -c \
+    "$script_dir/Sources/speaker_audio_ring.c" -o "$temporary_ring_object_path"
   swiftc -O -parse-as-library -module-cache-path "$module_cache_dir" \
     -import-objc-header "$script_dir/Sources/audio_tap_installer.h" \
+    "$script_dir/Sources/speaker_audio_tap.swift" \
+    "$script_dir/Sources/speaker_audio_device.swift" \
     "$script_dir/Sources/audio_stats.swift" \
     "$script_dir/Sources/audio_scaling.swift" \
     "$script_dir/Sources/audio_buffer_copy.swift" \
@@ -62,8 +79,8 @@ else
     "$script_dir/Sources/wav_input.swift" \
     "$script_dir/Sources/appended_audio_dump.swift" \
     "$script_dir/Sources/main.swift" \
-    "$script_dir/Sources/entrypoint.swift" \
-    "$temporary_object_path" \
+    "$entrypoint" \
+    "$temporary_object_path" "$temporary_ring_object_path" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$script_dir/Info.plist" \
     -o "$temporary_path"
 fi

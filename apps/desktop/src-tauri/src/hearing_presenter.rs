@@ -84,8 +84,19 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             kind,
             message,
         } if view.generation == generation => {
-            view.message = Some(localize_audio_message(&kind, &message, locale));
-            view.warning_kind = Some(kind);
+            if kind == "system-audio-restored" {
+                if view
+                    .warning_kind
+                    .as_deref()
+                    .is_some_and(|kind| kind == "system-audio" || kind.starts_with("system-audio-"))
+                {
+                    view.message = None;
+                    view.warning_kind = None;
+                }
+            } else {
+                view.message = Some(localize_audio_message(&kind, &message, locale));
+                view.warning_kind = Some(kind);
+            }
         }
         HearingResult::Recognition {
             generation,

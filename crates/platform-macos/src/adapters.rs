@@ -102,7 +102,10 @@ impl SystemSettingsPort for MacSystemSettings {
         cancellation: CancellationToken,
     ) -> Result<(), PortError> {
         let section = match pane {
-            SystemSettingsPane::ScreenCapture => "Privacy_ScreenCapture",
+            // 画面収録とシステムオーディオ録音は同じ設定ペイン内にある。
+            SystemSettingsPane::ScreenCapture | SystemSettingsPane::SystemAudio => {
+                "Privacy_ScreenCapture"
+            }
             SystemSettingsPane::Accessibility => "Privacy_Accessibility",
             SystemSettingsPane::Microphone => "Privacy_Microphone",
             SystemSettingsPane::SpeechRecognition => "Privacy_SpeechRecognition",

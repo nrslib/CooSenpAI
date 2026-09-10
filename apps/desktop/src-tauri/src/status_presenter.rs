@@ -51,6 +51,7 @@ pub(crate) struct ThoughtView {
 pub(crate) enum RecoveryAction {
     Settings,
     ScreenCapture,
+    SystemAudio,
     Microphone,
     Recognition,
     Relaunch,
@@ -243,6 +244,7 @@ fn banner(tone: &'static str, message: UiText, action: Option<RecoveryAction>) -
         UiText::message(match action {
             RecoveryAction::Settings => "view.actionSettings",
             RecoveryAction::Relaunch => "view.relaunch",
+            RecoveryAction::SystemAudio => "view.actionSystemAudioSettings",
             _ => "view.actionSystemSettings",
         })
     });
@@ -259,9 +261,20 @@ fn audio_action(s: &AppSnapshot) -> Option<RecoveryAction> {
         Some("permission-speech") => return Some(Recognition),
         Some("permission-microphone") => return Some(Microphone),
         Some("screen-capture") => return Some(ScreenCapture),
+        Some("system-audio" | "system-audio-permission" | "system-audio-start-timeout") => {
+            return Some(SystemAudio)
+        }
+        Some("system-audio-device" | "system-audio-format" | "system-audio-overflow") => {
+            return None
+        }
         _ => {}
     }
-    if s.config.audio.speaker && s.audio.screen_capture_permission != "granted" {
+    if s.config.audio.speaker
+        && !matches!(
+            s.audio.screen_capture_permission.as_str(),
+            "granted" | "not-required"
+        )
+    {
         Some(ScreenCapture)
     } else if s.config.audio.mic && s.audio.microphone_permission != "granted" {
         Some(Microphone)

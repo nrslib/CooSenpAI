@@ -336,7 +336,13 @@ impl SnapshotPresenter {
                 snapshot.screen_recording_status = presentation.status.to_owned();
                 snapshot.screen_recording_message = presentation.message.map(str::to_owned);
                 snapshot.screen_recording_restart_required = permission.requires_restart();
-                snapshot.audio.screen_capture_permission = presentation.status.to_owned();
+                snapshot.audio.screen_capture_permission =
+                    if crate::platform::speaker_requires_screen_recording() {
+                        presentation.status
+                    } else {
+                        "not-required"
+                    }
+                    .to_owned();
             }
         }
         if refresh_avatar || old_avatar_path != snapshot.config.ui.avatar_path {

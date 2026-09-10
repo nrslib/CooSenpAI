@@ -110,7 +110,7 @@ export const desktopApi = {
   readAttachment: (path: string): Promise<IpcResult<readonly number[]>> => call("attachment_read", { payload: { path } }),
   getConfig: (): Promise<IpcResult<CooSenpaiConfig>> => call("config_get"),
   getPersistedConfig: (): Promise<IpcResult<CooSenpaiConfig>> => call("config_get_persisted"),
-  updateConfig: (patch: ConfigPatch, avatarImage?: readonly number[], baseConfigRevision?: number): Promise<IpcResult<CooSenpaiConfig>> => call(
+  updateConfig: (patch: ConfigPatch, avatarImage: readonly number[] | undefined, baseConfigRevision: number): Promise<IpcResult<CooSenpaiConfig>> => call(
     "config_update",
     {
       patch,

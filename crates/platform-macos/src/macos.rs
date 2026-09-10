@@ -464,3 +464,12 @@ fn normalized_cg_image(path: &Path) -> Result<CFRetained<CGImage>> {
     CGBitmapContextCreateImage(Some(&context)).context("Vision OCR の正規化画像を作成できません")
 }
 
+/// macOS 14.2 以降の process tap は画面収録の事前許可を必要としない。
+pub fn speaker_requires_screen_recording() -> bool {
+    use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
+    !NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+        majorVersion: 14,
+        minorVersion: 2,
+        patchVersion: 0,
+    })
+}

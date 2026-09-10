@@ -440,7 +440,13 @@ impl AppSnapshot {
                 phase: "off".to_owned(),
                 microphone_permission: speech_permission_name(speech_permissions.microphone),
                 recognition_permission: speech_permission_name(speech_permissions.recognition),
-                screen_capture_permission: permission_presentation.status.to_owned(),
+                screen_capture_permission:
+                    if crate::platform::speaker_requires_screen_recording() {
+                        permission_presentation.status
+                    } else {
+                        "not-required"
+                    }
+                    .to_owned(),
                 warning_kind: None,
                 message: None,
                 latest_observation: None,

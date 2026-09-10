@@ -1,6 +1,10 @@
+import Foundation
+
 @main
 struct AudioStatsTest {
     static func main() {
+        if CommandLine.arguments.contains("--speaker-stop-timeout") { runSpeakerStopTimeoutProbe() }
+        if CommandLine.arguments.contains("--speaker-stop-failure") { runSpeakerStopFailureProbe() }
         var microphone = AudioStats()
         microphone.recordBuffer(frameCount: 1_024)
         microphone.recordBuffer(frameCount: 512)
@@ -68,5 +72,6 @@ struct AudioStatsTest {
         testRecognitionState()
         testMusicGate()
         testMicrophoneInputRecovery()
+        testSpeakerAudio()
     }
 }

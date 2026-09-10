@@ -356,7 +356,9 @@ impl HearingController {
             return;
         }
         let mut helper_sources = settings.sources.clone();
-        if settings.sources.contains(&AudioObservationSource::Speaker) {
+        if settings.sources.contains(&AudioObservationSource::Speaker)
+            && crate::platform::speaker_requires_screen_recording()
+        {
             let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=screen-permission phase=begin elapsed-ms={}", started.elapsed().as_millis()));
             let permission = state.request_screen_permission_for_audio().await;
             let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=screen-permission phase=end elapsed-ms={}", started.elapsed().as_millis()));
@@ -639,14 +641,39 @@ impl HearingController {
                                 },
                             ))
                             .await;
+                        let audio = state.snapshot().await.audio;
+                        let _ = state.logger.write(
+                            "INFO",
+                            &format!(
+                                "聴覚観察 warning UI: phase={} kind={:?} generation={}",
+                                audio.phase, audio.warning_kind, audio.generation
+                            ),
+                        );
                     }
                 }
                 Ok(HearingEvent::Error { kind, message }) => {
                     if is_non_fatal_audio_source_error(&kind) {
                         if self.accepts_events(generation).await && !cancellation.is_cancelled() {
-                            let _ = state
-                                .logger
-                                .write("WARN", &format!("聴覚観察 source-local error: {message}"));
+                            let _ = state.logger.write("WARN", &format!(
+                                "聴覚観察 source-local warning: kind={kind} generation={generation} {message}"
+                            ));
+                            state
+                                .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
+                                    HearingResult::Warning {
+                                        generation,
+                                        kind,
+                                        message,
+                                    },
+                                ))
+                                .await;
+                            let audio = state.snapshot().await.audio;
+                            let _ = state.logger.write(
+                                "WARN",
+                                &format!(
+                                    "聴覚観察 warning UI: phase={} kind={:?} generation={}",
+                                    audio.phase, audio.warning_kind, audio.generation
+                                ),
+                            );
                         }
                         continue;
                     }
@@ -1075,6 +1102,8 @@ fn is_non_fatal_audio_source_error(kind: &str) -> bool {
             | "screen-capture"
             | "audio-pending-overflow"
     ) || kind.starts_with("recognition-")
+        || kind == "system-audio"
+        || kind.starts_with("system-audio-")
 }
 
 fn restart_delay(attempt: u8) -> std::time::Duration {

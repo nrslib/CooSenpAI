@@ -278,7 +278,7 @@ export function appearancePreview(form: FormState): SettingsAppearancePreview {
 }
 
 export function permissionLabel(value: string, locale: Locale = "ja"): string {
-  const key = ({ granted: "view.permissionGranted", denied: "view.permissionDenied", restricted: "view.permissionRestricted", unavailable: "common.unavailable", "not-determined": "view.permissionUndetermined", "not-granted": "view.permissionNotGranted", unknown: "common.unknown" } as Record<string, TranslationKey>)[value];
+  const key = ({ granted: "view.permissionGranted", denied: "view.permissionDenied", restricted: "view.permissionRestricted", unavailable: "common.unavailable", "not-determined": "view.permissionUndetermined", "not-granted": "view.permissionNotGranted", "not-required": "view.permissionNotRequired", unknown: "common.unknown" } as Record<string, TranslationKey>)[value];
   return key === undefined ? value : t(locale, key);
 }
 

@@ -517,7 +517,7 @@ pub async fn config_update(
     window: WebviewWindow,
     patch: Value,
     avatar_image: Option<Vec<u8>>,
-    base_config_revision: Option<u64>,
+    base_config_revision: u64,
 ) -> TauriIpcResult<Config> {
     authorize_window(&window, CommandOrigin::Main)?;
     let locale = Locale::from_config(&state.runtime_config().ui.language);
@@ -556,7 +556,7 @@ pub async fn config_update(
         state.inner().clone(),
         patch,
         normalized_avatar,
-        base_config_revision,
+        Some(base_config_revision),
         CommandSource::IpcMain,
     )
     .await)
