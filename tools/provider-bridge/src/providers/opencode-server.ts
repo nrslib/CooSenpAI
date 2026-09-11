@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import { BridgeError, safeProviderError } from "../errors.js";
-import { observationFrameDirectory } from "./observation-frame-directory.js";
+import { observationDirectories } from "./observation-frame-directory.js";
 
 const HOST = "127.0.0.1";
 const START_TIMEOUT_MS = 60_000;
@@ -18,6 +18,23 @@ export interface ServerRecord {
 }
 
 export type OpenCodeServerStarter = (executable: string) => Promise<ServerRecord>;
+
+export function openCodeObservationPermissions(readableObservationDirectories: readonly string[]) {
+  const observationPermission = readableObservationDirectories.length === 0
+    ? "deny"
+    : {
+      "*": "deny",
+      ...Object.fromEntries(readableObservationDirectories.map((directory) => [`${directory}/**`, "allow"])),
+    };
+  return {
+    "*": "deny",
+    read: observationPermission,
+    edit: "deny",
+    bash: "deny",
+    webfetch: "deny",
+    external_directory: observationPermission,
+  };
+}
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -58,18 +75,8 @@ function stopChild(child: ChildProcess): Promise<void> {
 
 async function start(executable: string): Promise<ServerRecord> {
   const port = await freePort();
-  const frameDirectory = observationFrameDirectory();
-  const framePermission = frameDirectory === undefined
-    ? "deny"
-    : { "*": "deny", [`${frameDirectory}/**`]: "allow" };
-  const permissions = {
-    "*": "deny",
-    read: framePermission,
-    edit: "deny",
-    bash: "deny",
-    webfetch: "deny",
-    external_directory: framePermission,
-  };
+  const readableObservationDirectories = observationDirectories();
+  const permissions = openCodeObservationPermissions(readableObservationDirectories);
   const config = {
     mcp: {},
     permission: permissions,

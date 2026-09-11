@@ -370,7 +370,7 @@ async fn capture(
                 frame.target.clone(),
                 frame.ocr_text.clone(),
             ),
-            &memory.publication,
+            Some(&memory.publication),
         )?;
     }
     memory.last_hash = Some(prepared.comparison_hash.clone());

@@ -12,6 +12,9 @@ pub(super) fn default_send_debounce() -> u64 {
 pub(super) fn default_frames_per_send() -> usize {
     4
 }
+pub(super) fn default_app_window_limit() -> usize {
+    4
+}
 pub(super) fn default_downscale_width() -> u32 {
     1_280
 }

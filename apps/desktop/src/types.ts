@@ -31,6 +31,7 @@ export interface CooSenpaiConfig {
     readonly sendIntervalMs: number;
     readonly sendDebounceMs: number;
     readonly framesPerSend: number;
+    readonly appWindowLimit: number;
     readonly downscaleWidth: number;
     readonly triggers: {
       readonly typingPauseMs: number;

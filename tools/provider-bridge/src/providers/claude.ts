@@ -16,7 +16,7 @@ import type { ProviderAgent, ProviderAppendInput, ProviderCallOptions, ProviderC
 import { AsyncInput } from "./async-input.js";
 import { claudeContent } from "./inputs.js";
 import { resolveStructuredOutput } from "../structured-output.js";
-import { observationFrameDirectory } from "./observation-frame-directory.js";
+import { observationDirectories } from "./observation-frame-directory.js";
 
 async function userMessage(
   message: string,
@@ -80,6 +80,25 @@ function model(value: string | undefined): string | undefined {
   return value === undefined || value === "default" ? undefined : value;
 }
 
+function readToolHooks(options: ProviderCallOptions): NonNullable<Options["hooks"]> {
+  return {
+    PostToolUse: [{
+      matcher: "Read",
+      hooks: [async (input) => {
+        if (input.hook_event_name === "PostToolUse" && input.tool_name === "Read") {
+          options.onToolExecution?.({
+            provider: "claude",
+            tool: input.tool_name,
+            input: input.tool_input,
+            output: input.tool_response,
+          });
+        }
+        return {};
+      }],
+    }],
+  };
+}
+
 export class ClaudeAgent implements ProviderAgent {
   readonly provider = "claude" as const;
   readonly capabilities = PROVIDER_CAPABILITIES.claude;
@@ -97,12 +116,14 @@ export class ClaudeAgent implements ProviderAgent {
     if (options.signal.aborted) abort();
     else options.signal.addEventListener("abort", abort, { once: true });
     const selectedModel = model(options.model);
-    const frameDirectory = options.isolateTools === true ? undefined : observationFrameDirectory();
-    const readTools = frameDirectory === undefined ? [] : ["Read"];
+    const readableObservationDirectories = options.isolateTools === true ? [] : observationDirectories();
+    const readTools = readableObservationDirectories.length === 0 ? [] : ["Read"];
     const sdkOptions: Options = {
       abortController: controller,
       cwd: options.cwd,
-      ...(frameDirectory === undefined ? {} : { additionalDirectories: [frameDirectory] }),
+      ...(readableObservationDirectories.length === 0
+        ? {}
+        : { additionalDirectories: readableObservationDirectories }),
       systemPrompt: options.systemPrompt,
       tools: readTools,
       allowedTools: readTools,
@@ -126,6 +147,7 @@ export class ClaudeAgent implements ProviderAgent {
         : { outputFormat: { type: "json_schema", schema: options.schema } }),
       ...(options.executable === undefined ? {} : { pathToClaudeCodeExecutable: options.executable }),
       ...(options.session.mode === "resume" ? { resume: options.session.id } : {}),
+      ...(options.onToolExecution === undefined ? {} : { hooks: readToolHooks(options) }),
     };
     let finalText = "";
     let sessionId = options.session.id;

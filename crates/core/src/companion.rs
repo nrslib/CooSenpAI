@@ -936,7 +936,7 @@ impl CompanionAgent {
         let CompanionTurn {
             mut data,
             user,
-            observations,
+            observations: reference_observations,
             image_paths,
             events,
             requested_source_ids,
@@ -946,12 +946,14 @@ impl CompanionAgent {
         } = turn;
         self.initialize_storage()?;
         let observations = if user {
-            helpers::unsent_observations(observations, &self.sent_observation_ids)
+            helpers::unsent_observations(reference_observations.clone(), &self.sent_observation_ids)
         } else {
-            observations
+            reference_observations.clone()
         };
         if user {
-            data.observations = observation_values(&observations)?;
+            // 送信済み観察の再送防止と、質問に答えるための直近観察の参照は別の責務です。
+            data.observations = observation_values(&reference_observations)?;
+            // user prompt の観察列に直近観察も含めるため、last_observation では重ねない。
             data.last_observation = None;
         }
         self.prepare_call_session(user, cancellation.clone())

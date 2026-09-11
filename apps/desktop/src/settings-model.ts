@@ -43,7 +43,7 @@ const CONTROL_PATHS = new Set<string>([
   "companion.provider", "companion.model", "companion.effort",
   "companion.executable", "companion.timeoutMs", "companion.dailyProactiveLimit",
   "companion.proactiveQuietMinutes",
-  "watch.sendIntervalMs", "watch.sendDebounceMs", "watch.framesPerSend",
+  "watch.sendIntervalMs", "watch.sendDebounceMs", "watch.framesPerSend", "watch.appWindowLimit",
   "watch.downscaleWidth", "watch.triggers.typingPauseMs",
   "watch.triggers.activeThresholdMs", "watch.triggers.appSwitch",
   "watch.triggers.appSwitchSettleMs", "watch.triggers.maxIntervalMs",

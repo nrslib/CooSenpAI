@@ -516,6 +516,12 @@ fn validate_watch(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
             "1以上12以下の整数で指定してください。",
         ));
     }
+    if !(1..=8).contains(&config.watch.app_window_limit) {
+        issues.push(issue(
+            "watch.appWindowLimit",
+            "1以上8以下の整数で指定してください。",
+        ));
+    }
     if config.watch.triggers.active_threshold_ms >= config.watch.triggers.typing_pause_ms {
         issues.push(issue(
             "watch.triggers.activeThresholdMs",

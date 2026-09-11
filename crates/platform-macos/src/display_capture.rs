@@ -115,11 +115,24 @@ pub(crate) fn capture_watch_png(
         },
     );
     let image = capture_target(target, cancellation, log.clone())?;
-    check_cancellation(cancellation).map_err(CaptureError::into_error)?;
-    let started = Instant::now();
-    let result = cg_image_png(&image);
-    log.stage("encode", "png", started.elapsed(), result.is_ok());
-    result
+    encode_watch_png(image, cancellation, &log)
+}
+
+pub(crate) fn capture_application_watch_pngs(
+    window_ids: &[CGWindowID],
+    cancellation: &CancellationToken,
+    logger: Option<Arc<dyn RuntimeLogger>>,
+) -> Result<Vec<Vec<u8>>> {
+    if window_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let log = CaptureLog::new(logger, "application");
+    let images = capture_application_targets(window_ids, cancellation, log.clone())
+        .map_err(CaptureError::into_error)?;
+    images
+        .into_iter()
+        .map(|image| encode_watch_png(image, cancellation, &log))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -180,6 +193,58 @@ fn capture_target(
     .map_err(CaptureError::into_error)
 }
 
+fn capture_application_targets(
+    window_ids: &[CGWindowID],
+    cancellation: &CancellationToken,
+    log: CaptureLog,
+) -> Result<Vec<CFRetained<CGImage>>, CaptureError> {
+    check_cancellation(cancellation)?;
+    let flight = acquire_capture_flight(&CAPTURE_FLIGHT, cancellation, SCK_CAPTURE_TIMEOUT)?;
+    if screenshot_manager_available() {
+        // SCShareableContent は集合ごとに一度だけ取得し、同じスナップショットを
+        // 使って各ウインドウを直列に撮影する。撮影完了前に次の要求を発行しない。
+        capture_with_retry(cancellation, || {
+            capture_application_with_screenshot_kit(
+                window_ids,
+                cancellation,
+                flight.clone(),
+                log.clone(),
+            )
+        })
+    } else {
+        check_capture_permission()?;
+        window_ids
+            .iter()
+            .map(|window_id| {
+                check_cancellation(cancellation)?;
+                log.stage("content", "none-quartz", Duration::ZERO, true);
+                let started = Instant::now();
+                let result = capture_with_retry(cancellation, || {
+                    capture_quartz_with_timeout(
+                        CaptureTarget::Window(*window_id),
+                        cancellation,
+                        flight.clone(),
+                    )
+                });
+                log.stage("capture", "quartz", started.elapsed(), result.is_ok());
+                result
+            })
+            .collect()
+    }
+}
+
+fn encode_watch_png(
+    image: CFRetained<CGImage>,
+    cancellation: &CancellationToken,
+    log: &CaptureLog,
+) -> Result<Vec<u8>> {
+    check_cancellation(cancellation).map_err(CaptureError::into_error)?;
+    let started = Instant::now();
+    let result = cg_image_png(&image);
+    log.stage("encode", "png", started.elapsed(), result.is_ok());
+    result
+}
+
 fn capture_with_retry<T>(
     cancellation: &CancellationToken,
     mut capture: impl FnMut() -> Result<T, CaptureError>,
@@ -232,11 +297,11 @@ pub(crate) fn acquire_capture_flight(
 }
 
 fn check_capture_permission() -> Result<(), CaptureError> {
-    if objc2_core_graphics::CGPreflightScreenCaptureAccess() {
-        Ok(())
-    } else {
-        Err(CaptureError::PermissionDenied)
-    }
+    quartz_capture_permission(objc2_core_graphics::CGPreflightScreenCaptureAccess())
+}
+
+fn quartz_capture_permission(granted: bool) -> Result<(), CaptureError> {
+    granted.then_some(()).ok_or(CaptureError::PermissionDenied)
 }
 
 fn check_cancellation(cancellation: &CancellationToken) -> Result<(), CaptureError> {
@@ -405,9 +470,213 @@ fn capture_once_with_screenshot_kit(
     await_sck_reply(&rx, SCK_CAPTURE_TIMEOUT, &cancellation)
 }
 
-// SCK の completion handler から受ける生ポインタ 2 つと、撮影 1 回分の文脈をそのまま渡す。
-// 引数をまとめる構造体を足すより、handler と同じ形で読める方を優先している。
-#[allow(clippy::too_many_arguments)]
+fn capture_application_with_screenshot_kit(
+    window_ids: &[CGWindowID],
+    cancellation: &CancellationToken,
+    flight: Arc<OwnedSemaphorePermit>,
+    log: CaptureLog,
+) -> Result<Vec<CFRetained<CGImage>>, CaptureError> {
+    let content_started = Instant::now();
+    let callback_cancellation = cancellation.clone();
+    let callback_flight = flight.clone();
+    let callback_window_ids = window_ids.to_owned();
+    let (tx, rx) = mpsc::channel();
+    let block = RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut NSError| {
+            let _flight = callback_flight.clone();
+            if let Err(error) = check_cancellation(&callback_cancellation) {
+                log.stage("content", "window-list", content_started.elapsed(), false);
+                let _ = tx.send(Err(error));
+                return;
+            }
+            let requests =
+                prepare_application_capture_requests(content, error, &callback_window_ids);
+            log.stage(
+                "content",
+                "window-list",
+                content_started.elapsed(),
+                requests.is_ok(),
+            );
+            let (content, requests) = match requests {
+                Ok(requests) => requests,
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                    return;
+                }
+            };
+            let state = Arc::new(Mutex::new(SckApplicationCaptureSequence {
+                _content: content,
+                requests,
+                images: Vec::with_capacity(callback_window_ids.len()),
+                next_index: 0,
+                cancellation: callback_cancellation.clone(),
+                flight: callback_flight.clone(),
+                log: log.clone(),
+                tx: tx.clone(),
+                finished: false,
+            }));
+            start_next_application_capture(state);
+        },
+    );
+    // SAFETY: the framework copies the block and invokes it exactly once on its own queue.
+    // The raw pointers it passes are valid for the duration of the invocation.
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(false, true, &block);
+    }
+    await_capture_reply(&rx, SCK_CAPTURE_TIMEOUT, cancellation)
+}
+
+struct SckApplicationCaptureRequest {
+    filter: Retained<SCContentFilter>,
+    configuration: Retained<SCStreamConfiguration>,
+}
+
+struct SckApplicationCaptureSequence {
+    _content: Retained<SCShareableContent>,
+    requests: Vec<SckApplicationCaptureRequest>,
+    images: Vec<CFRetained<CGImage>>,
+    next_index: usize,
+    cancellation: CancellationToken,
+    flight: Arc<OwnedSemaphorePermit>,
+    log: CaptureLog,
+    tx: mpsc::Sender<Result<Vec<CFRetained<CGImage>>, CaptureError>>,
+    finished: bool,
+}
+
+fn prepare_application_capture_requests(
+    content: *mut SCShareableContent,
+    error: *mut NSError,
+    window_ids: &[CGWindowID],
+) -> Result<
+    (
+        Retained<SCShareableContent>,
+        Vec<SckApplicationCaptureRequest>,
+    ),
+    CaptureError,
+> {
+    if let Some(error) = NonNull::new(error) {
+        // SAFETY: the framework passes a valid NSError for the duration of the handler.
+        return Err(CaptureError::from_nserror(unsafe { error.as_ref() }));
+    }
+    let content = NonNull::new(content).ok_or(CaptureError::NoResult)?;
+    // SAFETY: the framework passes a valid SCShareableContent for the duration of the handler.
+    let content_ref = unsafe { content.as_ref() };
+    // SAFETY: retain the content before the completion handler returns.
+    let retained_content =
+        unsafe { Retained::retain(content.as_ptr()) }.ok_or(CaptureError::NoResult)?;
+    let requests = window_ids
+        .iter()
+        .map(|window_id| {
+            let (filter, pixel_width, pixel_height) = capture_filter(content_ref, *window_id)?;
+            // SAFETY: SCStreamConfiguration is a plain NSObject with no thread affinity.
+            let configuration = unsafe { SCStreamConfiguration::new() };
+            // SAFETY: setters on a live configuration object with in-range pixel dimensions.
+            unsafe {
+                configuration.setWidth(pixel_width);
+                configuration.setHeight(pixel_height);
+                configuration.setShowsCursor(false);
+                configuration.setIgnoreShadowsSingleWindow(true);
+            }
+            Ok(SckApplicationCaptureRequest {
+                filter,
+                configuration,
+            })
+        })
+        .collect::<Result<Vec<_>, CaptureError>>()?;
+    Ok((retained_content, requests))
+}
+
+fn start_next_application_capture(state: Arc<Mutex<SckApplicationCaptureSequence>>) {
+    let (filter, configuration, flight) = {
+        let mut sequence = state.lock().expect("capture sequence");
+        if sequence.finished {
+            return;
+        }
+        let Some(request) = sequence.requests.get(sequence.next_index) else {
+            sequence.finished = true;
+            let reply = Ok(std::mem::take(&mut sequence.images));
+            let _ = sequence.tx.send(reply);
+            return;
+        };
+        let filter = request.filter.clone();
+        let configuration = request.configuration.clone();
+        sequence.next_index += 1;
+        (filter, configuration, sequence.flight.clone())
+    };
+    let block = application_capture_completion(state, flight);
+    // This function is called from the shareable-content or previous image completion handler,
+    // so every SCScreenshotManager request stays on the framework's callback queue.
+    // SAFETY: live filter/configuration; the framework copies and invokes the block once.
+    unsafe {
+        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+            &filter,
+            &configuration,
+            Some(&block),
+        );
+    }
+}
+
+fn application_capture_completion(
+    state: Arc<Mutex<SckApplicationCaptureSequence>>,
+    flight: Arc<OwnedSemaphorePermit>,
+) -> RcBlock<dyn Fn(*mut CGImage, *mut NSError)> {
+    let started = Instant::now();
+    RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+        let reply = if let Some(image) = NonNull::new(image) {
+            // SAFETY: the handler receives a valid CGImage; retain it before returning.
+            Ok(unsafe { CFRetained::retain(image) })
+        } else if let Some(error) = NonNull::new(error) {
+            // SAFETY: the framework passes a valid NSError for the duration of the handler.
+            Err(CaptureError::from_nserror(unsafe { error.as_ref() }))
+        } else {
+            Err(CaptureError::NoResult)
+        };
+        let _flight = flight.clone();
+        let mut next = None;
+        let mut final_reply = None;
+        {
+            let mut sequence = state.lock().expect("capture sequence");
+            if sequence.finished {
+                return;
+            }
+            match reply {
+                Ok(image) if !sequence.cancellation.is_cancelled() => {
+                    sequence.images.push(image);
+                    sequence
+                        .log
+                        .stage("capture", "filter", started.elapsed(), true);
+                    if sequence.next_index == sequence.requests.len() {
+                        sequence.finished = true;
+                        final_reply = Some(Ok(std::mem::take(&mut sequence.images)));
+                    } else {
+                        next = Some(state.clone());
+                    }
+                }
+                Ok(_) => {
+                    sequence.finished = true;
+                    sequence
+                        .log
+                        .stage("capture", "filter", started.elapsed(), false);
+                    final_reply = Some(Err(CaptureError::Cancelled));
+                }
+                Err(error) => {
+                    sequence.finished = true;
+                    sequence
+                        .log
+                        .stage("capture", "filter", started.elapsed(), false);
+                    final_reply = Some(Err(error));
+                }
+            }
+        }
+        if let Some(reply) = final_reply {
+            let _ = state.lock().expect("capture sequence").tx.send(reply);
+        }
+        if let Some(state) = next {
+            start_next_application_capture(state);
+        }
+    })
+}
+
 fn start_capture(
     content: *mut SCShareableContent,
     error: *mut NSError,
@@ -449,6 +718,26 @@ fn start_capture(
         );
     }
     Ok(())
+}
+
+fn await_capture_reply<T>(
+    rx: &mpsc::Receiver<Result<T, CaptureError>>,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<T, CaptureError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        check_cancellation(cancellation)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining.min(CAPTURE_POLL_INTERVAL)) {
+            Ok(reply) => return reply,
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                return Err(CaptureError::Timeout)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(CaptureError::Disconnected),
+        }
+    }
 }
 
 fn capture_completion(
@@ -519,19 +808,7 @@ fn await_sck_reply(
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<CFRetained<CGImage>, CaptureError> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        check_cancellation(cancellation)?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(remaining.min(CAPTURE_POLL_INTERVAL)) {
-            Ok(reply) => return reply,
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
-                return Err(CaptureError::Timeout)
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(CaptureError::Disconnected),
-        }
-    }
+    await_capture_reply(rx, timeout, cancellation)
 }
 
 fn sc_stream_error_domain() -> String {

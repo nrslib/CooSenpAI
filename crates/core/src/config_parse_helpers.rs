@@ -148,6 +148,29 @@ pub(super) fn frames_per_send(
     }
 }
 
+pub(super) fn app_window_limit(
+    object: &Map<String, Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> usize {
+    let Some(value) = object.get("appWindowLimit") else {
+        return 4;
+    };
+    match value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| (1..=8).contains(value))
+    {
+        Some(value) => value,
+        None => {
+            issues.push(issue(
+                "watch.appWindowLimit",
+                "1以上8以下の整数で指定してください。",
+            ));
+            4
+        }
+    }
+}
+
 pub(super) fn positive_number(
     object: &Map<String, Value>,
     key: &str,

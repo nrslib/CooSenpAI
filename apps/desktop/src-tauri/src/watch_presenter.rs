@@ -42,6 +42,8 @@ pub(crate) enum WatchResult {
         trigger: ActivityTriggerKind,
         disposition: CaptureDisposition,
         captured_at: Option<String>,
+        frame_count: usize,
+        next_send_at: Option<String>,
     },
     HeartbeatObserved(ObservationRecord),
     FailureObserved {
@@ -205,14 +207,20 @@ impl WatchPresenter {
                 trigger,
                 disposition,
                 captured_at,
+                frame_count,
+                next_send_at,
             } => {
                 view.phase = ObserverViewPhase::Idle;
                 view.last_trigger = Some(trigger_name(trigger).to_owned());
                 view.last_capture_disposition =
                     Some(disposition.display_for_locale(locale).to_owned());
-                view.pending_frame_count = view
-                    .pending_frame_count
-                    .saturating_add(usize::from(disposition == CaptureDisposition::Accepted));
+                if disposition == CaptureDisposition::Accepted {
+                    view.pending_frame_count = view.pending_frame_count.saturating_add(frame_count);
+                    view.next_send_at = next_send_at;
+                }
+                if captured_at.is_some() {
+                    view.last_captured_at = captured_at.clone();
+                }
                 if let Some(target) = view
                     .targets
                     .iter_mut()
@@ -289,3 +297,4 @@ impl WatchPresenter {
         true
     }
 }
+

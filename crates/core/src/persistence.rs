@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{MutexGuard, TryLockError as MutexTryLockError};
 use std::time::Duration as StdDuration;
 use thiserror::Error;
 use uuid::Uuid;
@@ -23,7 +24,7 @@ pub enum PersistenceError {
     AlreadyLocked,
 }
 
-/// Serializes cancellation with publication, without holding the gate during file I/O preparation.
+/// 公開の開始とキャンセルの順序だけを直列化する。ファイル準備はこのゲートの外で行う。
 #[derive(Debug, Clone)]
 pub struct PublicationGate {
     cancellation: tokio_util::sync::CancellationToken,
@@ -39,20 +40,406 @@ impl PublicationGate {
     }
 
     pub fn cancel(&self) {
-        let _guard = self.publication.lock().expect("publication gate");
         self.cancellation.cancel();
     }
 
-    fn publish(&self, operation: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
-        let _guard = self.publication.lock().expect("publication gate");
+    pub fn publish_batch<T, E>(&self, operation: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<io::Error>,
+    {
+        self.publish_batch_with_directories(Vec::new(), |_| operation())
+    }
+
+    pub fn publish_batch_with_directories<T, E>(
+        &self,
+        directories: impl IntoIterator<Item = PathBuf>,
+        operation: impl FnOnce(&DirectoryLocks) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<io::Error>,
+    {
+        let directories =
+            DirectoryLocks::acquire(directories, Some(&self.cancellation)).map_err(E::from)?;
+        let _guard = self.lock_publication().map_err(E::from)?;
+        if self.cancellation.is_cancelled() {
+            return Err(
+                io::Error::new(io::ErrorKind::Interrupted, "画面記録が取り消されました").into(),
+            );
+        }
+        operation(&directories)
+    }
+
+    fn lock_publication(&self) -> io::Result<MutexGuard<'_, ()>> {
         if self.cancellation.is_cancelled() {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "画面記録が取り消されました",
             ));
         }
-        operation()
+        match self.publication.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(MutexTryLockError::Poisoned(_)) => {
+                Err(io::Error::other("publication gate が壊れています"))
+            }
+            Err(MutexTryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "publication gate が使用中です",
+            )),
+        }
     }
+}
+
+#[derive(Debug)]
+pub struct DirectoryLock {
+    path: PathBuf,
+    file: File,
+}
+
+impl DirectoryLock {
+    fn acquire(
+        path: &Path,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+    ) -> io::Result<Self> {
+        let file = File::open(path)?;
+        lock_file(&file, cancellation)?;
+        Ok(Self {
+            path: path.to_owned(),
+            file,
+        })
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        self.path == path
+    }
+}
+
+#[derive(Debug)]
+pub struct DirectoryLocks {
+    locks: Vec<DirectoryLock>,
+}
+
+impl DirectoryLocks {
+    pub fn acquire(
+        paths: impl IntoIterator<Item = PathBuf>,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+    ) -> io::Result<Self> {
+        let mut paths = paths.into_iter().collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        let locks = paths
+            .iter()
+            .map(|path| DirectoryLock::acquire(path, cancellation))
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(Self { locks })
+    }
+
+    fn for_path(&self, path: &Path) -> io::Result<&DirectoryLock> {
+        self.locks
+            .iter()
+            .find(|lock| lock.matches(path))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ディレクトリロックがありません",
+                )
+            })
+    }
+}
+
+fn lock_file(
+    file: &File,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> io::Result<()> {
+    let Some(cancellation) = cancellation else {
+        file.lock()?;
+        return Ok(());
+    };
+    if cancellation.is_cancelled() {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "画面記録が取り消されました",
+        ));
+    }
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::Error(error)) => Err(error),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "ディレクトリロックが使用中です",
+        )),
+    }
+}
+
+/// 公開前の sibling 一時ファイル。復元はこの型自身では行わず、batch の所有者が行う。
+#[derive(Debug)]
+pub struct StagedFile {
+    path: PathBuf,
+    temporary: Option<PathBuf>,
+    previous: Option<Vec<u8>>,
+    published: bool,
+    committed: bool,
+    restored: bool,
+    rollback_attempted: bool,
+}
+
+impl StagedFile {
+    pub fn prepare(
+        path: &Path,
+        bytes: &[u8],
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
+    ) -> io::Result<Self> {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "親ディレクトリがありません")
+        })?;
+        fs::create_dir_all(parent)?;
+        set_private_directory_mode(parent)?;
+        let directory_lock = DirectoryLock::acquire(parent, cancellation)?;
+        let temporary = parent.join(format!(
+            ".{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("snapshot"),
+            Uuid::new_v4()
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            set_private_file_mode(&file)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            let previous = if path.exists() {
+                Some(fs::read(path)?)
+            } else {
+                None
+            };
+            if cancellation.is_some_and(|value| value.is_cancelled()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "画面記録が取り消されました",
+                ));
+            }
+            drop(directory_lock);
+            Ok(Self {
+                path: path.to_owned(),
+                temporary: Some(temporary.clone()),
+                previous,
+                published: false,
+                committed: false,
+                restored: false,
+                rollback_attempted: false,
+            })
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn parent(&self) -> &Path {
+        self.path.parent().expect("staged file parent")
+    }
+
+    pub fn publish(&mut self, directories: &DirectoryLocks) -> io::Result<()> {
+        if self.committed || self.restored || self.rollback_attempted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "確定済み、復元済み、または復元試行済みの staged file は公開できません",
+            ));
+        }
+        let temporary = self.temporary.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "一時ファイルがありません")
+        })?;
+        let directory = directories.for_path(self.parent())?;
+        fs::rename(temporary, &self.path)?;
+        self.temporary = None;
+        self.published = true;
+        #[cfg(test)]
+        failpoints::after_rename(&self.path)?;
+        directory.file.sync_all()?;
+        set_private_path_mode(&self.path)?;
+        Ok(())
+    }
+
+    pub fn restore(&mut self) -> io::Result<()> {
+        if self.committed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "commit 後の rollback はできません",
+            ));
+        }
+        if self.restored {
+            return Ok(());
+        }
+        if self.rollback_attempted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "復元試行済みの staged file は再度 rollback できません",
+            ));
+        }
+        self.rollback_attempted = true;
+        if !self.published {
+            self.remove_temporary()?;
+            self.restored = true;
+            return Ok(());
+        }
+        let parent = self.path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "親ディレクトリがありません")
+        })?;
+        let directories = DirectoryLocks::acquire(vec![parent.to_owned()], None)?;
+        self.restore_locked_inner(&directories)
+    }
+
+    pub(crate) fn restore_locked(&mut self, directories: &DirectoryLocks) -> io::Result<()> {
+        if self.committed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "commit 後の rollback はできません",
+            ));
+        }
+        if self.restored {
+            return Ok(());
+        }
+        if self.rollback_attempted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "復元試行済みの staged file は再度 rollback できません",
+            ));
+        }
+        self.rollback_attempted = true;
+        self.restore_locked_inner(directories)
+    }
+
+    fn restore_locked_inner(&mut self, directories: &DirectoryLocks) -> io::Result<()> {
+        let directory = if self.published {
+            let parent = self.path.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "親ディレクトリがありません")
+            })?;
+            Some(directories.for_path(parent)?)
+        } else {
+            None
+        };
+        self.remove_temporary()?;
+        if let Some(directory) = directory {
+            match &self.previous {
+                Some(bytes) => write_replacement_locked(&self.path, bytes, directory)?,
+                None => match fs::remove_file(&self.path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                },
+            }
+            if self.previous.is_none() {
+                directory.file.sync_all()?;
+            }
+        }
+        self.published = false;
+        self.restored = true;
+        Ok(())
+    }
+
+    fn remove_temporary(&mut self) -> io::Result<()> {
+        if let Some(temporary) = self.temporary.take() {
+            match fs::remove_file(temporary) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn commit(&mut self) -> io::Result<()> {
+        if self.committed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "commit 済みの staged file は再度 commit できません",
+            ));
+        }
+        if self.restored || self.rollback_attempted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "rollback 後または復元試行後の commit はできません",
+            ));
+        }
+        if !self.published {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "公開前の staged file は commit できません",
+            ));
+        }
+        self.committed = true;
+        Ok(())
+    }
+
+    pub fn validate_commit(&self) -> io::Result<()> {
+        if self.committed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "commit 済みの staged file は再度 commit できません",
+            ));
+        }
+        if self.restored || self.rollback_attempted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "rollback 後または復元試行後の commit はできません",
+            ));
+        }
+        if !self.published {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "公開前の staged file は commit できません",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if let Some(temporary) = self.temporary.take() {
+            let _ = fs::remove_file(temporary);
+        }
+    }
+}
+
+fn write_replacement_locked(
+    path: &Path,
+    bytes: &[u8],
+    directory: &DirectoryLock,
+) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "親ディレクトリがありません"))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.rollback.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("snapshot"),
+        Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        set_private_file_mode(&file)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        directory.file.sync_all()?;
+        set_private_path_mode(path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 /// 同一ディレクトリの一時ファイルを sync してから置き換える。
@@ -65,40 +452,55 @@ pub fn atomic_write_bytes_cancellable(
     bytes: &[u8],
     publication: Option<&PublicationGate>,
 ) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "親ディレクトリがありません"))?;
-    fs::create_dir_all(parent)?;
-    set_private_directory_mode(parent)?;
-    let directory_lock = File::open(parent)?;
-    directory_lock.lock()?;
-    let temp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("snapshot"),
-        Uuid::new_v4()
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        set_private_file_mode(&file)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        match publication {
-            Some(gate) => gate.publish(|| fs::rename(&temp, path))?,
-            None => fs::rename(&temp, path)?,
+    let mut staged = StagedFile::prepare(path, bytes, publication.map(|gate| &gate.cancellation))?;
+    let mut publication_started = false;
+    let publish = match publication {
+        Some(gate) => {
+            gate.publish_batch_with_directories(vec![staged.parent().to_owned()], |directories| {
+                publication_started = true;
+                publish_and_commit_staged(&mut staged, directories).or_else(|error| {
+                    match staged.restore_locked(directories) {
+                        Ok(()) => Err(error),
+                        Err(rollback) => Err(io::Error::other(format!(
+                            "{error}; ロールバックにも失敗しました: {rollback}"
+                        ))),
+                    }
+                })
+            })
         }
-        directory_lock.sync_all()?;
-        set_private_path_mode(path)?;
-        Ok::<(), io::Error>(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        None => {
+            let directories = DirectoryLocks::acquire(vec![staged.parent().to_owned()], None)?;
+            publication_started = true;
+            publish_and_commit_staged(&mut staged, &directories).or_else(|error| {
+                match staged.restore_locked(&directories) {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(io::Error::other(format!(
+                        "{error}; ロールバックにも失敗しました: {rollback}"
+                    ))),
+                }
+            })
+        }
+    };
+    if let Err(error) = publish {
+        if !publication_started {
+            if let Err(rollback) = staged.restore() {
+                return Err(io::Error::other(format!(
+                    "{error}; staging の後始末にも失敗しました: {rollback}"
+                )));
+            }
+        }
+        return Err(error);
     }
-    result
+    Ok(())
+}
+
+fn publish_and_commit_staged(
+    staged: &mut StagedFile,
+    directories: &DirectoryLocks,
+) -> io::Result<()> {
+    staged.publish(directories)?;
+    staged.validate_commit()?;
+    staged.commit()
 }
 
 /// 前回の異常終了で残った、本実装が作成した sibling temp を起動時に片付ける。
@@ -143,6 +545,7 @@ pub fn atomic_write_json_cancellable<T: Serialize>(
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct SiblingLock {
     file: File,
 }

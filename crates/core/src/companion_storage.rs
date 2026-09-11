@@ -8,7 +8,9 @@ use crate::config::ConfigPaths;
 use crate::frame_buffer::FrameBuffer;
 use crate::logging::FileLogger;
 use crate::outbox::DurableOutbox;
-use crate::persistence::{atomic_write_json, PersistenceError, SiblingLock};
+use crate::persistence::{
+    atomic_write_json, DirectoryLocks, PersistenceError, SiblingLock, StagedFile,
+};
 use crate::ports::RuntimeLogger;
 use crate::provider::ProviderSession;
 use crate::state::{
@@ -83,6 +85,111 @@ pub struct CompanionStorage {
     frame_buffer: FrameBuffer,
     pub retention_days: u64,
     pinned_conversation_generation: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct PendingFrameContextChange {
+    staged: StagedFile,
+    lock: Option<SiblingLock>,
+    committed: bool,
+    rolled_back: bool,
+    rollback_attempted: bool,
+}
+
+impl PendingFrameContextChange {
+    pub fn publish(&mut self, directories: &DirectoryLocks) -> Result<(), PersistenceError> {
+        self.staged.publish(directories)?;
+        Ok(())
+    }
+
+    pub fn directories(&self) -> Vec<PathBuf> {
+        vec![self.staged.parent().to_owned()]
+    }
+
+    pub fn commit(&mut self) -> Result<(), PersistenceError> {
+        if self.rolled_back {
+            return Err(PersistenceError::Invalid(
+                "rollback 後の pending context は commit できません".to_owned(),
+            ));
+        }
+        if self.rollback_attempted {
+            return Err(PersistenceError::Invalid(
+                "復元試行後の pending context は commit できません".to_owned(),
+            ));
+        }
+        self.staged.commit()?;
+        self.committed = true;
+        self.lock.take();
+        Ok(())
+    }
+
+    pub fn validate_commit(&self) -> Result<(), PersistenceError> {
+        if self.committed {
+            return Err(PersistenceError::Invalid(
+                "commit 済みの pending context は再度 commit できません".to_owned(),
+            ));
+        }
+        if self.rolled_back {
+            return Err(PersistenceError::Invalid(
+                "rollback 後の pending context は commit できません".to_owned(),
+            ));
+        }
+        if self.rollback_attempted {
+            return Err(PersistenceError::Invalid(
+                "復元試行後の pending context は commit できません".to_owned(),
+            ));
+        }
+        self.staged.validate_commit().map_err(Into::into)
+    }
+
+    pub fn rollback(&mut self) -> Result<(), PersistenceError> {
+        self.rollback_with(|staged| staged.restore())
+    }
+
+    pub fn rollback_with_directories(
+        &mut self,
+        directories: &DirectoryLocks,
+    ) -> Result<(), PersistenceError> {
+        self.rollback_with(|staged| staged.restore_locked(directories))
+    }
+
+    fn rollback_with<F>(&mut self, restore: F) -> Result<(), PersistenceError>
+    where
+        F: FnOnce(&mut StagedFile) -> std::io::Result<()>,
+    {
+        if self.committed {
+            return Err(PersistenceError::Invalid(
+                "commit 後の rollback はできません".to_owned(),
+            ));
+        }
+        if self.rolled_back {
+            return Ok(());
+        }
+        if self.rollback_attempted {
+            return Err(PersistenceError::Invalid(
+                "復元試行済みの pending context は再度 rollback できません".to_owned(),
+            ));
+        }
+        self.rollback_attempted = true;
+        if let Err(error) = restore(&mut self.staged) {
+            eprintln!("pending context のロールバックに失敗しました: {error}");
+            return Err(error.into());
+        }
+        self.rolled_back = true;
+        self.lock.take();
+        Ok(())
+    }
+}
+
+impl Drop for PendingFrameContextChange {
+    fn drop(&mut self) {
+        if self.committed || self.rolled_back || self.rollback_attempted {
+            return;
+        }
+        if let Err(error) = self.rollback() {
+            eprintln!("pending context の自動ロールバックに失敗しました: {error}");
+        }
+    }
 }
 
 impl CompanionStorage {
@@ -656,11 +763,48 @@ impl CompanionStorage {
             .collect())
     }
 
+    pub fn prepare_pending_frame_contexts(
+        &self,
+        contexts: Vec<PendingFrameContext>,
+    ) -> Result<Option<PendingFrameContextChange>, PersistenceError> {
+        if contexts.is_empty() {
+            return Ok(None);
+        }
+        let lock_path = cursor_lock_path(&self.cursor_path);
+        let lock = SiblingLock::acquire(&lock_path)?;
+        let mut cursor = read_cursor_locked(
+            &self.cursor_path,
+            &self.pending_quarantine_path,
+            &self.pending_delivery_quarantine_path,
+            &self.turn_commit_quarantine_path,
+            &self.log_path,
+        )?;
+        let mut scoped_cursor = self.scope_cursor_to_generation(cursor.clone());
+        add_pending_frame_contexts(&mut scoped_cursor, &contexts)?;
+        if let Some(generation) = self.pinned_conversation_generation {
+            self.merge_cursor_generation(&mut cursor, scoped_cursor, generation)?;
+        } else {
+            cursor = scoped_cursor;
+        }
+        #[cfg(test)]
+        failpoints::before_cursor_write(&self.cursor_path)?;
+        let bytes = cursor_document_bytes(&cursor)?;
+        let staged = StagedFile::prepare(&self.cursor_path, &bytes, None)?;
+        Ok(Some(PendingFrameContextChange {
+            staged,
+            lock: Some(lock),
+            committed: false,
+            rolled_back: false,
+            rollback_attempted: false,
+        }))
+    }
+
     pub fn register_pending_frame_context(
         &self,
         context: PendingFrameContext,
     ) -> Result<(), PersistenceError> {
-        self.register_pending_frame_context_cancellable(context, None)
+        self.register_pending_frame_contexts_cancellable(vec![context], None)
+            .map(|_| ())
     }
 
     pub fn register_pending_frame_context_cancellable(
@@ -668,33 +812,42 @@ impl CompanionStorage {
         context: PendingFrameContext,
         publication: Option<&crate::persistence::PublicationGate>,
     ) -> Result<(), PersistenceError> {
+        self.register_pending_frame_contexts_cancellable(vec![context], publication)
+            .map(|_| ())
+    }
+
+    pub fn register_pending_frame_contexts_cancellable(
+        &self,
+        contexts: Vec<PendingFrameContext>,
+        publication: Option<&crate::persistence::PublicationGate>,
+    ) -> Result<Vec<String>, PersistenceError> {
+        if contexts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut registered_ids = Vec::new();
         self.update_cursor_cancellable(
             |cursor| {
-                if cursor
-                    .consumed_frame_context_ids
-                    .iter()
-                    .any(|id| id == &context.id)
-                {
-                    return Ok(());
-                }
-                if let Some(existing) = cursor
+                registered_ids = add_pending_frame_contexts(cursor, &contexts)?;
+                Ok(())
+            },
+            publication,
+        )?;
+        Ok(registered_ids)
+    }
+
+    pub fn remove_pending_frame_contexts(
+        &self,
+        ids: &[String],
+        publication: Option<&crate::persistence::PublicationGate>,
+    ) -> Result<(), PersistenceError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.update_cursor_cancellable(
+            |cursor| {
+                cursor
                     .pending_frame_contexts
-                    .iter()
-                    .find(|existing| existing.id == context.id)
-                {
-                    if existing != &context {
-                        return Err(PersistenceError::Invalid(
-                            "処理待ち画面の ID が重複しています".to_owned(),
-                        ));
-                    }
-                    return Ok(());
-                }
-                cursor.pending_frame_contexts.push(context);
-                if cursor.pending_frame_contexts.len() > 100 {
-                    cursor
-                        .pending_frame_contexts
-                        .drain(..cursor.pending_frame_contexts.len() - 100);
-                }
+                    .retain(|context| !ids.iter().any(|id| id == &context.id));
                 Ok(())
             },
             publication,
@@ -1511,11 +1664,53 @@ fn parse_pending_observation(value: Value) -> Result<PendingObservation, Persist
     ))
 }
 
+fn add_pending_frame_contexts(
+    cursor: &mut CursorSnapshot,
+    contexts: &[PendingFrameContext],
+) -> Result<Vec<String>, PersistenceError> {
+    let mut registered_ids = Vec::new();
+    for context in contexts {
+        if cursor
+            .consumed_frame_context_ids
+            .iter()
+            .any(|id| id == &context.id)
+        {
+            continue;
+        }
+        if let Some(existing) = cursor
+            .pending_frame_contexts
+            .iter()
+            .find(|existing| existing.id == context.id)
+        {
+            if existing != context {
+                return Err(PersistenceError::Invalid(
+                    "処理待ち画面の ID が重複しています".to_owned(),
+                ));
+            }
+            continue;
+        }
+        cursor.pending_frame_contexts.push(context.clone());
+        registered_ids.push(context.id.clone());
+    }
+    if cursor.pending_frame_contexts.len() > 100 {
+        cursor
+            .pending_frame_contexts
+            .drain(..cursor.pending_frame_contexts.len() - 100);
+    }
+    Ok(registered_ids)
+}
+
 fn write_cursor_locked_cancellable(
     path: &Path,
     cursor: &CursorSnapshot,
     publication: Option<&crate::persistence::PublicationGate>,
 ) -> Result<(), PersistenceError> {
+    let bytes = cursor_document_bytes(cursor)?;
+    crate::persistence::atomic_write_bytes_cancellable(path, &bytes, publication)?;
+    Ok(())
+}
+
+fn cursor_document_bytes(cursor: &CursorSnapshot) -> Result<Vec<u8>, PersistenceError> {
     let ids = retain_ids(cursor.ids.clone());
     let failed = retain_ids(cursor.failed.clone());
     let observation_attempts = cursor.observation_attempts.clone();
@@ -1535,43 +1730,38 @@ fn write_cursor_locked_cancellable(
     validate_observation_consumptions(&cursor.observation_consumptions)?;
     validate_observation_attempts(&observation_attempts)?;
     validate_pending_deliveries(&cursor.pending_deliveries)?;
-    crate::persistence::atomic_write_json_cancellable(
-        path,
-        &CursorDocument {
-            emotion_updates_enabled: cursor.emotion_updates_enabled,
-            companion_emotions: cursor.companion_emotions,
-            emotion_epoch: cursor.emotion_epoch,
-            schema_version: CURSOR_SCHEMA_VERSION,
-            user_operation_generation: cursor.user_operation_generation,
-            user_epoch: cursor.user_epoch,
-            next_user_seq: cursor.next_user_seq.max(
-                cursor
-                    .pending_inputs
-                    .iter()
-                    .map(|pending| match pending {
-                        PendingInput::UserMessage(input) => input.user_seq,
-                    })
-                    .max()
-                    .unwrap_or(0),
-            ),
-            next_dispatch_seq: cursor.next_dispatch_seq,
-            user_dispatch: &cursor.user_dispatch,
-            active_turn_commit: &cursor.active_turn_commit,
-            ids: &ids,
-            pending: &cursor.pending,
-            failed: &failed,
-            observation_attempts: &observation_attempts,
-            cancelled_input_ids: &cancelled_input_ids,
-            pending_inputs: &cursor.pending_inputs,
-            pending_deliveries: &cursor.pending_deliveries,
-            pending_frame_contexts: &cursor.pending_frame_contexts,
-            consumed_frame_context_ids: &consumed_frame_context_ids,
-            observation_consumptions: &cursor.observation_consumptions,
-            turn_commit_recovery_attempts: &cursor.turn_commit_recovery_attempts,
-        },
-        publication,
-    )?;
-    Ok(())
+    Ok(serde_json::to_vec_pretty(&CursorDocument {
+        emotion_updates_enabled: cursor.emotion_updates_enabled,
+        companion_emotions: cursor.companion_emotions,
+        emotion_epoch: cursor.emotion_epoch,
+        schema_version: CURSOR_SCHEMA_VERSION,
+        user_operation_generation: cursor.user_operation_generation,
+        user_epoch: cursor.user_epoch,
+        next_user_seq: cursor.next_user_seq.max(
+            cursor
+                .pending_inputs
+                .iter()
+                .map(|pending| match pending {
+                    PendingInput::UserMessage(input) => input.user_seq,
+                })
+                .max()
+                .unwrap_or(0),
+        ),
+        next_dispatch_seq: cursor.next_dispatch_seq,
+        user_dispatch: &cursor.user_dispatch,
+        active_turn_commit: &cursor.active_turn_commit,
+        ids: &ids,
+        pending: &cursor.pending,
+        failed: &failed,
+        observation_attempts: &observation_attempts,
+        cancelled_input_ids: &cancelled_input_ids,
+        pending_inputs: &cursor.pending_inputs,
+        pending_deliveries: &cursor.pending_deliveries,
+        pending_frame_contexts: &cursor.pending_frame_contexts,
+        consumed_frame_context_ids: &consumed_frame_context_ids,
+        observation_consumptions: &cursor.observation_consumptions,
+        turn_commit_recovery_attempts: &cursor.turn_commit_recovery_attempts,
+    })?)
 }
 
 fn load_recent_conversation(

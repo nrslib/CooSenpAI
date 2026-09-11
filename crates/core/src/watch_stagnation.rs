@@ -1,4 +1,6 @@
-use crate::persistence::{atomic_write_json, PersistenceError, SiblingLock};
+use crate::persistence::{
+    atomic_write_json, DirectoryLocks, PersistenceError, SiblingLock, StagedFile,
+};
 use crate::ports::ActivitySnapshot;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -190,6 +192,111 @@ pub struct WatchStagnationStore {
     publication: Option<crate::persistence::PublicationGate>,
 }
 
+#[derive(Debug)]
+pub struct StagnationChange {
+    staged: StagedFile,
+    lock: Option<SiblingLock>,
+    committed: bool,
+    rolled_back: bool,
+    rollback_attempted: bool,
+}
+
+impl StagnationChange {
+    pub fn publish(&mut self, directories: &DirectoryLocks) -> Result<(), PersistenceError> {
+        self.staged.publish(directories)?;
+        Ok(())
+    }
+
+    pub fn directories(&self) -> Vec<PathBuf> {
+        vec![self.staged.parent().to_owned()]
+    }
+
+    pub fn commit(&mut self) -> Result<(), PersistenceError> {
+        if self.rolled_back {
+            return Err(PersistenceError::Invalid(
+                "rollback 後の fingerprint は commit できません".to_owned(),
+            ));
+        }
+        if self.rollback_attempted {
+            return Err(PersistenceError::Invalid(
+                "復元試行後の fingerprint は commit できません".to_owned(),
+            ));
+        }
+        self.staged.commit()?;
+        self.committed = true;
+        self.lock.take();
+        Ok(())
+    }
+
+    pub fn validate_commit(&self) -> Result<(), PersistenceError> {
+        if self.committed {
+            return Err(PersistenceError::Invalid(
+                "commit 済みの fingerprint は再度 commit できません".to_owned(),
+            ));
+        }
+        if self.rolled_back {
+            return Err(PersistenceError::Invalid(
+                "rollback 後の fingerprint は commit できません".to_owned(),
+            ));
+        }
+        if self.rollback_attempted {
+            return Err(PersistenceError::Invalid(
+                "復元試行後の fingerprint は commit できません".to_owned(),
+            ));
+        }
+        self.staged.validate_commit().map_err(Into::into)
+    }
+
+    pub fn rollback(&mut self) -> Result<(), PersistenceError> {
+        self.rollback_with(|staged| staged.restore())
+    }
+
+    pub fn rollback_with_directories(
+        &mut self,
+        directories: &DirectoryLocks,
+    ) -> Result<(), PersistenceError> {
+        self.rollback_with(|staged| staged.restore_locked(directories))
+    }
+
+    fn rollback_with<F>(&mut self, restore: F) -> Result<(), PersistenceError>
+    where
+        F: FnOnce(&mut StagedFile) -> std::io::Result<()>,
+    {
+        if self.committed {
+            return Err(PersistenceError::Invalid(
+                "commit 後の rollback はできません".to_owned(),
+            ));
+        }
+        if self.rolled_back {
+            return Ok(());
+        }
+        if self.rollback_attempted {
+            return Err(PersistenceError::Invalid(
+                "復元試行済みの fingerprint は再度 rollback できません".to_owned(),
+            ));
+        }
+        self.rollback_attempted = true;
+        if let Err(error) = restore(&mut self.staged) {
+            eprintln!("停滞 fingerprint のロールバックに失敗しました: {error}");
+            return Err(error.into());
+        }
+        self.rolled_back = true;
+        self.lock.take();
+        Ok(())
+    }
+}
+
+impl Drop for StagnationChange {
+    fn drop(&mut self) {
+        if self.committed || self.rolled_back || self.rollback_attempted {
+            return;
+        }
+        if let Err(error) = self.rollback() {
+            eprintln!("停滞 fingerprint の自動ロールバックに失敗しました: {error}");
+        }
+    }
+}
+
 impl WatchStagnationStore {
     pub fn new(path: PathBuf) -> Self {
         Self {
@@ -206,6 +313,13 @@ impl WatchStagnationStore {
         self
     }
 
+    pub fn without_publication_gate(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            publication: None,
+        }
+    }
+
     pub fn load(&self, now: DateTime<Utc>) -> Result<StagnationSnapshot, PersistenceError> {
         let _lock = SiblingLock::acquire(&self.path.with_extension("json.lock"))?;
         let state = self.load_unlocked()?;
@@ -218,21 +332,82 @@ impl WatchStagnationStore {
         fingerprint: StagnationFingerprint,
         changed_at: DateTime<Utc>,
     ) -> Result<bool, PersistenceError> {
-        let _lock = SiblingLock::acquire(&self.path.with_extension("json.lock"))?;
+        let Some(mut change) = self.prepare_meaningful_change(target, fingerprint, changed_at)?
+        else {
+            return Ok(false);
+        };
+        let directories = change.directories();
+        let mut publication_started = false;
+        let publish = match &self.publication {
+            Some(publication) => publication.publish_batch_with_directories(directories, |locks| {
+                publication_started = true;
+                let result = (|| {
+                    change.publish(locks)?;
+                    change.validate_commit()?;
+                    change.commit()
+                })();
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) => match change.rollback_with_directories(locks) {
+                        Ok(()) => Err(error),
+                        Err(rollback) => Err(PersistenceError::Io(std::io::Error::other(format!(
+                            "{error}; ロールバックにも失敗しました: {rollback}"
+                        )))),
+                    },
+                }
+            }),
+            None => {
+                let locks = DirectoryLocks::acquire(directories, None)?;
+                publication_started = true;
+                let result = (|| {
+                    change.publish(&locks)?;
+                    change.validate_commit()?;
+                    change.commit()
+                })();
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) => match change.rollback_with_directories(&locks) {
+                        Ok(()) => Err(error),
+                        Err(rollback) => Err(PersistenceError::Io(std::io::Error::other(format!(
+                            "{error}; ロールバックにも失敗しました: {rollback}"
+                        )))),
+                    },
+                }
+            }
+        };
+        if let Err(error) = publish {
+            if !publication_started {
+                change.rollback()?;
+            }
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    pub fn prepare_meaningful_change(
+        &self,
+        target: &str,
+        fingerprint: StagnationFingerprint,
+        changed_at: DateTime<Utc>,
+    ) -> Result<Option<StagnationChange>, PersistenceError> {
+        let lock = SiblingLock::acquire(&self.path.with_extension("json.lock"))?;
         let mut state = self.load_unlocked()?;
         if state.fingerprints.get(target) == Some(&fingerprint) {
-            return Ok(false);
+            return Ok(None);
         }
         state.fingerprints.insert(target.to_owned(), fingerprint);
         state.last_meaningful_change_at = Some(changed_at.to_rfc3339());
         state.reported_at = None;
         state.pending_report = None;
-        crate::persistence::atomic_write_json_cancellable(
-            &self.path,
-            &state,
-            self.publication.as_ref(),
-        )?;
-        Ok(true)
+        let bytes = serde_json::to_vec_pretty(&state)?;
+        let staged = StagedFile::prepare(&self.path, &bytes, None)?;
+        Ok(Some(StagnationChange {
+            staged,
+            lock: Some(lock),
+            committed: false,
+            rolled_back: false,
+            rollback_attempted: false,
+        }))
     }
 
     pub fn prepare_report(

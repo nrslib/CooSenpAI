@@ -15,20 +15,42 @@ use core_graphics::window::{
 use objc2_app_kit::NSRunningApplication;
 use objc2_foundation::NSString;
 
+const MIN_APPLICATION_WINDOW_SIZE: f64 = 200.0;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ApplicationWindow {
     pub id: u32,
     pub bounds: CGRect,
 }
 
-pub(crate) fn application_window(bundle_id: &str) -> Result<Option<ApplicationWindow>> {
-    let windows = application_windows(bundle_id)?;
-    Ok(largest_window(&windows))
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ApplicationCaptureWindow {
+    pub window: ApplicationWindow,
+    pub display: ScreenDisplay,
 }
 
 pub(crate) fn frontmost_application_window(bundle_id: &str) -> Result<Option<ApplicationWindow>> {
     let windows = application_windows(bundle_id)?;
     Ok(frontmost_window(&windows))
+}
+
+pub(crate) fn application_capture_windows(
+    bundle_id: &str,
+    limit: usize,
+) -> Result<Vec<ApplicationCaptureWindow>> {
+    let windows = application_windows(bundle_id)?;
+    if windows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let displays = crate::display_capture::active_screen_displays()?;
+    let candidates = windows
+        .into_iter()
+        .filter_map(|window| {
+            display_for_window(window, &displays)
+                .map(|display| ApplicationCaptureWindow { window, display })
+        })
+        .collect::<Vec<_>>();
+    Ok(select_application_windows(&candidates, limit))
 }
 
 fn application_windows(bundle_id: &str) -> Result<Vec<ApplicationWindow>> {
@@ -94,19 +116,65 @@ fn application_windows(bundle_id: &str) -> Result<Vec<ApplicationWindow>> {
     Ok(candidates)
 }
 
-fn largest_window(candidates: &[ApplicationWindow]) -> Option<ApplicationWindow> {
-    candidates
-        .iter()
-        .copied()
-        .max_by(|left, right| window_area(left.bounds).total_cmp(&window_area(right.bounds)))
-}
-
 fn frontmost_window(candidates: &[ApplicationWindow]) -> Option<ApplicationWindow> {
     candidates.first().copied()
 }
 
 fn window_area(bounds: CGRect) -> f64 {
     bounds.size.width * bounds.size.height
+}
+
+fn display_for_window(
+    window: ApplicationWindow,
+    displays: &[ScreenDisplay],
+) -> Option<ScreenDisplay> {
+    displays
+        .iter()
+        .copied()
+        .filter_map(|display| {
+            let area = intersection_area(window.bounds, display.bounds);
+            (area > 0.0).then_some((area, display))
+        })
+        .max_by(|(left_area, left_display), (right_area, right_display)| {
+            left_area
+                .total_cmp(right_area)
+                .then_with(|| left_display.id.cmp(&right_display.id))
+        })
+        .map(|(_, display)| display)
+}
+
+fn intersection_area(window: CGRect, display: WindowBounds) -> f64 {
+    let left = window.origin.x.max(display.x);
+    let top = window.origin.y.max(display.y);
+    let right = (window.origin.x + window.size.width).min(display.x + display.width);
+    let bottom = (window.origin.y + window.size.height).min(display.y + display.height);
+    (right - left).max(0.0) * (bottom - top).max(0.0)
+}
+
+fn select_application_windows(
+    candidates: &[ApplicationCaptureWindow],
+    limit: usize,
+) -> Vec<ApplicationCaptureWindow> {
+    let mut selected = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            let bounds = candidate.window.bounds;
+            bounds.origin.x.is_finite()
+                && bounds.origin.y.is_finite()
+                && bounds.size.width.is_finite()
+                && bounds.size.height.is_finite()
+                && bounds.size.width >= MIN_APPLICATION_WINDOW_SIZE
+                && bounds.size.height >= MIN_APPLICATION_WINDOW_SIZE
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        window_area(right.window.bounds)
+            .total_cmp(&window_area(left.window.bounds))
+            .then_with(|| left.window.id.cmp(&right.window.id))
+    });
+    selected.truncate(limit);
+    selected
 }
 
 fn dictionary_number(dictionary: &CFDictionary<CFString, CFType>, key: &CFString) -> Option<i64> {

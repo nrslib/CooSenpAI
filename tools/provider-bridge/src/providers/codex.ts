@@ -7,7 +7,7 @@ import { BridgeError, invalidJsonOutput, safeProviderError } from "../errors.js"
 import { validateImages } from "../images.js";
 import type { ProviderAgent, ProviderCallOptions, ProviderCallResult, ProviderUsage } from "../types.js";
 import { codexInput, codexOutputSchema } from "./inputs.js";
-import { observationFrameDirectory } from "./observation-frame-directory.js";
+import { observationDirectories } from "./observation-frame-directory.js";
 
 function environment(): Record<string, string> {
   return Object.fromEntries(
@@ -54,6 +54,8 @@ function usageFromEvent(event: ThreadEvent): ProviderUsage | undefined {
   };
 }
 
+export type CodexClientFactory = (options: CodexOptions) => Codex;
+
 async function ephemeralEnvironment(): Promise<{ env: Record<string, string>; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "coosenpai-codex-"));
   const sourceHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
@@ -92,6 +94,8 @@ export class CodexAgent implements ProviderAgent {
   readonly provider = "codex" as const;
   readonly capabilities = PROVIDER_CAPABILITIES.codex;
 
+  constructor(private readonly createClient: CodexClientFactory = (options) => new Codex(options)) {}
+
   async send(options: ProviderCallOptions): Promise<ProviderCallResult> {
     if (options.isolateTools === true) throw new BridgeError("unsupported", "Codex の作業用 tool 隔離は未対応です");
     const ephemeral = options.session.mode === "ephemeral" ? await ephemeralEnvironment() : undefined;
@@ -103,12 +107,12 @@ export class CodexAgent implements ProviderAgent {
         web_search: "disabled",
         model_reasoning_summary: "auto",
       } as CodexOptions["config"];
-      const client = new Codex({
+      const client = this.createClient({
         env: sdkEnvironment,
         ...(config === undefined ? {} : { config }),
         ...(options.executable === undefined ? {} : { codexPathOverride: options.executable }),
       });
-      const frameDirectory = observationFrameDirectory();
+      const readableObservationDirectories = observationDirectories();
       const threadOptions: ThreadOptions = {
         workingDirectory: options.cwd,
         skipGitRepoCheck: true,
@@ -116,7 +120,9 @@ export class CodexAgent implements ProviderAgent {
         approvalPolicy: "never",
         networkAccessEnabled: false,
         webSearchMode: "disabled",
-        ...(frameDirectory === undefined ? {} : { additionalDirectories: [frameDirectory] }),
+        ...(readableObservationDirectories.length === 0
+          ? {}
+          : { additionalDirectories: readableObservationDirectories }),
         ...(model(options.model) === undefined ? {} : { model: model(options.model) as string }),
         ...(effort(options.effort) === undefined
           ? {}
@@ -141,6 +147,22 @@ export class CodexAgent implements ProviderAgent {
         if (event.type === "thread.started") sessionId = event.thread_id;
         usage = usageFromEvent(event) ?? usage;
         if (event.type !== "item.updated" && event.type !== "item.completed") continue;
+        if (event.type === "item.completed" && event.item.type === "command_execution") {
+          options.onToolExecution?.({
+            provider: "codex",
+            tool: "command_execution",
+            input: { command: event.item.command },
+            output: event.item.aggregated_output,
+          });
+        }
+        if (event.type === "item.completed" && event.item.type === "mcp_tool_call") {
+          options.onToolExecution?.({
+            provider: "codex",
+            tool: `${event.item.server}/${event.item.tool}`,
+            input: event.item.arguments,
+            output: event.item.result ?? event.item.error,
+          });
+        }
         if (event.item.type !== "agent_message") continue;
         const previous = offsets.get(event.item.id) ?? 0;
         if (event.item.text.length > previous) {

@@ -7,6 +7,7 @@ use coosenpai_core::image_processing::own_window_exclusions;
 use coosenpai_core::logging::FileLogger;
 use coosenpai_core::notification::NotificationConsumer;
 use coosenpai_core::observer::ObservationFrameInput;
+use coosenpai_core::persistence::PublicationGate;
 use coosenpai_core::ports::{
     ActivityPort, ApplicationCapturePort, Clock, HelperResolverPort, OcrPort, OwnWindowBoundsPort,
     PowerEvent, PowerEventPort, RuntimeLogger, ScreenCapturePort, SystemClock,
@@ -56,12 +57,19 @@ pub(crate) async fn run(
         println!("watch stopped");
         return Ok(());
     };
-    let cancellation = bootstrap.cancellation();
-    if cancellation.is_cancelled() {
+    let requested_cancellation = bootstrap.cancellation();
+    if requested_cancellation.is_cancelled() {
         bootstrap.stop().await;
         println!("watch stopped");
         return Ok(());
     }
+    let cancellation = CancellationToken::new();
+    let publication = PublicationGate::new(cancellation.clone());
+    let forward_publication = publication.clone();
+    let cancellation_forwarder = tokio::spawn(async move {
+        requested_cancellation.cancelled().await;
+        forward_publication.cancel();
+    });
     let own_windows = platform::MacOwnWindowBounds::empty();
     let agents = bootstrap.take_agents()?;
     let runtime = RuntimeActor::spawn_agents_with_factory_logger_and_cancellation(
@@ -112,7 +120,8 @@ pub(crate) async fn run(
     let now = Instant::now();
     let now_utc = Utc::now();
     let initial_activity = activity.read_activity().await.ok();
-    let stagnation_store = WatchStagnationStore::new(paths.watch_stagnation.clone());
+    let stagnation_store = WatchStagnationStore::new(paths.watch_stagnation.clone())
+        .with_publication_gate(publication.clone());
     let stagnation_snapshot = stagnation_store.load(now_utc).unwrap_or(
         coosenpai_core::watch_coordinator::StagnationSnapshot {
             last_meaningful_change_at: now_utc,
@@ -143,6 +152,7 @@ pub(crate) async fn run(
         last_captured_at: None,
         temporary_directories: Vec::new(),
         target_statuses: Vec::new(),
+        publication,
         stagnation: StagnationTracker::resume(
             now,
             stagnation_snapshot.elapsed(now_utc),
@@ -205,6 +215,7 @@ pub(crate) async fn run(
         }
     }
     let watch_result: Result<()> = {
+        let watch_publication = watch_state.publication.clone();
         let watch_loop = async {
             loop {
                 config_reload
@@ -376,7 +387,10 @@ pub(crate) async fn run(
         tokio::pin!(watch_loop);
         tokio::select! {
             result = &mut watch_loop => result,
-            _ = cancellation.cancelled() => Ok(()),
+            _ = cancellation.cancelled() => {
+                watch_publication.cancel();
+                Ok(())
+            },
         }
     };
     status.phase = "終了中";
@@ -395,6 +409,8 @@ pub(crate) async fn run(
         }
     }
     bootstrap.stop().await;
+    cancellation_forwarder.abort();
+    let _ = cancellation_forwarder.await;
     let _ = FrameBuffer::new(paths.frame_buffer.clone()).cleanup_expired(Utc::now());
     if !interrupted {
         watch_result?;
@@ -421,6 +437,7 @@ struct WatchState {
     last_captured_at: Option<chrono::DateTime<Utc>>,
     temporary_directories: Vec<tempfile::TempDir>,
     target_statuses: Vec<TargetStatus>,
+    publication: PublicationGate,
     stagnation: StagnationTracker,
     stagnation_store: WatchStagnationStore,
     pending_stagnation_report: Option<StagnationReportIntent>,

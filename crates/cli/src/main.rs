@@ -392,6 +392,8 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                 .enumerate()
                 .map(|(index, _)| ObserverPromptFrame {
                     display: None,
+                    window_id: None,
+                    window_bounds: None,
                     index: index + 1,
                     relative_seconds: index as f64 * 15.0,
                     trigger: Some(ActivityTriggerKind::Timer),

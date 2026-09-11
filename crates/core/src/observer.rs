@@ -67,6 +67,8 @@ use storage::{
 #[derive(Debug, Clone)]
 pub struct ObservationFrameInput {
     pub display: Option<crate::ports::ScreenDisplay>,
+    pub window_id: Option<u32>,
+    pub window_bounds: Option<crate::ports::WindowBounds>,
     pub scope_generation: u64,
     pub context_id: String,
     pub captured_at: DateTime<Utc>,
@@ -353,6 +355,8 @@ impl ObserverAgent {
             .map(|(index, frame)| ObserverPromptFrame {
                 index: index + 1,
                 display: frame.display,
+                window_id: frame.window_id,
+                window_bounds: frame.window_bounds,
                 relative_seconds: frame.relative_seconds,
                 trigger: Some(frame.trigger),
                 front_app: frame.front_app.clone(),

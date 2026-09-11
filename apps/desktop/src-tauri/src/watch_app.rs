@@ -1,19 +1,24 @@
 use super::{
-    capture_is_allowed, capture_trigger, ensure_capture_active, mark_meaningful_change,
-    record_gate, trigger_name, CaptureDisposition, WatchMemory,
+    capture_is_allowed, capture_trigger, ensure_capture_active, record_gate, trigger_name,
+    CaptureDisposition, WatchMemory,
 };
 use crate::state::DesktopState;
 use crate::watch_presenter::WatchResult;
-use anyhow::{Context, Result};
+use anyhow::Result;
+use coosenpai_core::application_frames::{
+    compare_application_signatures, prepare_application_frames,
+};
+use coosenpai_core::companion_storage::PendingFrameContextChange;
 use coosenpai_core::config::{Config, WatchAppConfig};
-use coosenpai_core::debug::DebugStore;
-use coosenpai_core::image_processing::{png_dimensions, process_png};
-use coosenpai_core::observer::ObservationFrameInput;
+use coosenpai_core::debug::{
+    ocr_preview, DebugCaptureBatch, DebugFrameRecord, DebugGateRecord, DebugStore,
+};
+use coosenpai_core::persistence::DirectoryLocks;
 use coosenpai_core::ports::{ActivitySnapshot, ApplicationCapturePort, OcrPort, RuntimeLogger};
 use coosenpai_core::state::{ActivityTriggerKind, PendingFrameContext};
 use coosenpai_core::watch_coordinator::{
-    application_capture_is_needed, application_is_foreground, normalize_ocr_blocks,
-    ApplicationTriggerCoordinator, StagnationFingerprint,
+    application_capture_is_needed, application_is_foreground, ApplicationTriggerCoordinator,
+    StagnationChange, StagnationFingerprint,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -153,6 +158,8 @@ impl ApplicationWatchSet {
                     trigger,
                     CaptureDisposition::MinSpacing,
                     None,
+                    0,
+                    None,
                 )
                 .await;
                 continue;
@@ -172,7 +179,17 @@ impl ApplicationWatchSet {
                 cancellation.clone(),
             )
             .await?;
-            update_target_result(state, generation, application, trigger, result.0, result.1).await;
+            update_target_result(
+                state,
+                generation,
+                application,
+                trigger,
+                result.0,
+                result.1,
+                result.2,
+                result.3,
+            )
+            .await;
         }
         Ok(())
     }
@@ -192,165 +209,373 @@ async fn capture_application(
     memory: &mut WatchMemory,
     generation: u64,
     cancellation: CancellationToken,
-) -> Result<(CaptureDisposition, Option<String>)> {
+) -> Result<(CaptureDisposition, Option<String>, usize, Option<String>)> {
     state
         .publish_watch_view(generation, WatchResult::CaptureStarted)
         .await;
     let scope_generation = state.core_runtime().watch_scope_generation();
     ensure_capture_active(&cancellation)?;
     let directory = tempfile::tempdir()?;
-    let source = directory.path().join("application.png");
+    let source_directory = directory.path().join("captures");
     let Some(_screen_gate) =
         crate::screen_capture_gate::acquire_screen_capture_gate(state, &cancellation).await
     else {
         return Err(anyhow::anyhow!("見守りの撮影が取り消されました"));
     };
     let captured = capture
-        .capture_application(&application.bundle_id, &source, cancellation.clone())
-        .await
-        .map_err(anyhow::Error::new)?;
-    ensure_capture_active(&cancellation)?;
-    let Some(captured) = captured else {
-        target.last_capture = Instant::now();
-        return Ok((CaptureDisposition::WindowUnavailable, None));
-    };
-    if cancellation.is_cancelled() {
-        return Err(anyhow::anyhow!("見守りの撮影が取り消されました"));
-    }
-    let captured_at = chrono::Utc::now();
-    let bytes = tokio::fs::read(&captured.path).await?;
-    ensure_capture_active(&cancellation)?;
-    let (width, height) = png_dimensions(&bytes).context("アプリの画面 PNG が不正です")?;
-    let processed = process_png(
-        bytes,
-        config.watch.downscale_width,
-        0,
-        Vec::new(),
-        semaphore.clone(),
-    )
-    .await?;
-    ensure_capture_active(&cancellation)?;
-    let provider_path = directory.path().join("provider.png");
-    tokio::fs::write(&provider_path, &processed.provider_png).await?;
-    ensure_capture_active(&cancellation)?;
-    let ocr_text = if ocr_enabled {
-        let ocr_path = directory.path().join("ocr.png");
-        tokio::fs::write(&ocr_path, &processed.masked_png).await?;
-        ensure_capture_active(&cancellation)?;
-        ocr.recognize(
-            &ocr_path,
-            &config.watch.ocr_gate.level,
-            Duration::from_millis(config.watch.ocr_gate.timeout_ms),
+        .capture_application(
+            &application.bundle_id,
+            &source_directory,
+            config.watch.app_window_limit,
             cancellation.clone(),
         )
         .await
-        .ok()
-        .map(|blocks| normalize_ocr_blocks(&blocks, width, height, &[], 0))
-    } else {
-        None
-    };
+        .map_err(anyhow::Error::new)?;
     ensure_capture_active(&cancellation)?;
-    let changed_by_ocr = matches!((&ocr_text, &target.last_ocr), (Some(_), Some(_)));
-    let changed = match (&ocr_text, &target.last_ocr) {
-        (Some(current), Some(previous)) => current.signature != *previous,
-        _ => target.last_hash.as_deref() != Some(processed.comparison_hash.as_str()),
-    };
-    let context_id = DebugStore::new_id();
-    let debug_id = config.debug.enabled.then(|| context_id.clone());
-    ensure_capture_active(&cancellation)?;
-    if let Some(id) = &debug_id {
-        DebugStore::from_paths(&state.paths)
-            .with_publication_gate(memory.publication.clone())
-            .record_frame(
-                id,
-                captured_at,
-                &processed.provider_png,
-                ocr_text.as_ref().map(|value| value.text.as_str()),
-            )?;
+    if captured.is_empty() {
+        target.last_capture = Instant::now();
+        return Ok((CaptureDisposition::WindowUnavailable, None, 0, None));
     }
-    target.last_capture = Instant::now();
-    if !changed {
-        record_gate(
-            state,
-            config,
+    let captured_at = chrono::Utc::now();
+    let prepared = prepare_application_frames(
+        captured,
+        &directory.path().join("processed"),
+        config,
+        ocr,
+        ocr_enabled,
+        semaphore.clone(),
+        &cancellation,
+    )
+    .await?;
+    let captured_at_instant = Instant::now();
+    let comparison = compare_application_signatures(
+        target.last_hash.as_deref(),
+        target.last_ocr.as_deref(),
+        &prepared.signatures,
+    );
+    let frame_count = prepared.frames.len();
+    let frame_target = format!("app:{}", application.bundle_id);
+    let mut frames = Vec::with_capacity(prepared.frames.len());
+    let mut debug_frames = Vec::new();
+    for prepared_frame in prepared.frames {
+        let frame = prepared_frame.observation_frame(
+            scope_generation,
+            captured_at,
+            captured_at_instant
+                .duration_since(memory.window_start)
+                .as_secs_f64(),
             trigger,
-            debug_id.as_deref(),
-            ocr_text.as_ref().map(|value| value.text.as_str()),
+            memory.front_app.clone(),
+            application.name.clone(),
+            frame_target.clone(),
+            config.debug.enabled,
+        );
+        if let Some(id) = &frame.debug_id {
+            debug_frames.push(DebugFrameRecord {
+                id: id.clone(),
+                created_at: captured_at,
+                provider_png: prepared_frame.image.provider_png.clone(),
+                ocr_text: frame.ocr_text.clone(),
+            });
+        }
+        frames.push(frame);
+    }
+    ensure_capture_active(&cancellation)?;
+    let debug_store = DebugStore::from_paths(&state.paths);
+    if !comparison.changed {
+        let prune_store = debug_store.clone();
+        let mut debug_batch = record_application_debug_batch(
+            &debug_store,
+            &frames,
+            trigger,
             false,
-            if changed_by_ocr {
+            if comparison.changed_by_ocr {
                 "OCR 一致"
             } else {
                 "画素一致"
             },
-            &memory.publication,
+            true,
+            captured_at,
+            debug_frames,
         )?;
+        let directories = debug_batch.directories();
+        let mut publication_started = false;
+        let publication =
+            memory
+                .publication
+                .publish_batch_with_directories(directories, |locks| -> Result<()> {
+                    publication_started = true;
+                    let result = (|| {
+                        debug_batch.publish(locks)?;
+                        debug_batch.commit()?;
+                        Ok::<(), anyhow::Error>(())
+                    })();
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(rollback_application_publication_with_directories(
+                            error,
+                            &mut debug_batch,
+                            None,
+                            None,
+                            locks,
+                        )),
+                    }
+                });
+        if let Err(error) = publication {
+            if publication_started {
+                return Err(error);
+            }
+            return Err(rollback_application_publication(
+                error,
+                &mut debug_batch,
+                None,
+                None,
+            ));
+        }
+        if let Err(error) = prune_store.prune(captured_at) {
+            let _ = state
+                .logger
+                .write("WARN", &format!("debug 記録の整理に失敗しました: {error}"));
+        }
+        target.last_capture = captured_at_instant;
         return Ok((
             CaptureDisposition::Unchanged,
             Some(captured_at.to_rfc3339()),
+            0,
+            None,
         ));
     }
-    target.last_hash = Some(processed.comparison_hash);
-    target.last_ocr = ocr_text.as_ref().map(|value| value.signature.clone());
-    let frame_target = format!("app:{}", application.bundle_id);
-    mark_meaningful_change(
-        memory,
-        &frame_target,
-        target.last_hash.clone().unwrap_or_default(),
-        target.last_ocr.clone(),
-        captured_at,
-    )?;
-    if !coosenpai_core::watch_coordinator::frame_target_is_enabled(
+    let target_enabled = coosenpai_core::watch_coordinator::frame_target_is_enabled(
         &state.runtime_config(),
         &frame_target,
-    ) {
-        return Ok((CaptureDisposition::Suppressed, None));
-    }
-    let ocr_text = ocr_text.map(|value| value.text);
-    ensure_capture_active(&cancellation)?;
-    state.core_runtime().register_pending_frame_context(
-        PendingFrameContext::bounded(
-            context_id.clone(),
-            captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    );
+    if !target_enabled {
+        let comparison_hash = prepared.signatures.comparison_hash.clone();
+        let ocr_signature = prepared.signatures.ocr_signature.clone();
+        let prune_store = debug_store.clone();
+        let mut debug_batch = record_application_debug_batch(
+            &debug_store,
+            &frames,
             trigger,
-            memory.front_app.clone(),
-            Some(application.name.clone()),
-            frame_target.clone(),
-            ocr_text.clone(),
-        ),
-        &memory.publication,
-    )?;
-    memory.frames.push(ObservationFrameInput {
-        display: None,
-        scope_generation,
-        context_id,
-        captured_at,
-        debug_id: debug_id.clone(),
-        relative_seconds: target
-            .last_capture
-            .duration_since(memory.window_start)
-            .as_secs_f64(),
+            false,
+            "対象が無効です",
+            true,
+            captured_at,
+            debug_frames,
+        )?;
+        let fingerprint_store = memory.stagnation_store.without_publication_gate();
+        let mut fingerprint_change = match fingerprint_store.prepare_meaningful_change(
+            &frame_target,
+            coosenpai_core::watch_coordinator::StagnationFingerprint {
+                image_hash: comparison_hash.clone(),
+                ocr_signature: ocr_signature.clone(),
+            },
+            captured_at,
+        ) {
+            Ok(change) => change,
+            Err(error) => {
+                return Err(rollback_application_publication(
+                    anyhow::Error::from(error),
+                    &mut debug_batch,
+                    None,
+                    None,
+                ));
+            }
+        };
+        let mut directories = debug_batch.directories();
+        if let Some(change) = fingerprint_change.as_ref() {
+            directories.extend(change.directories());
+        }
+        let mut publication_started = false;
+        let publication =
+            memory
+                .publication
+                .publish_batch_with_directories(directories, |locks| -> Result<()> {
+                    publication_started = true;
+                    let result = (|| {
+                        debug_batch.publish(locks)?;
+                        if let Some(change) = fingerprint_change.as_mut() {
+                            change.publish(locks)?;
+                        }
+                        debug_batch.validate_commit()?;
+                        if let Some(change) = fingerprint_change.as_ref() {
+                            change.validate_commit()?;
+                        }
+                        debug_batch.commit()?;
+                        if let Some(change) = fingerprint_change.as_mut() {
+                            change.commit()?;
+                            memory.stagnation.mark_meaningful_change(Instant::now());
+                            memory.pending_stagnation_report = None;
+                            memory.last_meaningful_change_at = captured_at;
+                        }
+                        target.last_hash = Some(comparison_hash.clone());
+                        target.last_ocr = ocr_signature.clone();
+                        target.last_capture = captured_at_instant;
+                        Ok::<(), anyhow::Error>(())
+                    })();
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(rollback_application_publication_with_directories(
+                            error,
+                            &mut debug_batch,
+                            fingerprint_change.as_mut(),
+                            None,
+                            locks,
+                        )),
+                    }
+                });
+        if let Err(error) = publication {
+            if publication_started {
+                return Err(error);
+            }
+            return Err(rollback_application_publication(
+                error,
+                &mut debug_batch,
+                fingerprint_change.as_mut(),
+                None,
+            ));
+        }
+        if let Err(error) = prune_store.prune(captured_at) {
+            let _ = state
+                .logger
+                .write("WARN", &format!("debug 記録の整理に失敗しました: {error}"));
+        }
+        return Ok((CaptureDisposition::Suppressed, None, 0, None));
+    }
+    ensure_capture_active(&cancellation)?;
+    let contexts = frames
+        .iter()
+        .map(|frame| {
+            PendingFrameContext::bounded(
+                frame.context_id.clone(),
+                captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                trigger,
+                memory.front_app.clone(),
+                Some(application.name.clone()),
+                frame.target.clone(),
+                frame.ocr_text.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let comparison_hash = prepared.signatures.comparison_hash.clone();
+    let ocr_signature = prepared.signatures.ocr_signature.clone();
+    let prune_store = debug_store.clone();
+    let mut debug_batch = record_application_debug_batch(
+        &debug_store,
+        &frames,
         trigger,
-        front_app: memory.front_app.clone(),
-        app: Some(application.name.clone()),
-        target: frame_target,
-        ocr_text,
-        image_path: provider_path,
-    });
-    memory.last_accepted = Some(target.last_capture);
-    memory.directories.push(directory);
-    record_gate(
-        state,
-        config,
-        trigger,
-        debug_id.as_deref(),
-        memory
-            .frames
-            .last()
-            .and_then(|frame| frame.ocr_text.as_deref()),
         true,
         "送った",
-        &memory.publication,
+        true,
+        captured_at,
+        debug_frames,
     )?;
+    let fingerprint_store = memory.stagnation_store.without_publication_gate();
+    let mut fingerprint_change = match fingerprint_store.prepare_meaningful_change(
+        &frame_target,
+        coosenpai_core::watch_coordinator::StagnationFingerprint {
+            image_hash: comparison_hash.clone(),
+            ocr_signature: ocr_signature.clone(),
+        },
+        captured_at,
+    ) {
+        Ok(change) => change,
+        Err(error) => {
+            return Err(rollback_application_publication(
+                anyhow::Error::from(error),
+                &mut debug_batch,
+                None,
+                None,
+            ));
+        }
+    };
+    let mut pending_change = match state
+        .core_runtime()
+        .prepare_pending_frame_contexts(contexts)
+    {
+        Ok(change) => change,
+        Err(error) => {
+            return Err(rollback_application_publication(
+                anyhow::Error::from(error),
+                &mut debug_batch,
+                fingerprint_change.as_mut(),
+                None,
+            ));
+        }
+    };
+    let mut directories = debug_batch.directories();
+    if let Some(change) = fingerprint_change.as_ref() {
+        directories.extend(change.directories());
+    }
+    if let Some(change) = pending_change.as_ref() {
+        directories.extend(change.directories());
+    }
+    let mut publication_started = false;
+    let publication =
+        memory
+            .publication
+            .publish_batch_with_directories(directories, |locks| -> Result<()> {
+                publication_started = true;
+                let result = (|| {
+                    debug_batch.publish(locks)?;
+                    if let Some(change) = fingerprint_change.as_mut() {
+                        change.publish(locks)?;
+                    }
+                    if let Some(change) = pending_change.as_mut() {
+                        change.publish(locks)?;
+                    }
+                    debug_batch.validate_commit()?;
+                    if let Some(change) = fingerprint_change.as_ref() {
+                        change.validate_commit()?;
+                    }
+                    if let Some(change) = pending_change.as_ref() {
+                        change.validate_commit()?;
+                    }
+                    debug_batch.commit()?;
+                    if let Some(change) = fingerprint_change.as_mut() {
+                        change.commit()?;
+                        memory.stagnation.mark_meaningful_change(Instant::now());
+                        memory.pending_stagnation_report = None;
+                        memory.last_meaningful_change_at = captured_at;
+                    }
+                    if let Some(change) = pending_change.as_mut() {
+                        change.commit()?;
+                    }
+                    target.last_hash = Some(comparison_hash.clone());
+                    target.last_ocr = ocr_signature.clone();
+                    target.last_capture = captured_at_instant;
+                    memory.frames.extend(frames);
+                    memory.last_accepted = Some(target.last_capture);
+                    memory.directories.push(directory);
+                    Ok::<(), anyhow::Error>(())
+                })();
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err(rollback_application_publication_with_directories(
+                        error,
+                        &mut debug_batch,
+                        fingerprint_change.as_mut(),
+                        pending_change.as_mut(),
+                        locks,
+                    )),
+                }
+            });
+    if let Err(error) = publication {
+        if publication_started {
+            return Err(error);
+        }
+        return Err(rollback_application_publication(
+            error,
+            &mut debug_batch,
+            fingerprint_change.as_mut(),
+            pending_change.as_mut(),
+        ));
+    }
+    if let Err(error) = prune_store.prune(captured_at) {
+        let _ = state
+            .logger
+            .write("WARN", &format!("debug 記録の整理に失敗しました: {error}"));
+    }
     let _ = state.logger.write(
         "INFO",
         &format!(
@@ -359,7 +584,115 @@ async fn capture_application(
             trigger_name(trigger)
         ),
     );
-    Ok((CaptureDisposition::Accepted, Some(captured_at.to_rfc3339())))
+    let next_send_at =
+        chrono::Utc::now() + chrono::Duration::milliseconds(config.watch.send_debounce_ms as i64);
+    Ok((
+        CaptureDisposition::Accepted,
+        Some(captured_at.to_rfc3339()),
+        frame_count,
+        Some(next_send_at.to_rfc3339()),
+    ))
+}
+
+fn rollback_application_publication_with_directories(
+    error: anyhow::Error,
+    debug_batch: &mut DebugCaptureBatch,
+    fingerprint_change: Option<&mut StagnationChange>,
+    pending_change: Option<&mut PendingFrameContextChange>,
+    directories: &DirectoryLocks,
+) -> anyhow::Error {
+    let mut rollback_errors = Vec::new();
+    if let Some(change) = fingerprint_change {
+        if let Err(error) = change.rollback_with_directories(directories) {
+            rollback_errors.push(format!("fingerprint={error}"));
+        }
+    }
+    if let Some(change) = pending_change {
+        if let Err(error) = change.rollback_with_directories(directories) {
+            rollback_errors.push(format!("pending={error}"));
+        }
+    }
+    if let Err(error) = debug_batch.rollback_with_directories(directories) {
+        rollback_errors.push(format!("debug={error}"));
+    }
+    if rollback_errors.is_empty() {
+        error
+    } else {
+        eprintln!(
+            "アプリ撮影セットのロールバックに失敗しました: {}",
+            rollback_errors.join(", ")
+        );
+        error.context(format!(
+            "アプリ撮影セットのロールバックに失敗しました: {}",
+            rollback_errors.join(", ")
+        ))
+    }
+}
+
+fn rollback_application_publication(
+    error: anyhow::Error,
+    debug_batch: &mut DebugCaptureBatch,
+    fingerprint_change: Option<&mut StagnationChange>,
+    pending_change: Option<&mut PendingFrameContextChange>,
+) -> anyhow::Error {
+    let mut rollback_errors = Vec::new();
+    if let Some(change) = fingerprint_change {
+        if let Err(error) = change.rollback() {
+            rollback_errors.push(format!("fingerprint={error}"));
+        }
+    }
+    if let Some(change) = pending_change {
+        if let Err(error) = change.rollback() {
+            rollback_errors.push(format!("pending={error}"));
+        }
+    }
+    if let Err(error) = debug_batch.rollback() {
+        rollback_errors.push(format!("debug={error}"));
+    }
+    if rollback_errors.is_empty() {
+        error
+    } else {
+        eprintln!(
+            "アプリ撮影セットのロールバックに失敗しました: {}",
+            rollback_errors.join(", ")
+        );
+        error.context(format!(
+            "アプリ撮影セットのロールバックに失敗しました: {}",
+            rollback_errors.join(", ")
+        ))
+    }
+}
+
+fn record_application_debug_batch(
+    store: &DebugStore,
+    frames: &[coosenpai_core::observer::ObservationFrameInput],
+    trigger: ActivityTriggerKind,
+    sent: bool,
+    reason: &str,
+    include_gates: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    debug_frames: Vec<DebugFrameRecord>,
+) -> Result<DebugCaptureBatch> {
+    let gates = include_gates
+        .then(|| {
+            frames
+                .iter()
+                .filter_map(|frame| frame.debug_id.as_ref().map(|id| (id, frame)))
+                .map(|(id, frame)| DebugGateRecord {
+                    id: id.clone(),
+                    created_at: created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    trigger: trigger_name(trigger).to_owned(),
+                    sent,
+                    reason: reason.to_owned(),
+                    image_file: Some(format!("frame-{id}.png")),
+                    ocr_preview: ocr_preview(frame.ocr_text.as_deref()),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    store
+        .prepare_capture_batch(debug_frames, gates)
+        .map_err(anyhow::Error::from)
 }
 
 async fn update_foreground(
@@ -386,6 +719,8 @@ async fn update_target_result(
     trigger: ActivityTriggerKind,
     disposition: CaptureDisposition,
     captured_at: Option<String>,
+    frame_count: usize,
+    next_send_at: Option<String>,
 ) {
     state
         .publish_watch_view(
@@ -395,6 +730,8 @@ async fn update_target_result(
                 trigger,
                 disposition,
                 captured_at,
+                frame_count,
+                next_send_at,
             },
         )
         .await;

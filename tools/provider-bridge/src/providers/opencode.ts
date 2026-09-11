@@ -27,6 +27,15 @@ function errorMessage(event: Event): string | undefined {
   return typeof record.data?.message === "string" ? record.data.message : "OpenCode session error";
 }
 
+export function openCodeToolPolicy(): Record<string, boolean> {
+  return {
+    read: true,
+    edit: false,
+    bash: false,
+    webfetch: false,
+  };
+}
+
 async function abortSession(client: OpencodeClient, sessionID: string, cwd: string): Promise<void> {
   await client.session.abort({ sessionID, directory: cwd }).catch(() => undefined);
 }
@@ -93,7 +102,7 @@ export class OpenCodeAgent implements ProviderAgent {
         directory: options.cwd,
         model,
         agent: "coosenpai",
-        tools: {},
+        tools: openCodeToolPolicy(),
         system: options.systemPrompt,
         ...(options.effort === undefined || options.effort === "default" ? {} : { variant: options.effort }),
         parts: opencodeParts(options.message, options.schema, images),
@@ -101,12 +110,32 @@ export class OpenCodeAgent implements ProviderAgent {
       let text = "";
       const textProjector = new OpenCodeTextProjector();
       try {
+        const toolCalls = new Map<string, { tool: string; input: unknown }>();
         while (true) {
           const next = await iterator.next();
           if (next.done) break;
           const event = next.value;
           const properties = event.properties as { sessionID?: unknown };
           if (properties.sessionID !== activeSessionId) continue;
+          if (event.type === "session.next.tool.called") {
+            toolCalls.set(event.properties.callID, {
+              tool: event.properties.tool,
+              input: event.properties.input,
+            });
+          } else if (event.type === "session.next.tool.success") {
+            const call = toolCalls.get(event.properties.callID);
+            if (call !== undefined && event.properties.provider.executed) {
+              options.onToolExecution?.({
+                provider: "opencode",
+                tool: call.tool,
+                input: call.input,
+                output: event.properties.result ?? event.properties.content,
+              });
+            }
+            toolCalls.delete(event.properties.callID);
+          } else if (event.type === "session.next.tool.failed") {
+            toolCalls.delete(event.properties.callID);
+          }
           const failure = errorMessage(event);
           if (failure !== undefined) throw safeProviderError(new Error(failure));
           for (const delta of textProjector.push(event)) {

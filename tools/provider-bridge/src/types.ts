@@ -31,6 +31,13 @@ export interface ProviderAppendInput {
   readonly images: readonly ProviderImageAttachment[];
 }
 
+export interface ProviderToolExecution {
+  readonly provider: Provider;
+  readonly tool: string;
+  readonly input: unknown;
+  readonly output: unknown;
+}
+
 export interface ProviderCallOptions {
   readonly requestId: string;
   readonly session: ProviderSession;
@@ -47,6 +54,7 @@ export interface ProviderCallOptions {
   readonly signal: AbortSignal;
   readonly emitDelta: (text: string) => void;
   readonly resetDelta: () => void;
+  readonly onToolExecution?: (execution: ProviderToolExecution) => void;
 }
 
 export interface ProviderCapabilityOptions {

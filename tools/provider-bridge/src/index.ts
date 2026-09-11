@@ -28,4 +28,5 @@ export type {
   ProviderCapabilityOptions,
   ProviderImageAttachment,
   ProviderCompactSessionOptions,
+  ProviderToolExecution,
 } from "./types.js";

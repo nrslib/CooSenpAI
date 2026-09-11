@@ -36,6 +36,7 @@ export function VisionSettings({ form, snapshot, saving, update, errorFor, onOpe
         <p className="field-help">{t("settings.vision.timingHelp")}</p>
         <NumberInput label={t("settings.vision.sendDebounce")} path="watch.sendDebounceMs" value={form.sendDebounceMs} update={(value) => update("sendDebounceMs", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.framesPerSend")} path="watch.framesPerSend" value={form.framesPerSend} update={(value) => update("framesPerSend", value)} errorFor={errorFor} />
+        <NumberInput label={t("settings.vision.appWindowLimit")} path="watch.appWindowLimit" value={form.appWindowLimit} update={(value) => update("appWindowLimit", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.downscaleWidth")} path="watch.downscaleWidth" value={form.downscaleWidth} update={(value) => update("downscaleWidth", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.typingPause")} path="watch.triggers.typingPauseMs" value={form.typingPauseMs} update={(value) => update("typingPauseMs", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.activeThreshold")} path="watch.triggers.activeThresholdMs" value={form.activeThresholdMs} update={(value) => update("activeThresholdMs", value)} errorFor={errorFor} />

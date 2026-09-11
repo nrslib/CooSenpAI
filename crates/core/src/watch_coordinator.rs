@@ -13,8 +13,8 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 #[path = "watch_stagnation.rs"]
 mod watch_stagnation;
 pub use watch_stagnation::{
-    StagnationCandidate, StagnationFingerprint, StagnationReportIntent, StagnationSnapshot,
-    StagnationTracker, WatchStagnationStore,
+    StagnationCandidate, StagnationChange, StagnationFingerprint, StagnationReportIntent,
+    StagnationSnapshot, StagnationTracker, WatchStagnationStore,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

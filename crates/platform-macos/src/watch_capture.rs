@@ -4,10 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use coosenpai_core::ports::{ApplicationCapture, CapturedScreen, RuntimeLogger, ScreenDisplay};
+use coosenpai_core::ports::{
+    ApplicationCapture, CapturedScreen, RuntimeLogger, ScreenDisplay, WindowBounds,
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::display_capture::{active_screen_displays, capture_watch_png, CaptureTarget};
+use crate::display_capture::{
+    active_screen_displays, capture_application_watch_pngs, capture_watch_png, CaptureTarget,
+};
 
 // 同期 Quartz API が停止しても、見守りは従来どおり 10 秒で打ち切る。
 const WATCH_CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -95,35 +99,146 @@ async fn capture_screens_to_directory(
 
 pub async fn capture_application_window(
     bundle_id: &str,
-    destination: PathBuf,
+    destination_directory: PathBuf,
+    window_limit: usize,
     cancellation: CancellationToken,
-) -> Result<Option<ApplicationCapture>> {
-    capture_application_window_with_logger(bundle_id, destination, cancellation, None).await
+) -> Result<Vec<ApplicationCapture>> {
+    capture_application_window_with_logger(
+        bundle_id,
+        destination_directory,
+        window_limit,
+        cancellation,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn capture_application_window_with_logger(
     bundle_id: &str,
-    destination: PathBuf,
+    destination_directory: PathBuf,
+    window_limit: usize,
     cancellation: CancellationToken,
     logger: Option<Arc<dyn RuntimeLogger>>,
-) -> Result<Option<ApplicationCapture>> {
+) -> Result<Vec<ApplicationCapture>> {
     ensure_not_cancelled(&cancellation)?;
-    let Some(window) = crate::window_info::application_window(bundle_id)? else {
-        return Ok(None);
+    let windows = crate::window_info::application_capture_windows(bundle_id, window_limit)?;
+    if windows.is_empty() {
+        return Ok(Vec::new());
+    }
+    std::fs::create_dir_all(&destination_directory)?;
+    let staging = tempfile::tempdir_in(&destination_directory)?;
+    let expected_ids = windows
+        .iter()
+        .map(|window| window.window.id)
+        .collect::<Vec<_>>();
+    let work = async {
+        let paths = capture_application_pngs_to_files(
+            windows
+                .iter()
+                .map(|window| {
+                    staging
+                        .path()
+                        .join(format!("window-{}.png", window.window.id))
+                })
+                .collect(),
+            expected_ids.clone(),
+            cancellation.clone(),
+            logger.clone(),
+        )
+        .await
+        .context("アプリウインドウの撮影セットに失敗しました")?;
+        let captures = windows
+            .iter()
+            .zip(paths)
+            .map(|(window, path)| ApplicationCapture {
+                path,
+                window_id: window.window.id,
+                window_bounds: WindowBounds {
+                    x: window.window.bounds.origin.x,
+                    y: window.window.bounds.origin.y,
+                    width: window.window.bounds.size.width,
+                    height: window.window.bounds.size.height,
+                },
+                display: window.display,
+            })
+            .collect::<Vec<_>>();
+        ensure_not_cancelled(&cancellation)?;
+        let current_windows =
+            crate::window_info::application_capture_windows(bundle_id, window_limit)?;
+        if !application_windows_are_unchanged(&windows, &current_windows) {
+            anyhow::bail!("撮影中にアプリウィンドウ構成が変わりました");
+        }
+        Ok(captures)
     };
-    let result = capture_png_to_file(destination, cancellation, move |cancellation| {
-        capture_watch_png(CaptureTarget::Window(window.id), cancellation, logger)
-    })
-    .await;
-    let path = match result {
-        Ok(path) => path,
-        Err(error) if error.is::<crate::display_capture::WindowUnavailable>() => return Ok(None),
-        Err(error) => return Err(error),
+    let captures = tokio::time::timeout(WATCH_CAPTURE_TIMEOUT, work)
+        .await
+        .context("アプリウィンドウの撮影がタイムアウトしました")??;
+    ensure_not_cancelled(&cancellation)?;
+    let _retained_directory = staging.keep();
+    Ok(captures)
+}
+
+fn application_windows_are_unchanged(
+    expected: &[crate::window_info::ApplicationCaptureWindow],
+    current: &[crate::window_info::ApplicationCaptureWindow],
+) -> bool {
+    expected.len() == current.len()
+        && expected.iter().zip(current).all(|(expected, current)| {
+            expected.window.id == current.window.id
+                && expected.window.bounds.origin.x == current.window.bounds.origin.x
+                && expected.window.bounds.origin.y == current.window.bounds.origin.y
+                && expected.window.bounds.size.width == current.window.bounds.size.width
+                && expected.window.bounds.size.height == current.window.bounds.size.height
+                && expected.display == current.display
+        })
+}
+
+async fn capture_application_pngs_to_files(
+    destinations: Vec<PathBuf>,
+    window_ids: Vec<u32>,
+    cancellation: CancellationToken,
+    logger: Option<Arc<dyn RuntimeLogger>>,
+) -> Result<Vec<PathBuf>> {
+    anyhow::ensure!(
+        destinations.len() == window_ids.len(),
+        "撮影対象と保存先の数が一致しません"
+    );
+    let cancellation = cancellation.child_token();
+    let _cancel_on_drop = cancellation.clone().drop_guard();
+    ensure_not_cancelled(&cancellation)?;
+    let task_cancellation = cancellation.clone();
+    let task = tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
+        let pngs = capture_application_watch_pngs(&window_ids, &task_cancellation, logger)?;
+        anyhow::ensure!(
+            pngs.len() == destinations.len(),
+            "撮影画像と保存先の数が一致しません"
+        );
+        let mut paths = Vec::with_capacity(destinations.len());
+        for (destination, png) in destinations.into_iter().zip(pngs) {
+            ensure_not_cancelled(&task_cancellation)?;
+            let parent = destination
+                .parent()
+                .context("capture destination に親がありません")?
+                .to_owned();
+            std::fs::create_dir_all(&parent)?;
+            let mut file = tempfile::NamedTempFile::new_in(parent)?;
+            file.write_all(&png)?;
+            ensure_not_cancelled(&task_cancellation)?;
+            file.persist(&destination).map_err(|error| error.error)?;
+            paths.push(destination);
+        }
+        Ok(paths)
+    });
+    let paths = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => anyhow::bail!("画面の撮影が取り消されました"),
+        result = tokio::time::timeout(WATCH_CAPTURE_TIMEOUT, task) => {
+            result.context("画面の撮影がタイムアウトしました")?
+                .context("画面撮影タスクを完了できませんでした")??
+        }
     };
-    Ok(Some(ApplicationCapture {
-        path,
-        window_id: window.id,
-    }))
+    ensure_not_cancelled(&cancellation)?;
+    Ok(paths)
 }
 
 pub(crate) async fn capture_png_to_file(

@@ -43,6 +43,7 @@ pub const NUMERIC_CONFIG_PATHS: &[&str] = &[
     "watch.sendIntervalMs",
     "watch.sendDebounceMs",
     "watch.framesPerSend",
+    "watch.appWindowLimit",
     "watch.downscaleWidth",
     "watch.triggers.typingPauseMs",
     "watch.triggers.activeThresholdMs",
@@ -229,6 +230,8 @@ pub struct WatchConfig {
     pub send_debounce_ms: u64,
     #[serde(default = "default_frames_per_send")]
     pub frames_per_send: usize,
+    #[serde(default = "default_app_window_limit")]
+    pub app_window_limit: usize,
     #[serde(default = "default_downscale_width")]
     pub downscale_width: u32,
     #[serde(default)]
@@ -248,6 +251,7 @@ impl Default for WatchConfig {
             send_interval_ms: default_send_interval(),
             send_debounce_ms: default_send_debounce(),
             frames_per_send: default_frames_per_send(),
+            app_window_limit: default_app_window_limit(),
             downscale_width: default_downscale_width(),
             triggers: TriggerConfig::default(),
             battery: BatteryConfig::default(),

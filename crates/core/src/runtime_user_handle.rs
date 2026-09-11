@@ -80,6 +80,56 @@ impl RuntimeHandle {
             .map_err(RuntimeError::from)
     }
 
+    pub fn register_pending_frame_contexts_cancellable(
+        &self,
+        contexts: Vec<crate::state::PendingFrameContext>,
+        publication: Option<&crate::persistence::PublicationGate>,
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.ensure_open()?;
+        let preparer = self
+            .user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .clone()
+            .ok_or(RuntimeError::CompanionUnavailable)?;
+        preparer
+            .register_pending_frame_contexts(contexts, publication)
+            .map_err(RuntimeError::from)
+    }
+
+    pub fn prepare_pending_frame_contexts(
+        &self,
+        contexts: Vec<crate::state::PendingFrameContext>,
+    ) -> Result<Option<crate::companion_storage::PendingFrameContextChange>, RuntimeError> {
+        self.ensure_open()?;
+        let preparer = self
+            .user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .clone()
+            .ok_or(RuntimeError::CompanionUnavailable)?;
+        preparer
+            .prepare_pending_frame_contexts(contexts)
+            .map_err(RuntimeError::from)
+    }
+
+    pub fn remove_pending_frame_contexts_cancellable(
+        &self,
+        ids: &[String],
+        publication: Option<&crate::persistence::PublicationGate>,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        let preparer = self
+            .user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .clone()
+            .ok_or(RuntimeError::CompanionUnavailable)?;
+        preparer
+            .remove_pending_frame_contexts(ids, publication)
+            .map_err(RuntimeError::from)
+    }
+
     pub async fn quiesce(&self) -> Result<u64, RuntimeError> {
         self.quiesce_inner(false, false).await
     }

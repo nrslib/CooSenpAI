@@ -46,5 +46,8 @@ impl RuntimeActor {
 }
 
 fn watch_scope_changed(current: &Config, next: &Config) -> bool {
-    current.watch.fullscreen != next.watch.fullscreen || current.watch.apps != next.watch.apps
+    current.watch.fullscreen != next.watch.fullscreen
+        || current.watch.apps != next.watch.apps
+        || current.watch.app_window_limit != next.watch.app_window_limit
 }
+

@@ -153,6 +153,7 @@ const FIXED_ISSUE_PATH_PATTERNS: &[&str] = &[
     "watch.apps[n].bundleId",
     "watch.apps[n].enabled",
     "watch.apps[n].name",
+    "watch.appWindowLimit",
     "watch.battery",
     "watch.battery.enabled",
     "watch.battery.multiplier",

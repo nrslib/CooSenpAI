@@ -30,6 +30,8 @@ impl PreparedScreenFrame {
     ) -> crate::observer::ObservationFrameInput {
         crate::observer::ObservationFrameInput {
             display: Some(self.display),
+            window_id: None,
+            window_bounds: None,
             scope_generation,
             context_id: self.context_id.clone(),
             captured_at,

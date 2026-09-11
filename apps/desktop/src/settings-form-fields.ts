@@ -31,7 +31,7 @@ const paths = {
   textQuickActions: "popup.quickActions.text", imageQuickActions: "popup.quickActions.image",
   assertiveness: "companion.assertiveness",
   sendIntervalMs: "watch.sendIntervalMs", sendDebounceMs: "watch.sendDebounceMs",
-  framesPerSend: "watch.framesPerSend", downscaleWidth: "watch.downscaleWidth",
+  framesPerSend: "watch.framesPerSend", appWindowLimit: "watch.appWindowLimit", downscaleWidth: "watch.downscaleWidth",
   typingPauseMs: "watch.triggers.typingPauseMs", activeThresholdMs: "watch.triggers.activeThresholdMs",
   appSwitch: "watch.triggers.appSwitch", appSwitchSettleMs: "watch.triggers.appSwitchSettleMs",
   maxIntervalMs: "watch.triggers.maxIntervalMs", minSpacingMs: "watch.triggers.minSpacingMs", pollMs: "watch.triggers.pollMs",

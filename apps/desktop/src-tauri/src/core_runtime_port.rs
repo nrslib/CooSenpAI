@@ -30,8 +30,12 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
     fn register_pending_frame_context(
         &self,
         context: PendingFrameContext,
-        publication: &coosenpai_core::persistence::PublicationGate,
+        publication: Option<&coosenpai_core::persistence::PublicationGate>,
     ) -> Result<(), RuntimeError>;
+    fn prepare_pending_frame_contexts(
+        &self,
+        contexts: Vec<PendingFrameContext>,
+    ) -> Result<Option<coosenpai_core::companion_storage::PendingFrameContextChange>, RuntimeError>;
     async fn observe(
         &self,
         frames: Vec<ObservationFrameInput>,
@@ -108,9 +112,17 @@ impl CoreRuntimePort for RuntimeHandle {
     fn register_pending_frame_context(
         &self,
         context: PendingFrameContext,
-        publication: &coosenpai_core::persistence::PublicationGate,
+        publication: Option<&coosenpai_core::persistence::PublicationGate>,
     ) -> Result<(), RuntimeError> {
-        RuntimeHandle::register_pending_frame_context_cancellable(self, context, Some(publication))
+        RuntimeHandle::register_pending_frame_context_cancellable(self, context, publication)
+    }
+
+    fn prepare_pending_frame_contexts(
+        &self,
+        contexts: Vec<PendingFrameContext>,
+    ) -> Result<Option<coosenpai_core::companion_storage::PendingFrameContextChange>, RuntimeError>
+    {
+        RuntimeHandle::prepare_pending_frame_contexts(self, contexts)
     }
 
     async fn observe(

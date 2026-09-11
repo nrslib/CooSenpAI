@@ -245,12 +245,14 @@ impl ApplicationCapturePort for MacApplicationCapture {
     async fn capture_application(
         &self,
         bundle_id: &str,
-        destination: &Path,
+        destination_directory: &Path,
+        window_limit: usize,
         cancellation: CancellationToken,
-    ) -> Result<Option<ApplicationCapture>, PortError> {
+    ) -> Result<Vec<ApplicationCapture>, PortError> {
         crate::watch_capture::capture_application_window_with_logger(
             bundle_id,
-            destination.to_owned(),
+            destination_directory.to_owned(),
+            window_limit,
             cancellation,
             self.logger.clone(),
         )

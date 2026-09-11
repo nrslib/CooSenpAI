@@ -3,7 +3,9 @@ use super::user_prompt::format_appended_user_message;
 use super::*;
 use crate::attachments::bound_text_attachment;
 use crate::companion_cursor::OWNED_USER_ID_PREFIX;
-use crate::companion_storage::{PendingAttachmentFailure, PendingInput, PendingUserMessage};
+use crate::companion_storage::{
+    PendingAttachmentFailure, PendingFrameContextChange, PendingInput, PendingUserMessage,
+};
 use crate::provider::ProviderMidTurnInput;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -56,10 +58,40 @@ impl UserMessagePreparer {
         context: crate::state::PendingFrameContext,
         publication: Option<&crate::persistence::PublicationGate>,
     ) -> Result<(), CompanionError> {
+        self.register_pending_frame_contexts(vec![context], publication)
+            .map(|_| ())
+    }
+
+    pub(crate) fn register_pending_frame_contexts(
+        &self,
+        contexts: Vec<crate::state::PendingFrameContext>,
+        publication: Option<&crate::persistence::PublicationGate>,
+    ) -> Result<Vec<String>, CompanionError> {
+        let Some(storage) = &self.storage else {
+            return Ok(Vec::new());
+        };
+        Ok(storage.register_pending_frame_contexts_cancellable(contexts, publication)?)
+    }
+
+    pub(crate) fn prepare_pending_frame_contexts(
+        &self,
+        contexts: Vec<crate::state::PendingFrameContext>,
+    ) -> Result<Option<PendingFrameContextChange>, CompanionError> {
+        let Some(storage) = &self.storage else {
+            return Ok(None);
+        };
+        Ok(storage.prepare_pending_frame_contexts(contexts)?)
+    }
+
+    pub(crate) fn remove_pending_frame_contexts(
+        &self,
+        ids: &[String],
+        publication: Option<&crate::persistence::PublicationGate>,
+    ) -> Result<(), CompanionError> {
         let Some(storage) = &self.storage else {
             return Ok(());
         };
-        storage.register_pending_frame_context_cancellable(context, publication)?;
+        storage.remove_pending_frame_contexts(ids, publication)?;
         Ok(())
     }
 

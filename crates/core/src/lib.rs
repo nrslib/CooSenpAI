@@ -1,5 +1,6 @@
 //! CooSenpAI の platform 非依存なユースケースと契約。
 
+pub mod application_frames;
 pub mod attachments;
 pub mod capture_mask;
 pub mod companion;

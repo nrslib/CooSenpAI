@@ -140,8 +140,7 @@ impl DesktopState {
                 &format!("アバター旧ファイルの cleanup に失敗しました: {error}"),
             );
         }
-        let watch_scope_changed = persisted_before.watch.fullscreen != config.watch.fullscreen
-            || persisted_before.watch.apps != config.watch.apps;
+        let watch_scope_changed = watch_scope_changed(&persisted_before, &config);
         let language_changed = persisted_before.ui.language != config.ui.language;
         let bubble_stack_changed = persisted_before.bubble.max_stack != config.bubble.max_stack;
         let bubble_appearance_changed = bubble_appearance_changed(&persisted_before, &config);
@@ -708,6 +707,12 @@ fn watch_enabled_is_only_difference(current: &Config, next: &Config) -> bool {
     current_without_intent.watch.enabled = false;
     next_without_intent.watch.enabled = false;
     current_without_intent == next_without_intent
+}
+
+fn watch_scope_changed(current: &Config, next: &Config) -> bool {
+    current.watch.fullscreen != next.watch.fullscreen
+        || current.watch.apps != next.watch.apps
+        || current.watch.app_window_limit != next.watch.app_window_limit
 }
 
 fn only_keymap_difference(current: &Config, next: &Config) -> bool {

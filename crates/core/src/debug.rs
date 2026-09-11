@@ -1,5 +1,7 @@
 use crate::config::ConfigPaths;
-use crate::persistence::{atomic_write_bytes, set_private_directory_mode};
+use crate::persistence::{
+    atomic_write_bytes, set_private_directory_mode, DirectoryLocks, StagedFile,
+};
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,12 +21,151 @@ pub enum DebugError {
     Io(#[from] io::Error),
     #[error("debug 記録を JSON 化できません: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("debug 記録のロールバックに失敗しました: {0}")]
+    Rollback(#[source] io::Error),
+    #[error(
+        "debug 記録の保存に失敗し、ロールバックにも失敗しました: 保存={error}; rollback={rollback}"
+    )]
+    BatchRollback {
+        error: Box<DebugError>,
+        rollback: Box<DebugError>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct DebugStore {
     root: PathBuf,
     publication: Option<crate::persistence::PublicationGate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DebugFrameRecord {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub provider_png: Vec<u8>,
+    pub ocr_text: Option<String>,
+}
+
+#[derive(Debug)]
+struct DebugFileBackup {
+    staged: StagedFile,
+}
+
+#[derive(Debug)]
+pub struct DebugCaptureBatch {
+    files: Vec<DebugFileBackup>,
+    committed: bool,
+    rolled_back: bool,
+    rollback_attempted: bool,
+}
+
+impl DebugCaptureBatch {
+    pub fn publish(&mut self, directories: &DirectoryLocks) -> Result<(), DebugError> {
+        for file in &mut self.files {
+            file.staged.publish(directories)?;
+        }
+        Ok(())
+    }
+
+    pub fn directories(&self) -> Vec<PathBuf> {
+        self.files
+            .iter()
+            .map(|file| file.staged.parent().to_owned())
+            .collect()
+    }
+
+    pub fn commit(&mut self) -> Result<(), DebugError> {
+        self.validate_commit()?;
+        for file in &mut self.files {
+            file.staged.commit()?;
+        }
+        self.committed = true;
+        Ok(())
+    }
+
+    pub fn validate_commit(&self) -> Result<(), DebugError> {
+        if self.rolled_back {
+            return Err(DebugError::Rollback(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "rollback 後の debug batch は commit できません",
+            )));
+        }
+        if self.committed {
+            return Err(DebugError::Rollback(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "commit 済みの debug batch は再度 commit できません",
+            )));
+        }
+        if self.rollback_attempted {
+            return Err(DebugError::Rollback(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "復元試行済みの debug batch は commit できません",
+            )));
+        }
+        for file in &self.files {
+            file.staged.validate_commit()?;
+        }
+        Ok(())
+    }
+
+    pub fn rollback(&mut self) -> Result<(), DebugError> {
+        self.rollback_with(|staged| staged.restore())
+    }
+
+    pub fn rollback_with_directories(
+        &mut self,
+        directories: &DirectoryLocks,
+    ) -> Result<(), DebugError> {
+        self.rollback_with(|staged| staged.restore_locked(directories))
+    }
+
+    fn rollback_with<F>(&mut self, mut restore: F) -> Result<(), DebugError>
+    where
+        F: FnMut(&mut StagedFile) -> io::Result<()>,
+    {
+        if self.committed {
+            return Err(DebugError::Rollback(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "commit 後の rollback はできません",
+            )));
+        }
+        if self.rolled_back {
+            return Ok(());
+        }
+        if self.rollback_attempted {
+            return Err(DebugError::Rollback(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "復元試行済みの debug batch は再度 rollback できません",
+            )));
+        }
+        self.rollback_attempted = true;
+        let mut first_error = None;
+        for file in self.files.iter_mut().rev() {
+            if let Err(error) = restore(&mut file.staged) {
+                if first_error.is_none() {
+                    first_error = Some(DebugError::Rollback(error));
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            eprintln!("debug 記録のロールバックに失敗しました: {error}");
+            Err(error)
+        } else {
+            self.rolled_back = true;
+            Ok(())
+        }
+    }
+}
+
+impl Drop for DebugCaptureBatch {
+    fn drop(&mut self) {
+        if self.committed || self.rolled_back || self.rollback_attempted {
+            return;
+        }
+        if let Err(error) = self.rollback() {
+            eprintln!("debug 記録の自動ロールバックに失敗しました: {error}");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -134,6 +275,117 @@ impl DebugStore {
             self.publication.as_ref(),
         )?;
         self.prune(created_at)
+    }
+
+    pub fn record_capture_batch(
+        &self,
+        frames: Vec<DebugFrameRecord>,
+        gates: Vec<DebugGateRecord>,
+    ) -> Result<DebugCaptureBatch, DebugError> {
+        let mut batch = self.prepare_capture_batch(frames, gates)?;
+        let directories = batch
+            .files
+            .iter()
+            .map(|file| file.staged.parent().to_owned())
+            .collect::<Vec<_>>();
+        let mut publication_started = false;
+        let publish = match &self.publication {
+            Some(publication) => publication.publish_batch_with_directories(directories, |locks| {
+                publication_started = true;
+                let result = (|| {
+                    batch.publish(locks)?;
+                    batch.validate_commit()?;
+                    batch.commit()
+                })();
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) => match batch.rollback_with_directories(locks) {
+                        Ok(()) => Err(error),
+                        Err(rollback) => Err(DebugError::BatchRollback {
+                            error: Box::new(error),
+                            rollback: Box::new(rollback),
+                        }),
+                    },
+                }
+            }),
+            None => {
+                let locks = crate::persistence::DirectoryLocks::acquire(directories, None)?;
+                publication_started = true;
+                let result = (|| {
+                    batch.publish(&locks)?;
+                    batch.validate_commit()?;
+                    batch.commit()
+                })();
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) => match batch.rollback_with_directories(&locks) {
+                        Ok(()) => Err(error),
+                        Err(rollback) => Err(DebugError::BatchRollback {
+                            error: Box::new(error),
+                            rollback: Box::new(rollback),
+                        }),
+                    },
+                }
+            }
+        };
+        if let Err(error) = publish {
+            if !publication_started {
+                return match batch.rollback() {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(DebugError::BatchRollback {
+                        error: Box::new(error),
+                        rollback: Box::new(rollback),
+                    }),
+                };
+            }
+            return Err(error);
+        }
+        Ok(batch)
+    }
+
+    pub fn prepare_capture_batch(
+        &self,
+        frames: Vec<DebugFrameRecord>,
+        gates: Vec<DebugGateRecord>,
+    ) -> Result<DebugCaptureBatch, DebugError> {
+        let mut batch = DebugCaptureBatch {
+            files: Vec::new(),
+            committed: false,
+            rolled_back: false,
+            rollback_attempted: false,
+        };
+        let result = (|| {
+            for frame in frames {
+                let directory = self.day_directory(frame.created_at)?;
+                batch.write(
+                    &directory.join(format!("frame-{}.png", frame.id)),
+                    &frame.provider_png,
+                )?;
+                batch.write(
+                    &directory.join(format!("ocr-{}.txt", frame.id)),
+                    frame.ocr_text.unwrap_or_default().as_bytes(),
+                )?;
+            }
+            for gate in gates {
+                let created_at = parse_timestamp(&gate.created_at)?;
+                let directory = self.day_directory(created_at)?;
+                batch.write(
+                    &directory.join(format!("gate-{}.json", gate.id)),
+                    &serde_json::to_vec_pretty(&gate)?,
+                )?;
+            }
+            Ok::<(), DebugError>(())
+        })();
+        if let Err(error) = result {
+            return match batch.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(DebugError::BatchRollback {
+                    error: Box::new(error),
+                    rollback: Box::new(rollback),
+                }),
+            };
+        }
+        Ok(batch)
     }
 
     pub fn record_gate(&self, record: &DebugGateRecord) -> Result<(), DebugError> {
@@ -321,7 +573,7 @@ impl DebugStore {
         Ok(directory)
     }
 
-    fn prune(&self, now: DateTime<Utc>) -> Result<(), DebugError> {
+    pub fn prune(&self, now: DateTime<Utc>) -> Result<(), DebugError> {
         let cutoff = now.with_timezone(&Local).date_naive() - Duration::days(RETENTION_DAYS - 1);
         if self.root.is_dir() {
             for entry in fs::read_dir(&self.root)? {
@@ -337,6 +589,15 @@ impl DebugStore {
             }
         }
         prune_to_size(&self.root, MAX_TOTAL_BYTES)?;
+        Ok(())
+    }
+}
+
+impl DebugCaptureBatch {
+    fn write(&mut self, path: &Path, bytes: &[u8]) -> Result<(), DebugError> {
+        self.files.push(DebugFileBackup {
+            staged: StagedFile::prepare(path, bytes, None)?,
+        });
         Ok(())
     }
 }

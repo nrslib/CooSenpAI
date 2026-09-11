@@ -18,10 +18,10 @@ mod presence;
 #[path = "config_parse_watch_apps.rs"]
 mod watch_apps;
 use self::helpers::{
-    boolean, effort, enum_string, executable, frames_per_send, nonnegative_u32, nonnegative_u64,
-    optional_nonnegative_u32, parse_audio, parse_chat, parse_debug, parse_speech, parse_ui,
-    parse_voice_output, persona, positive_number, positive_u32, positive_u64, positive_usize,
-    provider, string, unknown_keys,
+    app_window_limit, boolean, effort, enum_string, executable, frames_per_send, nonnegative_u32,
+    nonnegative_u64, optional_nonnegative_u32, parse_audio, parse_chat, parse_debug, parse_speech,
+    parse_ui, parse_voice_output, persona, positive_number, positive_u32, positive_u64,
+    positive_usize, provider, string, unknown_keys,
 };
 use keymap::parse_keymap;
 use memory::parse_memory;
@@ -291,6 +291,7 @@ fn parse_watch(
             "sendIntervalMs",
             "sendDebounceMs",
             "framesPerSend",
+            "appWindowLimit",
             "changeThreshold",
             "changedPixelThreshold",
             "downscaleWidth",
@@ -343,6 +344,7 @@ fn parse_watch(
             issues,
         ),
         frames_per_send: frames_per_send(object, issues),
+        app_window_limit: app_window_limit(object, issues),
         downscale_width: positive_u32(
             object,
             "downscaleWidth",

@@ -76,7 +76,8 @@ impl Clock for SystemClock {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ScreenDisplay {
     pub id: u32,
     /// Global desktop coordinates in logical points (CoreGraphics top-left origin).
@@ -434,10 +435,12 @@ pub trait ForegroundApplicationPort: Send + Sync {
     fn activate_application(&self, application: &ForegroundApplication) -> Result<(), PortError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ApplicationCapture {
     pub path: PathBuf,
     pub window_id: u32,
+    pub window_bounds: WindowBounds,
+    pub display: ScreenDisplay,
 }
 
 #[async_trait]
@@ -446,9 +449,10 @@ pub trait ApplicationCapturePort: Send + Sync {
     async fn capture_application(
         &self,
         bundle_id: &str,
-        destination: &Path,
+        destination_directory: &Path,
+        window_limit: usize,
         cancellation: CancellationToken,
-    ) -> Result<Option<ApplicationCapture>, PortError>;
+    ) -> Result<Vec<ApplicationCapture>, PortError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,7 +568,7 @@ impl ScreenCapturePermission {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct WindowBounds {
     pub x: f64,
     pub y: f64,

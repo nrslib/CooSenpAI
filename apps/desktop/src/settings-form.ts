@@ -64,6 +64,7 @@ export interface FormState {
   sendIntervalMs: string;
   sendDebounceMs: string;
   framesPerSend: string;
+  appWindowLimit: string;
   downscaleWidth: string;
   typingPauseMs: string;
   activeThresholdMs: string;
@@ -130,7 +131,7 @@ export type SettingsUpdate = <K extends keyof FormState>(key: K, value: FormStat
 export type SettingsErrorFor = (path: string) => string | undefined;
 
 const tuningDefaults = {
-  sendIntervalMs: "60000", sendDebounceMs: "2000", framesPerSend: "4", downscaleWidth: "1280",
+  sendIntervalMs: "60000", sendDebounceMs: "2000", framesPerSend: "4", appWindowLimit: "4", downscaleWidth: "1280",
   typingPauseMs: "2000", activeThresholdMs: "1000", appSwitch: true, appSwitchSettleMs: "1500",
   maxIntervalMs: "60000", minSpacingMs: "5000", pollMs: "1000", batteryEnabled: true,
   batteryMultiplier: "2", ocrGateEnabled: true, ocrGateLevel: "accurate" as const, ocrGateTimeoutMs: "3000",
@@ -148,6 +149,7 @@ export const tuningHelp: Readonly<Record<string, { readonly defaultValue: string
   "watch.sendIntervalMs": { defaultValue: "60000", descriptionKey: "settings.tuning.sendInterval" },
   "watch.sendDebounceMs": { defaultValue: "2000", descriptionKey: "settings.tuning.sendDebounce" },
   "watch.framesPerSend": { defaultValue: "4", descriptionKey: "settings.tuning.framesPerSend" },
+  "watch.appWindowLimit": { defaultValue: "4", descriptionKey: "settings.tuning.appWindowLimit" },
   "watch.downscaleWidth": { defaultValue: "1280", descriptionKey: "settings.tuning.downscaleWidth" },
   "watch.triggers.typingPauseMs": { defaultValue: "2000", descriptionKey: "settings.tuning.typingPause" },
   "watch.triggers.activeThresholdMs": { defaultValue: "1000", descriptionKey: "settings.tuning.activeThreshold" },
@@ -272,6 +274,7 @@ function toBaseForm(source: CooSenpaiConfig) {
     sendIntervalMs: String(source.watch.sendIntervalMs),
     sendDebounceMs: String(source.watch.sendDebounceMs),
     framesPerSend: String(source.watch.framesPerSend),
+    appWindowLimit: String(source.watch.appWindowLimit),
     downscaleWidth: String(source.watch.downscaleWidth),
     typingPauseMs: String(source.watch.triggers.typingPauseMs),
     activeThresholdMs: String(source.watch.triggers.activeThresholdMs),
@@ -354,6 +357,7 @@ function toBasePatch(form: FormState): ConfigPatch {
       sendIntervalMs: Number(form.sendIntervalMs),
       sendDebounceMs: Number(form.sendDebounceMs),
       framesPerSend: Number(form.framesPerSend),
+      appWindowLimit: Number(form.appWindowLimit),
       downscaleWidth: Number(form.downscaleWidth),
       triggers: {
         typingPauseMs: Number(form.typingPauseMs),
