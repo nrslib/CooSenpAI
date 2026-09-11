@@ -148,15 +148,17 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     if (avatarInputRef.current !== null) avatarInputRef.current.value = "";
     setIssues(issues.filter((issue) => issue.path !== "ui.avatarPath"));
   };
-  const changeProvider = (target: "observer" | "companion", provider: ProviderName): void => {
+  const changeProvider = (target: "vision" | "hearing" | "companion", provider: ProviderName): void => {
     const model = modelAfterProviderChange(provider, providerModels);
     if (model === undefined) {
-      const path = target === "observer" ? "observer.provider" : "companion.provider";
+      const path = target === "vision" ? "observer.vision.provider" : target === "hearing" ? "observer.hearing.provider" : "companion.provider";
       setIssues([...issues.filter((issue) => issue.path !== path), { path, message: unavailableProviderMessage(providerModelsError, locale) }]);
       return;
     }
     const current = formSync.form;
-    edit(target === "observer" ? { ...current, providerObserver: provider, observerModel: model } : { ...current, providerCompanion: provider, companionModel: model });
+    if (target === "vision") edit({ ...current, providerObserver: provider, observerModel: model });
+    else if (target === "hearing") edit({ ...current, providerHearing: provider, hearingModel: model });
+    else edit({ ...current, providerCompanion: provider, companionModel: model });
   };
   const requestClose = (): void => action("close");
   const discardAndClose = async (): Promise<void> => action("discard");
@@ -194,7 +196,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     action("openPicker");
   };
   const generalProps: ComponentProps<typeof GeneralSettings> = { ...categoryProps, personas, avatarInputRef, onSelectAvatar: (event) => { void selectAvatar(event); }, onResetAvatar: resetAvatar, onReloadPersona: () => { void onReloadPersona(); }, onEditPersona: editPersona, onOpenPersonaPicker: openPersonaPicker };
-  const providerProps: ComponentProps<typeof ProviderSettings> = { ...categoryProps, providerModels, providerApiKeys, providerApiKeysError, providerApiKeyDrafts, onChangeProvider: changeProvider, onProviderApiKeyDraftChange: updateProviderApiKeyDraft, onSaveProviderApiKey, onDeleteProviderApiKey };
+  const providerProps: ComponentProps<typeof ProviderSettings> = { ...categoryProps, providerModels, providerApiKeys, providerApiKeysError, providerApiKeyDrafts, onChangeProvider: changeProvider, onProviderApiKeyDraftChange: updateProviderApiKeyDraft, onSaveProviderApiKey, onDeleteProviderApiKey, onResetTuning: resetTuning };
   const renderCategory = (category: SettingsCategory): ReactElement => {
     let content: ReactElement;
     switch (category) {

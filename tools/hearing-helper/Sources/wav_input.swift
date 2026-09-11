@@ -46,6 +46,7 @@ final class DebugInputWavPlayer {
         qos: .userInitiated
     )
     private var timer: DispatchSourceTimer?
+    private var nextBufferDeadline = DispatchTime.now()
     private var started = false
     private var stopped = true
     private var bufferHandler: ((AVAudioPCMBuffer) -> Void)?
@@ -82,12 +83,13 @@ final class DebugInputWavPlayer {
             self.stopped = false
             self.bufferHandler = onBuffer
             self.completionHandler = onCompletion
-            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            let timer = DispatchSource.makeTimerSource(flags: .strict, queue: self.queue)
             timer.setEventHandler { [weak self] in
                 self?.emitNextBuffer()
             }
             self.timer = timer
-            timer.schedule(deadline: .now())
+            self.nextBufferDeadline = .now()
+            timer.schedule(deadline: self.nextBufferDeadline)
             timer.resume()
         }
     }
@@ -143,7 +145,9 @@ final class DebugInputWavPlayer {
         }
         let delayNanoseconds = UInt64(ceil(duration * 1_000_000_000))
         let delay = Int(min(max(delayNanoseconds, 1), UInt64(Int.max)))
-        timer?.schedule(deadline: .now() + .nanoseconds(delay))
+        // 読み込み処理や timer の遅延を次の音声区間に足して、無音を引き延ばさない。
+        nextBufferDeadline = nextBufferDeadline + .nanoseconds(delay)
+        timer?.schedule(deadline: nextBufferDeadline)
     }
 
     private func finish(_ result: Result<Void, Error>) {

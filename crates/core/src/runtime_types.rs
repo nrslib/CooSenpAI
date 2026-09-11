@@ -76,6 +76,29 @@ pub struct RuntimeLastError {
     pub issues: Vec<ConfigValidationIssue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_ocr: Option<RuntimeAttachmentOcrFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_response: Option<RuntimeUserResponseFailure>,
+}
+
+impl RuntimeLastError {
+    pub fn terminal_user_input_id(&self) -> Option<&str> {
+        self.attachment_ocr
+            .as_ref()
+            .filter(|failure| !failure.retryable)
+            .map(|failure| failure.input_id.as_str())
+            .or_else(|| {
+                self.user_response
+                    .as_ref()
+                    .map(|failure| failure.input_id.as_str())
+            })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeUserResponseFailure {
+    pub input_id: String,
+    pub attempts: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

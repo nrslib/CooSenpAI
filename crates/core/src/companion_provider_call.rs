@@ -118,7 +118,7 @@ impl CompanionAgent {
         self.record_call_attempt(kind, user)?;
         let mode = session_mode(&session);
         let started = Instant::now();
-        self.log_call_start(mode)?;
+        self.log_call_start(mode, kind, source_ids)?;
         let debug_call_id = DebugStore::new_id();
         let system_prompt = self.system_prompt();
         if let Some(store) = &self.debug_store {
@@ -135,8 +135,13 @@ impl CompanionAgent {
                 self.log_debug_failure();
             }
         }
-        let mut call =
-            self.provider_call(prompt, image_paths, session.clone(), tutorial_response_key);
+        let mut call = self.provider_call(
+            prompt,
+            user,
+            image_paths,
+            session.clone(),
+            tutorial_response_key,
+        );
         if user
             && work_result.is_none()
             && tutorial_response_key.is_none()
@@ -268,6 +273,7 @@ impl CompanionAgent {
     pub(super) fn provider_call(
         &self,
         prompt: &str,
+        user: bool,
         image_paths: &[std::path::PathBuf],
         session: SessionRequest,
         tutorial_response_key: Option<&str>,
@@ -279,8 +285,9 @@ impl CompanionAgent {
             tools_disabled: true,
             output_schema: Some(crate::prompts::companion_output_schema(
                 self.config.emotions_enabled,
+                user,
             )),
-            output_validation_schema: Some(crate::prompts::companion_response_schema()),
+            output_validation_schema: Some(crate::prompts::companion_response_schema(user)),
             session,
             model: Some(self.config.model.clone()),
             effort: Some(self.config.effort.clone()),

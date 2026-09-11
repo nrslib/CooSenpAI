@@ -139,10 +139,7 @@ pub(crate) fn invalidates_running_operations(current: &Config, next: &Config) ->
     (current.work != next.work && !work_config_is_only_difference(current, next))
         || watch_runtime_settings_changed(current, next)
         || current.ui.language != next.ui.language
-        || current.observer.provider != next.observer.provider
-        || current.observer.model != next.observer.model
-        || current.observer.effort != next.observer.effort
-        || current.observer.executable != next.observer.executable
+        || current.observer != next.observer
         || current.companion.provider != next.companion.provider
         || current.companion.model != next.companion.model
         || current.companion.effort != next.companion.effort

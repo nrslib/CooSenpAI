@@ -83,7 +83,7 @@ export interface CooSenpaiConfig {
     readonly position: "bottom-right" | "top-right" | "bottom-left" | "top-left";
     readonly display: "main" | "cursor" | "front";
   };
-  readonly observer: AgentConfig;
+  readonly observer: ObserverConfig;
   readonly companion: CompanionConfig;
   readonly chat: { readonly whileThinking: "queue" | "append" };
   readonly memory: MemoryConfig;
@@ -120,6 +120,15 @@ export interface AgentConfig {
   readonly textExcerptMaxCount: number;
   readonly textTotalMaxChars: number;
   readonly changesMaxCount: number;
+}
+
+export interface ObserverProfile extends AgentConfig {
+  readonly intervalMs: number;
+}
+
+export interface ObserverConfig {
+  readonly vision: ObserverProfile;
+  readonly hearing: ObserverProfile;
 }
 
 export interface CompanionConfig {
@@ -188,6 +197,7 @@ export interface ObservationFrame {
   readonly frontApp: string | null;
   readonly app: string | null;
   readonly target: string;
+  readonly ocrText?: string;
 }
 
 export interface ObservationEvent {
@@ -205,6 +215,13 @@ export interface VisualObservation {
   readonly frameCount: number;
   readonly frames: readonly ObservationFrame[];
   readonly sourceFrameIds?: readonly string[];
+  readonly sourceFramePaths?: Readonly<Record<string, string>>;
+  readonly audioSegments?: readonly {
+    readonly id: string;
+    readonly time: string;
+    readonly source: "microphone" | "speaker";
+    readonly transcriptPath?: string;
+  }[];
   readonly activity: string;
   readonly outline: string;
   readonly changes: readonly string[];
@@ -252,6 +269,7 @@ export interface TranscriptRecord {
   readonly source: string;
   readonly text: string;
   readonly speakerTag?: string;
+  readonly transcriptPath?: string;
 }
 
 export interface DataFlowLog {
@@ -270,6 +288,7 @@ export interface CompanionDecision {
 }
 
 export interface RuntimeLastError {
+  readonly userResponse?: { readonly inputId: string; readonly attempts: number };
   readonly kind: string;
   readonly occurredAt: string;
   readonly message?: string;
@@ -395,6 +414,7 @@ export type AudioLogEvent = {
   readonly id: string;
   readonly createdAt: string;
   readonly source: "microphone" | "speaker";
+  readonly transcriptPath?: string;
 } & (
   | { readonly stage: "recognizing" | "no-speech" }
   | { readonly stage: "confirmed"; readonly text: string }

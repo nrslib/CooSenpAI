@@ -159,7 +159,7 @@ pub fn watch_send_due(
         since_last_frame_ms,
         config.watch.send_debounce_ms,
         since_window_start_ms,
-        config.watch.send_interval_ms,
+        config.observer.vision.interval_ms,
     )
 }
 
@@ -169,17 +169,29 @@ pub fn next_send_seconds(
     since_window_start_ms: u64,
 ) -> u64 {
     let Some(since_last_frame_ms) = since_last_frame_ms else {
-        return crate::timing::remaining_seconds(config.watch.send_interval_ms);
+        return crate::timing::remaining_seconds(config.observer.vision.interval_ms);
     };
     let debounce = config
         .watch
         .send_debounce_ms
         .saturating_sub(since_last_frame_ms);
     let interval = config
-        .watch
-        .send_interval_ms
+        .observer
+        .vision
+        .interval_ms
         .saturating_sub(since_window_start_ms);
     crate::timing::remaining_seconds(debounce.min(interval))
+}
+
+#[test]
+fn vision_send_interval_is_independent_from_hearing_and_the_legacy_watch_field() {
+    let mut config = Config::default();
+    config.observer.vision.interval_ms = 30_000;
+    config.observer.hearing.interval_ms = 90_000;
+    config.watch.send_interval_ms = 120_000;
+    assert_eq!(next_send_seconds(&config, None, 0), 30);
+    assert!(!watch_send_due(&config, 1, 0, 29_999));
+    assert!(watch_send_due(&config, 1, 0, 30_000));
 }
 
 pub fn is_self_application(name: &str) -> bool {

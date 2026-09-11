@@ -24,8 +24,8 @@ export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings }
     </fieldset>
     <fieldset id="settings-hearing-permissions">
       <legend>{t("settings.hearing.transcription")}</legend>
-      <p className="field-help">{t("settings.hearing.microphonePermission", { permission: permissionLabel(snapshot.speech.microphonePermission, locale) })} <button type="button" onClick={() => onOpenSpeechSettings("microphone")}>{t("common.openSettings")}</button></p>
-      <p className="field-help">{t("settings.hearing.recognitionPermission", { permission: permissionLabel(snapshot.speech.recognitionPermission, locale) })} <button type="button" onClick={() => onOpenSpeechSettings("recognition")}>{t("common.openSettings")}</button></p>
+      <p className="field-help">{t("settings.hearing.microphonePermission", { permission: permissionLabel(snapshot.audio.microphonePermission, locale) })} <button type="button" onClick={() => onOpenSpeechSettings("microphone")}>{t("common.openSettings")}</button></p>
+      <p className="field-help">{t("settings.hearing.recognitionPermission", { permission: permissionLabel(snapshot.audio.recognitionPermission, locale) })} <button type="button" onClick={() => onOpenSpeechSettings("recognition")}>{t("common.openSettings")}</button></p>
     </fieldset>
   </>;
 }

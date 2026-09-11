@@ -196,6 +196,7 @@ struct VoiceActivityDetector {
     private let configuration: VoiceActivityConfiguration
     private(set) var phase: VoiceActivityPhase = .waiting
     private(set) var noiseFloorRms: Double = 0
+    private(set) var audioTimeNanoseconds: UInt64 = 0
     private var movingRmsWindow: MovingRmsWindow
     private var steadyRmsWindow: MovingRmsWindow
     private var steadyNoiseDurationNanoseconds: UInt64 = 0
@@ -247,6 +248,13 @@ struct VoiceActivityDetector {
             startRmsThreshold: startRmsThreshold,
             sustainRmsThreshold: sustainRmsThreshold
         )
+    }
+
+    // バッファがまとめて届いても、PCM に含まれる無音の長さを保つ。
+    mutating func observeSamples(rms: Double, durationNanoseconds: UInt64) -> VoiceActivityAction {
+        let timestamp = audioTimeNanoseconds
+        audioTimeNanoseconds += durationNanoseconds
+        return observe(rms: rms, durationNanoseconds: durationNanoseconds, at: timestamp)
     }
 
     mutating func observe(

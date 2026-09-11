@@ -156,15 +156,14 @@ impl AppUpdater {
             return (UpdateStatus::UpToDate, None);
         };
         let version = update.version.to_string();
-        if update
+        if let Some(minimum) = update
             .minimum_system_version
-            .ensure_supported(system)
-            .is_err()
+            .filter(|minimum| minimum.ensure_supported(system).is_err())
         {
             return (
                 UpdateStatus::Incompatible {
                     version,
-                    minimum_system_version: update.minimum_system_version.to_string(),
+                    minimum_system_version: minimum.to_string(),
                 },
                 None,
             );
@@ -230,14 +229,16 @@ impl AppUpdater {
             .take()
             .ok_or_else(|| text(TextKey::UpdatePendingMissing, locale).to_owned())?;
         let version = update.version.to_string();
-        if let Err(error) = update.minimum_system_version.ensure_supported(system) {
-            return self.install_error(
-                state,
-                version,
-                error,
-                TextKey::UpdateDownloadVerifyFailed,
-                locale,
-            );
+        if let Some(minimum) = update.minimum_system_version {
+            if let Err(error) = minimum.ensure_supported(system) {
+                return self.install_error(
+                    state,
+                    version,
+                    error,
+                    TextKey::UpdateDownloadVerifyFailed,
+                    locale,
+                );
+            }
         }
         self.publish(
             state,

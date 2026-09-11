@@ -38,7 +38,19 @@ export interface FormState {
   observerEffort: string;
   companionEffort: string;
   observerExecutable: string;
+  observerIntervalMs: string;
   companionExecutable: string;
+  providerHearing: ProviderName;
+  hearingModel: string;
+  hearingEffort: string;
+  hearingExecutable: string;
+  hearingIntervalMs: string;
+  hearingTimeoutMs: string;
+  hearingLimit: string;
+  hearingTextExcerptMaxChars: string;
+  hearingTextExcerptMaxCount: string;
+  hearingTextTotalMaxChars: string;
+  hearingChangesMaxCount: string;
   captureShortcut: string;
   microphoneShortcut: string;
   togglePanelShortcut: string;
@@ -122,8 +134,12 @@ const tuningDefaults = {
   typingPauseMs: "2000", activeThresholdMs: "1000", appSwitch: true, appSwitchSettleMs: "1500",
   maxIntervalMs: "60000", minSpacingMs: "5000", pollMs: "1000", batteryEnabled: true,
   batteryMultiplier: "2", ocrGateEnabled: true, ocrGateLevel: "accurate" as const, ocrGateTimeoutMs: "3000",
+  observerIntervalMs: "60000",
   observerTextExcerptMaxChars: "600", observerTextExcerptMaxCount: "6",
   observerTextTotalMaxChars: "2000", observerChangesMaxCount: "8",
+  hearingIntervalMs: "60000",
+  hearingTextExcerptMaxChars: "600", hearingTextExcerptMaxCount: "6",
+  hearingTextTotalMaxChars: "2000", hearingChangesMaxCount: "8",
   companionWakeCoalesceMax: "5", companionSessionMaxCalls: "60", companionStuckAfterMs: "900000",
   pendingDeliveryLimit: "20", pendingDeliveryMaxBytes: "21053440",
 };
@@ -145,10 +161,16 @@ export const tuningHelp: Readonly<Record<string, { readonly defaultValue: string
   "watch.ocrGate.enabled": { defaultValue: "enabled", defaultValueKey: "settings.tuning.enabled", descriptionKey: "settings.tuning.ocrEnabled" },
   "watch.ocrGate.level": { defaultValue: "accurate", descriptionKey: "settings.tuning.ocrLevel" },
   "watch.ocrGate.timeoutMs": { defaultValue: "3000", descriptionKey: "settings.tuning.ocrTimeout" },
-  "observer.textExcerptMaxChars": { defaultValue: "600", descriptionKey: "settings.tuning.textExcerptMaxChars" },
-  "observer.textExcerptMaxCount": { defaultValue: "6", descriptionKey: "settings.tuning.textExcerptMaxCount" },
-  "observer.textTotalMaxChars": { defaultValue: "2000", descriptionKey: "settings.tuning.textTotalMaxChars" },
-  "observer.changesMaxCount": { defaultValue: "8", descriptionKey: "settings.tuning.changesMaxCount" },
+  "observer.vision.intervalMs": { defaultValue: "60000", descriptionKey: "settings.tuning.observerInterval" },
+  "observer.vision.textExcerptMaxChars": { defaultValue: "600", descriptionKey: "settings.tuning.textExcerptMaxChars" },
+  "observer.vision.textExcerptMaxCount": { defaultValue: "6", descriptionKey: "settings.tuning.textExcerptMaxCount" },
+  "observer.vision.textTotalMaxChars": { defaultValue: "2000", descriptionKey: "settings.tuning.textTotalMaxChars" },
+  "observer.vision.changesMaxCount": { defaultValue: "8", descriptionKey: "settings.tuning.changesMaxCount" },
+  "observer.hearing.intervalMs": { defaultValue: "60000", descriptionKey: "settings.tuning.hearingInterval" },
+  "observer.hearing.textExcerptMaxChars": { defaultValue: "600", descriptionKey: "settings.tuning.hearingTextExcerptMaxChars" },
+  "observer.hearing.textExcerptMaxCount": { defaultValue: "6", descriptionKey: "settings.tuning.hearingTextExcerptMaxCount" },
+  "observer.hearing.textTotalMaxChars": { defaultValue: "2000", descriptionKey: "settings.tuning.hearingTextTotalMaxChars" },
+  "observer.hearing.changesMaxCount": { defaultValue: "8", descriptionKey: "settings.tuning.hearingChangesMaxCount" },
   "companion.dailyProactiveLimit": { defaultValue: "unlimited", defaultValueKey: "settings.tuning.unlimited", descriptionKey: "settings.tuning.dailyProactiveLimit" },
   "companion.wakeCoalesceMax": { defaultValue: "5", descriptionKey: "settings.tuning.wakeCoalesceMax" },
   "companion.sessionMaxCalls": { defaultValue: "60", descriptionKey: "settings.tuning.sessionMaxCalls" },
@@ -217,9 +239,76 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
   };
 }
 
-function toBaseForm(source: CooSenpaiConfig): Omit<FormState, "workApprovalMode" | "workAllowedRoots" | "voiceOutputEnabled" | "voiceOutputProvider" | "voiceOutputRate" | "voicevoxStyleId" | "emotionsEnabled" | "displayName" | "avatarColor" | "avatarPath" | "avatarImage" | "avatarFileName" | "avatarImageLoadFailed" | "persona" | "watchFullscreen" | "watchApps" | "audioEnabled" | "audioMic" | "audioSpeaker" | "contextRefreshCalls" | "memoryEnabled" | "memoryProviderConsent" | "memoryGraceMinutes" | "memoryDailyRetentionDays" | "memoryWeeklyRetentionWeeks" | "sendKey" | "whileThinking" | "speechLocale" | "speechMode" | "speechConfirmBeforeSend" | "speechInputDevice" | "sendTextShortcut" | "copyLastReplyShortcut" | "textQuickActions" | "imageQuickActions" | "bubbleMaxStack" | "bubbleKeepLatest" | "bubblePosition" | "bubbleDisplay" | "uiTheme" | "uiFont" | "language" | "thoughtBubble" | "reviewTime" | "reminders" | "factPromptDailyLimit" | "launchAtLogin"> {
-  const config = source;
-  return { providerObserver: config.observer.provider, providerCompanion: config.companion.provider, observerModel: config.observer.model, companionModel: config.companion.model, observerEffort: config.observer.effort, companionEffort: config.companion.effort, observerExecutable: config.observer.executable ?? "", companionExecutable: config.companion.executable ?? "", captureShortcut: config.keymap.captureRegion ?? "", microphoneShortcut: config.keymap.microphone ?? "", togglePanelShortcut: config.keymap.togglePanel ?? "", toggleAvatarShortcut: config.keymap.toggleAvatar ?? "", toggleWatchShortcut: config.keymap.toggleWatch ?? "", assertiveness: config.companion.assertiveness, sendIntervalMs: String(config.watch.sendIntervalMs), sendDebounceMs: String(config.watch.sendDebounceMs), framesPerSend: String(config.watch.framesPerSend), downscaleWidth: String(config.watch.downscaleWidth), typingPauseMs: String(config.watch.triggers.typingPauseMs), activeThresholdMs: String(config.watch.triggers.activeThresholdMs), appSwitch: config.watch.triggers.appSwitch, appSwitchSettleMs: String(config.watch.triggers.appSwitchSettleMs), maxIntervalMs: String(config.watch.triggers.maxIntervalMs), minSpacingMs: String(config.watch.triggers.minSpacingMs), pollMs: String(config.watch.triggers.pollMs), batteryEnabled: config.watch.battery.enabled, batteryMultiplier: String(config.watch.battery.multiplier), ocrGateEnabled: config.watch.ocrGate.enabled, ocrGateLevel: config.watch.ocrGate.level, ocrGateTimeoutMs: String(config.watch.ocrGate.timeoutMs), ocrGateExecutable: config.watch.ocrGate.executable ?? "", observerTimeoutMs: String(config.observer.timeoutMs), companionTimeoutMs: String(config.companion.timeoutMs), observerLimit: String(config.observer.dailyCallLimit), observerTextExcerptMaxChars: String(config.observer.textExcerptMaxChars), observerTextExcerptMaxCount: String(config.observer.textExcerptMaxCount), observerTextTotalMaxChars: String(config.observer.textTotalMaxChars), observerChangesMaxCount: String(config.observer.changesMaxCount), companionLimit: config.companion.dailyProactiveLimit === null ? "" : String(config.companion.dailyProactiveLimit), proactiveQuietMinutes: String(config.companion.proactiveQuietMinutes), companionWakeCoalesceMax: String(config.companion.wakeCoalesceMax), companionSessionMaxCalls: String(config.companion.sessionMaxCalls), companionStuckAfterMs: String(config.companion.stuckAfterMs), pendingDeliveryLimit: String(config.companion.pendingDeliveryLimit), pendingDeliveryMaxBytes: String(config.companion.pendingDeliveryMaxBytes), notificationMode: config.notification.mode, minPriority: config.notification.minPriority, bubbleDurationMs: String(config.notification.bubbleDurationMs), showPriority: config.notification.showPriority, observationDays: String(config.retention.observationDays), conversationDays: String(config.retention.conversationDays), debugEnabled: config.debug.enabled, checkForUpdates: config.app.checkForUpdates };
+function toBaseForm(source: CooSenpaiConfig) {
+  const vision = source.observer.vision;
+  const hearing = source.observer.hearing;
+  return {
+    providerObserver: vision.provider,
+    providerCompanion: source.companion.provider,
+    observerModel: vision.model,
+    companionModel: source.companion.model,
+    observerEffort: vision.effort,
+    companionEffort: source.companion.effort,
+    observerExecutable: vision.executable ?? "",
+    observerIntervalMs: String(vision.intervalMs),
+    companionExecutable: source.companion.executable ?? "",
+    providerHearing: hearing.provider,
+    hearingModel: hearing.model,
+    hearingEffort: hearing.effort,
+    hearingExecutable: hearing.executable ?? "",
+    hearingIntervalMs: String(hearing.intervalMs),
+    hearingTimeoutMs: String(hearing.timeoutMs),
+    hearingLimit: String(hearing.dailyCallLimit),
+    hearingTextExcerptMaxChars: String(hearing.textExcerptMaxChars),
+    hearingTextExcerptMaxCount: String(hearing.textExcerptMaxCount),
+    hearingTextTotalMaxChars: String(hearing.textTotalMaxChars),
+    hearingChangesMaxCount: String(hearing.changesMaxCount),
+    captureShortcut: source.keymap.captureRegion ?? "",
+    microphoneShortcut: source.keymap.microphone ?? "",
+    togglePanelShortcut: source.keymap.togglePanel ?? "",
+    toggleAvatarShortcut: source.keymap.toggleAvatar ?? "",
+    toggleWatchShortcut: source.keymap.toggleWatch ?? "",
+    assertiveness: source.companion.assertiveness,
+    sendIntervalMs: String(source.watch.sendIntervalMs),
+    sendDebounceMs: String(source.watch.sendDebounceMs),
+    framesPerSend: String(source.watch.framesPerSend),
+    downscaleWidth: String(source.watch.downscaleWidth),
+    typingPauseMs: String(source.watch.triggers.typingPauseMs),
+    activeThresholdMs: String(source.watch.triggers.activeThresholdMs),
+    appSwitch: source.watch.triggers.appSwitch,
+    appSwitchSettleMs: String(source.watch.triggers.appSwitchSettleMs),
+    maxIntervalMs: String(source.watch.triggers.maxIntervalMs),
+    minSpacingMs: String(source.watch.triggers.minSpacingMs),
+    pollMs: String(source.watch.triggers.pollMs),
+    batteryEnabled: source.watch.battery.enabled,
+    batteryMultiplier: String(source.watch.battery.multiplier),
+    ocrGateEnabled: source.watch.ocrGate.enabled,
+    ocrGateLevel: source.watch.ocrGate.level,
+    ocrGateTimeoutMs: String(source.watch.ocrGate.timeoutMs),
+    ocrGateExecutable: source.watch.ocrGate.executable ?? "",
+    observerTimeoutMs: String(vision.timeoutMs),
+    companionTimeoutMs: String(source.companion.timeoutMs),
+    observerLimit: String(vision.dailyCallLimit),
+    observerTextExcerptMaxChars: String(vision.textExcerptMaxChars),
+    observerTextExcerptMaxCount: String(vision.textExcerptMaxCount),
+    observerTextTotalMaxChars: String(vision.textTotalMaxChars),
+    observerChangesMaxCount: String(vision.changesMaxCount),
+    companionLimit: source.companion.dailyProactiveLimit === null ? "" : String(source.companion.dailyProactiveLimit),
+    proactiveQuietMinutes: String(source.companion.proactiveQuietMinutes),
+    companionWakeCoalesceMax: String(source.companion.wakeCoalesceMax),
+    companionSessionMaxCalls: String(source.companion.sessionMaxCalls),
+    companionStuckAfterMs: String(source.companion.stuckAfterMs),
+    pendingDeliveryLimit: String(source.companion.pendingDeliveryLimit),
+    pendingDeliveryMaxBytes: String(source.companion.pendingDeliveryMaxBytes),
+    notificationMode: source.notification.mode,
+    minPriority: source.notification.minPriority,
+    bubbleDurationMs: String(source.notification.bubbleDurationMs),
+    showPriority: source.notification.showPriority,
+    observationDays: String(source.retention.observationDays),
+    conversationDays: String(source.retention.conversationDays),
+    debugEnabled: source.debug.enabled,
+    checkForUpdates: source.app.checkForUpdates,
+  };
 }
 
 export function toPatch(form: FormState): ConfigPatch {
@@ -258,7 +347,77 @@ export function toPatch(form: FormState): ConfigPatch {
 }
 
 function toBasePatch(form: FormState): ConfigPatch {
-  return { watch: { fullscreen: form.watchFullscreen, apps: form.watchApps, sendIntervalMs: Number(form.sendIntervalMs), sendDebounceMs: Number(form.sendDebounceMs), framesPerSend: Number(form.framesPerSend), downscaleWidth: Number(form.downscaleWidth), triggers: { typingPauseMs: Number(form.typingPauseMs), activeThresholdMs: Number(form.activeThresholdMs), appSwitch: form.appSwitch, appSwitchSettleMs: Number(form.appSwitchSettleMs), maxIntervalMs: Number(form.maxIntervalMs), minSpacingMs: Number(form.minSpacingMs), pollMs: Number(form.pollMs) }, battery: { enabled: form.batteryEnabled, multiplier: Number(form.batteryMultiplier) }, ocrGate: { enabled: form.ocrGateEnabled, level: form.ocrGateLevel, timeoutMs: Number(form.ocrGateTimeoutMs), executable: form.ocrGateExecutable === "" ? null : form.ocrGateExecutable } }, observer: { provider: form.providerObserver, model: form.observerModel, effort: form.observerEffort, executable: form.observerExecutable === "" ? null : form.observerExecutable, timeoutMs: Number(form.observerTimeoutMs), dailyCallLimit: Number(form.observerLimit), textExcerptMaxChars: Number(form.observerTextExcerptMaxChars), textExcerptMaxCount: Number(form.observerTextExcerptMaxCount), textTotalMaxChars: Number(form.observerTextTotalMaxChars), changesMaxCount: Number(form.observerChangesMaxCount) }, companion: { provider: form.providerCompanion, model: form.companionModel, effort: form.companionEffort, executable: form.companionExecutable === "" ? null : form.companionExecutable, assertiveness: form.assertiveness, timeoutMs: Number(form.companionTimeoutMs), dailyProactiveLimit: form.companionLimit === "" ? null : Number(form.companionLimit), wakeCoalesceMax: Number(form.companionWakeCoalesceMax), sessionMaxCalls: Number(form.companionSessionMaxCalls), stuckAfterMs: Number(form.companionStuckAfterMs), pendingDeliveryLimit: Number(form.pendingDeliveryLimit), pendingDeliveryMaxBytes: Number(form.pendingDeliveryMaxBytes) }, notification: { mode: form.notificationMode, minPriority: form.minPriority, bubbleDurationMs: Number(form.bubbleDurationMs), showPriority: form.showPriority }, retention: { observationDays: Number(form.observationDays), conversationDays: Number(form.conversationDays) }, debug: { enabled: form.debugEnabled } };
+  return {
+    watch: {
+      fullscreen: form.watchFullscreen,
+      apps: form.watchApps,
+      sendIntervalMs: Number(form.sendIntervalMs),
+      sendDebounceMs: Number(form.sendDebounceMs),
+      framesPerSend: Number(form.framesPerSend),
+      downscaleWidth: Number(form.downscaleWidth),
+      triggers: {
+        typingPauseMs: Number(form.typingPauseMs),
+        activeThresholdMs: Number(form.activeThresholdMs),
+        appSwitch: form.appSwitch,
+        appSwitchSettleMs: Number(form.appSwitchSettleMs),
+        maxIntervalMs: Number(form.maxIntervalMs),
+        minSpacingMs: Number(form.minSpacingMs),
+        pollMs: Number(form.pollMs),
+      },
+      battery: { enabled: form.batteryEnabled, multiplier: Number(form.batteryMultiplier) },
+      ocrGate: {
+        enabled: form.ocrGateEnabled,
+        level: form.ocrGateLevel,
+        timeoutMs: Number(form.ocrGateTimeoutMs),
+        executable: form.ocrGateExecutable === "" ? null : form.ocrGateExecutable,
+      },
+    },
+    observer: {
+      vision: {
+        provider: form.providerObserver,
+        model: form.observerModel,
+        effort: form.observerEffort,
+        executable: form.observerExecutable === "" ? null : form.observerExecutable,
+        intervalMs: Number(form.observerIntervalMs),
+        timeoutMs: Number(form.observerTimeoutMs),
+        dailyCallLimit: Number(form.observerLimit),
+        textExcerptMaxChars: Number(form.observerTextExcerptMaxChars),
+        textExcerptMaxCount: Number(form.observerTextExcerptMaxCount),
+        textTotalMaxChars: Number(form.observerTextTotalMaxChars),
+        changesMaxCount: Number(form.observerChangesMaxCount),
+      },
+      hearing: {
+        provider: form.providerHearing,
+        model: form.hearingModel,
+        effort: form.hearingEffort,
+        executable: form.hearingExecutable === "" ? null : form.hearingExecutable,
+        intervalMs: Number(form.hearingIntervalMs),
+        timeoutMs: Number(form.hearingTimeoutMs),
+        dailyCallLimit: Number(form.hearingLimit),
+        textExcerptMaxChars: Number(form.hearingTextExcerptMaxChars),
+        textExcerptMaxCount: Number(form.hearingTextExcerptMaxCount),
+        textTotalMaxChars: Number(form.hearingTextTotalMaxChars),
+        changesMaxCount: Number(form.hearingChangesMaxCount),
+      },
+    },
+    companion: {
+      provider: form.providerCompanion,
+      model: form.companionModel,
+      effort: form.companionEffort,
+      executable: form.companionExecutable === "" ? null : form.companionExecutable,
+      assertiveness: form.assertiveness,
+      timeoutMs: Number(form.companionTimeoutMs),
+      dailyProactiveLimit: form.companionLimit === "" ? null : Number(form.companionLimit),
+      wakeCoalesceMax: Number(form.companionWakeCoalesceMax),
+      sessionMaxCalls: Number(form.companionSessionMaxCalls),
+      stuckAfterMs: Number(form.companionStuckAfterMs),
+      pendingDeliveryLimit: Number(form.pendingDeliveryLimit),
+      pendingDeliveryMaxBytes: Number(form.pendingDeliveryMaxBytes),
+    },
+    notification: { mode: form.notificationMode, minPriority: form.minPriority, bubbleDurationMs: Number(form.bubbleDurationMs), showPriority: form.showPriority },
+    retention: { observationDays: Number(form.observationDays), conversationDays: Number(form.conversationDays) },
+    debug: { enabled: form.debugEnabled },
+  };
 }
 
 export function defaultTuningForm(): Partial<FormState> { return { ...tuningDefaults }; }

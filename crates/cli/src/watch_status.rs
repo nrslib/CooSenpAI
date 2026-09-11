@@ -53,9 +53,9 @@ struct WatchStatusKey {
 impl WatchStatus {
     pub(super) fn new(config: &Config, helper_available: bool) -> Self {
         Self {
-            provider: config.observer.provider.clone(),
-            model: config.observer.model.clone(),
-            effort: config.observer.effort.clone(),
+            provider: config.observer.vision.provider.clone(),
+            model: config.observer.vision.model.clone(),
+            effort: config.observer.vision.effort.clone(),
             phase: "待機中",
             trigger: "なし",
             ai_calls_today: 0,
@@ -73,9 +73,9 @@ impl WatchStatus {
     }
 
     pub(super) fn update_config(&mut self, config: &Config, helper_available: bool) {
-        self.provider = config.observer.provider.clone();
-        self.model = config.observer.model.clone();
-        self.effort = config.observer.effort.clone();
+        self.provider = config.observer.vision.provider.clone();
+        self.model = config.observer.vision.model.clone();
+        self.effort = config.observer.vision.effort.clone();
         self.ocr_enabled = config.watch.ocr_gate.enabled && helper_available;
         self.ocr_disabled_reason = ocr_disabled_reason(config, helper_available);
         self.fullscreen = config.watch.fullscreen;

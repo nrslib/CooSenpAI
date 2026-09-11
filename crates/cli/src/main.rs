@@ -227,10 +227,10 @@ async fn eval(paths: &ConfigPaths, config: Config, args: EvalArgs) -> Result<()>
     {
         EvalAgent::Observer => (
             "observer",
-            config.observer.provider.clone(),
-            config.observer.model.clone(),
-            config.observer.effort.clone(),
-            config.observer.executable.clone(),
+            config.observer.vision.provider.clone(),
+            config.observer.vision.model.clone(),
+            config.observer.vision.effort.clone(),
+            config.observer.vision.executable.clone(),
         ),
         EvalAgent::Companion => (
             "companion",
@@ -561,9 +561,12 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                         tools_disabled: true,
                         output_schema: Some(coosenpai_core::prompts::companion_output_schema(
                             case.config.companion.emotions_enabled,
+                            data.user_message.is_some(),
                         )),
                         output_validation_schema: Some(
-                            coosenpai_core::prompts::companion_response_schema(),
+                            coosenpai_core::prompts::companion_response_schema(
+                                data.user_message.is_some(),
+                            ),
                         ),
                         session: SessionRequest::New,
                         model: Some(case.model.to_owned()),

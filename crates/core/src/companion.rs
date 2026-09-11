@@ -57,6 +57,8 @@ mod user_operation;
 mod user_preparer;
 #[path = "companion_user_prompt.rs"]
 mod user_prompt;
+#[path = "companion_user_retry.rs"]
+mod user_retry;
 use prompt_data::{build_observation_prompt_data, observation_value, observation_values};
 pub(crate) use support::silent_response;
 pub(crate) use support::CompanionCallOutcome;
@@ -123,6 +125,8 @@ pub enum CompanionError {
     Memory(#[from] MemoryContextError),
     #[error("添付画像の OCR に失敗しました: {0}")]
     AttachmentOcr(AttachmentOcrFailureKind),
+    #[error("保存待ちの音声が上限に達したため、新しい確定発話を受け付けられません")]
+    AudioPendingOverflow,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Error)]
@@ -159,7 +163,9 @@ impl CompanionError {
             | Self::Log(_)
             | Self::Json(_)
             | Self::Memory(_) => ObservationFailureKind::Infrastructure,
-            Self::AttachmentOcr(_) => ObservationFailureKind::Infrastructure,
+            Self::AttachmentOcr(_) | Self::AudioPendingOverflow => {
+                ObservationFailureKind::Infrastructure
+            }
         }
     }
 }
@@ -384,7 +390,7 @@ impl CompanionAgent {
             return Ok(self
                 .pending_user_messages
                 .iter()
-                .any(|input| !input.attachment_is_terminal()));
+                .any(|input| !input.is_terminal()));
         }
         Ok(self
             .storage
@@ -398,9 +404,7 @@ impl CompanionAgent {
             .pending_inputs
             .iter()
             .any(|input| match input {
-                crate::companion_storage::PendingInput::UserMessage(input) => {
-                    !input.attachment_is_terminal()
-                }
+                crate::companion_storage::PendingInput::UserMessage(input) => !input.is_terminal(),
             }))
     }
 
@@ -627,7 +631,7 @@ impl CompanionAgent {
             });
         }
         // The eye records facts; the companion alone decides whether to speak.
-        // No-change is the only mechanical drop because it carries no new screen information.
+        // 生の確定発話は journal 専用で、Coo には構造化した観察を渡す。
         let (mut observations, ignored) = observations
             .into_iter()
             .partition::<Vec<_>, _>(ObservationRecord::is_companion_signal);
@@ -829,6 +833,10 @@ impl CompanionAgent {
             if !target_ids.iter().any(|id| id == observation.id()) {
                 target_ids.push(observation.id().to_owned());
             }
+        }
+        // 重複除外や保留で対象がなくなった場合、確定する観察はない。
+        if target_ids.is_empty() {
+            return Ok(Some((candidate.response, Vec::new())));
         }
         if !self.reserve_proactive_commit(expected_user_epoch, &turn_id, &target_ids)? {
             return Ok(None);
@@ -1118,7 +1126,7 @@ impl CompanionAgent {
             .map_or(SessionRequest::New, SessionRequest::Resume);
         let mode = session_mode(&session);
         let started = Instant::now();
-        self.log_call_start(mode)?;
+        self.log_call_start(mode, CompanionCallKind::SessionSummary, &[])?;
         let provider = self.provider.clone();
         let cancellation_must_complete = provider.cancellation_must_complete();
         let system_prompt = self.system_prompt();
@@ -1136,8 +1144,9 @@ impl CompanionAgent {
                 tools_disabled: true,
                 output_schema: Some(crate::prompts::companion_output_schema(
                     self.config.emotions_enabled,
+                    false,
                 )),
-                output_validation_schema: Some(crate::prompts::companion_response_schema()),
+                output_validation_schema: Some(crate::prompts::companion_response_schema(false)),
                 session: provider_session,
                 model: Some(model),
                 effort: Some(effort),

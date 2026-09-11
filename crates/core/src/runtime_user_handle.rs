@@ -2,6 +2,21 @@ use super::*;
 use crate::locale::{text, Locale, TextKey};
 
 impl RuntimeHandle {
+    pub fn hearing_audio_ingestion(
+        &self,
+        session_id: String,
+    ) -> Result<crate::hearing_ingestion::HearingAudioIngestion, RuntimeError> {
+        self.ensure_open()?;
+        let preparer = self
+            .user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?;
+        let preparer = preparer
+            .as_ref()
+            .ok_or(RuntimeError::CompanionUnavailable)?;
+        Ok(preparer.hearing_audio_ingestion(session_id))
+    }
+
     pub fn begin_hearing_context(
         &self,
         generation: u64,
@@ -15,6 +30,16 @@ impl RuntimeHandle {
             .ok_or(RuntimeError::CompanionUnavailable)?
             .begin_hearing_context(generation, cancellation)
             .map_err(RuntimeError::from)
+    }
+
+    pub fn acknowledge_saved_hearing_audio(&self, id: &str) -> Result<(), RuntimeError> {
+        self.user_preparer
+            .read()
+            .map_err(|_| RuntimeError::Closed)?
+            .as_ref()
+            .ok_or(RuntimeError::CompanionUnavailable)?
+            .acknowledge_saved_hearing_audio(id)?;
+        Ok(())
     }
 
     pub fn update_hearing_context(
@@ -273,9 +298,7 @@ impl RuntimeHandle {
             .or_else(|| {
                 snapshot
                     .last_error
-                    .and_then(|error| error.attachment_ocr)
-                    .filter(|failure| !failure.retryable)
-                    .map(|failure| failure.input_id)
+                    .and_then(|error| error.terminal_user_input_id().map(str::to_owned))
             })
             .ok_or_else(|| {
                 RuntimeError::Factory(

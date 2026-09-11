@@ -54,6 +54,9 @@ pub(super) fn default_effort() -> String {
 pub(super) fn default_agent_timeout() -> u64 {
     120_000
 }
+pub(super) fn default_observer_interval() -> u64 {
+    60_000
+}
 pub(super) fn default_observer_daily_limit() -> u32 {
     1_000
 }

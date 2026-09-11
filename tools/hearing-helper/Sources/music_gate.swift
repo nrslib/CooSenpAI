@@ -33,15 +33,12 @@ enum SpeakerMusicGatePolicy {
 }
 
 enum SoundAnalysisMusicClassifierError: LocalizedError {
-    case unavailable
     case requiredClassificationUnavailable
     case audioDurationUnavailable
     case framePositionOverflow
 
     var errorDescription: String? {
         switch self {
-        case .unavailable:
-            return "macOS 13 以降の SoundAnalysis を利用できません"
         case .requiredClassificationUnavailable:
             return "SoundAnalysis のビルトイン分類器に music または speech がありません"
         case .audioDurationUnavailable:
@@ -70,9 +67,6 @@ final class SoundAnalysisMusicClassifier: NSObject, SNResultsObserving {
         onFailure: @escaping (Error) -> Void,
         onComplete: @escaping () -> Void
     ) throws {
-        guard #available(macOS 13.0, *) else {
-            throw SoundAnalysisMusicClassifierError.unavailable
-        }
         let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
         guard Set(request.knownClassifications).isSuperset(
             of: [Self.musicLabel, Self.speechLabel]

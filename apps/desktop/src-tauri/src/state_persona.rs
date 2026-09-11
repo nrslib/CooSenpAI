@@ -764,6 +764,7 @@ pub(crate) fn config_commit_last_error_for_locale(
         message: Some(error.format_for_locale(locale)),
         issues: error.issues_for_locale(locale),
         attachment_ocr: None,
+        user_response: None,
     }
 }
 

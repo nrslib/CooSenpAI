@@ -13,6 +13,7 @@ struct HearingHelperApp {
             debugInputWavPath: arguments.debugInputWavPath,
             debugDumpAppendedPath: arguments.debugDumpAppendedPath,
             debugRequestAuth: arguments.debugRequestAuth,
+            speakerBackend: arguments.speakerBackend,
             speakerDeviceFactory: {
                 guard #available(macOS 14.2, *) else { throw SpeakerAudioTapError.noOutputDevice }
                 return try FailureTestSpeakerDevice()

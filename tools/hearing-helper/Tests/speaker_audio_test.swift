@@ -50,6 +50,26 @@ private final class TestSpeakerDevice: SpeakerAudioCapture, @unchecked Sendable 
 }
 
 func testSpeakerAudio() {
+    do {
+        let legacy = try SpeakerBackend.select("screen-capture-kit")
+        let automatic = try SpeakerBackend.select()
+        assert(legacy == .screenCaptureKit)
+        if #available(macOS 14.2, *) {
+            assert(automatic == .processTap)
+            let tap = try SpeakerBackend.select("process-tap")
+            assert(tap == .processTap)
+        } else {
+            assert(automatic == .screenCaptureKit)
+            do {
+                _ = try SpeakerBackend.select("process-tap")
+                assertionFailure("古い OS では process tap を拒否する")
+            } catch SpeakerBackend.SelectionError.unavailable {}
+        }
+        do {
+            _ = try SpeakerBackend.select("unknown")
+            assertionFailure("未知の backend を拒否する")
+        } catch SpeakerBackend.SelectionError.invalid {}
+    } catch { assertionFailure("backend の選択に失敗: \(error)") }
     for interleaved in [false, true] {
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000,
                                   channels: 2, interleaved: interleaved)!

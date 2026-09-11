@@ -117,7 +117,7 @@ impl DetailsPresenter {
 #[derive(Default)]
 pub(super) struct DataFlowPresenter {
     events: Vec<Value>,
-    filter: Option<String>,
+    filters: std::collections::BTreeSet<String>,
     query: String,
     expanded: std::collections::BTreeSet<String>,
     scroll_distance: f64,
@@ -136,10 +136,14 @@ impl DataFlowPresenter {
             PanelEvent::Action { name, value } => match name.as_str() {
                 "filter" => {
                     let filter: String = decode(value)?;
-                    if !["all", "visual", "hearing", "companion"].contains(&filter.as_str()) {
+                    if !["all", "vision", "hearing", "coo"].contains(&filter.as_str()) {
                         return Err(action_error(&filter));
                     }
-                    self.filter = Some(filter);
+                    if filter == "all" {
+                        self.filters.clear();
+                    } else if !self.filters.insert(filter.clone()) {
+                        self.filters.remove(&filter);
+                    }
                 }
                 "query" => self.query = decode(value)?,
                 "scroll" => self.scroll_distance = decode(value)?,
@@ -149,6 +153,19 @@ impl DataFlowPresenter {
                         self.expanded.insert(id);
                     }
                 }
+                "open" => {
+                    let path: String = decode(value)?;
+                    if !self.events.iter().any(|event| {
+                        event["references"].as_array().is_some_and(|references| {
+                            references.iter().any(|reference| {
+                                reference["path"] == path && reference["available"] == true
+                            })
+                        })
+                    }) {
+                        return Err("データフローの参照元を開けません".to_owned());
+                    }
+                    io.command("openPath", path);
+                }
                 _ => return Err(action_error(&name)),
             },
             PanelEvent::Completed { id, .. } => {
@@ -156,13 +173,15 @@ impl DataFlowPresenter {
             }
             _ => {}
         }
-        let filter = self.filter.as_deref().unwrap_or("all");
         let needle = self.query.trim().to_lowercase();
         let visible: Vec<_> = self
             .events
             .iter()
             .filter(|event| {
-                (filter == "all" || event["kind"] == filter)
+                (self.filters.is_empty()
+                    || event["subject"]
+                        .as_str()
+                        .is_some_and(|subject| self.filters.contains(subject)))
                     && (needle.is_empty()
                         || ["summary", "detail"].iter().any(|field| {
                             event[field]
@@ -171,6 +190,6 @@ impl DataFlowPresenter {
                         }))
             })
             .collect();
-        Ok(json!({"filter":filter,"visible":visible,"expanded":self.expanded}))
+        Ok(json!({"filters":self.filters,"visible":visible,"expanded":self.expanded}))
     }
 }

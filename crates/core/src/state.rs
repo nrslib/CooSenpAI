@@ -1,5 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[path = "audio_observation.rs"]
@@ -50,6 +51,8 @@ pub struct ObservationFrame {
     pub front_app: Option<String>,
     pub app: Option<String>,
     pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +148,16 @@ enum LegacyObservationRegion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioSegmentReference {
+    pub id: String,
+    pub time: String,
+    pub source: AudioObservationSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VisualObservation {
     pub kind: String,
@@ -157,6 +170,10 @@ pub struct VisualObservation {
     pub frames: Vec<ObservationFrame>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_frame_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_frame_paths: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_segments: Vec<AudioSegmentReference>,
     #[serde(flatten)]
     pub data: VisualObservationData,
 }
@@ -191,12 +208,29 @@ pub struct StagnationObservation {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ObservationRecord {
     Visual(VisualObservation),
     NoChange(NoChangeObservation),
     Audio(AudioObservation),
+}
+
+impl<'de> Deserialize<'de> for ObservationRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        // 共通項目だけを持つ NoChange に Audio を誤変換すると本文と入力源が失われる。
+        match value.get("kind").and_then(Value::as_str) {
+            Some("visual") => serde_json::from_value(value).map(Self::Visual),
+            Some("no-change") => serde_json::from_value(value).map(Self::NoChange),
+            Some("audio") => serde_json::from_value(value).map(Self::Audio),
+            _ => return Err(serde::de::Error::custom("観察の kind が不正です")),
+        }
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl ObservationRecord {
@@ -222,12 +256,11 @@ impl ObservationRecord {
 
     pub fn is_audio(&self) -> bool {
         matches!(self, Self::Audio(_))
+            || matches!(self, Self::Visual(value) if !value.audio_segments.is_empty())
     }
 
     pub fn is_companion_signal(&self) -> bool {
-        self.is_visual()
-            || self.is_audio()
-            || matches!(self, Self::NoChange(value) if value.stagnation.is_some())
+        self.is_visual() || matches!(self, Self::NoChange(value) if value.stagnation.is_some())
     }
 
     pub fn is_critical_signal(&self) -> bool {
@@ -264,6 +297,14 @@ pub struct UserScreenContext {
         deserialize_with = "crate::hearing_context::deserialize_contexts"
     )]
     pub hearing_context: Vec<crate::hearing_context::HearingContext>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "crate::hearing_context::deserialize_pending_audio"
+    )]
+    pub pending_audio: Vec<crate::state::AudioObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_audio_ids: Vec<String>,
 }
 
 impl UserScreenContext {
@@ -271,6 +312,8 @@ impl UserScreenContext {
         self.observations.is_empty()
             && self.pending_frames.is_empty()
             && self.hearing_context.is_empty()
+            && self.pending_audio.is_empty()
+            && self.pending_audio_ids.is_empty()
     }
 }
 
@@ -461,8 +504,34 @@ pub fn parse_observation(
         || record.created_at.is_empty()
         || record.window_start.is_empty()
         || record.window_end.is_empty()
-        || record.frame_count == 0
+        || (record.frame_count == 0 && record.audio_segments.is_empty())
         || record.frames.len() != record.frame_count
+        || (record.frame_count == 0 && !record.source_frame_ids.is_empty())
+        || record.frames.iter().any(|frame| {
+            frame
+                .ocr_text
+                .as_ref()
+                .is_some_and(|text| text.chars().count() > 2_000)
+        })
+        || record.source_frame_paths.iter().any(|(frame_id, path)| {
+            !record.source_frame_ids.iter().any(|id| id == frame_id)
+                || !std::path::Path::new(path).is_absolute()
+        })
+        || record
+            .audio_segments
+            .iter()
+            .enumerate()
+            .any(|(index, segment)| {
+                segment.id.is_empty()
+                    || chrono::DateTime::parse_from_rfc3339(&segment.time).is_err()
+                    || segment
+                        .transcript_path
+                        .as_ref()
+                        .is_some_and(|path| !std::path::Path::new(path).is_absolute())
+                    || record.audio_segments[..index]
+                        .iter()
+                        .any(|previous| previous.id == segment.id)
+            })
     {
         return Err(ObservationError::Invalid);
     }
@@ -534,6 +603,8 @@ fn validate_stored_visual_keys(object: &Map<String, Value>) -> Result<(), Observ
             "frameCount",
             "frames",
             "sourceFrameIds",
+            "sourceFramePaths",
+            "audioSegments",
             "activity",
             "outline",
             "textExcerpts",
@@ -550,7 +621,7 @@ fn validate_stored_visual_keys(object: &Map<String, Value>) -> Result<(), Observ
         .ok_or(ObservationError::Missing("frames"))?;
     for item in frames {
         let item = item.as_object().ok_or(ObservationError::Invalid)?;
-        validate_keys(item, &["trigger", "frontApp", "app", "target"])?;
+        validate_keys(item, &["trigger", "frontApp", "app", "target", "ocrText"])?;
     }
     let data = visual_data_value(object);
     let data = data.as_object().ok_or(ObservationError::Invalid)?;

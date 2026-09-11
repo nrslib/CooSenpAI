@@ -302,7 +302,7 @@ impl DesktopState {
         let (companion_calls, companion_limit_reached) =
             companion_usage_summary(&paths, config.companion.daily_proactive_limit);
         let permission = crate::platform::screen_capture_permission();
-        let speech_permissions = permission::current_speech_permissions(logger.as_ref());
+        let audio_permissions = permission::current_audio_permissions(logger.as_ref());
         let speech = Arc::new(crate::speech::SpeechController::new(&paths));
         let hearing = Arc::new(crate::hearing::HearingController::new(
             &paths,
@@ -356,7 +356,7 @@ impl DesktopState {
                     config,
                     conversation,
                     permission,
-                    speech_permissions,
+                    audio_permissions,
                     observer_calls,
                     companion_calls,
                     signed_build(),

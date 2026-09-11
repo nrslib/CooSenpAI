@@ -13,6 +13,105 @@ pub struct ObserverUsage {
     pub ai_calls: u32,
 }
 
+#[derive(Clone, Copy)]
+pub enum ObserverCallKind {
+    Vision,
+    Hearing,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObserverRoleUsage {
+    date: String,
+    ai_calls: u32,
+    #[serde(default)]
+    vision_ai_calls: Option<u32>,
+    #[serde(default)]
+    hearing_ai_calls: u32,
+}
+
+pub fn try_reserve_observer_role(
+    path: &Path,
+    date: &str,
+    role: ObserverCallKind,
+    limit: u32,
+) -> Result<Option<ObserverUsage>, UsageError> {
+    let _lock = SiblingLock::acquire(&lock_path(path))?;
+    let mut current = match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<ObserverRoleUsage>(&bytes)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => ObserverRoleUsage {
+            date: date.to_owned(),
+            ai_calls: 0,
+            vision_ai_calls: Some(0),
+            hearing_ai_calls: 0,
+        },
+        Err(error) => return Err(error.into()),
+    };
+    if current.date != date {
+        current = ObserverRoleUsage {
+            date: date.to_owned(),
+            ai_calls: 0,
+            vision_ai_calls: Some(0),
+            hearing_ai_calls: 0,
+        };
+    }
+    // 分割前の aiCalls は Vision AI の使用量として引き継ぐ。
+    let vision_calls = current
+        .vision_ai_calls
+        .get_or_insert(current.ai_calls.saturating_sub(current.hearing_ai_calls));
+    let calls = match role {
+        ObserverCallKind::Vision => vision_calls,
+        ObserverCallKind::Hearing => &mut current.hearing_ai_calls,
+    };
+    if *calls >= limit {
+        write_snapshot(path, &current)?;
+        return Ok(None);
+    }
+    *calls = calls.saturating_add(1);
+    current.ai_calls = current.ai_calls.saturating_add(1);
+    write_snapshot(path, &current)?;
+    Ok(Some(ObserverUsage {
+        date: current.date,
+        ai_calls: current.ai_calls,
+    }))
+}
+
+#[test]
+fn observer_roles_reserve_independently_and_reset_at_the_next_local_date() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("usage.json");
+    fs::write(&path, r#"{"date":"2026-09-10","aiCalls":2}"#).unwrap();
+    assert!(
+        try_reserve_observer_role(&path, "2026-09-10", ObserverCallKind::Vision, 2)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        try_reserve_observer_role(&path, "2026-09-10", ObserverCallKind::Hearing, 1)
+            .unwrap()
+            .unwrap()
+            .ai_calls,
+        3
+    );
+    assert!(
+        try_reserve_observer_role(&path, "2026-09-10", ObserverCallKind::Hearing, 1)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        try_reserve_observer_role(&path, "2026-09-11", ObserverCallKind::Vision, 2)
+            .unwrap()
+            .unwrap()
+            .ai_calls,
+        1
+    );
+    assert!(
+        try_reserve_observer_role(&path, "2026-09-11", ObserverCallKind::Hearing, 0)
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionUsage {

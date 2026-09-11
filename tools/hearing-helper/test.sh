@@ -2,21 +2,28 @@
 set -eu
 
 request_auth=0
-process_tap=0
+process_tap=$(sw_vers -productVersion | awk -F. '{ print ($1 > 14 || ($1 == 14 && $2 >= 2)) ? 1 : 0 }')
 speaker_failures=0
+skip_speaker_e2e=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --request-auth) request_auth=1 ;;
     --process-tap) process_tap=1 ;;
     --speaker-failures) speaker_failures=1 ;;
-    *) printf '使い方: %s [--request-auth] [--process-tap] [--speaker-failures]\n' "$0" >&2; exit 2 ;;
+    --skip-speaker-e2e) skip_speaker_e2e=1 ;;
+    *) printf '使い方: %s [--request-auth] [--process-tap] [--speaker-failures] [--skip-speaker-e2e]\n' "$0" >&2; exit 2 ;;
   esac
   shift
 done
+if [ "$skip_speaker_e2e" -eq 1 ] && [ "$speaker_failures" -eq 1 ]; then
+  printf '%s\n' '--skip-speaker-e2e と --speaker-failures は同時に指定できません' >&2
+  exit 2
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-temporary_path=$(mktemp /tmp/coosenpai-hearing-test.XXXXXX)
+mkdir -p "$repository_dir/target/helpers"
+temporary_path=$(mktemp "$repository_dir/target/helpers/coosenpai-hearing-test.XXXXXX")
 temporary_object_path="${temporary_path}.o"
 temporary_ring_object_path="${temporary_path}.ring.o"
 module_cache_dir="$script_dir/../../target/helpers/test-module-cache"
@@ -43,6 +50,9 @@ stop_e2e_runner() {
 cleanup() {
   stop_e2e_runner
   rm -f "$temporary_path" "$temporary_object_path" "$temporary_ring_object_path"
+  for artifact in stdout stderr exit; do
+    if [ -f "$e2e_directory/$artifact" ]; then cp "$e2e_directory/$artifact" "$e2e_root/last-$artifact"; fi
+  done
   rm -rf "$e2e_directory"
   rm -f "$e2e_config"
 }
@@ -50,15 +60,18 @@ trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$module_cache_dir"
 sdk_path=$(xcrun --sdk macosx --show-sdk-path)
-clang -isysroot "$sdk_path" -fobjc-arc -c \
+clang -target "$(uname -m)-apple-macosx13.0" -isysroot "$sdk_path" -fobjc-arc -c \
   "$script_dir/Sources/audio_tap_installer.m" -o "$temporary_object_path"
-clang -isysroot "$sdk_path" -std=c11 -O2 -c \
+clang -target "$(uname -m)-apple-macosx13.0" -isysroot "$sdk_path" -std=c11 -O2 -c \
   "$script_dir/Sources/speaker_audio_ring.c" -o "$temporary_ring_object_path"
-swiftc \
+swiftc -target "$(uname -m)-apple-macosx13.0" \
   -parse-as-library \
   -module-cache-path "$module_cache_dir" \
   -import-objc-header "$script_dir/Sources/audio_tap_installer.h" \
   "$script_dir/Sources/speaker_audio_tap.swift" \
+  "$script_dir/Sources/speaker_backend.swift" \
+  "$script_dir/Sources/speaker_screen_capture.swift" \
+  "$script_dir/Sources/speaker_screen_device.swift" \
   "$script_dir/Sources/speaker_audio_device.swift" \
   "$script_dir/Sources/audio_stats.swift" \
   "$script_dir/Sources/audio_scaling.swift" \
@@ -76,6 +89,7 @@ swiftc \
   "$temporary_object_path" "$temporary_ring_object_path" \
   "$script_dir/Tests/audio_stats_test.swift" \
   "$script_dir/Tests/speaker_audio_test.swift" \
+  "$script_dir/Tests/speaker_screen_capture_test.swift" \
   "$script_dir/Tests/audio_scaling_test.swift" \
   "$script_dir/Tests/audio_buffer_copy_test.swift" \
   "$script_dir/Tests/audio_conversion_test.swift" \
@@ -99,10 +113,22 @@ assert result.returncode == 1, result
 assert "operation=stop-device" in result.stderr and "action=terminate-process" in result.stderr, result.stderr
 assert "completion after stop failure" not in result.stderr, result.stderr
 print("Speaker stop failure: process exited without completion")
+result = subprocess.run([sys.argv[1], "--screen-capture-stop-failure"], capture_output=True, text=True, timeout=5)
+assert result.returncode == 1, result
+assert "screen-capture stop failed:" in result.stderr, result.stderr
+assert "stopped" not in result.stderr and "closed" not in result.stdout, result
+print("ScreenCaptureKit stop failure: process exited without stopped/closed")
 PYTEST
 
 "$script_dir/build.sh" >/dev/null
 mkdir -p "$e2e_root"
+cat > "$e2e_root/speaker-helper.sh" <<'SPEAKER'
+#!/bin/sh
+set -eu
+test_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$test_root/../coosenpai-hearing" "$@" --debug-dump-appended "$test_root/data/dump"
+SPEAKER
+chmod 755 "$e2e_root/speaker-helper.sh"
 stop_e2e_runner
 rm -rf "$e2e_directory"
 rm -f "$e2e_config"
@@ -130,6 +156,9 @@ cat > "$e2e_app/Contents/Info.plist" <<'PLIST'
   <string>1.0</string>
   <key>LSBackgroundOnly</key>
   <true/>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>ScreenCaptureKit のスピーカー録音を検証するため画面収録を使用します。</string>
   <key>NSAudioCaptureUsageDescription</key>
   <string>スピーカー録音の E2E テストにシステムオーディオを使用します。</string>
   <key>NSMicrophoneUsageDescription</key>
@@ -190,8 +219,10 @@ elif [ "$mode" = speaker-failure ]; then
     --locale ja-JP --input-device default --sources microphone,speaker \
     --debug-input-wav "$input_wav" \
     < "$stdin_path" > "$stdout_path" 2> "$stderr_path" &
-elif [ "$mode" = process-tap ] || [ "$mode" = speaker-recovered ]; then
-  "$helper_path" --locale ja-JP --input-device default --sources speaker \
+elif [ "$mode" = process-tap ] || [ "$mode" = screen-capture-kit ] || [ "$mode" = speaker-recovered ]; then
+  backend=$mode
+  if [ "$mode" = speaker-recovered ]; then backend=process-tap; fi
+  "$helper_path" --locale ja-JP --input-device default --sources speaker --speaker-backend "$backend" \
     < "$stdin_path" > "$stdout_path" 2> "$stderr_path" &
 else
   "$helper_path" \
@@ -221,35 +252,14 @@ printf '%s\n' "$exit_status" > "$exit_path"
 exit 0
 RUN
 chmod 755 "$e2e_app/Contents/MacOS/runner.sh"
-cat > "$e2e_directory/e2e-launcher.c" <<'C'
-#include <libgen.h>
-#include <limits.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-int main(int argc, char **argv) {
-    char executable[PATH_MAX];
-    if (argc < 1 || realpath(argv[0], executable) == NULL) {
-        return 127;
-    }
-    char *directory = dirname(executable);
-    char script[PATH_MAX];
-    if (snprintf(script, sizeof(script), "%s/runner.sh", directory)
-        >= (int)sizeof(script)) {
-        return 127;
-    }
-    execl("/bin/sh", "sh", script, (char *)NULL);
-    return 127;
-}
-C
-clang "$e2e_directory/e2e-launcher.c" \
-  -o "$e2e_app/Contents/MacOS/run"
+swiftc -target "$(uname -m)-apple-macosx13.0" -O -module-cache-path "$module_cache_dir" \
+  "$script_dir/Tests/e2e_launcher.swift" -o "$e2e_app/Contents/MacOS/run"
 codesign --force --deep --sign - "$e2e_app" >/dev/null
 
 write_e2e_config() {
   helper_name=coosenpai-hearing
   case "$1" in speaker-failure|speaker-recovered|failure-auth) helper_name=coosenpai-hearing-failure-test ;; esac
+  case "$1" in process-tap|screen-capture-kit) helper_name=hearing-e2e/speaker-helper.sh ;; esac
   cat > "$e2e_config" <<EOF
 helper_path=$repository_dir/target/helpers/$helper_name
 mode=$1
@@ -266,6 +276,7 @@ EOF
 
 launch_e2e() {
   stop_e2e_runner
+  rm -rf "$e2e_directory/dump"
   write_e2e_config "$1"
   rm -f \
     "$e2e_directory/stdin" \
@@ -464,13 +475,19 @@ if [ "$close_count" -ne 2 ]; then
 fi
 printf '%s\n' 'WAV E2E final-count=2 (一つ目・二つ目)' >&2
 
-if [ "$process_tap" -eq 1 ]; then
-  for cycle in 1 2 3; do
-    launch_e2e process-tap
-    python3 "$script_dir/Tests/process_tap_e2e.py" "$e2e_directory" normal "$request_auth"
-    printf 'Process tap E2E cycle=%s PASS\n' "$cycle" >&2
-  done
+speaker_backends=screen-capture-kit
+if [ "$process_tap" -eq 1 ]; then speaker_backends="process-tap screen-capture-kit"; fi
+if [ "$skip_speaker_e2e" -eq 1 ]; then
+  speaker_backends=
+  printf '%s\n' 'Speaker E2E: --skip-speaker-e2e により実録音のみ省略（単体・WAV は検証済み）' >&2
 fi
+for backend in $speaker_backends; do
+  for cycle in 1 2 3; do
+    launch_e2e "$backend"
+    python3 "$script_dir/Tests/process_tap_e2e.py" "$e2e_directory" normal "$request_auth" "$backend" "$cycle"
+    printf 'Speaker E2E backend=%s cycle=%s PASS\n' "$backend" "$cycle" >&2
+  done
+done
 
 if [ "$speaker_failures" -eq 1 ]; then
   "$script_dir/build.sh" '' --test-speaker-failure >/dev/null

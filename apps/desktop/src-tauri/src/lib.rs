@@ -304,6 +304,7 @@ pub fn run() -> anyhow::Result<()> {
             commands_details::details_open,
             commands_details::details_snapshot,
             commands_details::details_dataflow_log,
+            commands_details::details_dataflow_open_path,
             commands::companion_assertiveness_set,
             commands::persona_list,
             commands::provider_models,

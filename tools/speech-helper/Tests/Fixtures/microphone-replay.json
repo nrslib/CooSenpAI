@@ -1,0 +1,24 @@
+{
+  "sources": [
+    {"file": "segment-microphone-1.wav", "sha256": "c461d66cf6f12ce7e4df25f4a11462f5825187231384ed19905bbf386f76cd28", "frames": 715200},
+    {"file": "segment-microphone-2.wav", "sha256": "9f161a06f32224896a8373aab556517a708dad3a01673027cf1033edc413a985", "frames": 211200},
+    {"file": "segment-microphone-3.wav", "sha256": "6150c245503bec3fa38c23bf3c1b91d2d18f5850ca321bb2f84e2bb3d71236d8", "frames": 422400}
+  ],
+  "sample_rate": 48000,
+  "channels": 1,
+  "codec": "pcm_f32le",
+  "parts": [
+    {"source": "segment-microphone-2.wav", "start_frame": 0, "frames": 211200},
+    {"source": "segment-microphone-1.wav", "start_frame": 475200, "frames": 168000},
+    {"source": "segment-microphone-3.wav", "start_frame": 0, "frames": 422400},
+    {"source": "segment-microphone-1.wav", "start_frame": 643200, "frames": 72000}
+  ],
+  "gap_seconds": 3.5,
+  "tail_seconds": 1.5,
+  "noise_rms_dbfs": -53.80080638233335,
+  "frames": 873600,
+  "duration_seconds": 18.2,
+  "pcm_sha256": "135ec56f3b6ced336520cc00266f49a9c54f590cec41071e2deb3f6688ee8cc5",
+  "wav_sha256": "d4e0f6abb11e1518e95ed9aa275e2b0e13429ef65a7656f4af578d22520d282b",
+  "note": "区間2・3は全フレームを保持。元からある前後の環境音に加えて3.5秒・1.5秒を挿入。元の連続録音の時系列復元ではない。"
+}

@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>話しかけた内容を文字にするためにマイクを使用します。</string>
   <key>NSSpeechRecognitionUsageDescription</key>
@@ -9,6 +11,6 @@
   <key>NSAudioCaptureUsageDescription</key>
   <string>音声観察でスピーカーの音を文字にするためにシステムオーディオを録音します。</string>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>音声観察でスピーカーの音を取得するために画面収録を使用します。</string>
+  <string>見守りの画面撮影と、macOS 14.2 未満でスピーカーの音を取得するために画面収録を使用します。</string>
 </dict>
 </plist>

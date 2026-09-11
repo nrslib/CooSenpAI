@@ -3,16 +3,12 @@ use super::*;
 pub(super) enum ControlCommand {
     Observe {
         frames: Vec<ObservationFrameInput>,
+        audio: Vec<crate::state::AudioObservation>,
         cancellation: CancellationToken,
         response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
     },
     Heartbeat {
         stagnation: Option<crate::state::StagnationObservation>,
-        cancellation: CancellationToken,
-        response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
-    },
-    AudioObservation {
-        observation: crate::state::AudioObservation,
         cancellation: CancellationToken,
         response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
     },

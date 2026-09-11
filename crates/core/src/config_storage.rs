@@ -223,6 +223,7 @@ pub fn ensure_layout(paths: &ConfigPaths) -> Result<(), ConfigError> {
     crate::frame_buffer::FrameBuffer::new(paths.frame_buffer.clone())
         .cleanup_expired(chrono::Utc::now())?;
     crate::conversation_archive::reconcile_conversation_reset(paths)?;
+    crate::observer::migrate_legacy_audio(paths, chrono::Utc::now())?;
     if !paths.config.exists() {
         save_config(paths, &Config::default())?;
     }
@@ -236,7 +237,14 @@ fn validate_executable_overrides(config: &Config) -> Result<(), ConfigError> {
             "watch.ocrGate.executable",
             &config.watch.ocr_gate.executable,
         ),
-        ("observer.executable", &config.observer.executable),
+        (
+            "observer.vision.executable",
+            &config.observer.vision.executable,
+        ),
+        (
+            "observer.hearing.executable",
+            &config.observer.hearing.executable,
+        ),
         ("companion.executable", &config.companion.executable),
     ] {
         let Some(value) = value else { continue };

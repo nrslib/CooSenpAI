@@ -207,8 +207,11 @@ impl PresenceEvent {
                 front_app: None,
                 app: None,
                 target: target.to_owned(),
+                ocr_text: None,
             }],
             source_frame_ids: Vec::new(),
+            source_frame_paths: std::collections::BTreeMap::new(),
+            audio_segments: Vec::new(),
             data: VisualObservationData {
                 activity: activity.to_owned(),
                 outline: truncate_bytes(context, 2_000),

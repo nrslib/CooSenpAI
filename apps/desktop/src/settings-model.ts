@@ -29,6 +29,15 @@ export interface SettingsIssueTarget {
 const CONTROL_PATHS = new Set<string>([
   "companion.displayName", "companion.persona", "companion.assertiveness", "companion.emotionsEnabled",
   "companion.reviewTime", "chat.whileThinking",
+  "observer.vision.provider", "observer.vision.model", "observer.vision.effort",
+  "observer.vision.executable", "observer.vision.intervalMs", "observer.vision.timeoutMs", "observer.vision.dailyCallLimit",
+  "observer.vision.textExcerptMaxChars", "observer.vision.textExcerptMaxCount",
+  "observer.vision.textTotalMaxChars", "observer.vision.changesMaxCount",
+  "observer.hearing.provider", "observer.hearing.model", "observer.hearing.effort",
+  "observer.hearing.executable", "observer.hearing.intervalMs", "observer.hearing.timeoutMs", "observer.hearing.dailyCallLimit",
+  "observer.hearing.textExcerptMaxChars", "observer.hearing.textExcerptMaxCount",
+  "observer.hearing.textTotalMaxChars", "observer.hearing.changesMaxCount",
+  // Keep resolving issue paths emitted by legacy flat configuration files.
   "observer.provider", "observer.model", "observer.effort",
   "observer.executable", "observer.timeoutMs", "observer.dailyCallLimit",
   "companion.provider", "companion.model", "companion.effort",

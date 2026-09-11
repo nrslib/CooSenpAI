@@ -1,5 +1,6 @@
 use super::{CompanionAgent, CompanionError};
 use crate::provider::{ProviderErrorKind, ProviderUsage};
+use crate::usage::CompanionCallKind;
 use std::path::Path;
 
 impl CompanionAgent {
@@ -33,13 +34,24 @@ impl CompanionAgent {
             .map_or("unknown", |provider| provider.as_str())
     }
 
-    pub(super) fn log_call_start(&self, mode: &str) -> Result<(), CompanionError> {
+    pub(super) fn log_call_start(
+        &self,
+        mode: &str,
+        kind: CompanionCallKind,
+        source_ids: &[String],
+    ) -> Result<(), CompanionError> {
         if let Some(logger) = &self.logger {
             logger.write(
                 "INFO",
                 &format!(
-                    "companion 呼び出し開始: provider={} mode={mode}",
-                    self.provider_label()
+                    "companion 呼び出し開始: provider={} mode={mode} trigger={} source-ids={}",
+                    self.provider_label(),
+                    match kind {
+                        CompanionCallKind::User => "user",
+                        CompanionCallKind::Proactive => "observation",
+                        CompanionCallKind::SessionSummary => "session-summary",
+                    },
+                    source_ids.join(","),
                 ),
             )?;
         }

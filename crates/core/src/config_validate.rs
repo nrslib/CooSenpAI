@@ -468,7 +468,22 @@ fn validate_positive_fields(config: &Config, issues: &mut Vec<ConfigValidationIs
         ),
         ("watch.triggers.pollMs", config.watch.triggers.poll_ms),
         ("watch.ocrGate.timeoutMs", config.watch.ocr_gate.timeout_ms),
-        ("observer.timeoutMs", config.observer.timeout_ms),
+        (
+            "observer.vision.timeoutMs",
+            config.observer.vision.timeout_ms,
+        ),
+        (
+            "observer.hearing.timeoutMs",
+            config.observer.hearing.timeout_ms,
+        ),
+        (
+            "observer.vision.intervalMs",
+            config.observer.vision.interval_ms,
+        ),
+        (
+            "observer.hearing.intervalMs",
+            config.observer.hearing.interval_ms,
+        ),
         ("companion.timeoutMs", config.companion.timeout_ms),
         ("companion.stuckAfterMs", config.companion.stuck_after_ms),
         (
@@ -550,10 +565,16 @@ fn validate_notification(config: &Config, issues: &mut Vec<ConfigValidationIssue
 fn validate_providers(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
     for (name, provider, model, effort) in [
         (
-            "observer",
-            &config.observer.provider,
-            &config.observer.model,
-            &config.observer.effort,
+            "observer.vision",
+            &config.observer.vision.provider,
+            &config.observer.vision.model,
+            &config.observer.vision.effort,
+        ),
+        (
+            "observer.hearing",
+            &config.observer.hearing.provider,
+            &config.observer.hearing.model,
+            &config.observer.hearing.effort,
         ),
         (
             "companion",
@@ -586,20 +607,36 @@ fn validate_providers(config: &Config, issues: &mut Vec<ConfigValidationIssue>) 
 fn validate_companion(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
     for (name, value) in [
         (
-            "observer.textExcerptMaxChars",
-            config.observer.text_excerpt_max_chars,
+            "observer.vision.textExcerptMaxChars",
+            config.observer.vision.text_excerpt_max_chars,
         ),
         (
-            "observer.textExcerptMaxCount",
-            config.observer.text_excerpt_max_count,
+            "observer.vision.textExcerptMaxCount",
+            config.observer.vision.text_excerpt_max_count,
         ),
         (
-            "observer.textTotalMaxChars",
-            config.observer.text_total_max_chars,
+            "observer.vision.textTotalMaxChars",
+            config.observer.vision.text_total_max_chars,
         ),
         (
-            "observer.changesMaxCount",
-            config.observer.changes_max_count,
+            "observer.vision.changesMaxCount",
+            config.observer.vision.changes_max_count,
+        ),
+        (
+            "observer.hearing.textExcerptMaxChars",
+            config.observer.hearing.text_excerpt_max_chars,
+        ),
+        (
+            "observer.hearing.textExcerptMaxCount",
+            config.observer.hearing.text_excerpt_max_count,
+        ),
+        (
+            "observer.hearing.textTotalMaxChars",
+            config.observer.hearing.text_total_max_chars,
+        ),
+        (
+            "observer.hearing.changesMaxCount",
+            config.observer.hearing.changes_max_count,
         ),
         (
             "companion.wakeCoalesceMax",
@@ -812,7 +849,14 @@ fn validate_executables(config: &Config, issues: &mut Vec<ConfigValidationIssue>
             "watch.ocrGate.executable",
             &config.watch.ocr_gate.executable,
         ),
-        ("observer.executable", &config.observer.executable),
+        (
+            "observer.vision.executable",
+            &config.observer.vision.executable,
+        ),
+        (
+            "observer.hearing.executable",
+            &config.observer.hearing.executable,
+        ),
         ("companion.executable", &config.companion.executable),
     ] {
         if executable

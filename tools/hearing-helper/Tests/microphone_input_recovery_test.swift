@@ -107,7 +107,7 @@ private func testBackgroundSourceFailureStopsMicrophoneOnMain() {
     let session = HearingSession(
         locale: Locale(identifier: "ja-JP"), inputDevice: "default",
         sources: [.microphone, .speaker], debugInputWavPath: nil,
-        debugDumpAppendedPath: nil, debugRequestAuth: false
+        debugDumpAppendedPath: nil, debugRequestAuth: false, speakerBackend: .screenCaptureKit
     )
     let failureQueue = DispatchQueue(label: "hearing-background-source-failure")
     let submitted = DispatchSemaphore(value: 0)
@@ -142,7 +142,7 @@ private func testOldSourceFailureDoesNotStopReplacementMicrophone() {
     let session = HearingSession(
         locale: Locale(identifier: "ja-JP"), inputDevice: "default",
         sources: [.microphone, .speaker], debugInputWavPath: nil,
-        debugDumpAppendedPath: nil, debugRequestAuth: false
+        debugDumpAppendedPath: nil, debugRequestAuth: false, speakerBackend: .screenCaptureKit
     )
     let oldGeneration = session.beginMicrophoneInputGeneration()
     let audioQueue = DispatchQueue(label: "hearing-stale-source-failure")

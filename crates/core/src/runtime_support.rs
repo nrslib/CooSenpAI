@@ -183,8 +183,7 @@ pub(super) fn drain_closed_commands(
     while let Ok(command) = control_rx.try_recv() {
         let response = match command {
             ControlCommand::Observe { response, .. }
-            | ControlCommand::Heartbeat { response, .. }
-            | ControlCommand::AudioObservation { response, .. } => Some(response),
+            | ControlCommand::Heartbeat { response, .. } => Some(response),
             ControlCommand::CompanionObservations { response, .. }
             | ControlCommand::ProcessCompanionMailbox { response, .. } => {
                 let _ = response.send(Err(RuntimeError::Closed));
@@ -442,9 +441,7 @@ impl RuntimeActor {
 pub(super) fn control_uses_observer(command: &ControlCommand) -> bool {
     matches!(
         command,
-        ControlCommand::Observe { .. }
-            | ControlCommand::Heartbeat { .. }
-            | ControlCommand::AudioObservation { .. }
+        ControlCommand::Observe { .. } | ControlCommand::Heartbeat { .. }
     )
 }
 
@@ -552,7 +549,7 @@ impl RuntimeActor {
         let input_id = self
             .active_user_message_id
             .clone()
-            .or_else(|| self.terminal_attachment_input_id())
+            .or_else(|| self.terminal_user_input_id())
             .ok_or_else(|| {
                 RuntimeError::Factory(
                     text(
@@ -585,10 +582,11 @@ impl RuntimeActor {
         self.operation_cancellation.cancel_lane(OperationLane::Coo);
         self.operation_cancellation.renew_lane(OperationLane::Coo);
         if self.last_error.as_ref().is_some_and(|error| {
-            error
-                .attachment_ocr
-                .as_ref()
-                .is_some_and(|failure| failure.input_id == input_id)
+            error.terminal_user_input_id() == Some(input_id)
+                || error
+                    .attachment_ocr
+                    .as_ref()
+                    .is_some_and(|failure| failure.input_id == input_id)
         }) {
             self.last_error = None;
             self.user_work_pending = true;
@@ -644,7 +642,7 @@ impl RuntimeActor {
                 expected,
                 self.active_user_message_id
                     .clone()
-                    .or_else(|| self.terminal_attachment_input_id()),
+                    .or_else(|| self.terminal_user_input_id()),
             ),
             PriorityCommand::RetryUser {
                 input_id: Some(expected),
@@ -673,7 +671,7 @@ impl RuntimeActor {
     }
 
     fn retry_user_input_id(&self) -> Result<String, RuntimeError> {
-        if let Some(input_id) = self.terminal_attachment_input_id() {
+        if let Some(input_id) = self.terminal_user_input_id() {
             return Ok(input_id);
         }
         if self.last_error.is_none() || self.user_retry_at.is_none() {
@@ -690,7 +688,7 @@ impl RuntimeActor {
         preparer
             .pending_messages()?
             .into_iter()
-            .find(|input| !input.attachment_is_terminal())
+            .find(|input| !input.is_terminal())
             .map(|input| input.id)
             .ok_or_else(|| {
                 RuntimeError::Factory(
@@ -710,21 +708,12 @@ impl RuntimeActor {
                 "対象の発言が変わったため操作を取り消しました".into(),
             ));
         }
-        if self.terminal_attachment_input_id().as_deref() == Some(&input_id) {
-            let companion = self
-                .companion
-                .as_ref()
-                .ok_or(RuntimeError::CompanionUnavailable)?;
-            if !companion.clear_terminal_attachment_failure(&input_id)? {
-                return Err(RuntimeError::Factory(
-                    text(
-                        TextKey::RuntimeRetryableReplyMissing,
-                        Locale::from_config(&self.config.ui.language),
-                    )
-                    .to_owned(),
-                ));
-            }
-        }
+        self.user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .as_ref()
+            .ok_or(RuntimeError::CompanionUnavailable)?
+            .retry_user_input(&input_id)?;
         self.operation_cancellation.renew();
         self.last_error = None;
         self.user_retry_at = None;
@@ -734,16 +723,18 @@ impl RuntimeActor {
         Ok(input_id)
     }
 
-    pub(super) fn terminal_attachment_input_id(&self) -> Option<String> {
+    pub(super) fn terminal_user_input_id(&self) -> Option<String> {
         self.last_error
             .as_ref()?
-            .attachment_ocr
-            .as_ref()
-            .filter(|failure| !failure.retryable)
-            .map(|failure| failure.input_id.clone())
+            .terminal_user_input_id()
+            .map(str::to_owned)
     }
 
     pub(super) fn refresh_user_preparer(&mut self) {
+        self.hearing_context
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_persistent(self.observation_delivery == ObservationDelivery::Companion);
         if let Some(companion) = self.companion.as_mut() {
             companion.set_hearing_context(self.hearing_context.clone());
         }
@@ -806,26 +797,12 @@ impl RuntimeActor {
             self.initialization_retry_at = self.companion.as_ref().map(|_| Instant::now());
             self.user_commands_blocked = false;
         } else {
-            if config.observer.provider != self.config.observer.provider
-                || config.observer.model != self.config.observer.model
-                || config.observer.executable != self.config.observer.executable
-                || config.companion.provider != self.config.companion.provider
-                || config.companion.model != self.config.companion.model
-                || config.companion.executable != self.config.companion.executable
-            {
-                return Err(RuntimeError::Factory(
-                    text(
-                        TextKey::RuntimeFactoryRebuildUnavailable,
-                        Locale::from_config(&self.config.ui.language),
-                    )
-                    .to_owned(),
-                ));
-            }
+            self.validate_reused_providers(&config)?;
             if let Some(companion) = self.companion.as_mut() {
                 companion.update_config(config.companion.clone())?;
             }
             if let Some(observer) = self.observer.as_mut() {
-                observer.update_config(config.observer.clone());
+                observer.update_observer_config(config.observer.clone());
             }
         }
         self.operation_cancellation.renew();
@@ -835,15 +812,13 @@ impl RuntimeActor {
         Ok(self.revision)
     }
 
-    pub(super) fn update_config_without_factory(
-        &mut self,
-        config: Config,
-    ) -> Result<u64, RuntimeError> {
-        let config_revision = config.revision;
-        let config = self.merge_config_update(config)?;
-        if config.observer.provider != self.config.observer.provider
-            || config.observer.model != self.config.observer.model
-            || config.observer.executable != self.config.observer.executable
+    fn validate_reused_providers(&self, config: &Config) -> Result<(), RuntimeError> {
+        if config.observer.vision.provider != self.config.observer.vision.provider
+            || config.observer.vision.model != self.config.observer.vision.model
+            || config.observer.vision.executable != self.config.observer.vision.executable
+            || config.observer.hearing.provider != self.config.observer.hearing.provider
+            || config.observer.hearing.model != self.config.observer.hearing.model
+            || config.observer.hearing.executable != self.config.observer.hearing.executable
             || config.companion.provider != self.config.companion.provider
             || config.companion.model != self.config.companion.model
             || config.companion.executable != self.config.companion.executable
@@ -856,6 +831,16 @@ impl RuntimeActor {
                 .to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    pub(super) fn update_config_without_factory(
+        &mut self,
+        config: Config,
+    ) -> Result<u64, RuntimeError> {
+        let config_revision = config.revision;
+        let config = self.merge_config_update(config)?;
+        self.validate_reused_providers(&config)?;
         if config.companion != self.config.companion {
             if let Some(companion) = self.companion.as_mut() {
                 companion.update_config(config.companion.clone())?;
@@ -863,7 +848,7 @@ impl RuntimeActor {
         }
         if config.observer != self.config.observer {
             if let Some(observer) = self.observer.as_mut() {
-                observer.update_config(config.observer.clone());
+                observer.update_observer_config(config.observer.clone());
             }
         }
         self.full_config_revision = config_revision;
@@ -999,9 +984,10 @@ pub(super) fn initialization_error_kind(error: &CompanionError) -> RuntimeErrorK
         | CompanionError::ObservationPrompt
         | CompanionError::LimitReached
         | CompanionError::AttachmentOcr(_) => RuntimeErrorKind::Provider,
-        CompanionError::Usage(_) | CompanionError::Persistence(_) | CompanionError::Memory(_) => {
-            RuntimeErrorKind::Persistence
-        }
+        CompanionError::Usage(_)
+        | CompanionError::Persistence(_)
+        | CompanionError::Memory(_)
+        | CompanionError::AudioPendingOverflow => RuntimeErrorKind::Persistence,
         CompanionError::Mailbox(_) => RuntimeErrorKind::Mailbox,
         CompanionError::Outbox(_) => RuntimeErrorKind::Outbox,
         CompanionError::Log(_) => RuntimeErrorKind::Logging,
@@ -1025,5 +1011,6 @@ pub(super) fn config_update_last_error(error: &RuntimeError, locale: Locale) -> 
         ),
         issues,
         attachment_ocr: None,
+        user_response: None,
     }
 }

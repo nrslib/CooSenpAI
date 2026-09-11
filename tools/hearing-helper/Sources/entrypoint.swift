@@ -10,7 +10,8 @@ struct HearingHelperApp {
             sources: arguments.sources,
             debugInputWavPath: arguments.debugInputWavPath,
             debugDumpAppendedPath: arguments.debugDumpAppendedPath,
-            debugRequestAuth: arguments.debugRequestAuth
+            debugRequestAuth: arguments.debugRequestAuth,
+            speakerBackend: arguments.speakerBackend
         )
         DispatchQueue.global(qos: .userInitiated).async {
             while let line = readLine() {

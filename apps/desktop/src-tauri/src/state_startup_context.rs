@@ -92,7 +92,7 @@ impl StartupContext {
             &format!(
                 "desktop 起動状態: runtime-active={} observer-provider={} companion-provider={} setup-required={} tutorial-active={}",
                 self.is_runtime_active(),
-                self.config.observer.provider,
+                self.config.observer.vision.provider,
                 self.config.companion.provider,
                 self.onboarding.setup_required,
                 self.onboarding.tutorial_active,

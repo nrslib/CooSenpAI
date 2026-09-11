@@ -127,8 +127,8 @@ impl RuntimeFactory for WatchRuntimeFactory {
         .await
         .map_err(|error| error.to_string())?;
         let observer_provider = make_provider(
-            &config.observer.provider,
-            config.observer.executable.as_deref(),
+            &config.observer.vision.provider,
+            config.observer.vision.executable.as_deref(),
             &path_value,
         )
         .map_err(|error| error.to_string())?;
@@ -140,7 +140,7 @@ impl RuntimeFactory for WatchRuntimeFactory {
         .map_err(|error| error.to_string())?;
         let persona = load_persona(&self.paths, &config.companion.persona)
             .map_err(|error| error.to_string())?;
-        let observer = ObserverAgent::new(observer_provider, config.observer.clone())
+        let observer = ObserverAgent::new(observer_provider, config.observer.vision.clone())
             .with_usage_path(self.paths.usage.clone())
             .with_observation_store_without_read(&self.paths, config.retention.observation_days)
             .with_mailbox(self.incoming_mailbox.clone())

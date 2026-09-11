@@ -54,7 +54,12 @@ pub fn speech_input_devices() -> std::sync::Arc<dyn coosenpai_core::ports::Speec
 pub fn speech_port(
     helper: std::path::PathBuf,
 ) -> std::sync::Arc<dyn coosenpai_core::ports::SpeechPort> {
-    std::sync::Arc::new(coosenpai_platform_macos::MacSpeech::new(helper))
+    let debug_dump_wav =
+        std::env::var_os("COOSENPAI_SPEECH_DUMP_WAV").map(std::path::PathBuf::from);
+    std::sync::Arc::new(coosenpai_platform_macos::MacSpeech::new(
+        helper,
+        debug_dump_wav,
+    ))
 }
 
 pub fn hearing_port(
@@ -67,3 +72,4 @@ pub fn hearing_port(
 pub fn provider_api_key_store() -> std::sync::Arc<dyn coosenpai_core::ports::ProviderApiKeyStore> {
     std::sync::Arc::new(coosenpai_platform_macos::MacKeychain)
 }
+

@@ -6,7 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let helper_script = manifest_dir.join("../../../tools/ocr-helper/build.sh");
     let helper_source = manifest_dir.join("../../../tools/ocr-helper/Sources/main.swift");
     let speech_script = manifest_dir.join("../../../tools/speech-helper/build.sh");
-    let speech_source = manifest_dir.join("../../../tools/speech-helper/Sources/main.swift");
+    let speech_sources = manifest_dir.join("../../../tools/speech-helper/Sources");
     let speech_plist = manifest_dir.join("../../../tools/speech-helper/Info.plist");
     let hearing_script = manifest_dir.join("../../../tools/hearing-helper/build.sh");
     let hearing_sources = manifest_dir.join("../../../tools/hearing-helper/Sources");
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={}", helper_script.display());
     println!("cargo:rerun-if-changed={}", helper_source.display());
     println!("cargo:rerun-if-changed={}", speech_script.display());
-    println!("cargo:rerun-if-changed={}", speech_source.display());
+    println!("cargo:rerun-if-changed={}", speech_sources.display());
     println!("cargo:rerun-if-changed={}", speech_plist.display());
     println!("cargo:rerun-if-changed={}", hearing_script.display());
     println!("cargo:rerun-if-changed={}", hearing_sources.display());

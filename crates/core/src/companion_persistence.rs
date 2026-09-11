@@ -258,6 +258,7 @@ impl CompanionAgent {
         }
         self.commit_session_summary(response.session_summary.clone())?;
         self.commit_user_response(&commit.target_ids, &response)?;
+        self.consume_user_audio_context(&response.audio_ids)?;
         let consumed =
             self.consume_user_observation_context(&commit.target_ids, &commit.turn_id)?;
         self.pending_observations

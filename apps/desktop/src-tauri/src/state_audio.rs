@@ -10,6 +10,7 @@ impl DesktopState {
             && (!next.audio.enabled
                 || previous.audio.mic != next.audio.mic
                 || previous.audio.speaker != next.audio.speaker
+                || previous.observer.hearing.interval_ms != next.observer.hearing.interval_ms
                 || previous.audio.debug_dump_dir != next.audio.debug_dump_dir)
     }
 
@@ -79,4 +80,15 @@ impl DesktopState {
             .install_audio_terminal_barrier_for_test(received, release)
             .await;
     }
+}
+
+#[test]
+fn changing_hearing_interval_restarts_the_timer_without_coupling_vision() {
+    let mut previous = coosenpai_core::config::Config::default();
+    previous.audio.enabled = true;
+    let mut next = previous.clone();
+    next.observer.vision.interval_ms += 1;
+    assert!(!DesktopState::audio_session_needs_stop(&previous, &next));
+    next.observer.hearing.interval_ms += 1;
+    assert!(DesktopState::audio_session_needs_stop(&previous, &next));
 }

@@ -1,5 +1,38 @@
 private let testAudioBufferDurationNanoseconds: UInt64 = 10
 
+private func testBufferedAudioKeepsSilenceDuration() {
+    let duration: UInt64 = 20_000_000
+    let samples = (0..<350).map { index -> Double in
+        let speaking = index < 100 || (175..<275).contains(index)
+        return speaking ? (index % 2 == 0 ? 0.025 : 0.075) : (index % 2 == 0 ? 0.00005 : 0.0003)
+    }
+    for delivery in ["regular", "delayed"] {
+        var detector = VoiceActivityDetector(configuration: .standard)
+        var starts = 0
+        var endings = 0
+        var legacy = VoiceActivityDetector(configuration: .standard)
+        var legacyEndings = 0
+        for (index, rms) in samples.enumerated() {
+            let sampleTime = UInt64(index) * duration
+            let receivedAt = delivery == "delayed" && (90..<120).contains(index)
+                ? 2_400_000_000 : sampleTime
+            let action = detector.observeSamples(rms: rms, durationNanoseconds: duration)
+            if action == .start { starts += 1 }
+            if case .appendAndFinish(.trailing) = action {
+                endings += 1
+                detector.finishSegment(at: detector.audioTimeNanoseconds)
+            }
+            if case .appendAndFinish = legacy.observe(rms: rms, durationNanoseconds: duration, at: receivedAt) {
+                legacyEndings += 1
+                legacy.finishSegment(at: receivedAt)
+            }
+        }
+        assert(starts == 2 && endings == 2, "受信間隔によらず PCM の2発話を分割する")
+        assert(legacyEndings == (delivery == "regular" ? 2 : 1), "受信時刻で測ると遅配で発話が結合する")
+        assert(detector.audioTimeNanoseconds == UInt64(samples.count) * duration)
+    }
+}
+
 private func configurationForStateTests(
     maximumSegmentNanoseconds: UInt64
 ) -> VoiceActivityConfiguration {
@@ -502,6 +535,7 @@ private func testPreRollEvictsByAudioTime() {
 }
 
 func testVoiceActivity() {
+    testBufferedAudioKeepsSilenceDuration()
     testVoiceActivityStateTransitions()
     testNoiseFloorAndThresholds()
     testNoiseFloorRequiresAQuietMovingWindow()

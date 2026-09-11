@@ -6,24 +6,61 @@ import type {
   CompanionDecision,
   NoChangeObservation,
   ObservationRecord,
+  TranscriptRecord,
   VisualObservation,
 } from "./types.js";
 
-export type DataFlowKind = "visual" | "hearing" | "companion";
-export type DataFlowKindFilter = "all" | DataFlowKind;
+export type DataFlowSubject = "vision" | "hearing" | "coo";
+export type DataFlowKindFilter = "all" | DataFlowSubject;
+export type DataFlowMarker =
+  | "screen-observation"
+  | "audio-observation"
+  | "ocr"
+  | "transcript"
+  | "audio-status"
+  | "session"
+  | "diagnostic"
+  | "interruption"
+  | "thought"
+  | "speech";
+
+export interface DataFlowReference {
+  readonly type: "frame" | "transcript" | "observation" | "conversation";
+  readonly id: string;
+  readonly path?: string;
+  readonly available?: boolean;
+  readonly observationKind?: DataFlowMarker;
+  readonly source?: string;
+  readonly text?: string;
+}
 
 export interface DataFlowEvent {
   readonly id: string;
-  readonly kind: DataFlowKind;
+  readonly subject: DataFlowSubject;
+  readonly marker: DataFlowMarker;
   readonly at: string;
   readonly summary: string;
   readonly detail?: string;
+  readonly references: readonly DataFlowReference[];
 }
 
-export const DATAFLOW_KIND_LABELS: Readonly<Record<DataFlowKind, TranslationKey>> = {
-  visual: "details.dataflowFilterVisual",
+export const DATAFLOW_KIND_LABELS: Readonly<Record<DataFlowSubject, TranslationKey>> = {
+  vision: "details.dataflowFilterVisual",
   hearing: "details.dataflowFilterHearing",
-  companion: "details.dataflowFilterSpeech",
+  coo: "details.dataflowFilterCoo",
+};
+
+export const DATAFLOW_MARKER_LABELS: Readonly<Record<DataFlowMarker, TranslationKey>> = {
+  "screen-observation": "details.dataflowMarkerScreen",
+  "audio-observation": "details.dataflowMarkerAudioObservation",
+  ocr: "details.dataflowMarkerOcr",
+  transcript: "details.dataflowMarkerTranscript",
+  "audio-status": "details.dataflowMarkerAudioStatus",
+  session: "details.dataflowMarkerSession",
+  diagnostic: "details.dataflowMarkerDiagnostic",
+  interruption: "details.dataflowMarkerInterruption",
+  thought: "details.dataflowMarkerThought",
+  speech: "details.dataflowMarkerSpeech",
 };
 
 function preview(text: string, max = 80): string {
@@ -39,102 +76,63 @@ function audioSourceLabel(source: "microphone" | "speaker", locale: Locale): str
   return source === "speaker" ? t(locale, "now.speaker") : t(locale, "now.microphone");
 }
 
-function visualEvent(record: VisualObservation, locale: Locale): DataFlowEvent {
+function visualEvent(record: VisualObservation, locale: Locale): string {
   const wake = record.wakeCompanion ? ` · ${t(locale, "details.dataflowWake")}` : "";
-  return {
-    id: `visual:${record.id}`,
-    kind: "visual",
-    at: record.createdAt,
-    summary: `${preview(record.activity)}${wake}`,
-    detail: detailJson(record),
-  };
+  const window = record.audioSegments?.length ? ` · ${record.windowStart} – ${record.windowEnd}` : "";
+  return `${preview(record.activity)}${wake}${window}`;
 }
 
-function noChangeEvent(record: NoChangeObservation, locale: Locale): DataFlowEvent {
+function noChangeEvent(record: NoChangeObservation, locale: Locale): string {
   const stagnation = record.stagnation === undefined || record.stagnation.detail === ""
     ? ""
     : ` · ${preview(record.stagnation.detail)}`;
-  return {
-    id: `visual:${record.id}`,
-    kind: "visual",
-    at: record.createdAt,
-    summary: `${t(locale, "details.dataflowNoChange")}${stagnation}`,
-    detail: detailJson(record),
-  };
+  return `${t(locale, "details.dataflowNoChange")}${stagnation}`;
 }
 
-function hearingSegmentEvent(
+function transcriptText(
   record: AudioObservation,
-  transcriptText: string | undefined,
+  transcript: string | TranscriptRecord | null | undefined,
+): string {
+  if (typeof transcript === "string") return transcript;
+  return transcript?.text ?? record.text;
+}
+
+function hearingObservationEvent(
+  record: AudioObservation,
+  transcript: string | TranscriptRecord | null | undefined,
   locale: Locale,
-): DataFlowEvent {
-  return {
-    id: `hearing:${record.id}`,
-    kind: "hearing",
-    at: record.createdAt,
-    summary: `${audioSourceLabel(record.source, locale)} · ${t(locale, "details.dataflowTranscriptConfirmed")}: ${preview(transcriptText ?? record.text)}`,
-    detail: detailJson(record),
-  };
+): string {
+  return `${audioSourceLabel(record.source, locale)} · ${t(locale, "details.dataflowTranscriptConfirmed")}: ${preview(transcriptText(record, transcript))}`;
 }
 
-function hearingLogEvent(event: AudioLogEvent, locale: Locale): DataFlowEvent {
-  let summary: string;
-  switch (event.stage) {
-    case "recognizing":
-      summary = t(locale, "details.dataflowRecognizing");
-      break;
-    case "no-speech":
-      summary = t(locale, "details.dataflowNoSpeech");
-      break;
-    case "confirmed":
-      summary = `${t(locale, "details.dataflowTranscriptConfirmed")}: ${preview(event.text)}`;
-      break;
-  }
-  return {
-    id: `hearing:${event.id}`,
-    kind: "hearing",
-    at: event.createdAt,
-    summary: `${audioSourceLabel(event.source, locale)} · ${summary}`,
-    detail: detailJson(event),
-  };
+function decisionEvent(decision: CompanionDecision, locale: Locale): string {
+  return decision.thought === undefined
+    ? t(locale, decision.emit ? "details.dataflowEmit" : "details.dataflowNoEmit", { kind: decision.messageKind })
+    : preview(decision.thought);
 }
 
-function observationEvent(
-  record: ObservationRecord,
-  transcriptByObservationId: ReadonlyMap<string, string>,
-  locale: Locale,
-): DataFlowEvent {
-  switch (record.kind) {
-    case "visual":
-      return visualEvent(record, locale);
-    case "no-change":
-      return noChangeEvent(record, locale);
-    case "audio":
-      return hearingSegmentEvent(record, transcriptByObservationId.get(record.id), locale);
-  }
-}
-
-function decisionEvent(decision: CompanionDecision, locale: Locale): DataFlowEvent {
-  const summary = decision.emit
-    ? `${t(locale, "details.dataflowEmit", { kind: decision.messageKind })}: ${preview(decision.message ?? "")}`
-    : `${t(locale, "details.dataflowNoEmit")}: ${preview(decision.thought ?? "")}`;
-  return {
-    id: `companion-decision:${decision.sequence}`,
-    kind: "companion",
-    at: decision.occurredAt,
-    summary,
-    detail: detailJson(decision),
-  };
+function referencesOf(record: DataFlowRecord): readonly DataFlowReference[] {
+  return record.references;
 }
 
 export interface DataFlowRecord {
   readonly id: string;
-  readonly kind: DataFlowKind;
+  readonly subject: DataFlowSubject;
+  readonly marker: DataFlowMarker;
   readonly at: string;
+  readonly references: readonly DataFlowReference[];
   readonly content:
-    | { readonly type: "observation"; readonly data: { readonly record: ObservationRecord; readonly transcript: string | null } }
+    | {
+        readonly type: "observation";
+        readonly data: {
+          readonly record: ObservationRecord;
+          readonly transcript?: string | TranscriptRecord | null;
+          readonly transcripts?: readonly TranscriptRecord[];
+        };
+      }
     | { readonly type: "hearing"; readonly data: AudioLogEvent }
     | { readonly type: "remark"; readonly data: AppSnapshot["conversation"][number] }
+    | { readonly type: "ocr"; readonly data: { readonly observationId: string; readonly frameId: string; readonly text: string } }
     | { readonly type: "decision"; readonly data: CompanionDecision }
     | { readonly type: "session"; readonly data: AppSnapshot["audio"] }
     | { readonly type: "diagnostic"; readonly data: { readonly kind: string; readonly message: string } }
@@ -147,22 +145,72 @@ export function renderDataFlowRecord(record: DataFlowRecord, locale: Locale): Da
   let detail: string | undefined;
   switch (content.type) {
     case "observation": {
-      const transcripts = new Map<string, string>();
-      if (content.data.transcript !== null) transcripts.set(content.data.record.id, content.data.transcript);
-      ({ summary, detail } = observationEvent(content.data.record, transcripts, locale));
+      const observation = content.data.record;
+      switch (observation.kind) {
+        case "visual":
+          summary = visualEvent(observation, locale);
+          break;
+        case "no-change":
+          summary = noChangeEvent(observation, locale);
+          break;
+        case "audio":
+          summary = hearingObservationEvent(observation, content.data.transcript, locale);
+          break;
+      }
+      detail = detailJson(content.data);
       break;
     }
-    case "hearing": ({ summary, detail } = hearingLogEvent(content.data, locale)); break;
-    case "decision": ({ summary, detail } = decisionEvent(content.data, locale)); break;
-    case "remark": summary = preview(content.data.message); detail = detailJson(content.data); break;
+    case "ocr":
+      summary = preview(content.data.text);
+      detail = detailJson(content.data);
+      break;
+    case "hearing": {
+      const event = content.data;
+      const text = event.stage === "confirmed"
+        ? `${t(locale, "details.dataflowTranscriptConfirmed")}: ${preview(event.text)}`
+        : event.stage === "recognizing"
+          ? t(locale, "details.dataflowRecognizing")
+          : t(locale, "details.dataflowNoSpeech");
+      summary = `${audioSourceLabel(event.source, locale)} · ${text}`;
+      detail = detailJson(event);
+      break;
+    }
+    case "decision":
+      summary = decisionEvent(content.data, locale);
+      detail = detailJson(content.data);
+      break;
+    case "remark":
+      summary = preview(content.data.message);
+      detail = detailJson(content.data);
+      break;
     case "session": {
       const audio = content.data;
-      summary = t(locale, audio.phase === "listening" ? "details.dataflowSessionStart" : audio.phase === "off" ? "details.dataflowSessionStop" : "details.dataflowSessionError");
-      if (audio.phase === "error" && audio.message !== undefined) { summary += `: ${preview(audio.message)}`; detail = audio.message; }
+      summary = t(locale, audio.phase === "listening"
+        ? "details.dataflowSessionStart"
+        : audio.phase === "off"
+          ? "details.dataflowSessionStop"
+          : "details.dataflowSessionError");
+      if (audio.phase === "error" && audio.message !== undefined) {
+        summary += `: ${preview(audio.message)}`;
+        detail = audio.message;
+      }
       break;
     }
-    case "diagnostic": summary = t(locale, "details.dataflowHearingDiagnostic", { message: preview(content.data.message, 120) }); detail = detailJson(content.data); break;
-    case "interruption": summary = t(locale, "details.dataflowUserInterrupted"); break;
+    case "diagnostic":
+      summary = t(locale, "details.dataflowHearingDiagnostic", { message: preview(content.data.message, 120) });
+      detail = detailJson(content.data);
+      break;
+    case "interruption":
+      summary = t(locale, "details.dataflowUserInterrupted");
+      break;
   }
-  return { id: record.id, kind: record.kind, at: record.at, summary, detail };
+  return {
+    id: record.id,
+    subject: record.subject,
+    marker: record.marker,
+    at: record.at,
+    summary,
+    detail,
+    references: referencesOf(record),
+  };
 }

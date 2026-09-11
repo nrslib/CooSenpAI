@@ -551,7 +551,7 @@ fn dataflow_preserves_live_events_when_history_arrives_and_bounds_deduplicated_e
     );
     let events = s.last.state["dataFlow"]["events"].as_array().unwrap();
     assert_eq!(events.len(), 200);
-    assert_eq!(events.last().unwrap()["id"], "companion-decision:205");
+    assert_eq!(events.last().unwrap()["id"], "coo-decision:205");
     let saved = events.clone();
     s.action("snapshot", snapshot(1));
     assert_eq!(s.last.state["dataFlow"]["events"], json!(saved));
@@ -579,19 +579,27 @@ fn dataflow_hearing_interruption_and_first_history_use_recorded_times() {
     );
     s.action("history",json!({"ok":true,"value":{"observations":[{"kind":"audio","id":"old","createdAt":"2026-09-07T00:00:00Z","text":"old","source":"speaker"}],"transcripts":[{"observationId":"old","text":"canonical"}]}}));
     assert_eq!(
-        s.last.state["dataFlow"]["events"][0]["content"]["data"]["transcript"],
+        s.last.state["dataFlow"]["events"][0]["content"]["data"]["transcript"]["text"],
         "canonical"
     );
 }
 #[test]
 fn dataflow_filters_expansion_and_scroll_threshold() {
-    let events = json!([{"id":"1","kind":"visual","summary":"Editor","detail":"saved"},{"id":"2","kind":"hearing","summary":"Speech","detail":"Meeting"}]);
+    let events = json!([
+        {"id":"1","subject":"vision","marker":"screen-observation","references":[],"summary":"Editor","detail":"saved"},
+        {"id":"2","subject":"hearing","marker":"transcript","references":[],"summary":"Speech","detail":"Meeting"}
+    ]);
     let mut s = Screen::new(PanelKind::Dataflow, events.clone());
     s.command("scrollEnd");
     s.action("filter", json!("hearing"));
     assert_eq!(s.last.state["visible"].as_array().unwrap().len(), 1);
+    s.action("filter", json!("vision"));
+    assert_eq!(s.last.state["visible"].as_array().unwrap().len(), 2);
+    s.action("filter", json!("hearing"));
+    assert_eq!(s.last.state["visible"].as_array().unwrap().len(), 1);
     s.action("query", json!(" editor "));
-    assert_eq!(s.last.state["visible"], json!([]));
+    assert_eq!(s.last.state["visible"][0]["id"], "1");
+    s.action("filter", json!("hearing"));
     s.action("query", json!(" meeting "));
     assert_eq!(s.last.state["visible"][0]["id"], "2");
     s.action("toggle", json!("2"));
@@ -611,6 +619,83 @@ fn dataflow_filters_expansion_and_scroll_threshold() {
     assert_eq!(history.last.state["expandedText"], "full text");
     history.action("close", Value::Null);
     assert!(history.last.state["expandedText"].is_null());
+}
+
+#[test]
+fn dataflow_distinguishes_thought_speech_and_their_observation_and_conversation_references() {
+    let directory = tempfile::tempdir().unwrap();
+    let frame = directory.path().join("frame-test.png");
+    std::fs::write(&frame, b"frame").unwrap();
+    let missing = directory.path().join("frame-expired.png");
+    let at = "2026-09-10T00:00:01Z";
+    let screen = json!({"kind":"visual","id":"screen","createdAt":at,"sourceFrameIds":["f1","f2"],"sourceFramePaths":{"f1":frame,"f2":missing},"frames":[{"ocrText":"画面の文字"},{"ocrText":"別画面の文字"}]});
+    let hearing = json!({"kind":"visual","id":"heard","createdAt":at,"sourceFrameIds":[],"audioSegments":[{"id":"utterance","source":"speaker","transcriptPath":"/missing/transcript.jsonl"}]});
+    let mut snapshot = snapshot(1);
+    snapshot["conversation"] = json!([{"id":"user-1","role":"user","createdAt":"2026-09-10T00:00:00Z","message":"直近の会話"}]);
+    let mut s = Screen::new(PanelKind::Details, Value::Null);
+    s.action("snapshot", snapshot.clone());
+    s.action("history", json!({"ok":true,"value":{"observations":[screen,hearing],"transcripts":[{"observationId":"utterance","text":"音声の全文","source":"speaker"}]}}));
+    let events = s.last.state["dataFlow"]["events"].as_array().unwrap();
+    let ocr = events
+        .iter()
+        .find(|event| event["id"] == "ocr:screen:f1")
+        .unwrap();
+    assert_eq!(ocr["marker"], "ocr");
+    assert_eq!(ocr["references"][0]["path"], json!(frame));
+    assert_eq!(ocr["references"][0]["available"], true);
+    let visual = events
+        .iter()
+        .find(|event| event["id"] == "vision-observation:screen")
+        .unwrap();
+    assert_eq!(visual["references"][1]["path"], json!(missing));
+    assert_eq!(visual["references"][1]["available"], false);
+    let audio = events
+        .iter()
+        .find(|event| event["id"] == "hearing-observation:heard")
+        .unwrap();
+    assert_eq!(audio["references"][0]["source"], "speaker");
+    assert_eq!(audio["references"][0]["text"], "音声の全文");
+    snapshot["revision"] = json!(2);
+    snapshot["latestCompanionDecision"] = json!({"sequence":1,"occurredAt":at,"emit":false,"thought":"今は待つ","observationIds":["screen","heard"]});
+    s.action("snapshot", snapshot.clone());
+    let events = s.last.state["dataFlow"]["events"].as_array().unwrap();
+    let thought = events
+        .iter()
+        .find(|event| event["id"] == "coo-decision:1")
+        .unwrap();
+    assert_eq!(thought["marker"], "thought");
+    assert_eq!(
+        thought["references"][0]["observationKind"],
+        "screen-observation"
+    );
+    assert_eq!(
+        thought["references"][1]["observationKind"],
+        "audio-observation"
+    );
+    assert_eq!(thought["references"][2]["text"], "直近の会話");
+    assert!(!events.iter().any(|event| event["marker"] == "speech"));
+    snapshot["revision"] = json!(3);
+    snapshot["conversation"].as_array_mut().unwrap().push(json!({"id":"reply","role":"companion","createdAt":at,"message":"表示した返事","causedByIds":["user-1"]}));
+    s.action("snapshot", snapshot.clone());
+    assert_eq!(
+        s.last.state["dataFlow"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["marker"] == "speech")
+            .count(),
+        1
+    );
+    std::fs::remove_file(&frame).unwrap();
+    snapshot["revision"] = json!(4);
+    s.action("snapshot", snapshot);
+    let events = s.last.state["dataFlow"]["events"].as_array().unwrap();
+    let ocr = events
+        .iter()
+        .find(|event| event["id"] == "ocr:screen:f1")
+        .unwrap();
+    assert_eq!(ocr["references"][0]["path"], json!(frame));
+    assert_eq!(ocr["references"][0]["available"], false);
 }
 
 #[test]
@@ -755,8 +840,8 @@ fn persona_ime_escape_and_delete_confirmation_priority() {
 fn category_mapping_preserves_path_families() {
     for (path, category) in [
         ("work.allowedRoots[0].path", "work"),
-        ("observer.provider", "providers"),
-        ("observer.textExcerptMaxChars", "vision"),
+        ("observer.vision.provider", "providers"),
+        ("observer.vision.textExcerptMaxChars", "vision"),
         ("speech.locale", "general"),
         ("retention.observationDays", "vision"),
         ("audio.enabled", "hearing"),

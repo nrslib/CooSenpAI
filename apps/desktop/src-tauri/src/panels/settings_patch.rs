@@ -86,18 +86,26 @@ pub(super) fn category_for_issue(path: &str) -> &'static str {
         "notifications"
     } else if belongs("keymap") {
         "shortcuts"
+    } else if belongs("observer.hearing") {
+        "providers"
     } else if belongs("observer") {
+        let provider_fields = [
+            "provider",
+            "model",
+            "effort",
+            "executable",
+            "timeoutMs",
+            "dailyCallLimit",
+        ];
         if path == "observer"
-            || [
-                "provider",
-                "model",
-                "effort",
-                "executable",
-                "timeoutMs",
-                "dailyCallLimit",
-            ]
-            .iter()
-            .any(|field| belongs(&format!("observer.{field}")))
+            || provider_fields
+                .iter()
+                .any(|field| belongs(&format!("observer.{field}")))
+            || ["vision", "hearing"].iter().any(|role| {
+                provider_fields
+                    .iter()
+                    .any(|field| belongs(&format!("observer.{role}.{field}")))
+            })
         {
             "providers"
         } else {

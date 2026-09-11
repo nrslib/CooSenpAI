@@ -1,7 +1,7 @@
 use crate::update_format::{
     VerifiedArchive, BUNDLE_IDENTIFIER, BUNDLE_NAME, EXECUTABLE_NAME, MAX_ARCHIVE_BYTES,
 };
-use crate::update_system::SystemVersion;
+use crate::update_system::{SystemVersion, UpdateError};
 use coosenpai_core::locale::{text, Locale, TextKey};
 use flate2::read::GzDecoder;
 use semver::Version;
@@ -42,6 +42,10 @@ impl StagedBundle {
             return Err(text(TextKey::UpdateBundleMinimumMismatch, locale).to_owned());
         }
         Ok(())
+    }
+
+    pub(crate) fn ensure_system_supported(&self, system: SystemVersion) -> Result<(), UpdateError> {
+        self.minimum_system_version.ensure_supported(system)
     }
 }
 

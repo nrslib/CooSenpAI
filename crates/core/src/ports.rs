@@ -191,6 +191,12 @@ pub trait SpeechPermissionPort: Send + Sync {
     ) -> Result<SpeechPermissions, PortError>;
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SpeechRecognitionEngine {
+    SpeechAnalyzer,
+    SFSpeechRecognizer,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SpeechEvent {
@@ -198,6 +204,7 @@ pub enum SpeechEvent {
         locale: String,
         microphone: SpeechPermissionKind,
         recognition: SpeechPermissionKind,
+        engine: SpeechRecognitionEngine,
     },
     Partial {
         text: String,

@@ -12,6 +12,10 @@ func boundedPartialTranscript(_ text: String) -> String {
     return String(kept)
 }
 
+func boundedFinalTranscript(_ text: String) -> String {
+    String(String.UnicodeScalarView(text.unicodeScalars.prefix(2000)))
+}
+
 enum RecognitionRestartThrottle {
     static let minimumIntervalNanoseconds: UInt64 = 2_000_000_000
 }

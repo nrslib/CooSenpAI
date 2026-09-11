@@ -1,4 +1,4 @@
-use crate::config::{local_date_at, AgentConfig, ConfigPaths};
+use crate::config::{local_date_at, AgentConfig, ConfigPaths, ObserverConfig};
 use crate::debug::{ocr_preview, DebugStore, ObserverDebugCall};
 use crate::frame_buffer::FrameBuffer;
 use crate::mailbox::{Mailbox, MailboxError};
@@ -14,13 +14,12 @@ use crate::provider::{
 };
 use crate::state::{
     parse_observation, parse_visual_observation, ActivityTriggerKind, AudioObservation,
-    AudioObservationSource, ObservationFrame, ObservationLimits, ObservationRecord,
-    TranscriptRecord, VisualObservation,
+    ObservationFrame, ObservationLimits, ObservationRecord, VisualObservation,
 };
-use crate::usage::{record_observer_attempt, UsageError};
+use crate::usage::{try_reserve_observer_role, ObserverCallKind, UsageError};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::mem;
@@ -57,11 +56,12 @@ fn session_mode(session: &SessionRequest) -> &'static str {
 #[path = "observer_storage.rs"]
 mod storage;
 pub use storage::{
-    append_observation, excluded_bounds_for_self, observation_store, record_audio_observation,
+    append_observation, excluded_bounds_for_self, mark_audio_consumed, migrate_legacy_audio,
+    observation_store, read_audio_by_ids, read_unobserved_audio, record_audio_observation,
 };
 use storage::{
-    append_observation_record, append_transcript, read_latest_observation, reconcile_transcripts,
-    stagnation_identity, timestamp,
+    append_observation_record, read_latest_observation, reconcile_transcripts, stagnation_identity,
+    timestamp,
 };
 
 #[derive(Debug, Clone)]
@@ -110,7 +110,12 @@ pub enum ObserverError {
 
 pub struct ObserverAgent {
     provider: Arc<dyn ProviderClient>,
+    vision_provider: Arc<dyn ProviderClient>,
+    hearing_provider: Option<Arc<dyn ProviderClient>>,
     config: AgentConfig,
+    vision_config: AgentConfig,
+    hearing_config: Option<AgentConfig>,
+    active_role: ObserverRole,
     session: Option<ProviderSession>,
     session_calls: usize,
     previous: Option<Value>,
@@ -137,12 +142,21 @@ pub struct ObserverAgent {
     transcript_reconciliation_pending: bool,
     #[cfg(test)]
     fail_retention_after_append: bool,
-    #[cfg(test)]
-    fail_transcript_after_observation: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObserverRole {
+    Vision,
+    Hearing,
 }
 
 impl ObserverAgent {
-    pub fn new(provider: Arc<dyn ProviderClient>, config: AgentConfig) -> Self {
+    pub fn new<C>(provider: Arc<dyn ProviderClient>, config: C) -> Self
+    where
+        C: Into<AgentConfig>,
+    {
+        let config = config.into();
+        let vision_config = config.clone();
         let limits = ObservationLimits {
             text_excerpt_max_chars: config.text_excerpt_max_chars,
             text_excerpt_max_count: config.text_excerpt_max_count,
@@ -150,8 +164,13 @@ impl ObserverAgent {
             changes_max_count: config.changes_max_count,
         };
         Self {
+            vision_provider: provider.clone(),
             provider,
+            hearing_provider: None,
             config,
+            vision_config,
+            hearing_config: None,
+            active_role: ObserverRole::Vision,
             session: None,
             session_calls: 0,
             previous: None,
@@ -178,13 +197,20 @@ impl ObserverAgent {
             transcript_reconciliation_pending: false,
             #[cfg(test)]
             fail_retention_after_append: false,
-            #[cfg(test)]
-            fail_transcript_after_observation: false,
         }
     }
 
     pub fn with_usage_path(mut self, path: PathBuf) -> Self {
         self.usage_path = Some(path);
+        self
+    }
+
+    pub fn with_hearing_provider<C>(mut self, provider: Arc<dyn ProviderClient>, config: C) -> Self
+    where
+        C: Into<AgentConfig>,
+    {
+        self.hearing_provider = Some(provider);
+        self.hearing_config = Some(config.into());
         self
     }
 
@@ -253,12 +279,14 @@ impl ObserverAgent {
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
     ) -> Result<VisualObservation, ObserverError> {
-        self.observe_inner(frames, cancellation, None).await
+        self.observe_inner(frames, Vec::new(), cancellation, None)
+            .await
     }
 
     pub async fn observe_scoped(
         &mut self,
         frames: Vec<ObservationFrameInput>,
+        audio: Vec<AudioObservation>,
         cancellation: CancellationToken,
         expected_generation: u64,
         scope_generation: Arc<std::sync::atomic::AtomicU64>,
@@ -266,6 +294,7 @@ impl ObserverAgent {
     ) -> Result<VisualObservation, ObserverError> {
         self.observe_inner(
             frames,
+            audio,
             cancellation,
             Some((expected_generation, scope_generation, scope_commit_lock)),
         )
@@ -275,6 +304,7 @@ impl ObserverAgent {
     async fn observe_inner(
         &mut self,
         frames: Vec<ObservationFrameInput>,
+        audio: Vec<AudioObservation>,
         cancellation: CancellationToken,
         scope_guard: Option<(
             u64,
@@ -282,19 +312,39 @@ impl ObserverAgent {
             Arc<std::sync::Mutex<()>>,
         )>,
     ) -> Result<VisualObservation, ObserverError> {
+        require_active_observation(&cancellation)?;
+        self.select_role(if frames.is_empty() && !audio.is_empty() {
+            ObserverRole::Hearing
+        } else {
+            ObserverRole::Vision
+        });
         self.load_previous_if_needed();
         self.retry_pending_outbox();
-        if frames.is_empty() {
+        self.reconcile_transcripts_if_needed();
+        if let Some(paths) = &self.observation_paths {
+            let retention_days = self
+                .observation_retention_days
+                .ok_or(ObserverError::Output)?;
+            for record in &audio {
+                record_audio_observation(paths, retention_days, record, self.clock.now())?;
+            }
+        }
+        if frames.is_empty() && audio.is_empty() {
             return Err(ObserverError::Output);
         }
+        let mut source_frame_paths = BTreeMap::new();
         if let Some(frame_buffer) = &self.frame_buffer {
             frame_buffer
                 .cleanup_expired(self.clock.now())
                 .map_err(ObserverError::FrameBuffer)?;
             for frame in &frames {
-                frame_buffer
+                let path = frame_buffer
                     .save_frame(&frame.context_id, &frame.image_path, frame.captured_at)
                     .map_err(ObserverError::FrameBuffer)?;
+                source_frame_paths.insert(
+                    frame.context_id.clone(),
+                    path.to_string_lossy().into_owned(),
+                );
             }
         }
         let prompt_frames = frames
@@ -311,17 +361,43 @@ impl ObserverAgent {
                 ocr_text: frame.ocr_text.clone(),
             })
             .collect::<Vec<_>>();
-        let prompt = build_observer_prompt(
+        let mut prompt = build_observer_prompt(
             &prompt_frames,
             self.previous.as_ref(),
             self.limits.outline_max_bytes(),
             self.limits.changes_max_count,
         );
+        let audio_segments = audio
+            .iter()
+            .map(|record| {
+                let time = DateTime::parse_from_rfc3339(&record.created_at)
+                    .map_err(|_| ObserverError::Output)?
+                    .with_timezone(&Utc);
+                Ok(crate::state::AudioSegmentReference {
+                    id: record.id.clone(),
+                    time: record.created_at.clone(),
+                    source: record.source,
+                    transcript_path: self.transcript_directory.as_ref().map(|directory| {
+                        directory
+                            .join(format!("{}.jsonl", local_date_at(time)))
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                })
+            })
+            .collect::<Result<Vec<_>, ObserverError>>()?;
+        if !audio.is_empty() {
+            prompt.push_str(&crate::prompts::observer_audio_context(&audio)?);
+        }
         let image_paths: Vec<PathBuf> = frames
             .iter()
             .map(|frame| frame.image_path.clone())
             .collect();
-        let system_prompt = observer_system_prompt();
+        let mut system_prompt = observer_system_prompt();
+        if !audio.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::prompts::OBSERVER_AUDIO_INSTRUCTIONS);
+        }
         let debug_call_id = DebugStore::new_id();
         if let Some(store) = &self.debug_store {
             if store
@@ -380,10 +456,13 @@ impl ObserverAgent {
             schema_version: 1,
             id: Uuid::new_v4().to_string(),
             created_at: now.clone(),
-            window_start: now.clone(),
-            window_end: now,
+            window_start: audio
+                .first()
+                .map_or_else(|| now.clone(), |v| v.created_at.clone()),
+            window_end: audio.last().map_or(now, |v| v.created_at.clone()),
             frame_count: frames.len(),
             source_frame_ids,
+            audio_segments,
             frames: frames
                 .into_iter()
                 .map(|frame| ObservationFrame {
@@ -393,8 +472,12 @@ impl ObserverAgent {
                         .map(|value| crate::state::truncate(&value, 300)),
                     app: frame.app.map(|value| crate::state::truncate(&value, 300)),
                     target: crate::state::truncate(&frame.target, 500),
+                    ocr_text: frame
+                        .ocr_text
+                        .map(|value| crate::state::truncate(&value, 2_000)),
                 })
                 .collect(),
+            source_frame_paths,
             data,
         };
         if let Some(store) = &self.debug_store {
@@ -428,17 +511,25 @@ impl ObserverAgent {
         }
         require_active_observation(&cancellation)?;
         if let Err(error) = self.persist_record(&ObservationRecord::Visual(record.clone())) {
-            self.previous = serde_json::to_value(&record).ok();
+            if record.frame_count > 0 {
+                self.previous = serde_json::to_value(&record).ok();
+            }
             return Err(error);
         }
-        self.previous = serde_json::to_value(&record).ok();
+        if record.frame_count > 0 {
+            self.previous = serde_json::to_value(&record).ok();
+        }
         Ok(record)
     }
 
-    pub fn update_config(&mut self, config: AgentConfig) {
-        if self.config.provider != config.provider
-            || self.config.model != config.model
-            || self.config.executable != config.executable
+    pub fn update_config<C>(&mut self, config: C)
+    where
+        C: Into<AgentConfig>,
+    {
+        let config = config.into();
+        if self.vision_config.provider != config.provider
+            || self.vision_config.model != config.model
+            || self.vision_config.executable != config.executable
         {
             self.reset_session();
         }
@@ -448,68 +539,60 @@ impl ObserverAgent {
             text_total_max_chars: config.text_total_max_chars,
             changes_max_count: config.changes_max_count,
         };
+        self.vision_config = config.clone();
         self.config = config;
+        self.active_role = ObserverRole::Vision;
+        self.provider = self.vision_provider.clone();
+    }
+
+    pub fn update_observer_config(&mut self, config: ObserverConfig) {
+        let hearing_config = config.hearing;
+        self.update_config(config.vision);
+        let hearing_changed = self.hearing_config.as_ref().is_some_and(|current| {
+            current.provider != hearing_config.provider
+                || current.model != hearing_config.model
+                || current.executable != hearing_config.executable
+        });
+        if hearing_changed {
+            self.reset_session();
+        }
+        if self.hearing_config.is_some() {
+            self.hearing_config = Some(hearing_config.into());
+        }
     }
 
     pub fn no_change(&mut self) -> Result<ObservationRecord, ObserverError> {
         self.no_change_with_stagnation(None)
     }
 
-    pub fn audio_observation(
-        &mut self,
-        source: AudioObservationSource,
-        text: &str,
-    ) -> Result<AudioObservation, ObserverError> {
-        let record = AudioObservation::from_confirmed_text(source, text, self.clock.now())
-            .map_err(|_| ObserverError::Output)?;
-        self.ingest_audio_observation(record)
-    }
-
-    pub fn ingest_audio_observation(
-        &mut self,
-        record: AudioObservation,
-    ) -> Result<AudioObservation, ObserverError> {
-        self.load_previous_if_needed();
-        self.retry_pending_outbox();
-        self.reconcile_transcripts_if_needed();
-        let outbox_pending = match self.persist_record(&ObservationRecord::Audio(record.clone())) {
-            Ok(()) => false,
-            Err(ObserverError::OutboxPending { .. }) => true,
-            Err(error) => return Err(error),
+    fn select_role(&mut self, role: ObserverRole) {
+        if self.active_role == role {
+            return;
+        }
+        self.reset_session();
+        match role {
+            ObserverRole::Vision => {
+                self.provider = self.vision_provider.clone();
+                self.config = self.vision_config.clone();
+            }
+            ObserverRole::Hearing => {
+                self.provider = self
+                    .hearing_provider
+                    .clone()
+                    .unwrap_or_else(|| self.vision_provider.clone());
+                self.config = self
+                    .hearing_config
+                    .clone()
+                    .unwrap_or_else(|| self.vision_config.clone());
+            }
+        }
+        self.limits = ObservationLimits {
+            text_excerpt_max_chars: self.config.text_excerpt_max_chars,
+            text_excerpt_max_count: self.config.text_excerpt_max_count,
+            text_total_max_chars: self.config.text_total_max_chars,
+            changes_max_count: self.config.changes_max_count,
         };
-        self.append_audio_transcript(&record)?;
-        if outbox_pending {
-            self.transcript_reconciliation_pending = true;
-            return Err(ObserverError::OutboxPending {
-                record: Box::new(ObservationRecord::Audio(record)),
-            });
-        }
-        Ok(record)
-    }
-
-    fn append_audio_transcript(&mut self, record: &AudioObservation) -> Result<(), ObserverError> {
-        if let Some(directory) = &self.transcript_directory {
-            let retention_days = self.observation_retention_days.ok_or_else(|| {
-                ObserverError::Persistence(PersistenceError::Invalid(
-                    "transcript の保持日数がありません".to_owned(),
-                ))
-            })?;
-            let transcript = TranscriptRecord::from_observation(record);
-            #[cfg(test)]
-            if mem::take(&mut self.fail_transcript_after_observation) {
-                self.transcript_reconciliation_pending = true;
-                return Err(
-                    PersistenceError::Invalid("transcript append failpoint".to_owned()).into(),
-                );
-            }
-            if let Err(error) =
-                append_transcript(directory, retention_days, &transcript, self.clock.now())
-            {
-                self.transcript_reconciliation_pending = true;
-                return Err(error.into());
-            }
-        }
-        Ok(())
+        self.active_role = role;
     }
 
     fn reconcile_transcripts_if_needed(&mut self) {
@@ -547,6 +630,7 @@ impl ObserverAgent {
         &mut self,
         stagnation: Option<crate::state::StagnationObservation>,
     ) -> Result<ObservationRecord, ObserverError> {
+        self.select_role(ObserverRole::Vision);
         self.load_previous_if_needed();
         self.retry_pending_outbox();
         let (id, now) = stagnation_identity(stagnation.as_ref(), self.clock.now())?;
@@ -588,11 +672,16 @@ impl ObserverAgent {
         let mut session = self.next_session_request();
         let mut last_error = None;
         for attempt in 0..MAX_OBSERVER_ATTEMPTS {
+            require_active_observation(&cancellation)?;
             if let Some(path) = &self.usage_path {
                 let date = local_date_at(self.clock.now());
-                // TODO: 呼び出し上限は、見守りを無言で終日停止させない形で再設計する。
-                // 当面は回数だけを記録し、観察 AI のディスパッチを継続する。
-                let reservation = record_observer_attempt(path, &date)?;
+                let role = match self.active_role {
+                    ObserverRole::Vision => ObserverCallKind::Vision,
+                    ObserverRole::Hearing => ObserverCallKind::Hearing,
+                };
+                let reservation =
+                    try_reserve_observer_role(path, &date, role, self.config.daily_call_limit)?
+                        .ok_or(ObserverError::LimitReached)?;
                 self.ai_calls_today = reservation.ai_calls;
             }
             self.session_calls = self.session_calls.saturating_add(1);
@@ -907,6 +996,9 @@ impl ObserverAgent {
                 let Ok(record) = parse_observation(value, self.limits) else {
                     continue;
                 };
+                if matches!(record, ObservationRecord::Audio(_)) {
+                    continue;
+                }
                 if ids.insert(record.id().to_owned()) {
                     records.push(record);
                 }

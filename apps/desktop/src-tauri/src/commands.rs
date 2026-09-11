@@ -242,22 +242,26 @@ where
     }
 }
 
-async fn run_detached<T, Fut>(future: Fut) -> Result<T, DispatchError>
+fn run_detached<T, Fut>(future: Fut) -> impl std::future::Future<Output = Result<T, DispatchError>>
 where
     T: Send + 'static,
     Fut: std::future::Future<Output = Result<T, DispatchError>> + Send + 'static,
 {
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    tauri::async_runtime::spawn(async move {
-        let result = future.await;
-        let _ = result_tx.send(result);
-    });
-    match result_rx.await {
-        Ok(result) => result,
-        Err(_) => Err(DispatchError::indeterminate(text(
-            TextKey::CommandResultUnavailable,
-            Locale::Ja,
-        ))),
+    // 設定操作の大きな Future を spawn の各層へ値渡しせず、この境界で保持する。
+    let future = Box::pin(future);
+    async move {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tauri::async_runtime::spawn(async move {
+            let result = future.await;
+            let _ = result_tx.send(result);
+        });
+        match result_rx.await {
+            Ok(result) => result,
+            Err(_) => Err(DispatchError::indeterminate(text(
+                TextKey::CommandResultUnavailable,
+                Locale::Ja,
+            ))),
+        }
     }
 }
 

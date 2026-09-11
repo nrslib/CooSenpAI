@@ -33,11 +33,27 @@ enum ScreenPermissionCacheUpdate {
     CheckedAt(Instant),
 }
 
-pub(crate) fn current_speech_permissions(logger: &dyn RuntimeLogger) -> SpeechPermissions {
-    match crate::platform::MacSpeechPermissions.current() {
+pub(crate) fn current_audio_permissions(
+    logger: &dyn RuntimeLogger,
+) -> crate::snapshot::AudioPermissions {
+    crate::snapshot::AudioPermissions {
+        speech: current_permissions(&crate::platform::MacSpeechPermissions, "音声入力", logger),
+        hearing: current_permissions(&crate::platform::MacHearingPermissions, "聴覚観察", logger),
+    }
+}
+
+fn current_permissions(
+    port: &dyn SpeechPermissionPort,
+    source: &str,
+    logger: &dyn RuntimeLogger,
+) -> SpeechPermissions {
+    match port.current() {
         Ok(permissions) => permissions,
         Err(error) => {
-            let _ = logger.write("WARN", &format!("音声権限の状態を取得できません: {error}"));
+            let _ = logger.write(
+                "WARN",
+                &format!("{source}の権限の状態を取得できません: {error}"),
+            );
             SpeechPermissions {
                 microphone: SpeechPermissionKind::Unavailable,
                 recognition: SpeechPermissionKind::Unavailable,

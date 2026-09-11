@@ -320,9 +320,7 @@ impl ConversationPresenter {
         let terminal = snapshot
             .last_error
             .as_ref()
-            .and_then(|error| error.attachment_ocr.as_ref())
-            .filter(|failure| !failure.retryable)
-            .map(|failure| failure.input_id.as_str());
+            .and_then(|error| error.terminal_user_input_id());
         let available =
             !self.view.busy && self.pending_sends == 0 && !snapshot.onboarding.setup_required;
         let can_send = available

@@ -27,7 +27,7 @@ impl FrameBuffer {
         frame_id: &str,
         source: &Path,
         captured_at: DateTime<Utc>,
-    ) -> io::Result<Option<PathBuf>> {
+    ) -> io::Result<PathBuf> {
         self.ensure_directory()?;
         let directory_lock = File::open(&self.directory)?;
         directory_lock.lock()?;
@@ -39,14 +39,16 @@ impl FrameBuffer {
         let result = (|| {
             match fs::copy(source, &temporary) {
                 Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(destination.clone());
+                }
                 Err(error) => return Err(error),
             }
             set_private_file_mode(&temporary)?;
             File::open(&temporary)?.sync_all()?;
             fs::rename(&temporary, &destination)?;
             directory_lock.sync_all()?;
-            Ok(Some(destination.clone()))
+            Ok(destination.clone())
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);

@@ -111,11 +111,11 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, snapsh
           type="button"
           role="switch"
           aria-checked={watchIntentActive}
-          aria-label="Vision AI"
-          title="Vision AI"
+          aria-label={t("header.vision")}
+          title={t("header.vision")}
           onClick={onToggleWatch}
         >
-          <span>Vision AI</span>
+          <span>{t("header.vision")}</span>
         </button>
         {onToggleAudio === undefined ? null : <button
           className={`watch-switch hearing-switch${audioEnabled ? " is-on" : ""}${audioChanging ? " is-changing" : ""}`}
@@ -123,11 +123,11 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, snapsh
           role="switch"
           aria-checked={audioEnabled}
           aria-busy={audioChanging}
-          aria-label="Hearing AI"
-          title="Hearing AI"
+          aria-label={t("header.hearing")}
+          title={t("header.hearing")}
           onClick={onToggleAudio}
         >
-          <span>Hearing AI</span>
+          <span>{t("header.hearing")}</span>
         </button>}
       </div>
     </div>

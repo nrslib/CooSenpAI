@@ -26,6 +26,7 @@ impl RuntimeHandle {
         self.control_tx
             .send(ControlCommand::Observe {
                 frames,
+                audio: Vec::new(),
                 cancellation,
                 response,
             })
@@ -89,31 +90,9 @@ impl RuntimeHandle {
             .await
     }
 
-    pub async fn audio_observation(
+    pub async fn observe_audio_batch(
         &self,
-        source: crate::state::AudioObservationSource,
-        text: String,
-    ) -> Result<ObservationRecord, RuntimeError> {
-        self.audio_observation_cancellable(source, text, self.cancellation.child_token())
-            .await
-    }
-
-    pub async fn audio_observation_cancellable(
-        &self,
-        source: crate::state::AudioObservationSource,
-        text: String,
-        cancellation: CancellationToken,
-    ) -> Result<ObservationRecord, RuntimeError> {
-        let observation =
-            crate::state::AudioObservation::from_confirmed_text(source, &text, chrono::Utc::now())
-                .map_err(|_| RuntimeError::Observer(ObserverError::Output))?;
-        self.ingest_audio_observation_cancellable(observation, cancellation)
-            .await
-    }
-
-    pub async fn ingest_audio_observation_cancellable(
-        &self,
-        observation: crate::state::AudioObservation,
+        audio: Vec<crate::state::AudioObservation>,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError> {
         self.ensure_open()?;
@@ -122,8 +101,9 @@ impl RuntimeHandle {
         }
         let (response, result) = oneshot::channel();
         self.control_tx
-            .send(ControlCommand::AudioObservation {
-                observation,
+            .send(ControlCommand::Observe {
+                frames: Vec::new(),
+                audio,
                 cancellation,
                 response,
             })

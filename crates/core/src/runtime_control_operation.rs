@@ -18,23 +18,16 @@ impl RuntimeActor {
             }
             ControlCommand::Observe {
                 frames,
+                audio,
                 cancellation,
                 response,
-            } => self.start_observe(frames, cancellation, response, snapshot_tx),
+            } => self.start_observe(frames, audio, cancellation, response, snapshot_tx),
             ControlCommand::Heartbeat {
                 stagnation,
                 cancellation,
                 response,
             } => {
                 self.process_heartbeat(stagnation, cancellation, response, snapshot_tx);
-                StartResult::Completed
-            }
-            ControlCommand::AudioObservation {
-                observation,
-                cancellation,
-                response,
-            } => {
-                self.process_audio_observation(observation, cancellation, response, snapshot_tx);
                 StartResult::Completed
             }
             ControlCommand::CompanionObservations {

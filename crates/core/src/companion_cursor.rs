@@ -7,6 +7,8 @@ use crate::state::{
 use serde::{de::Error as DeError, ser::Error as SerError, Deserialize, Serialize};
 use serde_json::Value;
 
+pub const MAX_USER_RESPONSE_ATTEMPTS: u8 = 3;
+
 pub(crate) const OWNED_USER_ID_PREFIX: &str = "runtime-user-";
 
 #[derive(Debug, Clone)]
@@ -167,6 +169,15 @@ pub struct PendingUserMessage {
         deserialize_with = "crate::hearing_context::deserialize_contexts"
     )]
     pub hearing_context: Vec<crate::hearing_context::HearingContext>,
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "crate::hearing_context::deserialize_pending_audio"
+    )]
+    pub pending_audio: Vec<crate::state::AudioObservation>,
+    /// 音声本文は共有 journal を正本にし、cursor には参照 ID だけを保存する。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_audio_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub observation_in_progress: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,6 +186,10 @@ pub struct PendingUserMessage {
     pub response_commit_started: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_failure: Option<PendingAttachmentFailure>,
+    #[serde(default)]
+    pub response_attempts: u8,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub response_terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tutorial_response_key: Option<String>,
 }
@@ -247,10 +262,24 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl PendingUserMessage {
+    pub fn pending_audio_ids(&self) -> Vec<String> {
+        let mut ids = std::collections::HashSet::new();
+        self.pending_audio_ids
+            .iter()
+            .chain(self.pending_audio.iter().map(|audio| &audio.id))
+            .filter(|id| ids.insert((*id).clone()))
+            .cloned()
+            .collect()
+    }
+
     pub fn attachment_is_terminal(&self) -> bool {
         self.attachment_failure
             .as_ref()
             .is_some_and(|failure| failure.terminal)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.attachment_is_terminal() || self.response_terminal
     }
 
     pub fn conversation_entry(&self) -> ConversationEntry {
@@ -258,6 +287,8 @@ impl PendingUserMessage {
             observations: self.observations.clone(),
             pending_frames: self.pending_frames.clone(),
             hearing_context: self.hearing_context.clone(),
+            pending_audio: Vec::new(),
+            pending_audio_ids: self.pending_audio_ids(),
         };
         ConversationEntry {
             schema_version: 1,
@@ -286,6 +317,8 @@ pub struct PendingAttachmentFailure {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedUserResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_ids: Vec<String>,
     #[serde(default)]
     pub emotion_epoch: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

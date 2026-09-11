@@ -587,7 +587,8 @@ impl DesktopRuntimeFactory {
         let provider_client: Arc<dyn ProviderClient> = Arc::new(provider.clone());
         // チュートリアルでは撮影・OCR・observer 呼び出しまでを通すが、
         // 観察を本番の履歴や mailbox へ残して終了後に再処理させない。
-        let observer = ObserverAgent::new(provider_client.clone(), config.observer.clone())
+        let observer = ObserverAgent::new(provider_client.clone(), config.observer.vision.clone())
+            .with_hearing_provider(provider_client.clone(), config.observer.hearing.clone())
             .with_logger(self.logger.clone());
         let companion = CompanionAgent::with_persona_profile(
             provider_client,
@@ -666,7 +667,8 @@ impl DesktopRuntimeFactory {
             coosenpai_core::provider::resolve_login_shell_path(self.cancellation.child_token())
                 .await;
         if config.companion.provider != ProviderName::Mock.as_str()
-            || config.observer.provider != ProviderName::Mock.as_str()
+            || config.observer.vision.provider != ProviderName::Mock.as_str()
+            || config.observer.hearing.provider != ProviderName::Mock.as_str()
         {
             self.validate_node(&path_value, "companion", self.cancellation.child_token())
                 .await?;
@@ -674,9 +676,16 @@ impl DesktopRuntimeFactory {
         self.refresh_bridge_environment_for_path(&path_value)
             .await?;
         let observer_provider = self.provider(
-            "observer",
-            &config.observer.provider,
-            config.observer.executable.as_deref(),
+            "observer.vision",
+            &config.observer.vision.provider,
+            config.observer.vision.executable.as_deref(),
+            &path_value,
+            None,
+        )?;
+        let hearing_provider = self.provider(
+            "observer.hearing",
+            &config.observer.hearing.provider,
+            config.observer.hearing.executable.as_deref(),
             &path_value,
             None,
         )?;
@@ -688,7 +697,8 @@ impl DesktopRuntimeFactory {
             None,
         )?;
         let companion_provider_name = parse_provider_name("companion", &config.companion.provider)?;
-        let observer = ObserverAgent::new(observer_provider, config.observer.clone())
+        let observer = ObserverAgent::new(observer_provider, config.observer.vision.clone())
+            .with_hearing_provider(hearing_provider, config.observer.hearing.clone())
             .with_usage_path(self.paths.usage.clone())
             .with_observation_store_without_read(&self.paths, config.retention.observation_days)
             .with_mailbox(self.incoming.clone())
@@ -932,7 +942,14 @@ fn tutorial_provider_model_options(config: &Config) -> Vec<ProviderModelOptions>
             .map(|value| (*value).to_owned())
             .collect::<Vec<_>>();
         for (configured_provider, configured_model) in [
-            (&config.observer.provider, &config.observer.model),
+            (
+                &config.observer.vision.provider,
+                &config.observer.vision.model,
+            ),
+            (
+                &config.observer.hearing.provider,
+                &config.observer.hearing.model,
+            ),
             (&config.companion.provider, &config.companion.model),
         ] {
             if configured_provider == provider.as_str() && !candidates.contains(configured_model) {

@@ -82,5 +82,6 @@ fn config_read_error(error: ConfigError) -> RuntimeLastError {
         message: Some(message),
         issues,
         attachment_ocr: None,
+        user_response: None,
     }
 }

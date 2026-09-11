@@ -40,7 +40,7 @@ mod types;
 pub use types::{
     CompanionDecision, ObservationDelivery, RuntimeAgents, RuntimeAttachmentOcrFailure,
     RuntimeError, RuntimeErrorKind, RuntimeFactory, RuntimeLastError, RuntimePhase,
-    RuntimeSnapshot, UserInterruption,
+    RuntimeSnapshot, RuntimeUserResponseFailure, UserInterruption,
 };
 #[path = "runtime_handle_types.rs"]
 mod handle_types;
@@ -381,7 +381,9 @@ impl RuntimeActor {
             |agent| agent.display_name().to_owned(),
         );
         let runtime_user_queue = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
-        let hearing_context = std::sync::Arc::default();
+        let mut hearing_buffer = crate::hearing_context::HearingContextBuffer::default();
+        hearing_buffer.set_persistent(observation_delivery == ObservationDelivery::Companion);
+        let hearing_context = std::sync::Arc::new(std::sync::Mutex::new(hearing_buffer));
         if let Some(companion) = companion.as_mut() {
             companion.set_hearing_context(std::sync::Arc::clone(&hearing_context));
         }
@@ -518,13 +520,14 @@ impl RuntimeActor {
                     if actor.user_work_is_pending(&volatile_users) {
                         actor.user_work_pending = true;
                     }
+                    // 復旧は観察完了を待つ。新しいチャットによる中断は受付時に行う。
                     if actor.user_work_is_pending(&volatile_users)
                         && actor.user_cancel_recovery.is_none()
                         && actor.pending_user_can_start()
+                        && running_observer
+                            .as_ref()
+                            .is_none_or(RunningOperation::was_preempted_for_user)
                     {
-                        if let Some(operation) = running_observer.as_mut() {
-                            actor.preempt_operation_for_user(operation);
-                        }
                         match actor.start_pending_user_operation(
                             &mut volatile_users,
                             &snapshot_tx,
@@ -719,7 +722,7 @@ impl RuntimeActor {
                                 let input_id = actor
                                     .active_user_message_id
                                     .clone()
-                                    .or_else(|| actor.terminal_attachment_input_id());
+                                    .or_else(|| actor.terminal_user_input_id());
                                 let mut termination_ack = true;
                                 if let Some(operation) = running_coo.take() {
                                     match operation.cancel_and_wait().await {

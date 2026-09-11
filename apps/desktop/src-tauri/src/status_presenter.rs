@@ -336,6 +336,16 @@ fn status_banner(s: &AppSnapshot) -> Option<BannerView> {
             Some(Settings),
         ));
     }
+    if s.last_error
+        .as_ref()
+        .is_some_and(|error| error.user_response.is_some())
+    {
+        return Some(banner(
+            "error",
+            Text::message("view.userResponseStopped"),
+            None,
+        ));
+    }
     if let Some(failure) = s
         .last_error
         .as_ref()

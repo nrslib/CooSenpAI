@@ -83,10 +83,20 @@ impl CompanionStorage {
                             .screen_context
                             .as_ref()
                             .map_or_else(Vec::new, |context| context.hearing_context.clone()),
+                        pending_audio: entry
+                            .screen_context
+                            .as_ref()
+                            .map_or_else(Vec::new, |context| context.pending_audio.clone()),
+                        pending_audio_ids: entry
+                            .screen_context
+                            .as_ref()
+                            .map_or_else(Vec::new, |context| context.pending_audio_ids.clone()),
                         observation_in_progress: false,
                         prepared_response: None,
                         response_commit_started: false,
                         attachment_failure: None,
+                        response_attempts: 0,
+                        response_terminal: false,
                         tutorial_response_key: entry.tutorial_response_key.clone(),
                     }));
             }

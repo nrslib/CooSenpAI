@@ -42,10 +42,7 @@ impl RuntimeActor {
         &self,
         volatile_users: &std::collections::VecDeque<crate::companion_storage::PendingUserMessage>,
     ) -> bool {
-        if volatile_users
-            .iter()
-            .any(|input| !input.attachment_is_terminal())
-        {
+        if volatile_users.iter().any(|input| !input.is_terminal()) {
             return true;
         }
         self.companion
@@ -66,11 +63,11 @@ impl RuntimeActor {
         }
     }
 
-    pub(super) fn clear_non_attachment_error(&mut self) {
+    pub(super) fn clear_non_user_error(&mut self) {
         self.last_error = self
             .last_error
             .take()
-            .filter(|error| error.attachment_ocr.is_some());
+            .filter(|error| error.attachment_ocr.is_some() || error.user_response.is_some());
     }
 
     pub(super) fn companion_recovery_can_start(&self) -> bool {
@@ -109,6 +106,7 @@ impl RuntimeActor {
             occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             message: None,
             issues: Vec::new(),
+            user_response: None,
             attachment_ocr: Some(RuntimeAttachmentOcrFailure {
                 input_id: input_id.to_owned(),
                 reason,
@@ -133,16 +131,29 @@ impl RuntimeActor {
         Ok(retryable)
     }
 
-    pub(super) fn restore_terminal_attachment_failure(
+    pub(super) fn restore_terminal_user_failure(
         &mut self,
         companion: &CompanionAgent,
     ) -> Result<(), CompanionError> {
         let Some((input_id, failure)) = companion.first_terminal_attachment_failure()? else {
+            if let Some((input_id, attempts)) = companion.first_terminal_user_response()? {
+                self.user_retry_at = None;
+                self.user_retry_delay = Duration::from_secs(1);
+                self.last_error = Some(RuntimeLastError {
+                    kind: RuntimeErrorKind::Provider,
+                    occurred_at: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    message: None,
+                    issues: Vec::new(),
+                    attachment_ocr: None,
+                    user_response: Some(RuntimeUserResponseFailure { input_id, attempts }),
+                });
+                return Ok(());
+            }
             if self
                 .last_error
                 .as_ref()
-                .and_then(|error| error.attachment_ocr.as_ref())
-                .is_some_and(|failure| !failure.retryable)
+                .is_some_and(|error| error.terminal_user_input_id().is_some())
             {
                 self.last_error = None;
             }
@@ -155,6 +166,7 @@ impl RuntimeActor {
             occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             message: None,
             issues: Vec::new(),
+            user_response: None,
             attachment_ocr: Some(RuntimeAttachmentOcrFailure {
                 input_id,
                 reason: failure.reason,
@@ -176,6 +188,7 @@ impl RuntimeActor {
             message: None,
             issues: Vec::new(),
             attachment_ocr: None,
+            user_response: None,
         });
         self.revision = self.revision.saturating_add(1);
         self.publish(snapshot_tx);

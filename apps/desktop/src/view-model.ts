@@ -151,6 +151,7 @@ export function observerStatus(snapshot: AppSnapshot, now = Date.now(), locale: 
 
 export function companionStatus(snapshot: AppSnapshot, locale: Locale = "ja"): string {
   const name = snapshot.companionDisplayName;
+  if (snapshot.lastError?.userResponse !== undefined) return t(locale, "view.userResponseStopped");
   if (snapshot.lastError?.attachmentOcr !== undefined) {
     return attachmentOcrFailureMessage(snapshot.lastError.attachmentOcr.reason, locale);
   }

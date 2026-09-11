@@ -22,6 +22,8 @@ pub struct TranscriptRecord {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
 }
 
 impl TranscriptRecord {
@@ -36,6 +38,7 @@ impl TranscriptRecord {
             .to_owned(),
             text: observation.text.clone(),
             speaker_tag: None,
+            transcript_path: None,
         }
     }
 }
@@ -63,9 +66,7 @@ impl AudioObservation {
         if text.is_empty() {
             return Err(ObservationError::Missing("text"));
         }
-        if text.chars().count() > AUDIO_TEXT_MAX_CHARS {
-            return Err(ObservationError::Invalid);
-        }
+        let text = crate::state::truncate(text, AUDIO_TEXT_MAX_CHARS);
         let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         Ok(Self {
             kind: "audio".to_owned(),
@@ -102,9 +103,9 @@ pub(super) fn parse(value: Value) -> Result<AudioObservation, ObservationError> 
     if record.kind != "audio"
         || record.schema_version != 1
         || record.id.is_empty()
-        || record.created_at.is_empty()
-        || record.window_start.is_empty()
-        || record.window_end.is_empty()
+        || DateTime::parse_from_rfc3339(&record.created_at).is_err()
+        || DateTime::parse_from_rfc3339(&record.window_start).is_err()
+        || DateTime::parse_from_rfc3339(&record.window_end).is_err()
         || record.text.trim().is_empty()
         || record.text.chars().count() > AUDIO_TEXT_MAX_CHARS
     {

@@ -12,6 +12,24 @@ impl CompanionAgent {
 }
 
 impl UserMessagePreparer {
+    pub(crate) fn hearing_audio_ingestion(
+        &self,
+        session_id: String,
+    ) -> crate::hearing_ingestion::HearingAudioIngestion {
+        crate::hearing_ingestion::HearingAudioIngestion::new(
+            session_id,
+            self.hearing_context.clone(),
+        )
+    }
+
+    pub(crate) fn acknowledge_saved_hearing_audio(&self, id: &str) -> Result<(), CompanionError> {
+        self.hearing_context
+            .lock()
+            .map_err(|_| PersistenceError::Invalid("音声文脈のロックが壊れています".to_owned()))?
+            .acknowledge_saved_audio(id);
+        Ok(())
+    }
+
     pub(crate) fn begin_hearing_context(
         &self,
         generation: u64,
@@ -34,30 +52,22 @@ impl UserMessagePreparer {
             .hearing_context
             .lock()
             .map_err(|_| PersistenceError::Invalid("音声文脈のロックが壊れています".to_owned()))?;
+        let original = context.clone();
         let Some(context) = buffer.prepare_update(context) else {
             return Ok(false);
         };
-        if context.confirmed {
-            if let Some(storage) = &self.storage {
-                storage.update_cursor(|cursor| {
-                    for pending in &mut cursor.pending_inputs {
-                        let crate::companion_storage::PendingInput::UserMessage(input) = pending;
-                        if input.prepared_response.is_some() || input.response_commit_started {
-                            continue;
-                        }
-                        for captured in &mut input.hearing_context {
-                            if captured.same_segment(&context)
-                                && captured.sequence < context.sequence
-                            {
-                                *captured = context.clone();
-                            }
-                        }
-                    }
-                    Ok(())
-                })?;
-            }
+        let audio = if original.confirmed && !original.text.trim().is_empty() {
+            Some(
+                original
+                    .confirmed_audio(chrono::Utc::now())
+                    .map_err(|_| PersistenceError::Invalid("確定した音声が不正です".to_owned()))?,
+            )
+        } else {
+            None
+        };
+        if !buffer.record(context, audio) {
+            return Err(CompanionError::AudioPendingOverflow);
         }
-        buffer.record(context);
         Ok(true)
     }
 }

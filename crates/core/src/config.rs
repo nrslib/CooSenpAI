@@ -25,6 +25,7 @@ pub use paths::ConfigPaths;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io;
+use std::ops::{Deref, DerefMut};
 pub use storage::{
     ensure_layout, load_config, patch_config, patch_config_before_save,
     patch_config_before_save_if_revision, prepare_config_update, save_config,
@@ -51,12 +52,20 @@ pub const NUMERIC_CONFIG_PATHS: &[&str] = &[
     "watch.triggers.pollMs",
     "watch.battery.multiplier",
     "watch.ocrGate.timeoutMs",
-    "observer.timeoutMs",
-    "observer.dailyCallLimit",
-    "observer.textExcerptMaxChars",
-    "observer.textExcerptMaxCount",
-    "observer.textTotalMaxChars",
-    "observer.changesMaxCount",
+    "observer.vision.intervalMs",
+    "observer.vision.timeoutMs",
+    "observer.vision.dailyCallLimit",
+    "observer.vision.textExcerptMaxChars",
+    "observer.vision.textExcerptMaxCount",
+    "observer.vision.textTotalMaxChars",
+    "observer.vision.changesMaxCount",
+    "observer.hearing.intervalMs",
+    "observer.hearing.timeoutMs",
+    "observer.hearing.dailyCallLimit",
+    "observer.hearing.textExcerptMaxChars",
+    "observer.hearing.textExcerptMaxCount",
+    "observer.hearing.textTotalMaxChars",
+    "observer.hearing.changesMaxCount",
     "companion.timeoutMs",
     "companion.dailyProactiveLimit",
     "companion.wakeCoalesceMax",
@@ -96,7 +105,7 @@ pub struct Config {
     #[serde(default)]
     pub watch: WatchConfig,
     #[serde(default)]
-    pub observer: AgentConfig,
+    pub observer: ObserverConfig,
     #[serde(default)]
     pub companion: CompanionConfig,
     #[serde(default)]
@@ -133,7 +142,7 @@ impl Default for Config {
             config_version: CONFIG_VERSION,
             revision: 0,
             watch: WatchConfig::default(),
-            observer: AgentConfig::default_observer(),
+            observer: ObserverConfig::default(),
             companion: CompanionConfig::default(),
             chat: ChatConfig::default(),
             notification: NotificationConfig::default(),
@@ -522,6 +531,84 @@ impl AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self::default_observer()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObserverProfile {
+    #[serde(flatten)]
+    pub agent: AgentConfig,
+    #[serde(default = "default_observer_interval")]
+    pub interval_ms: u64,
+}
+
+impl ObserverProfile {
+    pub fn new(agent: AgentConfig, interval_ms: u64) -> Self {
+        Self { agent, interval_ms }
+    }
+}
+
+impl Default for ObserverProfile {
+    fn default() -> Self {
+        Self::new(AgentConfig::default_observer(), default_observer_interval())
+    }
+}
+
+impl Deref for ObserverProfile {
+    type Target = AgentConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.agent
+    }
+}
+
+impl DerefMut for ObserverProfile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.agent
+    }
+}
+
+impl From<ObserverProfile> for AgentConfig {
+    fn from(profile: ObserverProfile) -> Self {
+        profile.agent
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObserverConfig {
+    pub vision: ObserverProfile,
+    pub hearing: ObserverProfile,
+}
+
+impl Default for ObserverConfig {
+    fn default() -> Self {
+        let vision = ObserverProfile::default();
+        Self {
+            hearing: vision.clone(),
+            vision,
+        }
+    }
+}
+
+impl Deref for ObserverConfig {
+    type Target = AgentConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.vision.agent
+    }
+}
+
+impl DerefMut for ObserverConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.vision.agent
+    }
+}
+
+impl From<ObserverConfig> for AgentConfig {
+    fn from(config: ObserverConfig) -> Self {
+        config.vision.agent
     }
 }
 

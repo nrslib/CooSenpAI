@@ -40,6 +40,7 @@ impl RuntimeActor {
                         message: Some(error.to_string()),
                         issues: Vec::new(),
                         attachment_ocr: None,
+                        user_response: None,
                     });
                 }
             }
@@ -58,6 +59,11 @@ impl RuntimeActor {
         };
         if let Err(error) = companion.recover_active_turn_commit() {
             self.schedule_initialization_retry(initialization_error_kind(&error), snapshot_tx);
+            self.companion = Some(companion);
+            return StartResult::Completed;
+        }
+        if let Err(error) = companion.settle_exhausted_user_responses() {
+            self.schedule_user_retry(initialization_error_kind(&error), snapshot_tx);
             self.companion = Some(companion);
             return StartResult::Completed;
         }
@@ -90,12 +96,12 @@ impl RuntimeActor {
          * The durable queue is the source of truth for owned runtimes. The
          * volatile branch is used only by the CLI's non-owning companion.
          */
-        if let Err(error) = self.restore_terminal_attachment_failure(&companion) {
-            self.schedule_user_retry(initialization_error_kind(&error), snapshot_tx);
-            self.companion = Some(companion);
-            return StartResult::Completed;
-        }
         if inputs.is_empty() {
+            if let Err(error) = self.restore_terminal_user_failure(&companion) {
+                self.schedule_user_retry(initialization_error_kind(&error), snapshot_tx);
+                self.companion = Some(companion);
+                return StartResult::Completed;
+            }
             self.revision = self.revision.saturating_add(1);
             self.publish(snapshot_tx);
             self.companion = Some(companion);
@@ -420,6 +426,7 @@ impl RuntimeActor {
                     message: Some("provider 操作が異常終了しました".to_owned()),
                     issues: Vec::new(),
                     attachment_ocr: None,
+                    user_response: None,
                 });
                 if !user_input_ids.is_empty() {
                     self.schedule_user_retry(RuntimeErrorKind::Provider, snapshot_tx);
@@ -499,11 +506,12 @@ impl RuntimeActor {
     pub(super) fn start_observe(
         &mut self,
         frames: Vec<ObservationFrameInput>,
+        audio: Vec<crate::state::AudioObservation>,
         request_cancellation: CancellationToken,
         response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
     ) -> StartResult {
-        if !self.accepts_watch_scope(&frames) {
+        if !frames.is_empty() && !self.accepts_watch_scope(&frames) {
             let _ = response.send(Err(RuntimeError::StaleWatchScope));
             return StartResult::Completed;
         }
@@ -539,9 +547,11 @@ impl RuntimeActor {
             |frame| frame.scope_generation,
         );
         let catch_panic_to_keep_agent = self.factory.is_none();
+        let hearing_context = self.hearing_context.clone();
         let task = tokio::spawn(async move {
             let observe = observer.observe_scoped(
                 frames,
+                audio,
                 provider_cancellation,
                 expected_generation,
                 scope_generation,
@@ -570,6 +580,20 @@ impl RuntimeActor {
                     |observation| Ok(ObservationRecord::Visual(observation)),
                 )
             };
+            // 保存済みの結果は、helper 再起動や返信先の取消、outbox 配達失敗でも消費する。
+            let result = result.and_then(|record| {
+                if let ObservationRecord::Visual(observation) = &record {
+                    let mut buffer = hearing_context.lock().map_err(|_| {
+                        CompanionError::Persistence(PersistenceError::Invalid(
+                            "音声文脈のロックが壊れています".to_owned(),
+                        ))
+                    })?;
+                    for segment in &observation.audio_segments {
+                        buffer.acknowledge_saved_audio(&segment.id);
+                    }
+                }
+                Ok(record)
+            });
             Box::new(OperationOutcome::Observe {
                 observer: Box::new(observer),
                 result,
@@ -597,35 +621,6 @@ impl RuntimeActor {
             match self.observer.as_mut() {
                 Some(observer) => match observer.no_change_with_stagnation(stagnation) {
                     Ok(observation) => Ok(observation),
-                    Err(ObserverError::OutboxPending { record }) => Ok(*record),
-                    Err(error) => Err(RuntimeError::from(error)),
-                },
-                None => Err(RuntimeError::ObserverUnavailable),
-            }
-        };
-        if self.observation_delivery == ObservationDelivery::Companion {
-            if let Ok(observation) = &result {
-                self.pending_observations.push(observation.clone());
-            }
-        }
-        let _ = response.send(result);
-        self.revision = self.revision.saturating_add(1);
-        self.publish(snapshot_tx);
-    }
-
-    pub(super) fn process_audio_observation(
-        &mut self,
-        observation: crate::state::AudioObservation,
-        cancellation: CancellationToken,
-        response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
-        snapshot_tx: &watch::Sender<RuntimeSnapshot>,
-    ) {
-        let result = if cancellation.is_cancelled() {
-            Err(RuntimeError::Closed)
-        } else {
-            match self.observer.as_mut() {
-                Some(observer) => match observer.ingest_audio_observation(observation) {
-                    Ok(observation) => Ok(ObservationRecord::Audio(observation)),
                     Err(ObserverError::OutboxPending { record }) => Ok(*record),
                     Err(error) => Err(RuntimeError::from(error)),
                 },
@@ -959,7 +954,7 @@ impl RuntimeActor {
                                         self.pending_observations.retain(|observation| {
                                             !consumed_ids.iter().any(|id| id == observation.id())
                                         });
-                                        self.clear_non_attachment_error();
+                                        self.clear_non_user_error();
                                         self.initialization_retry_at = None;
                                         self.initialization_retry_delay = Duration::from_secs(1);
                                         self.companion_recovery_at = companion
@@ -1057,7 +1052,7 @@ impl RuntimeActor {
                 result,
             } => {
                 let mut companion = *companion;
-                let mut terminal_attachment_failure = false;
+                let mut terminal_user_failure = false;
                 let waiter_ids = match &reply {
                     OperationReply::User(ids) => ids.clone(),
                     _ => Vec::new(),
@@ -1136,7 +1131,7 @@ impl RuntimeActor {
                             reason,
                             snapshot_tx,
                         ) {
-                            Ok(retryable) => terminal_attachment_failure = !retryable,
+                            Ok(retryable) => terminal_user_failure = !retryable,
                             Err(error) => {
                                 self.schedule_user_retry(
                                     initialization_error_kind(&error),
@@ -1145,12 +1140,37 @@ impl RuntimeActor {
                                 committed_result = Err(RuntimeError::Companion(error));
                             }
                         }
-                    } else if let Err(RuntimeError::Companion(error)) = &committed_result {
-                        self.preserve_proactive_during_user_failure(&companion);
-                        self.schedule_user_retry(initialization_error_kind(error), snapshot_tx);
                     }
-                    if committed_result.is_ok() {
-                        if let Err(error) = self.restore_terminal_attachment_failure(&companion) {
+                    if committed_result.is_err() {
+                        match companion.settle_exhausted_user_responses() {
+                            Ok(exhausted) => terminal_user_failure |= exhausted.contains(&input_id),
+                            Err(error) => committed_result = Err(RuntimeError::Companion(error)),
+                        }
+                    }
+                    if attachment_reason.is_none() {
+                        if let Err(RuntimeError::Companion(error)) = &committed_result {
+                            self.preserve_proactive_during_user_failure(&companion);
+                            if let Some(logger) = &self.logger {
+                                let action = if terminal_user_failure {
+                                    "stop"
+                                } else {
+                                    "retry"
+                                };
+                                let _ = logger.write("WARN", &format!(
+                                    "利用者応答が失敗しました: input-id={input_id} action={action} error-type={} error={error}",
+                                    initialization_error_kind(error).as_str()
+                                ));
+                            }
+                            if !terminal_user_failure {
+                                self.schedule_user_retry(
+                                    initialization_error_kind(error),
+                                    snapshot_tx,
+                                );
+                            }
+                        }
+                    }
+                    if committed_result.is_ok() || terminal_user_failure {
+                        if let Err(error) = self.restore_terminal_user_failure(&companion) {
                             self.schedule_user_retry(
                                 initialization_error_kind(&error),
                                 snapshot_tx,
@@ -1170,7 +1190,7 @@ impl RuntimeActor {
                 pending_user_drain = if cancelled
                     || append_restart_requested
                     || response_result.is_ok()
-                    || terminal_attachment_failure
+                    || terminal_user_failure
                 {
                     self.user_retry_at = None;
                     self.user_retry_delay = Duration::from_secs(1);
@@ -1197,7 +1217,7 @@ impl RuntimeActor {
                     Ok(()) => {
                         pending_user_drain = PendingUserDrain::Continue;
                         if self.provider_build_failed {
-                            self.clear_non_attachment_error();
+                            self.clear_non_user_error();
                             self.provider_build_failed = false;
                         }
                         self.companion_recovery_pending = true;

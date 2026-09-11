@@ -19,6 +19,10 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
         generation: u64,
         cancellation: CancellationToken,
     ) -> Result<String, RuntimeError>;
+    fn hearing_audio_ingestion(
+        &self,
+        session_id: String,
+    ) -> Result<coosenpai_core::hearing_ingestion::HearingAudioIngestion, RuntimeError>;
     fn update_hearing_context(
         &self,
         context: coosenpai_core::hearing_context::HearingContext,
@@ -50,7 +54,7 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
     ) -> Result<ObservationRecord, RuntimeError>;
     async fn audio_observation(
         &self,
-        observation: AudioObservation,
+        observations: Vec<AudioObservation>,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError>;
     async fn cancel_user_message(&self) -> Result<String, RuntimeError>;
@@ -63,6 +67,13 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
 
 #[async_trait]
 impl CoreRuntimePort for RuntimeHandle {
+    fn hearing_audio_ingestion(
+        &self,
+        session_id: String,
+    ) -> Result<coosenpai_core::hearing_ingestion::HearingAudioIngestion, RuntimeError> {
+        RuntimeHandle::hearing_audio_ingestion(self, session_id)
+    }
+
     fn begin_hearing_context(
         &self,
         generation: u64,
@@ -140,11 +151,10 @@ impl CoreRuntimePort for RuntimeHandle {
 
     async fn audio_observation(
         &self,
-        observation: AudioObservation,
+        observations: Vec<AudioObservation>,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError> {
-        self.ingest_audio_observation_cancellable(observation, cancellation)
-            .await
+        self.observe_audio_batch(observations, cancellation).await
     }
 
     async fn cancel_user_message(&self) -> Result<String, RuntimeError> {

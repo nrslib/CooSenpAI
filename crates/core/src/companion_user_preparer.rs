@@ -196,11 +196,6 @@ impl UserMessagePreparer {
         } else {
             (observations, Vec::new())
         };
-        // 確定イベントと入力の保存を直列化し、受付中に届いた Final を取り落とさない。
-        let hearing_buffer = self
-            .hearing_context
-            .lock()
-            .map_err(|_| PersistenceError::Invalid("音声文脈のロックが壊れています".to_owned()))?;
         let mut input = PendingUserMessage {
             id,
             conversation_generation,
@@ -211,11 +206,15 @@ impl UserMessagePreparer {
             attachment_text,
             observations,
             pending_frames,
-            hearing_context: hearing_buffer.snapshot(),
+            hearing_context: Vec::new(),
+            pending_audio: Vec::new(),
+            pending_audio_ids: Vec::new(),
             observation_in_progress,
             prepared_response: None,
             response_commit_started: false,
             attachment_failure: None,
+            response_attempts: 0,
+            response_terminal: false,
             tutorial_response_key,
         };
         if let Some(storage) = &self.storage {
@@ -229,7 +228,6 @@ impl UserMessagePreparer {
         } else if persist_runtime_queue {
             self.enqueue_runtime_input(input.clone());
         }
-        drop(hearing_buffer);
         Ok(input)
     }
 
@@ -281,7 +279,7 @@ impl UserMessagePreparer {
                     PersistenceError::Invalid("runtime user queue が壊れています".to_owned())
                 })?
                 .iter()
-                .filter(|message| !message.attachment_is_terminal())
+                .filter(|message| !message.is_terminal())
                 .cloned()
                 .collect());
         };
@@ -292,7 +290,7 @@ impl UserMessagePreparer {
             .map(|pending| match pending {
                 PendingInput::UserMessage(message) => message,
             })
-            .filter(|message| !message.attachment_is_terminal())
+            .filter(|message| !message.is_terminal())
             .collect())
     }
 
@@ -381,37 +379,6 @@ impl UserMessagePreparer {
                     }
                 }
                 Ok(failure)
-            })
-            .map_err(CompanionError::from)
-    }
-
-    pub(crate) fn clear_terminal_attachment_failure(
-        &self,
-        input_id: &str,
-    ) -> Result<bool, CompanionError> {
-        let storage = self.storage.as_ref().ok_or_else(|| {
-            PersistenceError::Invalid("添付失敗を更新する storage がありません".to_owned())
-        })?;
-        storage
-            .update_cursor(|cursor| {
-                let Some(message) =
-                    cursor
-                        .pending_inputs
-                        .iter_mut()
-                        .find_map(|pending| match pending {
-                            PendingInput::UserMessage(message) if message.id == input_id => {
-                                Some(message)
-                            }
-                            _ => None,
-                        })
-                else {
-                    return Ok(false);
-                };
-                if !message.attachment_is_terminal() {
-                    return Ok(false);
-                }
-                message.attachment_failure = None;
-                Ok(true)
             })
             .map_err(CompanionError::from)
     }

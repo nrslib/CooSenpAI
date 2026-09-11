@@ -352,6 +352,7 @@ pub enum TextKey {
     ModelPopupCloseFailed,
     DetailsOpenFailed,
     DetailsDataflowLogReadFailed,
+    DetailsDataflowPathOpenFailed,
     ModelConfigObject,
     ModelConfigCompanionOnly,
     ModelConfigCompanionObject,
@@ -1132,10 +1133,10 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::AudioSystemFailed, Locale::En) => "Could not capture speaker audio. Check System Audio Recording permission and the output device.",
         (TextKey::AudioSystemDeviceUnavailable, Locale::Ja) => "音声出力デバイスがありません。出力デバイスの接続を確認してください。",
         (TextKey::AudioSystemDeviceUnavailable, Locale::En) => "No audio output device is available. Check the output device connection.",
-        (TextKey::AudioSystemFormatFailed, Locale::Ja) => "スピーカー音声の形式を取得できません。出力デバイスを確認し、Hearing を入れ直してください。",
-        (TextKey::AudioSystemFormatFailed, Locale::En) => "Could not read the speaker audio format. Check the output device and restart Hearing.",
-        (TextKey::AudioSystemOverflow, Locale::Ja) => "スピーカー音声の処理が追いつかず停止しました。負荷を減らして Hearing を入れ直してください。",
-        (TextKey::AudioSystemOverflow, Locale::En) => "Speaker capture stopped because processing could not keep up. Reduce system load and restart Hearing.",
+        (TextKey::AudioSystemFormatFailed, Locale::Ja) => "スピーカー音声の形式を取得できません。出力デバイスを確認し、Hearing AI を入れ直してください。",
+        (TextKey::AudioSystemFormatFailed, Locale::En) => "Could not read the speaker audio format. Check the output device and restart Hearing AI.",
+        (TextKey::AudioSystemOverflow, Locale::Ja) => "スピーカー音声の処理が追いつかず停止しました。負荷を減らして Hearing AI を入れ直してください。",
+        (TextKey::AudioSystemOverflow, Locale::En) => "Speaker capture stopped because processing could not keep up. Reduce system load and restart Hearing AI.",
         (TextKey::AudioSystemStartupTimeout, Locale::Ja) => "スピーカー音声の開始がタイムアウトしました。システムオーディオ録音の許可と出力デバイスを確認してください。",
         (TextKey::AudioSystemStartupTimeout, Locale::En) => "Speaker capture timed out during startup. Check System Audio Recording permission and the output device.",
         (TextKey::AudioHelperMissing, Locale::Ja) => "coosenpai-hearing が見つかりません",
@@ -1508,6 +1509,8 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::DetailsDataflowLogReadFailed, Locale::En) => {
             "Could not read the observation log: {error}"
         }
+        (TextKey::DetailsDataflowPathOpenFailed, Locale::Ja) => "参照元を開けませんでした",
+        (TextKey::DetailsDataflowPathOpenFailed, Locale::En) => "Could not open the referenced file.",
         (TextKey::ModelConfigObject, Locale::Ja) => "モデル設定はオブジェクトで指定してください",
         (TextKey::ModelConfigObject, Locale::En) => "Model settings must be an object.",
         (TextKey::ModelConfigCompanionOnly, Locale::Ja) => {

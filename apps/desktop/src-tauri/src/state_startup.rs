@@ -167,6 +167,7 @@ pub(super) fn conversation_generation_for_locale(
                 ),
                 issues: Vec::new(),
                 attachment_ocr: None,
+                user_response: None,
             }),
         ),
     }
@@ -275,6 +276,7 @@ pub(super) fn persistence_runtime_error(message: String) -> RuntimeLastError {
         message: Some(message),
         issues: Vec::new(),
         attachment_ocr: None,
+        user_response: None,
     }
 }
 
@@ -301,5 +303,6 @@ fn runtime_error_with_kind(
         message: Some(message),
         issues,
         attachment_ocr: None,
+        user_response: None,
     }
 }

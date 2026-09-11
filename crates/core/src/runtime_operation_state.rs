@@ -507,6 +507,7 @@ impl RunningOperation {
             return Ok(AppendPendingResult::NoNewInput);
         }
         for input in additional {
+            preparer.begin_appended_response_attempt(&input.id)?;
             let provider_input = match preparer.mid_turn_input(&input) {
                 Ok(input) => input,
                 Err(error) => {

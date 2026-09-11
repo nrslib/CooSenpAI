@@ -216,6 +216,7 @@ export const detailsApi = {
   ready: (): Promise<IpcResult<null>> => call("ui_view_mounted"),
   getSnapshot: (): Promise<IpcResult<AppSnapshot>> => call("details_snapshot"),
   getDataFlowLog: (): Promise<IpcResult<DataFlowLog>> => call("details_dataflow_log"),
+  openDataFlowPath: (path: string): Promise<IpcResult<null>> => call("details_dataflow_open_path", { payload: { path } }),
   resetCompanionEmotions: (): Promise<IpcResult<AppSnapshot>> => call("companion_emotions_reset"),
   selectConversationGeneration: (generation: number): Promise<IpcResult<AppSnapshot>> => call("conversation_select", { payload: { generation } }),
   subscribeSnapshots: (listener: (event: SnapshotEvent) => void) => subscribeLocal(ipcChannels.snapshotUpdated, listener),

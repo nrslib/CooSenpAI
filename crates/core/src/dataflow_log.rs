@@ -77,7 +77,16 @@ fn read_transcript_tail(
 ) -> Result<Vec<TranscriptRecord>, PersistenceError> {
     let mut transcripts = Vec::new();
     for path in recent_daily_files(directory)? {
-        transcripts.append(&mut JsonlStore::new(path).read::<TranscriptRecord>()?);
+        let path_string = path.to_string_lossy().into_owned();
+        transcripts.extend(
+            JsonlStore::new(path)
+                .read::<TranscriptRecord>()?
+                .into_iter()
+                .map(|mut record| {
+                    record.transcript_path = Some(path_string.clone());
+                    record
+                }),
+        );
     }
     if transcripts.len() > limit {
         transcripts.drain(..transcripts.len() - limit);

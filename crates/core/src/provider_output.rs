@@ -47,11 +47,17 @@ pub(super) fn validate_json_shape(value: &Value, schema: &Value) -> Result<(), (
     }
     validate_object(value, schema)?;
     validate_array(value, schema)?;
-    if let (Some(max), Some(string)) = (
-        schema.get("maxLength").and_then(Value::as_u64),
-        value.as_str(),
-    ) {
-        if string.encode_utf16().count() as u64 > max {
+    if let Some(string) = value.as_str() {
+        let length = string.encode_utf16().count() as u64;
+        if schema
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|min| length < min)
+            || schema
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|max| length > max)
+        {
             return Err(());
         }
     }
@@ -120,3 +126,4 @@ fn json_type_matches(value: &Value, kind: &str) -> bool {
         _ => false,
     }
 }
+

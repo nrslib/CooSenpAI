@@ -21,15 +21,16 @@ impl UserMessagePreparer {
                             "取り消された user input です".to_owned(),
                         ));
                     }
-                    if !cursor
+                    let Some(PendingInput::UserMessage(input)) = cursor
                         .pending_inputs
-                        .iter()
-                        .any(|pending| pending.id() == input_id)
-                    {
+                        .iter_mut()
+                        .find(|pending| pending.id() == input_id)
+                    else {
                         return Err(PersistenceError::Invalid(
-                            "user input が cursor にありません".to_owned(),
+                            "user input が cursor にありません".into(),
                         ));
-                    }
+                    };
+                    super::user_retry::begin_response_attempt(input)?;
                 }
                 cursor.user_operation_generation = next_generation(cursor)?;
                 Ok(Some(cursor.user_operation_generation))
@@ -64,6 +65,13 @@ impl UserMessagePreparer {
                     };
                     if input.prepared_response.is_some() || input.response_commit_started {
                         return Ok(false);
+                    }
+                }
+                // 利用者の言い足しによる中断は自動再試行の回数に含めない。
+                for pending in &mut cursor.pending_inputs {
+                    let PendingInput::UserMessage(input) = pending;
+                    if input_ids.contains(&input.id) {
+                        input.response_attempts = input.response_attempts.saturating_sub(1);
                     }
                 }
                 cursor.user_operation_generation = next_generation(cursor)?;

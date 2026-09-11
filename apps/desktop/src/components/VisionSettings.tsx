@@ -34,7 +34,6 @@ export function VisionSettings({ form, snapshot, saving, update, errorFor, onOpe
       <fieldset id="settings-watch-detail" disabled={saving}>
         <legend>{t("settings.vision.timingDetail")}</legend>
         <p className="field-help">{t("settings.vision.timingHelp")}</p>
-        <NumberInput label={t("settings.vision.sendInterval")} path="watch.sendIntervalMs" value={form.sendIntervalMs} update={(value) => update("sendIntervalMs", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.sendDebounce")} path="watch.sendDebounceMs" value={form.sendDebounceMs} update={(value) => update("sendDebounceMs", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.framesPerSend")} path="watch.framesPerSend" value={form.framesPerSend} update={(value) => update("framesPerSend", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.downscaleWidth")} path="watch.downscaleWidth" value={form.downscaleWidth} update={(value) => update("downscaleWidth", value)} errorFor={errorFor} />
@@ -51,17 +50,18 @@ export function VisionSettings({ form, snapshot, saving, update, errorFor, onOpe
         <SelectInput label={t("settings.vision.ocrLevel")} path="watch.ocrGate.level" value={form.ocrGateLevel} options={["fast", "accurate"]} update={(value) => update("ocrGateLevel", value as FormState["ocrGateLevel"])} />
         <NumberInput label={t("settings.vision.ocrTimeout")} path="watch.ocrGate.timeoutMs" value={form.ocrGateTimeoutMs} update={(value) => update("ocrGateTimeoutMs", value)} errorFor={errorFor} />
         <TextInput label={t("settings.vision.ocrExecutable")} path="watch.ocrGate.executable" value={form.ocrGateExecutable} update={(value) => update("ocrGateExecutable", value)} />
-        <NumberInput label={t("settings.vision.textExcerptMaxChars")} path="observer.textExcerptMaxChars" value={form.observerTextExcerptMaxChars} update={(value) => update("observerTextExcerptMaxChars", value)} errorFor={errorFor} />
-        <NumberInput label={t("settings.vision.textExcerptMaxCount")} path="observer.textExcerptMaxCount" value={form.observerTextExcerptMaxCount} update={(value) => update("observerTextExcerptMaxCount", value)} errorFor={errorFor} />
-        <NumberInput label={t("settings.vision.textTotalMaxChars")} path="observer.textTotalMaxChars" value={form.observerTextTotalMaxChars} update={(value) => update("observerTextTotalMaxChars", value)} errorFor={errorFor} />
-        <NumberInput label={t("settings.vision.changesMaxCount")} path="observer.changesMaxCount" value={form.observerChangesMaxCount} update={(value) => update("observerChangesMaxCount", value)} errorFor={errorFor} />
+        <NumberInput label={t("settings.providers.interval")} path="observer.vision.intervalMs" value={form.observerIntervalMs} update={(value) => update("observerIntervalMs", value)} errorFor={errorFor} />
+        <NumberInput label={t("settings.vision.textExcerptMaxChars")} path="observer.vision.textExcerptMaxChars" value={form.observerTextExcerptMaxChars} update={(value) => update("observerTextExcerptMaxChars", value)} errorFor={errorFor} />
+        <NumberInput label={t("settings.vision.textExcerptMaxCount")} path="observer.vision.textExcerptMaxCount" value={form.observerTextExcerptMaxCount} update={(value) => update("observerTextExcerptMaxCount", value)} errorFor={errorFor} />
+        <NumberInput label={t("settings.vision.textTotalMaxChars")} path="observer.vision.textTotalMaxChars" value={form.observerTextTotalMaxChars} update={(value) => update("observerTextTotalMaxChars", value)} errorFor={errorFor} />
+        <NumberInput label={t("settings.vision.changesMaxCount")} path="observer.vision.changesMaxCount" value={form.observerChangesMaxCount} update={(value) => update("observerChangesMaxCount", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.wakeCoalesceMax")} path="companion.wakeCoalesceMax" value={form.companionWakeCoalesceMax} update={(value) => update("companionWakeCoalesceMax", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.sessionMaxCalls")} path="companion.sessionMaxCalls" value={form.companionSessionMaxCalls} update={(value) => update("companionSessionMaxCalls", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.stuckAfterMs")} path="companion.stuckAfterMs" value={form.companionStuckAfterMs} update={(value) => update("companionStuckAfterMs", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.pendingDeliveryLimit")} path="companion.pendingDeliveryLimit" value={form.pendingDeliveryLimit} update={(value) => update("pendingDeliveryLimit", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.pendingDeliveryMaxBytes")} path="companion.pendingDeliveryMaxBytes" value={form.pendingDeliveryMaxBytes} update={(value) => update("pendingDeliveryMaxBytes", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.quietMinutes")} path="companion.proactiveQuietMinutes" value={form.proactiveQuietMinutes} update={(value) => update("proactiveQuietMinutes", value)} errorFor={errorFor} />
-        {tuningIsDefault(form) ? null : <button type="button" onClick={onResetTuning}>{t("settings.vision.resetTiming")}</button>}
+        {tuningIsDefault(form) ? null : <button type="button" onClick={onResetTuning}>{t("settings.resetTuning")}</button>}
       </fieldset>
       <fieldset id="settings-retention">
         <legend>{t("settings.vision.retention")}</legend>

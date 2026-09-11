@@ -339,9 +339,7 @@ impl SpeechController {
                     }
                 }
             }
-            controller
-                .finish_without_text(&state, generation, source)
-                .await;
+            controller.fail_without_final(&state, generation).await;
         });
     }
 
@@ -509,6 +507,7 @@ impl SpeechController {
                 locale: _,
                 microphone,
                 recognition,
+                engine: _,
             } => {
                 let snapshot = state
                     .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
@@ -528,7 +527,6 @@ impl SpeechController {
                 false
             }
             SpeechEvent::Partial { text } => {
-                self.transcript().remember_partial(generation, &text);
                 state
                     .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
                         generation,
@@ -590,7 +588,7 @@ impl SpeechController {
                 true
             }
             SpeechEvent::Closed => {
-                self.finish_without_text(state, generation, source).await;
+                self.fail_without_final(state, generation).await;
                 true
             }
         }
@@ -699,25 +697,15 @@ impl SpeechController {
         }
     }
 
-    async fn finish_without_text(
-        &self,
-        state: &Arc<DesktopState>,
-        generation: u64,
-        source: SpeechSource,
-    ) {
+    async fn fail_without_final(&self, state: &Arc<DesktopState>, generation: u64) {
         if self.lifecycle().accepts_session_events(generation) {
-            let fallback = { self.transcript().resolve_closed(generation) };
-            if let Some(text) = fallback {
-                self.accept_final(state, generation, source, text).await;
-            } else {
-                let locale = Locale::from_config(&state.runtime_config().ui.language);
-                self.fail(
-                    state,
-                    generation,
-                    locale_text(TextKey::SpeechNoSpeech, locale),
-                )
-                .await;
-            }
+            let locale = Locale::from_config(&state.runtime_config().ui.language);
+            self.fail(
+                state,
+                generation,
+                locale_text(TextKey::SpeechGenericFailure, locale),
+            )
+            .await;
         }
     }
 

@@ -24,7 +24,7 @@ pub(crate) struct UpdateClient {
 pub(crate) struct PendingUpdate {
     pub(crate) version: Version,
     pub(crate) notes: Option<String>,
-    pub(crate) minimum_system_version: SystemVersion,
+    pub(crate) minimum_system_version: Option<SystemVersion>,
     url: Url,
     signature: Signature,
 }
@@ -46,8 +46,18 @@ struct Manifest {
 struct Artifact {
     url: Url,
     signature: String,
-    #[serde(rename = "minimumSystemVersion")]
-    minimum_system_version: SystemVersion,
+    #[serde(
+        default,
+        rename = "minimumSystemVersion",
+        deserialize_with = "deserialize_minimum_system_version"
+    )]
+    minimum_system_version: Option<SystemVersion>,
+}
+
+fn deserialize_minimum_system_version<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SystemVersion>, D::Error> {
+    SystemVersion::deserialize(deserializer).map(Some)
 }
 
 impl UpdateClient {
@@ -140,9 +150,9 @@ impl UpdateClient {
         update: &PendingUpdate,
         progress: impl FnMut(u64, Option<u64>),
     ) -> Result<update_format::VerifiedArchive, UpdateError> {
-        update
-            .minimum_system_version
-            .ensure_supported(self.system)?;
+        if let Some(minimum) = update.minimum_system_version {
+            minimum.ensure_supported(self.system)?;
+        }
         let bytes = self
             .get(
                 update.url.clone(),

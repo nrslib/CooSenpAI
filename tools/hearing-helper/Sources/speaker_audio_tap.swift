@@ -172,6 +172,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
     private func finishStop() {
         guard !stopFinished else { return }
         stopFinished = true
+        diagnostic("speaker-capture backend=process-tap event=stopped")
         stopDeadline?.cancel()
         let completions = stopCompletions
         stopCompletions.removeAll()

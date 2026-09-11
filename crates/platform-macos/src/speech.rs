@@ -10,11 +10,15 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone)]
 pub struct MacSpeech {
     helper: PathBuf,
+    debug_dump_wav: Option<PathBuf>,
 }
 
 impl MacSpeech {
-    pub fn new(helper: PathBuf) -> Self {
-        Self { helper }
+    pub fn new(helper: PathBuf, debug_dump_wav: Option<PathBuf>) -> Self {
+        Self {
+            helper,
+            debug_dump_wav,
+        }
     }
 }
 
@@ -26,15 +30,33 @@ impl SpeechPort for MacSpeech {
         input_device: &str,
         cancellation: CancellationToken,
     ) -> Result<SpeechSession, PortError> {
+        let mut args = vec![
+            "--locale".to_owned(),
+            locale.to_owned(),
+            "--input-device".to_owned(),
+            input_device.to_owned(),
+        ];
+        if let Some(path) = &self.debug_dump_wav {
+            let path_text = path
+                .to_str()
+                .filter(|_| {
+                    path.is_absolute()
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))
+                })
+                .ok_or_else(|| {
+                    PortError::Unavailable(
+                        "音声の診断用 WAV 保存先には UTF-8 の絶対パスと .wav 拡張子が必要です"
+                            .to_owned(),
+                    )
+                })?;
+            args.extend(["--debug-dump-wav".to_owned(), path_text.to_owned()]);
+        }
         let process = InteractiveProcess::spawn(
             InteractiveProcessRequest {
                 executable: self.helper.clone(),
-                args: vec![
-                    "--locale".to_owned(),
-                    locale.to_owned(),
-                    "--input-device".to_owned(),
-                    input_device.to_owned(),
-                ],
+                args,
                 env: Vec::new(),
                 cwd: None,
             },

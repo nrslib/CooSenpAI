@@ -550,8 +550,10 @@ impl DesktopState {
             coosenpai_core::config::patch_config(&self.paths, Some(&recovery), |mut current| {
                 current.companion.provider = provider_name.clone();
                 current.companion.model = model.clone();
-                current.observer.provider = provider_name;
-                current.observer.model = model;
+                current.observer.vision.provider = provider_name.clone();
+                current.observer.vision.model = model.clone();
+                current.observer.hearing.provider = provider_name;
+                current.observer.hearing.model = model;
                 Ok(current)
             })?
         };

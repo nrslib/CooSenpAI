@@ -1,8 +1,9 @@
+use super::defaults::default_observer_daily_limit;
 use super::{
     issue, AgentConfig, AppConfig, AudioConfig, BatteryConfig, BubbleConfig, ChatConfig,
     CompanionConfig, Config, ConfigError, ConfigValidationIssue, DebugConfig, MemoryConfig,
-    NotificationConfig, OcrGateConfig, PopupConfig, RetentionConfig, SpeechConfig, TriggerConfig,
-    UiConfig, VoiceOutputConfig, WatchConfig,
+    NotificationConfig, ObserverConfig, ObserverProfile, OcrGateConfig, PopupConfig,
+    RetentionConfig, SpeechConfig, TriggerConfig, UiConfig, VoiceOutputConfig, WatchConfig,
 };
 #[path = "config_parse_helpers.rs"]
 mod helpers;
@@ -91,13 +92,24 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         parse_watch,
     );
     let revision = nonnegative_u64(object, "revision", 0, "revision", &mut issues);
-    let observer = parse_section(
+    let mut observer = parse_section(
         object.get("observer"),
-        AgentConfig::default(),
+        ObserverConfig::default(),
         "observer",
         &mut issues,
         parse_observer,
     );
+    if object.get("observer").is_none_or(|observer| {
+        observer.get("vision").is_none() && observer.get("intervalMs").is_none()
+    }) {
+        observer.vision.interval_ms = watch.send_interval_ms;
+        if object
+            .get("observer")
+            .is_none_or(|observer| observer.get("hearing").is_none())
+        {
+            observer.hearing.interval_ms = observer.vision.interval_ms;
+        }
+    }
     let companion = parse_section(
         object.get("companion"),
         CompanionConfig::default(),
@@ -486,7 +498,52 @@ fn parse_ocr_gate(
 fn parse_observer(
     object: &Map<String, Value>,
     issues: &mut Vec<ConfigValidationIssue>,
-) -> AgentConfig {
+) -> ObserverConfig {
+    if object.contains_key("vision") || object.contains_key("hearing") {
+        issues.extend(unknown_keys(object, &["vision", "hearing"], "observer"));
+        let vision = parse_observer_profile_section(
+            object.get("vision"),
+            ObserverProfile::default(),
+            "observer.vision",
+            issues,
+        );
+        let hearing = match object.get("hearing") {
+            Some(value) => parse_observer_profile_section(
+                Some(value),
+                ObserverProfile::default(),
+                "observer.hearing",
+                issues,
+            ),
+            None => vision.clone(),
+        };
+        return ObserverConfig { vision, hearing };
+    }
+    let vision = parse_observer_profile(object, "observer", issues);
+    ObserverConfig {
+        hearing: vision.clone(),
+        vision,
+    }
+}
+
+fn parse_observer_profile_section(
+    value: Option<&Value>,
+    default: ObserverProfile,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> ObserverProfile {
+    let Some(value) = value else { return default };
+    let Some(object) = value.as_object() else {
+        issues.push(issue(path, "設定はオブジェクトで指定してください。"));
+        return default;
+    };
+    parse_observer_profile(object, path, issues)
+}
+
+fn parse_observer_profile(
+    object: &Map<String, Value>,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> ObserverProfile {
     issues.extend(unknown_keys(
         object,
         &[
@@ -500,53 +557,68 @@ fn parse_observer(
             "textExcerptMaxCount",
             "textTotalMaxChars",
             "changesMaxCount",
+            "intervalMs",
         ],
-        "observer",
+        path,
     ));
-    let provider = provider(object, "provider", "codex", "observer.provider", issues);
-    let model = string(object, "model", "default", "observer.model", issues);
-    AgentConfig {
-        provider,
-        model,
-        effort: effort(object, "effort", "default", "observer.effort", issues),
-        executable: executable(object, "executable", "observer.executable", issues),
-        timeout_ms: positive_u64(object, "timeoutMs", 120_000, "observer.timeoutMs", issues),
-        daily_call_limit: nonnegative_u32(
+    let path_value = |field: &str| format!("{path}.{field}");
+    ObserverProfile::new(
+        AgentConfig {
+            provider: provider(object, "provider", "codex", &path_value("provider"), issues),
+            model: string(object, "model", "default", &path_value("model"), issues),
+            effort: effort(object, "effort", "default", &path_value("effort"), issues),
+            executable: executable(object, "executable", &path_value("executable"), issues),
+            timeout_ms: positive_u64(
+                object,
+                "timeoutMs",
+                120_000,
+                &path_value("timeoutMs"),
+                issues,
+            ),
+            daily_call_limit: nonnegative_u32(
+                object,
+                "dailyCallLimit",
+                default_observer_daily_limit(),
+                &path_value("dailyCallLimit"),
+                issues,
+            ),
+            text_excerpt_max_chars: positive_usize(
+                object,
+                "textExcerptMaxChars",
+                600,
+                &path_value("textExcerptMaxChars"),
+                issues,
+            ),
+            text_excerpt_max_count: positive_usize(
+                object,
+                "textExcerptMaxCount",
+                6,
+                &path_value("textExcerptMaxCount"),
+                issues,
+            ),
+            text_total_max_chars: positive_usize(
+                object,
+                "textTotalMaxChars",
+                2_000,
+                &path_value("textTotalMaxChars"),
+                issues,
+            ),
+            changes_max_count: positive_usize(
+                object,
+                "changesMaxCount",
+                8,
+                &path_value("changesMaxCount"),
+                issues,
+            ),
+        },
+        positive_u64(
             object,
-            "dailyCallLimit",
-            120,
-            "observer.dailyCallLimit",
+            "intervalMs",
+            60_000,
+            &path_value("intervalMs"),
             issues,
         ),
-        text_excerpt_max_chars: positive_usize(
-            object,
-            "textExcerptMaxChars",
-            600,
-            "observer.textExcerptMaxChars",
-            issues,
-        ),
-        text_excerpt_max_count: positive_usize(
-            object,
-            "textExcerptMaxCount",
-            6,
-            "observer.textExcerptMaxCount",
-            issues,
-        ),
-        text_total_max_chars: positive_usize(
-            object,
-            "textTotalMaxChars",
-            2_000,
-            "observer.textTotalMaxChars",
-            issues,
-        ),
-        changes_max_count: positive_usize(
-            object,
-            "changesMaxCount",
-            8,
-            "observer.changesMaxCount",
-            issues,
-        ),
-    }
+    )
 }
 
 fn parse_companion(

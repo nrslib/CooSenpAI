@@ -15,6 +15,10 @@ private final class FakeRecognitionTask {
 }
 
 func testRecognitionState() {
+    for length in [1999, 2000, 2001, 4096] {
+        assert(boundedFinalTranscript(String(repeating: "あ", count: length)).unicodeScalars.count == min(length, 2000))
+    }
+    assert(boundedFinalTranscript(String(repeating: "e\u{301}", count: 2001)).unicodeScalars.count == 2000)
     assert(boundedPartialTranscript("途中の発話") == "途中の発話")
     assert(boundedPartialTranscript(String(repeating: "あ", count: 2000)).utf8.count == 4095)
     assert(boundedPartialTranscript(String(repeating: "a", count: 4095) + "界") == String(repeating: "a", count: 4095))

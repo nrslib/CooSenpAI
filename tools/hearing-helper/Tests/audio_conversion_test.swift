@@ -202,7 +202,7 @@ func testAudioBufferIsMonoFloat32BeforeAppend() throws {
         sources: [.microphone],
         debugInputWavPath: nil,
         debugDumpAppendedPath: nil,
-        debugRequestAuth: false
+        debugRequestAuth: false, speakerBackend: .screenCaptureKit
     )
     let input = makeMonoInt16Buffer()
     session.processReceivedAudioBuffer(

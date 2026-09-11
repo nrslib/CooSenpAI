@@ -122,8 +122,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var debugDumpOnlyRequest: SFSpeechAudioBufferRecognitionRequest?
     private var debugDumpOnlyGeneration: Int?
     private let speakerDeviceFactory: (() throws -> SpeakerAudioCapture)?
+    private let speakerBackend: SpeakerBackend
     private var speakerAudioTap: SpeakerAudioTap?
-    private var speakerStream: SCStream?
+    private var speakerScreenCapture: SpeakerScreenCapture?
     private var microphoneStarted = false
     private var speakerStarted = false
     private var microphoneAuthorization: AVAuthorizationStatus?
@@ -158,9 +159,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         debugInputWavPath: String?,
         debugDumpAppendedPath: String?,
         debugRequestAuth: Bool,
+        speakerBackend: SpeakerBackend,
         speakerDeviceFactory: (() throws -> SpeakerAudioCapture)? = nil
     ) {
         self.speakerDeviceFactory = speakerDeviceFactory
+        self.speakerBackend = speakerBackend
         self.locale = locale
         self.inputDevice = inputDevice
         self.sources = sources
@@ -621,67 +624,31 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         _ recognition: SFSpeechRecognizerAuthorizationStatus
     ) {
         guard !isTerminal(), isSourceActive(.speaker) else { return }
-        if #available(macOS 14.2, *) {
-            startSpeakerAudioTap(microphone, recognition)
+        emitStderr("speaker-capture backend=\(speakerBackend.rawValue) event=start")
+        if speakerBackend == .processTap {
+            if #available(macOS 14.2, *) {
+                startSpeakerAudioTap(microphone, recognition)
+            } else {
+                disableSource(.speaker, kind: "arguments", message: "process-tap には macOS 14.2 以降が必要です")
+            }
             return
         }
         emitStartupStage(for: .speaker, stage: "task", phase: "scheduled")
-        Task { [weak self] in
+        let device = ScreenCaptureSpeakerDevice(output: self, stage: { [weak self] stage, phase in
+            self?.emitStartupStage(for: .speaker, stage: stage, phase: phase)
+        }, diagnostic: emitStderr)
+        let capture = SpeakerScreenCapture(device: device, diagnostic: emitStderr)
+        speakerScreenCapture = capture
+        capture.start(onReady: { [weak self] in
+            guard let self, !self.isTerminal(), self.isSourceActive(.speaker) else { return }
+            self.emitStartupStage(for: .speaker, stage: "ready-dispatch", phase: "received")
+            self.speakerStarted = true
+            self.emitReadyIfPossible(microphone, recognition)
+        }, onFailure: { [weak self] error in
             guard let self else { return }
-            guard self.isSourceActive(.speaker) else { return }
-            do {
-                self.emitStartupStage(for: .speaker, stage: "shareable-content", phase: "begin")
-                let content = try await SCShareableContent.excludingDesktopWindows(
-                    false,
-                    onScreenWindowsOnly: true
-                )
-                self.emitStartupStage(for: .speaker, stage: "shareable-content", phase: "end")
-                guard let display = content.displays.first else {
-                    throw HearingError.noDisplay
-                }
-                self.emitStartupStage(for: .speaker, stage: "stream-create", phase: "begin")
-                let filter = SCContentFilter(display: display, excludingWindows: [])
-                let configuration = SCStreamConfiguration()
-                configuration.capturesAudio = true
-                configuration.excludesCurrentProcessAudio = true
-                configuration.sampleRate = 48_000
-                configuration.channelCount = 2
-                emitStderr(
-                    "audio-format speaker capture=sampleRate=\(configuration.sampleRate) channels=\(configuration.channelCount) commonFormat=unknown-until-first-sample converted-append=mono-float32"
-                )
-                let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
-                self.emitStartupStage(for: .speaker, stage: "stream-create", phase: "end")
-                self.emitStartupStage(for: .speaker, stage: "add-output", phase: "begin")
-                try stream.addStreamOutput(
-                    self,
-                    type: .audio,
-                    sampleHandlerQueue: DispatchQueue(label: "dev.nrslib.coosenpai.hearing.audio")
-                )
-                self.emitStartupStage(for: .speaker, stage: "add-output", phase: "end")
-                self.emitStartupStage(for: .speaker, stage: "start-capture", phase: "begin")
-                try await stream.startCapture()
-                self.emitStartupStage(for: .speaker, stage: "start-capture", phase: "end")
-                DispatchQueue.main.async {
-                    self.emitStartupStage(for: .speaker, stage: "ready-dispatch", phase: "received")
-                    guard !self.isTerminal(), self.isSourceActive(.speaker) else {
-                        Task { try? await stream.stopCapture() }
-                        return
-                    }
-                    self.speakerStream = stream
-                    self.speakerStarted = true
-                    self.emitReadyIfPossible(microphone, recognition)
-                }
-            } catch {
-                let details = errorDetails(error)
-                DispatchQueue.main.async {
-                    self.disableSource(
-                        .speaker,
-                        kind: "screen-capture",
-                        message: "スピーカーの音声入力を開始できませんでした: \(details)"
-                    )
-                }
-            }
-        }
+            self.disableSource(.speaker, kind: "screen-capture",
+                message: "スピーカーの音声入力を開始できませんでした: \(self.errorDetails(error))")
+        })
     }
 
     @available(macOS 14.2, *)
@@ -1034,8 +1001,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             emitStderr(
                 "recognition-final-received source=\(source.rawValue) generation=\(generation) chars=\(text.count)"
             )
-            if !text.isEmpty {
-                emit(["event": "final", "source": source.rawValue, "text": text,
+            let boundedText = boundedFinalTranscript(text)
+            if !boundedText.isEmpty {
+                emit(["event": "final", "source": source.rawValue, "text": boundedText,
                       "generation": generation, "sequence": transcriptSequence])
             } else {
                 emit(["event": "no-speech", "source": source.rawValue,
@@ -1287,9 +1255,8 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 speakerAudioTap?.stop {}
                 speakerAudioTap = nil
             }
-            if let stream = speakerStream {
-                speakerStream = nil
-                Task { try? await stream.stopCapture() }
+            if !noActiveSources {
+                speakerScreenCapture?.stop {}
             }
             speakerStarted = false
         }
@@ -1385,12 +1352,12 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         stopMicrophoneInput()
         let speakerCapture = speakerAudioTap
         speakerAudioTap = nil
-        if let stream = speakerStream {
-            Task { try? await stream.stopCapture() }
-        }
+        let screenCapture = speakerScreenCapture
         appendedAudioDump?.close()
         if let speakerCapture {
             speakerCapture.stop { self.emitClosedAndExit() }
+        } else if let screenCapture {
+            screenCapture.stop { self.emitClosedAndExit() }
         } else {
             emitClosedAndExit()
         }
@@ -1735,10 +1702,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         discardPendingAudio: Bool
     ) {
         let now = monotonicNanoseconds()
-        voiceActivity[source]?.finishSegment(
-            at: now,
-            rearmImmediately: rearmImmediately || discardPendingAudio
-        )
+        if var detector = voiceActivity[source] {
+            detector.finishSegment(at: detector.audioTimeNanoseconds,
+                rearmImmediately: rearmImmediately || discardPendingAudio)
+            voiceActivity[source] = detector
+        }
         _ = recognitionStates.takePreRoll(for: source)
         if discardPendingAudio {
             pendingDrainWorkItems[source]?.cancel()
@@ -1884,7 +1852,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         if !hasRecognition && hasPendingAudio {
             switch detector.phase {
             case .finishing, .pending:
-                detector.finishSegment(at: monotonicNanoseconds())
+                detector.finishSegment(at: detector.audioTimeNanoseconds)
             case .waiting, .speaking, .rearming:
                 break
             }
@@ -1897,7 +1865,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         let forcedFinish = detector.forceFinish()
         if forcedFinish, !hasRecognition {
-            detector.finishSegment(at: monotonicNanoseconds())
+            detector.finishSegment(at: detector.audioTimeNanoseconds)
         }
         voiceActivity[.microphone] = detector
         recordVoiceActivity(for: .microphone, levels: detector.levels)
@@ -2289,7 +2257,6 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let action = observeVoiceActivity(
             rms: rms,
             durationNanoseconds: durationNanoseconds,
-            at: timestamp,
             for: source
         )
         switch action {
@@ -2622,18 +2589,13 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private func observeVoiceActivity(
         rms: Double,
         durationNanoseconds: UInt64,
-        at timestamp: UInt64,
         for source: AudioSource
     ) -> VoiceActivityAction {
         var detector = voiceActivity[
             source,
             default: VoiceActivityDetector(configuration: .standard)
         ]
-        let action = detector.observe(
-            rms: rms,
-            durationNanoseconds: durationNanoseconds,
-            at: timestamp
-        )
+        let action = detector.observeSamples(rms: rms, durationNanoseconds: durationNanoseconds)
         voiceActivity[source] = detector
         recordVoiceActivity(for: source, levels: detector.levels)
         return action
@@ -2778,12 +2740,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 }
 
 private enum HearingError: LocalizedError {
-    case noDisplay
     case audioTap
 
     var errorDescription: String? {
         switch self {
-        case .noDisplay: return "音声を取得できるディスプレイが見つかりません"
         case .audioTap: return "マイクの音声タップを設置できません"
         }
     }
@@ -2796,6 +2756,7 @@ struct Arguments {
     let debugInputWavPath: String?
     let debugDumpAppendedPath: String?
     let debugRequestAuth: Bool
+    let speakerBackend: SpeakerBackend
 }
 
 func parseArguments() -> Arguments {
@@ -2810,9 +2771,17 @@ func parseArguments() -> Arguments {
     var debugInputWavPath: String?
     var debugDumpAppendedPath: String?
     var debugRequestAuth = false
+    var backendSelection: String?
     var index = 6
     while index < arguments.count {
         switch arguments[index] {
+        case "--speaker-backend":
+            guard backendSelection == nil, index + 1 < arguments.count else {
+                emit(["event": "error", "kind": "arguments", "message": "--speaker-backend は値を付けて一度だけ指定してください"])
+                exit(2)
+            }
+            backendSelection = arguments[index + 1]
+            index += 2
         case "--debug-input-wav":
             guard debugInputWavPath == nil,
                   index + 1 < arguments.count,
@@ -2856,13 +2825,25 @@ func parseArguments() -> Arguments {
         exit(2)
     }
     let locale = arguments[1] == "system" ? Locale.current : Locale(identifier: arguments[1])
+    let speakerBackend: SpeakerBackend
+    do {
+        speakerBackend = try SpeakerBackend.select(backendSelection ?? "auto")
+    } catch {
+        emit(["event": "error", "kind": "arguments", "message": error.localizedDescription])
+        exit(2)
+    }
+    guard backendSelection == nil || sources.contains(.speaker) else {
+        emit(["event": "error", "kind": "arguments", "message": "--speaker-backend は speaker source と一緒に指定してください"])
+        exit(2)
+    }
     return Arguments(
         locale: locale,
         inputDevice: arguments[3],
         sources: sources,
         debugInputWavPath: debugInputWavPath,
         debugDumpAppendedPath: debugDumpAppendedPath,
-        debugRequestAuth: debugRequestAuth
+        debugRequestAuth: debugRequestAuth,
+        speakerBackend: speakerBackend
     )
 }
 

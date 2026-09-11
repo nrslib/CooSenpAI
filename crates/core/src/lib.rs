@@ -13,6 +13,7 @@ pub mod debug;
 pub mod emotion;
 pub mod frame_buffer;
 pub mod hearing_context;
+pub mod hearing_ingestion;
 pub mod image_processing;
 pub mod interactive_process;
 pub mod locale;

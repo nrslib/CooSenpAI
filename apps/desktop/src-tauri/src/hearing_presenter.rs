@@ -31,6 +31,12 @@ pub(crate) enum HearingResult {
     Observed {
         generation: u64,
         observation: AudioObservation,
+        transcript_path: Option<String>,
+    },
+    Analyzed {
+        generation: u64,
+        observation: coosenpai_core::state::ObservationRecord,
+        calls: u32,
     },
     Stopping(u64),
     Stopped(u64),
@@ -68,7 +74,6 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             recognition,
         } if snapshot.config.audio.enabled && view.generation == generation => {
             view.recognition_permission = crate::speech::permission_name(recognition);
-            snapshot.speech.recognition_permission = crate::speech::permission_name(recognition);
         }
         HearingResult::Ready {
             generation,
@@ -108,22 +113,33 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
                 id: uuid::Uuid::new_v4().to_string(),
                 created_at,
                 source,
+                transcript_path: None,
                 stage,
             });
         }
         HearingResult::Observed {
             generation,
             observation,
+            transcript_path,
         } if view.generation == generation => {
             view.latest_observation = Some(AudioObservationView::from_observation(&observation));
             view.push_event(AudioLogEvent {
                 id: observation.id,
                 created_at: observation.created_at,
                 source: observation.source,
+                transcript_path,
                 stage: AudioLogStage::Confirmed {
                     text: observation.text,
                 },
             });
+        }
+        HearingResult::Analyzed {
+            generation,
+            observation,
+            calls,
+        } if view.generation == generation && view.phase == "listening" => {
+            snapshot.observer.record_observation(observation);
+            snapshot.observer.ai_calls_today = calls;
         }
         HearingResult::Stopping(generation) if view.generation == generation => {
             view.phase = "stopping".to_owned()
@@ -151,11 +167,9 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             match kind.as_str() {
                 "permission-microphone" => view.microphone_permission = "denied".to_owned(),
                 "permission-speech" => {
-                    let permission = crate::speech::permission_name(
+                    view.recognition_permission = crate::speech::permission_name(
                         recognition.unwrap_or(SpeechPermissionKind::Denied),
                     );
-                    view.recognition_permission = permission.clone();
-                    snapshot.speech.recognition_permission = permission;
                 }
                 _ => {}
             }
@@ -165,3 +179,4 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
     }
     true
 }
+

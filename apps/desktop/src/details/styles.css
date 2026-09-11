@@ -38,15 +38,19 @@
 .dataflow-empty { margin: 0; padding: 14px; color: var(--muted); font-size: 12px; text-align: center; }
 .dataflow-row { padding: 4px 8px; border-bottom: 1px solid var(--line); border-left: 3px solid transparent; font-size: 12px; }
 div.dataflow-row { display: flex; gap: 8px; align-items: baseline; }
-.dataflow-row-visual { border-left-color: var(--accent); }
+.dataflow-row-vision { border-left-color: var(--accent); }
 .dataflow-row-hearing { border-left-color: var(--warning); }
-.dataflow-row-companion { border-left-color: var(--error); }
+.dataflow-row-coo { border-left-color: var(--error); }
 .dataflow-row > summary { display: flex; gap: 8px; align-items: baseline; cursor: pointer; list-style: none; }
 .dataflow-row > summary::-webkit-details-marker { display: none; }
 .dataflow-row time { flex: 0 0 auto; color: var(--faint); font-variant-numeric: tabular-nums; }
 .dataflow-kind { flex: 0 0 auto; padding: 0 6px; border-radius: var(--radius-control); font-size: 11px; }
-.dataflow-kind-visual { color: var(--accent); background: var(--accent-soft); }
+.dataflow-kind-vision { color: var(--accent); background: var(--accent-soft); }
 .dataflow-kind-hearing { color: var(--warning); background: var(--warning-bg); }
-.dataflow-kind-companion { color: var(--error); background: var(--error-bg); }
+.dataflow-kind-coo { color: var(--error); background: var(--error-bg); }
+.dataflow-marker { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
 .dataflow-summary { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.dataflow-references { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; }
+.dataflow-reference { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 5px; background: var(--surface-raised); border-radius: var(--radius-control); overflow-wrap: anywhere; }
+.dataflow-reference button { flex: 0 0 auto; padding: 1px 4px; color: var(--accent); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-control); font-size: 10px; }
 .dataflow-detail { margin: 6px 0 2px; max-height: 240px; overflow: auto; padding: 8px; background: var(--surface-raised); border-radius: var(--radius-control); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }

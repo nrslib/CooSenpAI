@@ -38,6 +38,9 @@ pub fn read_recent_observations(
             let Ok(observation) = parse_observation(value, DEFAULT_OBSERVATION_LIMITS) else {
                 continue;
             };
+            if matches!(observation, ObservationRecord::Audio(_)) {
+                continue;
+            }
             let Ok(created_at) = DateTime::parse_from_rfc3339(observation.created_at()) else {
                 continue;
             };
@@ -63,6 +66,9 @@ pub fn merge_recent_observations(
 ) -> Vec<ObservationRecord> {
     let mut by_id = HashMap::<String, (DateTime<Utc>, ObservationRecord)>::new();
     for observation in stored.into_iter().chain(supplied) {
+        if matches!(observation, ObservationRecord::Audio(_)) {
+            continue;
+        }
         let Ok(created_at) = DateTime::parse_from_rfc3339(observation.created_at()) else {
             continue;
         };

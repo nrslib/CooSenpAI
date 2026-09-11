@@ -4,6 +4,7 @@ use crate::hearing_lifecycle::{
 use crate::hearing_presenter::HearingResult;
 use crate::state::DesktopState;
 use coosenpai_core::config::ConfigPaths;
+use coosenpai_core::hearing_ingestion::{HearingAudioIngestion, HearingAudioRecord};
 use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::ports::{
     HearingEvent, HearingPort, HelperResolverPort, RuntimeLogger, SpeechPermissionKind,
@@ -69,6 +70,14 @@ async fn next_hearing_context_event(
                         ));
                         continue;
                     }
+                    Err(coosenpai_core::runtime::RuntimeError::Companion(
+                        coosenpai_core::companion::CompanionError::AudioPendingOverflow,
+                    )) => {
+                        return Some(Ok(HearingEvent::Warning {
+                            kind: "audio-pending-overflow".to_owned(),
+                            message: "保存待ちの音声が上限に達したため、新しい確定発話を受け付けられません".to_owned(),
+                        }));
+                    }
                     Err(error) => {
                         return Some(Err(coosenpai_core::ports::PortError::Unavailable(format!(
                             "音声文脈を保存できませんでした: {error}"
@@ -83,11 +92,8 @@ async fn next_hearing_context_event(
 }
 
 struct AudioIngestionHandle {
-    sender: mpsc::Sender<(
-        AudioObservationSource,
-        String,
-        chrono::DateTime<chrono::Utc>,
-    )>,
+    session_id: String,
+    sender: mpsc::Sender<AudioObservation>,
     done: oneshot::Receiver<()>,
     terminal_barrier: Option<AudioTerminalBarrier>,
 }
@@ -134,7 +140,7 @@ impl HearingController {
             hearing_port: Mutex::new(
                 helper.map(|helper| crate::platform::hearing_port(helper, logger.clone())),
             ),
-            permission_port: Mutex::new(Arc::new(crate::platform::MacSpeechPermissions)),
+            permission_port: Mutex::new(Arc::new(crate::platform::MacHearingPermissions)),
             ingestion_barrier: Mutex::new(None),
             terminal_barrier: Mutex::new(None),
             lifecycle: Mutex::new(HearingLifecycle::default()),
@@ -390,6 +396,15 @@ impl HearingController {
                     "WARN",
                     &format!("聴覚観察 source-local error: source=speaker {message}"),
                 );
+                state
+                    .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
+                        HearingResult::Warning {
+                            generation,
+                            kind: "screen-capture".to_owned(),
+                            message: message.to_owned(),
+                        },
+                    ))
+                    .await;
             }
         }
         if cancellation.is_cancelled() {
@@ -453,7 +468,28 @@ impl HearingController {
         };
         match attach_outcome {
             AttachOutcome::Listening => {
-                publish_audio_listening(&state, generation).await;
+                let (context_session, audio_ingestion) = match state
+                    .core_runtime()
+                    .begin_hearing_context(generation, cancellation.clone())
+                    .and_then(|session_id| {
+                        state
+                            .core_runtime()
+                            .hearing_audio_ingestion(session_id.clone())
+                            .map(|ingestion| (session_id, ingestion))
+                    }) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        self.handle_session_failure(
+                            &state,
+                            generation,
+                            "audio-context",
+                            &error.to_string(),
+                            settings,
+                        )
+                        .await;
+                        return;
+                    }
+                };
                 let (ingestion_tx, ingestion_rx) = mpsc::channel(AUDIO_INGESTION_QUEUE_CAPACITY);
                 let (result_tx, result_rx) = mpsc::channel(AUDIO_INGESTION_QUEUE_CAPACITY);
                 let (ingestion_done_tx, ingestion_done_rx) = oneshot::channel();
@@ -461,10 +497,12 @@ impl HearingController {
                 let terminal_barrier = self.terminal_barrier.lock().await.take();
                 let ingestion_state = state.clone();
                 let ingestion_cancellation = cancellation.clone();
+                let ingestion_scope = audio_ingestion.clone();
                 tauri::async_runtime::spawn(async move {
                     run_audio_ingestion(
                         ingestion_state.paths.clone(),
                         ingestion_state.runtime_config().retention.observation_days,
+                        ingestion_scope,
                         ingestion_cancellation,
                         ingestion_rx,
                         result_tx,
@@ -472,17 +510,25 @@ impl HearingController {
                     )
                     .await;
                 });
-                let (delivery_tx, delivery_rx) = mpsc::channel(AUDIO_INGESTION_QUEUE_CAPACITY);
                 let delivery_state = state.clone();
                 let delivery_cancellation = cancellation.clone();
+                let observation_interval = std::time::Duration::from_millis(
+                    state.runtime_config().observer.hearing.interval_ms.max(1),
+                );
                 tauri::async_runtime::spawn(async move {
-                    run_delivery_worker(delivery_state, delivery_cancellation, delivery_rx).await;
+                    run_observation_worker(
+                        delivery_state,
+                        generation,
+                        delivery_cancellation,
+                        observation_interval,
+                        audio_ingestion,
+                    )
+                    .await;
                 });
                 let result_controller = self.clone();
                 let restart_settings = settings.clone();
                 let result_state = state.clone();
                 let result_cancellation = cancellation.clone();
-                let result_delivery = delivery_tx.clone();
                 tauri::async_runtime::spawn(async move {
                     run_audio_result_worker(
                         result_controller,
@@ -490,7 +536,6 @@ impl HearingController {
                         generation,
                         result_cancellation,
                         result_rx,
-                        result_delivery,
                         ingestion_done_tx,
                     )
                     .await;
@@ -505,6 +550,7 @@ impl HearingController {
                             session,
                             restart_settings,
                             AudioIngestionHandle {
+                                session_id: context_session,
                                 sender: ingestion_tx,
                                 done: ingestion_done_rx,
                                 terminal_barrier,
@@ -531,6 +577,7 @@ impl HearingController {
         ingestion: AudioIngestionHandle,
     ) {
         let AudioIngestionHandle {
+            session_id: context_session,
             sender: ingestion_sender,
             done: ingestion_completion,
             terminal_barrier,
@@ -538,24 +585,7 @@ impl HearingController {
         let mut ingestion_tx = Some(ingestion_sender);
         let mut ingestion_done = Some(ingestion_completion);
         let mut terminal_barrier = terminal_barrier;
-        let context_session = match state
-            .core_runtime()
-            .begin_hearing_context(generation, cancellation.clone())
-        {
-            Ok(session_id) => session_id,
-            Err(error) => {
-                finish_audio_ingestion(&mut ingestion_tx, &mut ingestion_done).await;
-                self.handle_session_failure(
-                    &state,
-                    generation,
-                    "audio-context",
-                    &error.to_string(),
-                    settings,
-                )
-                .await;
-                return;
-            }
-        };
+        publish_audio_listening(&state, generation).await;
         while let Some(event) = next_hearing_context_event(
             &mut session,
             &context_session,
@@ -606,7 +636,12 @@ impl HearingController {
                     )
                     .await;
                 }
-                Ok(HearingEvent::Final { source, text, .. }) => {
+                Ok(HearingEvent::Final {
+                    source,
+                    text,
+                    generation: recognition_generation,
+                    sequence,
+                }) => {
                     if !self.accepts_events(generation).await || cancellation.is_cancelled() {
                         let _ = state.logger.write(
                             "INFO",
@@ -619,7 +654,15 @@ impl HearingController {
                     let Some(ingestion_sender) = ingestion_tx.as_ref() else {
                         return;
                     };
-                    if !queue_audio_final(ingestion_sender, source, text, &cancellation).await {
+                    let context = coosenpai_core::hearing_context::HearingContext {
+                        session_id: context_session.clone(),
+                        source,
+                        generation: recognition_generation,
+                        sequence,
+                        text,
+                        confirmed: true,
+                    };
+                    if !queue_audio_final(ingestion_sender, &context, &cancellation).await {
                         if !cancellation.is_cancelled() {
                             let _ = state.logger.write(
                                 "WARN",
@@ -766,20 +809,21 @@ impl HearingController {
         &self,
         state: &Arc<DesktopState>,
         generation: u64,
-        result: Result<
-            coosenpai_core::state::ObservationRecord,
-            coosenpai_core::runtime::RuntimeError,
-        >,
+        result: Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>,
         cancellation: &CancellationToken,
-        delivery_tx: &mpsc::Sender<AudioObservation>,
     ) {
-        if let Ok(coosenpai_core::state::ObservationRecord::Audio(observation)) = &result {
+        if let Ok(HearingAudioRecord {
+            observation,
+            transcript_path,
+        }) = &result
+        {
             if self.accepts_events(generation).await && !cancellation.is_cancelled() {
                 state
                     .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
                         HearingResult::Observed {
                             generation,
                             observation: observation.clone(),
+                            transcript_path: transcript_path.clone(),
                         },
                     ))
                     .await;
@@ -795,22 +839,6 @@ impl HearingController {
             )
             .await;
             return;
-        }
-        if cancellation.is_cancelled() || !self.accepts_events(generation).await {
-            return;
-        }
-        let Ok(ObservationRecord::Audio(observation)) = result else {
-            return;
-        };
-        let delivered = tokio::select! {
-            result = delivery_tx.send(observation) => result.is_ok(),
-            _ = cancellation.cancelled() => return,
-        };
-        if !delivered {
-            let _ = state.logger.write(
-                "WARN",
-                "確定した音声観察の配達 worker が停止しています: error-type=audio-delivery",
-            );
         }
     }
 
@@ -936,19 +964,14 @@ impl HearingController {
 async fn run_audio_ingestion(
     paths: ConfigPaths,
     retention_days: u64,
+    ingestion: HearingAudioIngestion,
     cancellation: CancellationToken,
-    mut requests: mpsc::Receiver<(
-        AudioObservationSource,
-        String,
-        chrono::DateTime<chrono::Utc>,
-    )>,
-    results: mpsc::Sender<
-        Result<coosenpai_core::state::ObservationRecord, coosenpai_core::runtime::RuntimeError>,
-    >,
+    mut requests: mpsc::Receiver<AudioObservation>,
+    results: mpsc::Sender<Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>>,
     barrier: Option<AudioIngestionBarrier>,
 ) {
     let mut barrier = barrier;
-    while let Some((source, text, confirmed_at)) = requests.recv().await {
+    while let Some(observation) = requests.recv().await {
         if cancellation.is_cancelled() {
             return;
         }
@@ -958,20 +981,15 @@ async fn run_audio_ingestion(
         }
         let paths = paths.clone();
         let recording_cancellation = cancellation.clone();
+        let ingestion = ingestion.clone();
         let result = tokio::task::spawn_blocking(move || {
             if recording_cancellation.is_cancelled() {
                 return Err(coosenpai_core::runtime::RuntimeError::Closed);
             }
-            let observation = AudioObservation::from_confirmed_text(source, &text, confirmed_at)
-                .map_err(|_| coosenpai_core::observer::ObserverError::Output)?;
-            coosenpai_core::observer::record_audio_observation(
-                &paths,
-                retention_days,
-                &observation,
-                chrono::Utc::now(),
-            )
-            .map_err(coosenpai_core::observer::ObserverError::from)?;
-            Ok(ObservationRecord::Audio(observation))
+            ingestion
+                .record(&paths, retention_days, observation)
+                .map_err(coosenpai_core::observer::ObserverError::from)
+                .map_err(coosenpai_core::runtime::RuntimeError::from)
         })
         .await
         .unwrap_or_else(|error| {
@@ -982,6 +1000,11 @@ async fn run_audio_ingestion(
             )
             .into())
         });
+        let result = match result {
+            Ok(Some(record)) => Ok(record),
+            Ok(None) => continue,
+            Err(error) => Err(error),
+        };
         tokio::select! {
             result = results.send(result) => {
                 if result.is_err() {
@@ -994,18 +1017,15 @@ async fn run_audio_ingestion(
 }
 
 async fn queue_audio_final(
-    ingestion_tx: &mpsc::Sender<(
-        AudioObservationSource,
-        String,
-        chrono::DateTime<chrono::Utc>,
-    )>,
-    source: AudioObservationSource,
-    text: String,
+    ingestion_tx: &mpsc::Sender<AudioObservation>,
+    context: &coosenpai_core::hearing_context::HearingContext,
     cancellation: &CancellationToken,
 ) -> bool {
-    let confirmed_at = chrono::Utc::now();
+    let Ok(observation) = context.confirmed_audio(chrono::Utc::now()) else {
+        return false;
+    };
     tokio::select! {
-        result = ingestion_tx.send((source, text, confirmed_at)) => result.is_ok(),
+        result = ingestion_tx.send(observation) => result.is_ok(),
         _ = cancellation.cancelled() => false,
     }
 }
@@ -1015,28 +1035,19 @@ async fn run_audio_result_worker(
     state: Arc<DesktopState>,
     generation: u64,
     cancellation: CancellationToken,
-    mut results: mpsc::Receiver<
-        Result<coosenpai_core::state::ObservationRecord, coosenpai_core::runtime::RuntimeError>,
-    >,
-    delivery_tx: mpsc::Sender<AudioObservation>,
+    mut results: mpsc::Receiver<Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>>,
     ingestion_done: oneshot::Sender<()>,
 ) {
     while let Some(result) = results.recv().await {
         controller
-            .handle_audio_result(&state, generation, result, &cancellation, &delivery_tx)
+            .handle_audio_result(&state, generation, result, &cancellation)
             .await;
     }
     let _ = ingestion_done.send(());
 }
 
 async fn finish_audio_ingestion(
-    ingestion_tx: &mut Option<
-        mpsc::Sender<(
-            AudioObservationSource,
-            String,
-            chrono::DateTime<chrono::Utc>,
-        )>,
-    >,
+    ingestion_tx: &mut Option<mpsc::Sender<AudioObservation>>,
     ingestion_done: &mut Option<oneshot::Receiver<()>>,
 ) {
     ingestion_tx.take();
@@ -1045,39 +1056,98 @@ async fn finish_audio_ingestion(
     }
 }
 
-async fn run_delivery_worker(
+async fn run_observation_worker(
     state: Arc<DesktopState>,
+    generation: u64,
     cancellation: CancellationToken,
-    mut requests: mpsc::Receiver<AudioObservation>,
+    observation_interval: std::time::Duration,
+    ingestion: HearingAudioIngestion,
 ) {
-    while let Some(observation) = requests.recv().await {
-        if cancellation.is_cancelled() {
-            return;
+    let mut ticks = tokio::time::interval_at(
+        tokio::time::Instant::now() + observation_interval,
+        observation_interval,
+    );
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return,
+            _ = ticks.tick() => {}
         }
-        if state
-            .core_runtime()
-            .audio_observation(observation, cancellation.child_token())
-            .await
-            .is_err()
+        match observe_pending_audio(
+            state.core_runtime(),
+            &state.paths,
+            state.runtime_config().retention.observation_days,
+            &ingestion,
+            &cancellation,
+        )
+        .await
         {
-            let _ = state.logger.write(
-                "WARN",
-                "保存済みの音声観察を AI へ渡せませんでした: error-type=audio-delivery",
-            );
-            continue;
+            Ok(Some(observation)) if !cancellation.is_cancelled() => {
+                match coosenpai_core::usage::today_observer_usage(&state.paths.usage) {
+                    Ok(usage) => {
+                        state
+                            .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
+                                HearingResult::Analyzed {
+                                    generation,
+                                    observation,
+                                    calls: usage.ai_calls,
+                                },
+                            ))
+                            .await;
+                    }
+                    Err(_) => {
+                        let _ = state.logger.write(
+                            "WARN",
+                            "音声観察の使用量を読み込めませんでした: error-type=audio-usage",
+                        );
+                    }
+                }
+            }
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                if cancellation.is_cancelled() {
+                    return;
+                }
+                let _ = state.logger.write("WARN", &format!("音声の観察を次の周期へ延期しました: error-type=audio-observation error={error}"));
+            }
         }
-        if state
+        if let Err(error) = state
             .core_runtime()
             .process_mailbox(cancellation.child_token())
             .await
-            .is_err()
         {
             let _ = state.logger.write(
                 "WARN",
-                "確定した音声観察の配達を次回へ延期しました: error-type=audio-delivery",
+                &format!(
+                    "音声観察の配達を次回へ延期しました: error-type=audio-delivery error={error}"
+                ),
             );
         }
     }
+}
+
+async fn observe_pending_audio(
+    runtime: &dyn crate::core_runtime_port::CoreRuntimePort,
+    paths: &ConfigPaths,
+    retention_days: u64,
+    ingestion: &HearingAudioIngestion,
+    cancellation: &CancellationToken,
+) -> Result<Option<ObservationRecord>, coosenpai_core::runtime::RuntimeError> {
+    let paths = paths.clone();
+    let scope = ingestion.clone();
+    let audio = tokio::task::spawn_blocking(move || scope.pending_audio(&paths, retention_days))
+        .await
+        .map_err(|error| coosenpai_core::runtime::RuntimeError::Factory(error.to_string()))?
+        .map_err(coosenpai_core::observer::ObserverError::from)?;
+    if audio.is_empty() {
+        return Ok(None);
+    }
+    runtime
+        .audio_observation(audio, cancellation.child_token())
+        .await
+        .map(Some)
 }
 
 fn retryable_audio_error(kind: &str) -> bool {

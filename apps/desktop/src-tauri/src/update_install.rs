@@ -87,11 +87,13 @@ impl InstallLocation {
     pub(crate) fn apply(
         &self,
         staged: &StagedBundle,
-        minimum: SystemVersion,
+        minimum: Option<SystemVersion>,
         system: SystemVersion,
     ) -> Result<(), UpdateError> {
-        staged.validate_minimum_system_version(minimum, self.locale)?;
-        minimum.ensure_supported(system)?;
+        if let Some(minimum) = minimum {
+            staged.validate_minimum_system_version(minimum, self.locale)?;
+        }
+        staged.ensure_system_supported(system)?;
         self.swap(staged).map_err(|error| {
             UpdateError::Failed(
                 text(TextKey::UpdatePreviousPreserved, self.locale)

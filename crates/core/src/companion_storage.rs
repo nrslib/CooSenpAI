@@ -2,7 +2,7 @@ pub use crate::companion_cursor::{
     ActiveTurnCommit, CursorSnapshot, ObservationAttempt, ObservationConsumption,
     PendingAttachmentFailure, PendingDelivery, PendingInput, PendingObservation,
     PendingUserMessage, PreparedUserResponse, TurnCommitKind, TurnCommitPhase,
-    TurnCommitRecoveryAttempt, UserDispatchLease,
+    TurnCommitRecoveryAttempt, UserDispatchLease, MAX_USER_RESPONSE_ATTEMPTS,
 };
 use crate::config::ConfigPaths;
 use crate::frame_buffer::FrameBuffer;
@@ -33,6 +33,8 @@ mod quarantine;
 use quarantine::delivery_quarantine_record;
 #[path = "companion_storage_attachments.rs"]
 mod attachments;
+#[path = "companion_storage_audio.rs"]
+mod audio_migration;
 #[path = "companion_storage_usage.rs"]
 mod usage_recovery;
 
@@ -176,6 +178,20 @@ impl CompanionStorage {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<ObservationRecord>, PersistenceError> {
         crate::recent_observations::read_recent_observations(&self.observation_directory, now)
+    }
+
+    pub(crate) fn consume_audio_ids(&self, ids: &[String]) -> Result<(), PersistenceError> {
+        crate::observer::mark_audio_consumed(
+            &ConfigPaths::from_root(
+                self.state_directory
+                    .parent()
+                    .ok_or_else(|| {
+                        PersistenceError::Invalid("state directory が不正です".to_owned())
+                    })?
+                    .to_path_buf(),
+            ),
+            ids,
+        )
     }
 
     pub(crate) fn observation_frame_paths(
@@ -568,7 +584,7 @@ impl CompanionStorage {
                 .filter_map(|pending| match pending {
                     PendingInput::UserMessage(input)
                         if input.conversation_generation == conversation_generation
-                            && !input.attachment_is_terminal() =>
+                            && !input.is_terminal() =>
                     {
                         Some(input.clone())
                     }
@@ -1018,7 +1034,7 @@ fn lease_inputs(
                 "user dispatch lease の会話世代が一致しません".to_owned(),
             ));
         }
-        if input.attachment_is_terminal() {
+        if input.is_terminal() {
             return Err(PersistenceError::Invalid(
                 "terminal input が dispatch lease にあります".to_owned(),
             ));
@@ -1036,8 +1052,7 @@ fn runnable_inputs_for_generation(
         .iter()
         .filter(|input| match input {
             PendingInput::UserMessage(input) => {
-                input.conversation_generation == conversation_generation
-                    && !input.attachment_is_terminal()
+                input.conversation_generation == conversation_generation && !input.is_terminal()
             }
         })
         .collect()
@@ -1241,7 +1256,14 @@ fn read_cursor_locked(
         }
         Err(error) => return Err(error.into()),
     };
-    let raw: RawCursorDocument = serde_json::from_slice(&bytes)?;
+    let mut value: Value = serde_json::from_slice(&bytes)?;
+    let mut migrated_audio_context = false;
+    if let Some(inputs) = value.get_mut("pendingInputs").and_then(Value::as_array_mut) {
+        for input in inputs {
+            migrated_audio_context |= audio_migration::migrate_stripped_audio_context(input);
+        }
+    }
+    let raw: RawCursorDocument = serde_json::from_value(value)?;
     let RawCursorDocument {
         emotion_updates_enabled,
         companion_emotions,
@@ -1356,8 +1378,10 @@ fn read_cursor_locked(
     let has_quarantined_observations = !quarantined.is_empty();
     let has_quarantined_deliveries = !quarantined_deliveries.is_empty();
     let has_invalid_active_turn_commit = invalid_active_turn_commit.is_some();
-    let needs_cursor_rewrite =
-        legacy_cursor || migrated_user_sequences || has_invalid_active_turn_commit;
+    let needs_cursor_rewrite = legacy_cursor
+        || migrated_user_sequences
+        || migrated_audio_context
+        || has_invalid_active_turn_commit;
     if has_quarantined_observations || has_quarantined_deliveries || needs_cursor_rewrite {
         for record in quarantined {
             crate::persistence::JsonlStore::new(quarantine_path.to_owned()).append(&serde_json::json!({
@@ -1621,6 +1645,9 @@ pub(crate) fn conversation_entry_with_generation_from_storage_value(
         .and_then(Value::as_u64)
         .unwrap_or(0);
     value.as_object_mut()?.remove("conversationGeneration");
+    if let Some(context) = value.get_mut("screenContext") {
+        audio_migration::migrate_stripped_audio_context(context);
+    }
     let entry = serde_json::from_value::<ConversationEntry>(value).ok()?;
     validate_conversation_entry(&entry).ok()?;
     Some((stored_generation, entry))
@@ -1809,7 +1836,7 @@ fn validate_user_dispatch(
                 "user dispatch lease の会話世代が一致しません".to_owned(),
             ));
         }
-        if input.attachment_is_terminal() || input.user_seq <= last_seq {
+        if input.is_terminal() || input.user_seq <= last_seq {
             return Err(PersistenceError::Invalid(
                 "user dispatch lease の順序が不正です".to_owned(),
             ));
@@ -1821,7 +1848,7 @@ fn validate_user_dispatch(
         .filter_map(|pending| match pending {
             PendingInput::UserMessage(input)
                 if input.conversation_generation == lease.conversation_generation
-                    && !input.attachment_is_terminal() =>
+                    && !input.is_terminal() =>
             {
                 Some(input.id.as_str())
             }

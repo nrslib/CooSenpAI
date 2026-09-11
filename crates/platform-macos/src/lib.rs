@@ -28,6 +28,12 @@ mod hearing;
 mod speech_permissions;
 
 #[cfg(target_os = "macos")]
+mod hearing_permissions;
+
+#[cfg(target_os = "macos")]
+mod audio_permissions;
+
+#[cfg(target_os = "macos")]
 mod speech_devices;
 
 #[cfg(target_os = "macos")]
@@ -91,6 +97,9 @@ pub use hearing::*;
 
 #[cfg(target_os = "macos")]
 pub use speech_permissions::*;
+
+#[cfg(target_os = "macos")]
+pub use hearing_permissions::MacHearingPermissions;
 
 #[cfg(target_os = "macos")]
 pub use speech_devices::*;

@@ -13,6 +13,12 @@ use coosenpai_core::state::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Default)]
+pub struct AudioPermissions {
+    pub speech: coosenpai_core::ports::SpeechPermissions,
+    pub hearing: coosenpai_core::ports::SpeechPermissions,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
@@ -174,6 +180,8 @@ pub struct AudioLogEvent {
     pub id: String,
     pub created_at: String,
     pub source: AudioObservationSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
     #[serde(flatten)]
     pub stage: AudioLogStage,
 }
@@ -266,7 +274,9 @@ impl ObserverView {
 
     pub(crate) fn record_observation(&mut self, observation: ObservationRecord) {
         if let ObservationRecord::Visual(value) = &observation {
-            self.last_visual_observation = Some(value.clone());
+            if value.frame_count > 0 {
+                self.last_visual_observation = Some(value.clone());
+            }
         }
         self.last_observation = Some(observation);
     }
@@ -345,7 +355,7 @@ impl AppSnapshot {
         config: Config,
         conversation: Vec<ConversationEntry>,
         permission: coosenpai_core::ports::ScreenCapturePermission,
-        speech_permissions: coosenpai_core::ports::SpeechPermissions,
+        audio_permissions: AudioPermissions,
         observer_calls: u32,
         companion_calls: u32,
         signed_build: bool,
@@ -390,7 +400,7 @@ impl AppSnapshot {
                 mode: config.notification.mode.clone(),
                 minimum_priority: config.notification.min_priority.clone(),
             },
-            observer_provider_label: provider_label(&config.observer.provider),
+            observer_provider_label: provider_label(&config.observer.vision.provider),
             companion_provider_label: provider_label(&config.companion.provider),
             companion_display_name: config.companion.display_name.clone(),
             temporary_assertiveness: None,
@@ -428,8 +438,10 @@ impl AppSnapshot {
                 generation: 0,
                 phase: "idle".to_owned(),
                 partial: String::new(),
-                microphone_permission: speech_permission_name(speech_permissions.microphone),
-                recognition_permission: speech_permission_name(speech_permissions.recognition),
+                microphone_permission: speech_permission_name(audio_permissions.speech.microphone),
+                recognition_permission: speech_permission_name(
+                    audio_permissions.speech.recognition,
+                ),
                 input_devices: Vec::new(),
                 warning_kind: None,
                 message: None,
@@ -438,8 +450,10 @@ impl AppSnapshot {
             audio: AudioView {
                 generation: 0,
                 phase: "off".to_owned(),
-                microphone_permission: speech_permission_name(speech_permissions.microphone),
-                recognition_permission: speech_permission_name(speech_permissions.recognition),
+                microphone_permission: speech_permission_name(audio_permissions.hearing.microphone),
+                recognition_permission: speech_permission_name(
+                    audio_permissions.hearing.recognition,
+                ),
                 screen_capture_permission:
                     if crate::platform::speaker_requires_screen_recording() {
                         permission_presentation.status
@@ -524,7 +538,7 @@ impl AppSnapshot {
             return false;
         }
         let locale = Locale::from_config(&config.ui.language);
-        self.observer_provider_label = provider_label(&config.observer.provider);
+        self.observer_provider_label = provider_label(&config.observer.vision.provider);
         self.companion_provider_label = provider_label(&config.companion.provider);
         self.companion_display_name = config.companion.display_name.clone();
         self.observer.ocr_gate_enabled = config.watch.ocr_gate.enabled;

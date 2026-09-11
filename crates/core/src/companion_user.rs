@@ -173,14 +173,6 @@ impl CompanionAgent {
             .record_attachment_failure(input_id, reason)
     }
 
-    pub(crate) fn clear_terminal_attachment_failure(
-        &self,
-        input_id: &str,
-    ) -> Result<bool, CompanionError> {
-        self.user_message_preparer()
-            .clear_terminal_attachment_failure(input_id)
-    }
-
     pub(crate) fn first_terminal_attachment_failure(
         &self,
     ) -> Result<Option<(String, crate::companion_storage::PendingAttachmentFailure)>, CompanionError>
@@ -278,13 +270,11 @@ impl CompanionAgent {
             let observations = turn_observations(&inputs);
             let frames = super::user_prompt::turn_pending_frames(&inputs);
             logger.write("INFO", &format!(
-                "利用者応答の文脈を再収集: observation-ids={} frame-ids={} audio-count={} ocr-count={} hearing-count={} hearing-bytes={}",
+                "利用者応答の文脈を再収集: observation-ids={} frame-ids={} audio-count={} ocr-count={}",
                 observations.iter().map(ObservationRecord::id).collect::<Vec<_>>().join(","),
                 frames.iter().map(|frame| frame.id.as_str()).collect::<Vec<_>>().join(","),
                 observations.iter().filter(|observation| observation.is_audio()).count(),
                 frames.iter().filter(|frame| frame.ocr_text.is_some()).count(),
-                inputs.iter().map(|input| input.hearing_context.len()).sum::<usize>(),
-                inputs.iter().flat_map(|input| &input.hearing_context).map(|context| context.text.len()).sum::<usize>(),
             ))?;
         }
         let observations = turn_observations(&inputs);
@@ -393,6 +383,7 @@ impl CompanionAgent {
             outcome.response = completion.response;
         }
         let prepared = PreparedUserResponse {
+            audio_ids: Vec::new(),
             emotion_epoch: emotions.epoch,
             emotion_delta: outcome
                 .response
@@ -449,7 +440,7 @@ impl CompanionAgent {
                 .pending_user_messages
                 .iter()
                 .filter(|input| {
-                    !input.attachment_is_terminal()
+                    !input.is_terminal()
                         && input.prepared_response.is_none()
                         && !inputs.iter().any(|selected| selected.id == input.id)
                 })
@@ -515,7 +506,13 @@ impl CompanionAgent {
             .map_or(SessionRequest::New, SessionRequest::Resume);
         let tutorial_response_key = tutorial_response_key(&inputs)?;
         Ok(crate::provider::bridge_send_request_fits(
-            &self.provider_call(&prompt, &images, session, tutorial_response_key.as_deref()),
+            &self.provider_call(
+                &prompt,
+                true,
+                &images,
+                session,
+                tutorial_response_key.as_deref(),
+            ),
         ))
     }
 
@@ -581,15 +578,6 @@ impl CompanionAgent {
             .flat_map(|input| input.observations.iter().cloned())
             .collect();
         let cursor = storage.load_cursor()?;
-        for input in inputs.iter_mut() {
-            if let Some(crate::companion_storage::PendingInput::UserMessage(pending)) = cursor
-                .pending_inputs
-                .iter()
-                .find(|pending| pending.id() == input.id)
-            {
-                input.hearing_context = pending.hearing_context.clone();
-            }
-        }
         let observations = crate::recent_observations::merge_recent_observations(
             crate::recent_observations::merge_recent_observations(
                 supplied,
@@ -721,8 +709,27 @@ impl CompanionAgent {
             &candidate.observations,
         );
         self.commit_user_response(&candidate.input_ids, &candidate.prepared_response)?;
+        self.consume_user_audio_context(&candidate.prepared_response.audio_ids)?;
         let consumed = self.consume_user_observation_context(&candidate.input_ids, turn_id)?;
         Ok(consumed)
+    }
+
+    pub(super) fn consume_user_audio_context(&self, ids: &[String]) -> Result<(), CompanionError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        storage.consume_audio_ids(ids)?;
+        let mut buffer = self
+            .hearing_context
+            .lock()
+            .map_err(|_| PersistenceError::Invalid("音声文脈のロックが壊れています".to_owned()))?;
+        for id in ids {
+            buffer.acknowledge_saved_audio(id);
+        }
+        Ok(())
     }
 
     pub(super) fn consume_user_observation_context(
