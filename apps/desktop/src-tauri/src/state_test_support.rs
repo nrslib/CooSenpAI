@@ -176,6 +176,7 @@ impl DesktopState {
                 created_at: chrono::Utc::now().to_rfc3339(),
                 role: ConversationRole::Companion,
                 message: message.clone(),
+                message_kind: Some(coosenpai_core::state::ConversationMessageKind::Tutorial),
                 attachment_path: None,
                 attachment_text: None,
                 tutorial_response_key: None,

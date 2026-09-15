@@ -63,7 +63,7 @@ const CONTROL_PATHS = new Set<string>([
   "voiceOutput.enabled", "voiceOutput.provider", "voiceOutput.rate", "voiceOutput.voicevoxStyleId",
   "work.approvalMode", "work.allowedRoots",
   "notification.mode", "bubble.position", "bubble.display",
-  "bubble.keepLatest",
+  "bubble.keepLatest", "bubble.edgeRecall",
   "notification.minPriority", "notification.bubbleDurationMs",
   "bubble.maxStack", "retention.observationDays",
   "retention.conversationDays", "speech.locale", "speech.mode",

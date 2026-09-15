@@ -2,6 +2,8 @@
 set -eu
 
 request_auth=0
+# 既定では process tap が利用可能な OS なら両 backend、利用できなければ
+# ScreenCaptureKit のみを実収録する。--process-tap は process tap 側を明示する。
 process_tap=$(sw_vers -productVersion | awk -F. '{ print ($1 > 14 || ($1 == 14 && $2 >= 2)) ? 1 : 0 }')
 speaker_failures=0
 skip_speaker_e2e=0
@@ -80,6 +82,15 @@ swiftc -target "$(uname -m)-apple-macosx13.0" \
   "$script_dir/Sources/audio_input_processing.swift" \
   "$script_dir/Sources/music_gate.swift" \
   "$script_dir/Sources/microphone_input_recovery.swift" \
+  "$script_dir/../speech-helper/Sources/speech_analysis.swift" \
+  "$script_dir/../speech-helper/Sources/audio_queue.swift" \
+  "$script_dir/../speech-helper/Sources/transcript_accumulator.swift" \
+  "$script_dir/../speech-helper/Sources/recognition_session.swift" \
+  "$script_dir/../speech-helper/Sources/audio_converter.swift" \
+  "$script_dir/../speech-helper/Sources/speech_audio_gain.swift" \
+  "$script_dir/../speech-helper/Sources/speech_analyzer.swift" \
+  "$script_dir/../speech-helper/Sources/speech_recognizer.swift" \
+  "$script_dir/../speech-helper/Sources/speech_engine.swift" \
   "$script_dir/Sources/recognition_state.swift" \
   "$script_dir/Sources/segment_controller.swift" \
   "$script_dir/Sources/voice_activity.swift" \
@@ -322,7 +333,10 @@ if [ "$request_auth" -eq 1 ]; then
   auth_probe_exit=$(cat "$e2e_directory/exit")
   auth_probe_status=$(sed -n 's/^speech-auth status=//p' "$e2e_directory/stderr" | sed -n '1p')
   printf 'WAV E2E auth-probe status=%s exit=%s\n' "${auth_probe_status:-unknown}" "$auth_probe_exit" >&2
-  if [ "$auth_probe_exit" != 0 ] || [ "$auth_probe_status" != authorized ]; then
+  if [ "$auth_probe_exit" != 0 ] || {
+    [ "$auth_probe_status" != authorized ] \
+      && [ "$auth_probe_status" != 'not-required engine=SpeechAnalyzer' ];
+  }; then
     printf '%s\n' 'WAV E2E: テスト用アプリの音声認識認可を確認できませんでした。' >&2
     cat "$e2e_directory/stderr" >&2
     exit 1
@@ -351,7 +365,8 @@ if [ -z "$speech_auth_status" ]; then
   exit 1
 fi
 printf 'WAV E2E speech-auth status=%s\n' "$speech_auth_status" >&2
-if [ "$speech_auth_status" != authorized ]; then
+if [ "$speech_auth_status" != authorized ] \
+  && [ "$speech_auth_status" != 'not-required engine=SpeechAnalyzer' ]; then
   printf '%s\n' 'WAV E2E: 音声認識が許可されていないため不合格です。テスト用アプリの認可状態を確認してください。' >&2
   exit 1
 fi
@@ -456,7 +471,7 @@ for line in stderr_lines:
     if final_match:
         final_generations.add(final_match.group(1))
     cancel_match = re.match(
-        r"^recognition-task-cancel source=microphone generation=(\d+) reason=",
+        r"^recognition-session-cancel source=microphone generation=(\d+) reason=",
         line,
     )
     if cancel_match:
@@ -494,7 +509,7 @@ if [ "$speaker_failures" -eq 1 ]; then
   if [ "$request_auth" -eq 1 ]; then
     launch_e2e failure-auth
     wait_for_e2e 60 || { printf '%s\n' 'Failure fixture authorization timed out' >&2; exit 1; }
-    if ! grep -q '^speech-auth status=authorized$' "$e2e_directory/stderr"; then
+    if ! grep -Eq '^speech-auth status=(authorized|not-required engine=SpeechAnalyzer)$' "$e2e_directory/stderr"; then
       cat "$e2e_directory/stderr" >&2
       exit 1
     fi

@@ -8,6 +8,7 @@ struct HearingHelperApp {
         let arguments = parseArguments()
         let session = HearingSession(
             locale: arguments.locale,
+            engine: arguments.engine,
             inputDevice: arguments.inputDevice,
             sources: arguments.sources,
             debugInputWavPath: arguments.debugInputWavPath,

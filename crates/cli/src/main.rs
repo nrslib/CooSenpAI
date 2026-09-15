@@ -405,6 +405,7 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                         .unwrap_or("fullscreen")
                         .to_owned(),
                     ocr_text: None,
+                    focus: None,
                 })
                 .collect::<Vec<_>>();
             let previous = input.get("previousObservation");

@@ -252,6 +252,10 @@ impl CompanionAgent {
             .collect::<Vec<_>>();
         let tutorial_response_key = tutorial_response_key(&inputs)?;
         if let Some(prepared) = common_prepared_response(&inputs)? {
+            let mut prepared = prepared;
+            if tutorial_response_key.is_some() {
+                prepared.message_kind = crate::state::ConversationMessageKind::Tutorial;
+            }
             return Ok(UserOperationResult {
                 response: prepared_response(&prepared),
                 input_ids,
@@ -395,6 +399,11 @@ impl CompanionAgent {
                 .now()
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             message: require_user_message(&outcome.response)?,
+            message_kind: if tutorial_response_key.is_some() {
+                crate::state::ConversationMessageKind::Tutorial
+            } else {
+                crate::state::ConversationMessageKind::Chat
+            },
             session_summary: self.pending_session_summary.clone(),
         };
         Ok(UserOperationResult {
@@ -1039,7 +1048,7 @@ fn prepared_response(response: &PreparedUserResponse) -> CompanionResponse {
         emotion_delta: response.emotion_delta,
         emit: true,
         message: Some(response.message.clone()),
-        message_kind: "chat".to_owned(),
+        message_kind: response.message_kind.as_wire().to_owned(),
         notification_priority: "none".to_owned(),
         thought: None,
         fact_candidates: Vec::new(),

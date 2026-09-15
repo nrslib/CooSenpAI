@@ -53,6 +53,8 @@ pub struct ObservationFrame {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<crate::ports::FocusElement>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -317,6 +319,73 @@ impl UserScreenContext {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConversationMessageKind {
+    #[default]
+    Chat,
+    Advice,
+    Encouragement,
+    Nudge,
+    Celebration,
+    Summary,
+    Tutorial,
+    Notice,
+    Setup,
+    FactConfirmation,
+    Thought,
+    System,
+}
+
+impl ConversationMessageKind {
+    pub fn from_wire(value: &str) -> Option<Self> {
+        Some(match value {
+            "chat" => Self::Chat,
+            "advice" => Self::Advice,
+            "encouragement" => Self::Encouragement,
+            "nudge" => Self::Nudge,
+            "celebration" => Self::Celebration,
+            "summary" => Self::Summary,
+            "tutorial" => Self::Tutorial,
+            "notice" => Self::Notice,
+            "setup" => Self::Setup,
+            "fact-confirmation" => Self::FactConfirmation,
+            "thought" => Self::Thought,
+            "system" => Self::System,
+            _ => return None,
+        })
+    }
+
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Advice => "advice",
+            Self::Encouragement => "encouragement",
+            Self::Nudge => "nudge",
+            Self::Celebration => "celebration",
+            Self::Summary => "summary",
+            Self::Tutorial => "tutorial",
+            Self::Notice => "notice",
+            Self::Setup => "setup",
+            Self::FactConfirmation => "fact-confirmation",
+            Self::Thought => "thought",
+            Self::System => "system",
+        }
+    }
+
+    pub fn is_normal_speech(self) -> bool {
+        matches!(
+            self,
+            Self::Chat
+                | Self::Advice
+                | Self::Encouragement
+                | Self::Nudge
+                | Self::Celebration
+                | Self::Summary
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationEntry {
@@ -325,6 +394,8 @@ pub struct ConversationEntry {
     pub created_at: String,
     pub role: ConversationRole,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_kind: Option<ConversationMessageKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -339,6 +410,23 @@ pub struct ConversationEntry {
 }
 
 impl ConversationEntry {
+    pub fn is_normal_speech(&self) -> bool {
+        self.role == ConversationRole::Companion
+            && self
+                .message_kind
+                .is_some_and(ConversationMessageKind::is_normal_speech)
+            && self.tutorial_response_key.is_none()
+            && !self.message.trim().is_empty()
+    }
+
+    pub fn is_normal_user_input(&self) -> bool {
+        self.role == ConversationRole::User
+            && self.tutorial_response_key.is_none()
+            && (!self.message.trim().is_empty()
+                || self.attachment_path.is_some()
+                || self.attachment_text.is_some())
+    }
+
     pub fn observation_ids(&self) -> impl Iterator<Item = &str> {
         self.caused_by_ids.iter().map(String::as_str)
     }
@@ -621,7 +709,10 @@ fn validate_stored_visual_keys(object: &Map<String, Value>) -> Result<(), Observ
         .ok_or(ObservationError::Missing("frames"))?;
     for item in frames {
         let item = item.as_object().ok_or(ObservationError::Invalid)?;
-        validate_keys(item, &["trigger", "frontApp", "app", "target", "ocrText"])?;
+        validate_keys(
+            item,
+            &["trigger", "frontApp", "app", "target", "ocrText", "focus"],
+        )?;
     }
     let data = visual_data_value(object);
     let data = data.as_object().ok_or(ObservationError::Invalid)?;

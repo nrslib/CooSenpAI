@@ -10,12 +10,13 @@ import type { FormState } from "../settings-form.js";
 
 interface Props extends SettingsCategoryProps {
   readonly onOpenSystemSettings: () => void;
+  readonly onOpenAccessibilitySettings?: () => void;
   readonly onRelaunch: () => void;
   readonly highlight: boolean;
   readonly onResetTuning: () => void;
 }
 
-export function VisionSettings({ form, snapshot, saving, update, errorFor, onOpenSystemSettings, onRelaunch, highlight, onResetTuning }: Props): ReactElement {
+export function VisionSettings({ form, snapshot, saving, update, errorFor, onOpenSystemSettings, onOpenAccessibilitySettings, onRelaunch, highlight, onResetTuning }: Props): ReactElement {
   const { locale, t } = useI18n();
   return <>
     <WatchTargets
@@ -28,12 +29,14 @@ export function VisionSettings({ form, snapshot, saving, update, errorFor, onOpe
     <fieldset id="settings-vision-permissions">
       <legend>{t("settings.vision.permission")}</legend>
       <p className="field-help">{t("settings.vision.screenRecording", { status: snapshot.screenRecordingMessage ?? permissionLabel(snapshot.screenRecordingStatus, locale) })} <button type="button" onClick={onOpenSystemSettings}>{t("common.openSettings")}</button></p>
+      <p className="field-help">{t("settings.vision.focusElementHelp")} {onOpenAccessibilitySettings === undefined ? null : <button type="button" onClick={onOpenAccessibilitySettings}>{t("common.openSettings")}</button>}</p>
       {snapshot.screenRecordingRestartRequired ? <div className="button-row"><button type="button" onClick={onRelaunch}>{t("settings.vision.relaunch")}</button></div> : null}
     </fieldset>
     <fieldset id="settings-vision-detail"><legend>{t("settings.vision.detail")}</legend>
       <fieldset id="settings-watch-detail" disabled={saving}>
         <legend>{t("settings.vision.timingDetail")}</legend>
         <p className="field-help">{t("settings.vision.timingHelp")}</p>
+        <BooleanInput label={t("settings.vision.focusElement")} path="watch.focusElement" value={form.watchFocusElement} update={(value) => update("watchFocusElement", value)} />
         <NumberInput label={t("settings.vision.sendDebounce")} path="watch.sendDebounceMs" value={form.sendDebounceMs} update={(value) => update("sendDebounceMs", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.framesPerSend")} path="watch.framesPerSend" value={form.framesPerSend} update={(value) => update("framesPerSend", value)} errorFor={errorFor} />
         <NumberInput label={t("settings.vision.appWindowLimit")} path="watch.appWindowLimit" value={form.appWindowLimit} update={(value) => update("appWindowLimit", value)} errorFor={errorFor} />

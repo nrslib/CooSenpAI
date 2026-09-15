@@ -2,29 +2,6 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-struct SpeechAnalysisFailure: Error {
-    let kind: String
-    let message: String
-}
-
-enum SpeechAnalysisEvent {
-    case ready
-    case result(SpeechTranscription)
-    case partialTranscript(String)
-    case completedTranscript(String)
-    case finalizedThrough(CMTime)
-    case completed
-    case failed(SpeechAnalysisFailure)
-    case cancelled
-}
-
-protocol SpeechAnalysis: AnyObject {
-    func start(receive: @escaping (SpeechAnalysisEvent) -> Void)
-    func append(_ buffer: AVAudioPCMBuffer) throws
-    func finish()
-    func cancel()
-}
-
 protocol SpeechDeadline: AnyObject {
     func cancel()
 }
@@ -50,7 +27,7 @@ enum SpeechOutput: Equatable {
     case closed
 }
 
-// tap からの音声は queue が所有し、状態遷移と analyzer 操作は main queue に限定する。
+// tap からの音声は queue が所有し、状態遷移と analyzer 操作は指定した queue に限定する。
 final class SpeechRecognitionSession: @unchecked Sendable {
     static let finalizationTimeout: TimeInterval = 30
     static let cancellationTimeout: TimeInterval = 30
@@ -64,6 +41,8 @@ final class SpeechRecognitionSession: @unchecked Sendable {
     private let stopRecording: () -> Void
     private let emit: (SpeechOutput) -> Void
     private let diagnostic: (String) -> Void
+    private let queue: DispatchQueue
+    private let queueKey = DispatchSpecificKey<Void>()
     private var transcript: SpeechTranscript
     private var phase = Phase.preparing
     private var deadline: SpeechDeadline?
@@ -76,6 +55,7 @@ final class SpeechRecognitionSession: @unchecked Sendable {
         audio: SpeechAudioQueue,
         analysis: SpeechAnalysis,
         scheduler: SpeechDeadlineScheduler,
+        queue: DispatchQueue,
         startRecording: @escaping () -> Void,
         stopRecording: @escaping () -> Void,
         emit: @escaping (SpeechOutput) -> Void,
@@ -85,21 +65,37 @@ final class SpeechRecognitionSession: @unchecked Sendable {
         self.audio = audio
         self.analysis = analysis
         self.scheduler = scheduler
+        self.queue = queue
         self.startRecording = startRecording
         self.stopRecording = stopRecording
         self.emit = emit
         self.diagnostic = diagnostic
+        queue.setSpecific(key: queueKey, value: ())
     }
 
     func start(finishRequested: Bool = false) {
-        if finishRequested { finish() }
-        analysis.start { [weak self] event in self?.receive(event) }
+        performSynchronously {
+            if finishRequested { self.finishOnQueue() }
+            self.analysis.start { [weak self] event in self?.receive(event) }
+        }
     }
 
     func audioAvailable() {
+        performSynchronously { audioAvailableOnQueue() }
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        performSynchronously {
+            guard phase == .preparing || phase == .recording || phase == .finishing else { return }
+            guard audio.enqueue(buffer) else { return }
+            if phase == .recording || phase == .finishing { audioAvailableOnQueue() }
+        }
+    }
+
+    private func audioAvailableOnQueue() {
         guard phase == .recording || phase == .finishing, !inputEnded else { return }
         if let failure = audio.failure {
-            fail("audio", failure)
+            failOnQueue("audio", failure)
             return
         }
         do {
@@ -113,20 +109,23 @@ final class SpeechRecognitionSession: @unchecked Sendable {
                 analysis.finish()
             }
         } catch {
-            fail("audio", "音声を認識用フォーマットへ変換・転送できませんでした")
+            failOnQueue("audio", "音声を認識用フォーマットへ変換・転送できませんでした")
         }
     }
 
     private func receive(_ event: SpeechAnalysisEvent) {
+        performSynchronously { receiveOnQueue(event) }
+    }
+
+    private func receiveOnQueue(_ event: SpeechAnalysisEvent) {
         guard phase != .closed else { return }
         switch event {
         case .ready:
             if phase == .preparing {
                 phase = .recording
                 startRecording()
-            } else if phase == .finishing {
-                audioAvailable()
             }
+            audioAvailableOnQueue()
         case let .result(result):
             guard phase == .recording || phase == .finishing else { return }
             diagnostic("event=analysis-result isFinal=\(result.isFinal) finishRequested=\(phase == .finishing) chars=\(result.text.count) audioStart=\(result.audioRange.start.seconds) audioEnd=\(result.audioRange.end.seconds) resultsFinalizationTime=\(result.resultsFinalizationTime.seconds)")
@@ -134,7 +133,7 @@ final class SpeechRecognitionSession: @unchecked Sendable {
                 try transcript.record(result)
                 publishPartial(transcript.text)
             } catch {
-                fail("recognition", "音声認識が不正な区間の結果を返しました")
+                failOnQueue("recognition", "音声認識が不正な区間の結果を返しました")
             }
         case let .finalizedThrough(time):
             guard phase == .recording || phase == .finishing else { return }
@@ -142,7 +141,7 @@ final class SpeechRecognitionSession: @unchecked Sendable {
                 try transcript.finalize(through: time)
                 diagnostic("event=analysis-finalized-through audioTime=\(time.seconds)")
             } catch {
-                fail("recognition", "音声認識が不正な確定時刻を返しました")
+                failOnQueue("recognition", "音声認識が不正な確定時刻を返しました")
             }
         case let .partialTranscript(text):
             guard phase == .recording || phase == .finishing else { return }
@@ -151,19 +150,19 @@ final class SpeechRecognitionSession: @unchecked Sendable {
             complete(text)
         case .completed:
             guard phase == .finishing else {
-                if phase != .closing { fail("recognition", "音声認識が入力終了前に停止しました") }
+                if phase != .closing { failOnQueue("recognition", "音声認識が入力終了前に停止しました") }
                 return
             }
             guard !transcript.hasUnfinalizedText else {
-                fail("recognition", "音声認識が未確定の結果を残して終了しました")
+                failOnQueue("recognition", "音声認識が未確定の結果を残して終了しました")
                 return
             }
             complete(transcript.finalizedText)
         case let .failed(failure):
-            if phase != .closing { fail(failure.kind, failure.message) }
+            if phase != .closing { failOnQueue(failure.kind, failure.message) }
         case .cancelled:
-            if phase != .closing { fail("recognition", "音声認識が予期せず取り消されました") }
-            close()
+            if phase != .closing { failOnQueue("recognition", "音声認識が予期せず取り消されました") }
+            closeOnQueue()
         }
     }
 
@@ -175,66 +174,91 @@ final class SpeechRecognitionSession: @unchecked Sendable {
 
     private func complete(_ text: String) {
         guard phase == .finishing else {
-            if phase != .closing { fail("recognition", "音声認識が入力終了前に停止しました") }
+            if phase != .closing { failOnQueue("recognition", "音声認識が入力終了前に停止しました") }
             return
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            fail("no-speech", "音声を認識できませんでした")
+            failOnQueue("no-speech", "音声を認識できませんでした")
             return
         }
         diagnostic("event=session-final chars=\(text.count)")
         phase = .closing
         emit(.final(text))
-        close()
+        closeOnQueue()
     }
 
     func finish() {
+        performSynchronously { finishOnQueue() }
+    }
+
+    private func finishOnQueue() {
         guard phase == .preparing || phase == .recording else { return }
         let wasPreparing = phase == .preparing
         phase = .finishing
         audio.stopAccepting()
         stopRecording()
         deadline = scheduler.schedule(after: Self.finalizationTimeout) { [weak self] in
-            guard let self, self.phase == .finishing || self.phase == .closing else { return }
-            if self.phase == .finishing {
-                self.phase = .closing
-                self.diagnostic("event=analysis-final-timeout")
-                self.emit(.error(kind: "recognition", message: "音声認識の確定処理が30秒以内に完了しませんでした"))
-                self.analysis.cancel()
+            guard let self else { return }
+            self.performSynchronously {
+                guard self.phase == .finishing || self.phase == .closing else { return }
+                if self.phase == .finishing {
+                    self.phase = .closing
+                    self.diagnostic("event=analysis-final-timeout")
+                    self.emit(.error(kind: "recognition", message: "音声認識の確定処理が30秒以内に完了しませんでした"))
+                    self.analysis.cancel()
+                }
+                self.closeOnQueue()
             }
-            self.close()
         }
-        if !wasPreparing { audioAvailable() }
+        if !wasPreparing { audioAvailableOnQueue() }
     }
 
     func cancel() {
+        performSynchronously { cancelOnQueue() }
+    }
+
+    private func cancelOnQueue() {
         guard phase == .preparing || phase == .recording || phase == .finishing else { return }
-        beginClose()
+        beginCloseOnQueue()
     }
 
     func fail(_ kind: String, _ message: String) {
-        guard phase == .preparing || phase == .recording || phase == .finishing else { return }
-        beginClose(error: .error(kind: kind, message: message))
+        performSynchronously { failOnQueue(kind, message) }
     }
 
-    private func beginClose(error: SpeechOutput? = nil) {
+    private func failOnQueue(_ kind: String, _ message: String) {
+        guard phase == .preparing || phase == .recording || phase == .finishing else { return }
+        beginCloseOnQueue(error: .error(kind: kind, message: message))
+    }
+
+    private func beginCloseOnQueue(error: SpeechOutput? = nil) {
         let mustStop = phase != .finishing
         phase = .closing
         audio.discard()
         if mustStop {
             stopRecording()
-            deadline = scheduler.schedule(after: Self.cancellationTimeout) { [weak self] in self?.close() }
+            deadline = scheduler.schedule(after: Self.cancellationTimeout) { [weak self] in
+                self?.performSynchronously { self?.closeOnQueue() }
+            }
         }
         if let error { emit(error) }
         analysis.cancel()
     }
 
-    private func close() {
+    private func closeOnQueue() {
         guard phase != .closed else { return }
         phase = .closed
         deadline?.cancel()
         deadline = nil
         audio.discard()
         emit(.closed)
+    }
+
+    private func performSynchronously(_ action: () -> Void) {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            action()
+        } else {
+            queue.sync(execute: action)
+        }
     }
 }

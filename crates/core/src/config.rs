@@ -223,6 +223,8 @@ pub struct WatchConfig {
     #[serde(default)]
     pub fullscreen: bool,
     #[serde(default)]
+    pub focus_element: bool,
+    #[serde(default)]
     pub apps: Vec<WatchAppConfig>,
     #[serde(default = "default_send_interval")]
     pub send_interval_ms: u64,
@@ -247,6 +249,7 @@ impl Default for WatchConfig {
         Self {
             enabled: false,
             fullscreen: false,
+            focus_element: false,
             apps: Vec::new(),
             send_interval_ms: default_send_interval(),
             send_debounce_ms: default_send_debounce(),
@@ -708,6 +711,8 @@ pub struct BubbleConfig {
     pub always_show: bool,
     #[serde(default = "default_bubble_keep_latest")]
     pub keep_latest: bool,
+    #[serde(default = "default_bubble_edge_recall")]
+    pub edge_recall: bool,
     #[serde(default = "default_bubble_max_stack")]
     pub max_stack: usize,
     #[serde(default = "default_bubble_position")]
@@ -721,6 +726,7 @@ impl Default for BubbleConfig {
         Self {
             always_show: false,
             keep_latest: default_bubble_keep_latest(),
+            edge_recall: default_bubble_edge_recall(),
             max_stack: default_bubble_max_stack(),
             position: default_bubble_position(),
             display: default_bubble_display(),

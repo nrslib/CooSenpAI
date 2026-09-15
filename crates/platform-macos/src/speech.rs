@@ -53,6 +53,8 @@ impl SpeechPort for MacSpeech {
                 })?;
             args.extend(["--debug-dump-wav".to_owned(), path_text.to_owned()]);
         }
+        #[cfg(test)]
+        let process_guard = crate::test_support::acquire_helper_process_lock().await;
         let process = InteractiveProcess::spawn(
             InteractiveProcessRequest {
                 executable: self.helper.clone(),
@@ -66,7 +68,13 @@ impl SpeechPort for MacSpeech {
         .map_err(process_error)?;
         let (command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, event_rx) = mpsc::channel(32);
-        tokio::spawn(run_session(process, command_rx, event_tx));
+        tokio::spawn(run_session(
+            process,
+            command_rx,
+            event_tx,
+            #[cfg(test)]
+            process_guard,
+        ));
         Ok(SpeechSession::from_channels(command_tx, event_rx))
     }
 }
@@ -75,9 +83,11 @@ async fn run_session(
     mut process: InteractiveProcess,
     mut commands: mpsc::Receiver<SpeechCommand>,
     events: mpsc::Sender<Result<SpeechEvent, PortError>>,
+    #[cfg(test)] _process_guard: crate::test_support::HelperProcessLock,
 ) {
     let control = process.control();
     let mut terminal_event_seen = false;
+    let mut protocol_closed = false;
     loop {
         tokio::select! {
             biased;
@@ -85,7 +95,7 @@ async fn run_session(
                 Some(SpeechCommand::Finish) => {
                     if let Err(error) = control.write_line(br#"{"op":"finish"}"#.to_vec()).await {
                         let _ = events.send(Err(process_error(error))).await;
-                        let _ = control.terminate(false).await;
+                        let _ = cancel_and_reap(&mut process, &control).await;
                         return;
                     }
                 }
@@ -104,6 +114,9 @@ async fn run_session(
                 Some(Ok(InteractiveProcessEvent::StdoutLine(line))) => {
                     match serde_json::from_slice::<SpeechEvent>(&line) {
                         Ok(event) => {
+                            if protocol_closed {
+                                continue;
+                            }
                             let closed = matches!(&event, SpeechEvent::Closed);
                             let terminal = matches!(
                                 &event,
@@ -117,7 +130,14 @@ async fn run_session(
                             if terminal && !closed {
                                 terminal_event_seen = true;
                             }
-                            if events.send(Ok(event)).await.is_err() || closed {
+                            let sent = events.send(Ok(event)).await.is_ok();
+                            if closed {
+                                // closed はプロトコル通知であり、子プロセスの回収完了ではない。
+                                protocol_closed = true;
+                                continue;
+                            }
+                            if !sent {
+                                let _ = cancel_and_reap(&mut process, &control).await;
                                 return;
                             }
                         }
@@ -125,29 +145,32 @@ async fn run_session(
                             let _ = events.send(Err(PortError::Unavailable(
                                 "音声認識 helper が不正な応答を返しました".to_owned(),
                             ))).await;
-                            let _ = control.terminate(false).await;
+                            let _ = cancel_and_reap(&mut process, &control).await;
                             return;
                         }
                     }
                 }
                 Some(Ok(InteractiveProcessEvent::StderrLine(_))) => {}
                 Some(Ok(InteractiveProcessEvent::Exited { status, stderr })) => {
-                    if status == Some(0) {
-                        let _ = events.send(Ok(SpeechEvent::Closed)).await;
-                    } else {
-                        let detail = String::from_utf8_lossy(&stderr);
-                        let detail = detail.trim().chars().take(300).collect::<String>();
-                        let message = if detail.is_empty() {
-                            "音声認識 helper が異常終了しました".to_owned()
+                    if !protocol_closed {
+                        if status == Some(0) {
+                            let _ = events.send(Ok(SpeechEvent::Closed)).await;
                         } else {
-                            format!("音声認識 helper が異常終了しました: {detail}")
-                        };
-                        let _ = events.send(Err(PortError::Unavailable(message))).await;
+                            let detail = String::from_utf8_lossy(&stderr);
+                            let detail = detail.trim().chars().take(300).collect::<String>();
+                            let message = if detail.is_empty() {
+                                "音声認識 helper が異常終了しました".to_owned()
+                            } else {
+                                format!("音声認識 helper が異常終了しました: {detail}")
+                            };
+                            let _ = events.send(Err(PortError::Unavailable(message))).await;
+                        }
                     }
                     return;
                 }
                 Some(Err(error)) => {
                     let _ = events.send(Err(process_error(error))).await;
+                    let _ = cancel_and_reap(&mut process, &control).await;
                     return;
                 }
                 None => return,
@@ -161,16 +184,24 @@ async fn cancel_and_reap(
     control: &coosenpai_core::interactive_process::InteractiveProcessControl,
 ) -> Result<(), PortError> {
     let _ = control.write_line(br#"{"op":"cancel"}"#.to_vec()).await;
-    control.terminate(false).await.map_err(process_error)?;
+    let mut wait_error = control.terminate(false).await.err().map(process_error);
     while let Some(event) = process.next_event().await {
         match event {
-            Ok(InteractiveProcessEvent::Exited { .. }) => return Ok(()),
+            Ok(InteractiveProcessEvent::Exited { .. }) => {
+                return wait_error.map_or(Ok(()), Err);
+            }
             Ok(InteractiveProcessEvent::StdoutLine(_)) => {}
             Ok(InteractiveProcessEvent::StderrLine(_)) => {}
-            Err(error) => return Err(process_error(error)),
+            Err(error) => {
+                if wait_error.is_none() {
+                    wait_error = Some(process_error(error));
+                }
+            }
         }
     }
-    Ok(())
+    Err(wait_error.unwrap_or_else(|| {
+        PortError::Unavailable("音声認識 helper の終了を確認できませんでした".to_owned())
+    }))
 }
 
 fn process_error(error: impl std::fmt::Display) -> PortError {

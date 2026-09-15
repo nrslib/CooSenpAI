@@ -145,6 +145,7 @@ impl BubbleControlsPresenter {
         }
         self.view.reading = snapshot.reading && front.is_some();
         let fixed = front.is_some_and(|r| r.interaction.is_some());
+        let critical = front.is_some_and(|r| r.notification_priority == "critical");
         let index = snapshot
             .history_ids
             .iter()
@@ -152,10 +153,11 @@ impl BubbleControlsPresenter {
         self.view.dismissible = front.is_some_and(|r| r.message_kind != "tutorial");
         self.view.body_button =
             front.is_some_and(|r| r.interaction.is_none() || r.message_kind == "tutorial");
-        self.view.older_edge = index.is_some_and(|i| i > 0);
-        self.view.second_edge = index.is_some_and(|i| i > 1);
-        self.view.show_latest = !fixed && index.is_some_and(|i| i + 1 < snapshot.history_ids.len());
-        self.view.navigation_disabled = fixed || front.is_none();
+        self.view.older_edge = !critical && index.is_some_and(|i| i > 0);
+        self.view.second_edge = !critical && index.is_some_and(|i| i > 1);
+        self.view.show_latest =
+            !fixed && !critical && index.is_some_and(|i| i + 1 < snapshot.history_ids.len());
+        self.view.navigation_disabled = fixed || critical || front.is_none();
     }
 
     pub(crate) fn hide(&mut self) {

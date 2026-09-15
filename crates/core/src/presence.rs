@@ -208,6 +208,7 @@ impl PresenceEvent {
                 app: None,
                 target: target.to_owned(),
                 ocr_text: None,
+                focus: None,
             }],
             source_frame_ids: Vec::new(),
             source_frame_paths: std::collections::BTreeMap::new(),

@@ -488,8 +488,8 @@ struct VoiceActivityDetector {
         let startThreshold = startRmsThreshold
         guard rms >= startThreshold, movingRmsWindow.rms >= startThreshold else {
             startCandidateSince = nil
-            if rms < sustainRmsThreshold,
-               movingRmsWindow.rms < sustainRmsThreshold,
+            if rms < startThreshold,
+               movingRmsWindow.rms < startThreshold,
                movingRmsWindow.durationNanoseconds
                    >= configuration.movingRmsWindowNanoseconds {
                 updateNoiseFloor(

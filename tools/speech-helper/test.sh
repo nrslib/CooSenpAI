@@ -48,9 +48,11 @@ swiftc -target "$(uname -m)-apple-macosx13.0" -O \
   "$script_dir/Sources/audio_queue.swift" \
   "$script_dir/Sources/wav_dump.swift" \
   "$script_dir/Sources/wav_file.swift" \
+  "$script_dir/Sources/speech_analysis.swift" \
   "$script_dir/Sources/transcript_accumulator.swift" \
   "$script_dir/Sources/recognition_session.swift" \
   "$script_dir/Sources/audio_converter.swift" \
+  "$script_dir/Sources/speech_audio_gain.swift" \
   "$script_dir/Sources/speech_analyzer.swift" \
   "$script_dir/Sources/speech_recognizer.swift" \
   "$script_dir/Sources/speech_engine.swift" \
@@ -58,6 +60,7 @@ swiftc -target "$(uname -m)-apple-macosx13.0" -O \
   "$script_dir/Tests/speech_engine_test.swift" \
   "$script_dir/Tests/early_finish_test.swift" \
   "$script_dir/Tests/recognition_session_test.swift" \
+  "$script_dir/Tests/speech_audio_gain_test.swift" \
   "$script_dir/Tests/audio_converter_test.swift" \
   "$script_dir/Tests/wav_input_test.swift" \
   "$script_dir/Tests/wav_dump_test.swift" \

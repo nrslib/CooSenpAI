@@ -9,7 +9,7 @@ use coosenpai_core::frame_buffer::FrameBuffer;
 use coosenpai_core::observer::ObservationFrameInput;
 use coosenpai_core::onboarding::TutorialStep;
 use coosenpai_core::ports::{
-    ActivityPort, HelperResolverPort, PortError, RuntimeLogger, ScreenCapturePort,
+    ActivityPort, FocusElementPort, HelperResolverPort, PortError, RuntimeLogger, ScreenCapturePort,
 };
 use coosenpai_core::screen_frames::prepare_screen_frames;
 use coosenpai_core::state::{ActivityTriggerKind, PendingFrameContext, StagnationObservation};
@@ -208,6 +208,7 @@ async fn capture(
     config: &Config,
     ocr_enabled: bool,
     screen_capture: &platform::MacScreenCapture,
+    focus_element: &Arc<dyn FocusElementPort>,
     ocr: &platform::MacOcr,
     semaphore: &Arc<Semaphore>,
     memory: &mut WatchMemory,
@@ -243,6 +244,14 @@ async fn capture(
     ensure_capture_active(&cancellation)?;
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("screens");
+    let focus_task = config.watch.focus_element.then(|| {
+        let focus_element = focus_element.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            coosenpai_core::focus::read_focused_element(focus_element.as_ref(), &cancellation, None)
+                .await
+        })
+    });
     let stable = capture_with_window_mask(state.own_bounds.as_ref(), async {
         let capture_started = Instant::now();
         let _ = state.logger.write("INFO", "見守り: 段階=capture-start target=fullscreen backend=in-process");
@@ -261,6 +270,10 @@ async fn capture(
         }
         captured
     }).await;
+    let focus = match focus_task {
+        Some(task) => task.await.ok().flatten(),
+        None => None,
+    };
     let stable = match stable {
         Ok(stable) => stable,
         Err(CaptureWithMaskError::Capture(error)) => return Err(anyhow::Error::new(error)),
@@ -315,6 +328,7 @@ async fn capture(
                 .as_secs_f64(),
             trigger,
             memory.front_app.clone(),
+            focus.clone(),
             config.debug.enabled,
         );
         let debug_id = frame.debug_id.clone();
@@ -361,7 +375,7 @@ async fn capture(
     ensure_capture_active(&cancellation)?;
     for frame in &frames {
         state.core_runtime().register_pending_frame_context(
-            PendingFrameContext::bounded(
+            PendingFrameContext::bounded_with_focus(
                 frame.context_id.clone(),
                 captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 trigger,
@@ -369,6 +383,7 @@ async fn capture(
                 None,
                 frame.target.clone(),
                 frame.ocr_text.clone(),
+                frame.focus.clone(),
             ),
             Some(&memory.publication),
         )?;

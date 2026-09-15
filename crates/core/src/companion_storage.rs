@@ -14,8 +14,8 @@ use crate::persistence::{
 use crate::ports::RuntimeLogger;
 use crate::provider::ProviderSession;
 use crate::state::{
-    parse_observation, ConversationEntry, ConversationRole, ObservationRecord, PendingFrameContext,
-    DEFAULT_OBSERVATION_LIMITS,
+    parse_observation, ConversationEntry, ConversationMessageKind, ConversationRole,
+    ObservationRecord, PendingFrameContext, DEFAULT_OBSERVATION_LIMITS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -2291,6 +2291,8 @@ fn validate_pending_deliveries(deliveries: &[PendingDelivery]) -> Result<(), Per
         if delivery.remark_id.is_empty()
             || chrono::DateTime::parse_from_rfc3339(&delivery.created_at).is_err()
             || delivery.message.is_empty()
+            || ConversationMessageKind::from_wire(&delivery.message_kind)
+                .is_none_or(|kind| !kind.is_normal_speech())
             || !matches!(
                 delivery.notification_priority.as_str(),
                 "none" | "info" | "warning" | "critical"

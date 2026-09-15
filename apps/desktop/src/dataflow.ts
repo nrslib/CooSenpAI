@@ -76,10 +76,30 @@ function audioSourceLabel(source: "microphone" | "speaker", locale: Locale): str
   return source === "speaker" ? t(locale, "now.speaker") : t(locale, "now.microphone");
 }
 
+function normalizeFocus(focus: NonNullable<VisualObservation["frames"][number]["focus"]>) {
+  const value = focus.role === "AXSecureTextField" || focus.value === undefined
+    ? undefined
+    : Array.from(focus.value).slice(0, 600).join("");
+  return { ...focus, value };
+}
+
+function normalizeVisualObservation(record: VisualObservation): VisualObservation {
+  return {
+    ...record,
+    frames: record.frames.map((frame) => frame.focus === undefined
+      ? frame
+      : { ...frame, focus: normalizeFocus(frame.focus) }),
+  };
+}
+
 function visualEvent(record: VisualObservation, locale: Locale): string {
   const wake = record.wakeCompanion ? ` · ${t(locale, "details.dataflowWake")}` : "";
   const window = record.audioSegments?.length ? ` · ${record.windowStart} – ${record.windowEnd}` : "";
-  return `${preview(record.activity)}${wake}${window}`;
+  const focus = record.frames.find((frame) => frame.focus !== undefined)?.focus;
+  const focusText = focus === undefined
+    ? ""
+    : ` · ${t(locale, "details.dataflowFocus")}: ${preview(`${focus.bundleId} / ${focus.windowTitle ?? t(locale, "details.dataflowNoWindowTitle")} / ${focus.role} / ${focus.value ?? t(locale, "details.dataflowNoValue")}`)}`;
+  return `${preview(record.activity)}${wake}${window}${focusText}`;
 }
 
 function noChangeEvent(record: NoChangeObservation, locale: Locale): string {
@@ -145,7 +165,9 @@ export function renderDataFlowRecord(record: DataFlowRecord, locale: Locale): Da
   let detail: string | undefined;
   switch (content.type) {
     case "observation": {
-      const observation = content.data.record;
+      const observation = content.data.record.kind === "visual"
+        ? normalizeVisualObservation(content.data.record)
+        : content.data.record;
       switch (observation.kind) {
         case "visual":
           summary = visualEvent(observation, locale);
@@ -157,7 +179,7 @@ export function renderDataFlowRecord(record: DataFlowRecord, locale: Locale): Da
           summary = hearingObservationEvent(observation, content.data.transcript, locale);
           break;
       }
-      detail = detailJson(content.data);
+      detail = detailJson({ ...content.data, record: observation });
       break;
     }
     case "ocr":

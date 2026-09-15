@@ -26,6 +26,7 @@ use shortcut_errors::{
 };
 pub(crate) use shortcut_errors::{
     publish_speech_transient_shortcut_error, publish_transient_shortcut_error,
+    publish_tutorial_shortcut_error,
 };
 pub(crate) use shortcut_errors::{ShortcutErrorEvent, ShortcutErrorPresenter};
 #[path = "capture_shortcuts.rs"]

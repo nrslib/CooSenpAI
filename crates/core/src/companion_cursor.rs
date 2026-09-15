@@ -2,7 +2,8 @@ use crate::companion::AttachmentOcrFailureKind;
 use crate::config::PENDING_DELIVERY_ITEM_MAX_BYTES;
 use crate::persistence::PersistenceError;
 use crate::state::{
-    ConversationEntry, ConversationRole, ObservationRecord, PendingFrameContext, UserScreenContext,
+    ConversationEntry, ConversationMessageKind, ConversationRole, ObservationRecord,
+    PendingFrameContext, UserScreenContext,
 };
 use serde::{de::Error as DeError, ser::Error as SerError, Deserialize, Serialize};
 use serde_json::Value;
@@ -296,6 +297,7 @@ impl PendingUserMessage {
             created_at: self.created_at.clone(),
             role: ConversationRole::User,
             message: self.message.clone(),
+            message_kind: Some(ConversationMessageKind::Chat),
             attachment_path: self.attachment_path.clone(),
             attachment_text: self.attachment_text.clone(),
             tutorial_response_key: self.tutorial_response_key.clone(),
@@ -326,6 +328,8 @@ pub struct PreparedUserResponse {
     pub id: String,
     pub created_at: String,
     pub message: String,
+    #[serde(default)]
+    pub message_kind: ConversationMessageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_summary: Option<String>,
 }
@@ -338,6 +342,7 @@ impl PreparedUserResponse {
             created_at: self.created_at.clone(),
             role: ConversationRole::Companion,
             message: self.message.clone(),
+            message_kind: Some(self.message_kind),
             attachment_path: None,
             attachment_text: None,
             tutorial_response_key: None,
@@ -387,20 +392,26 @@ impl PendingDelivery {
         Ok(())
     }
 
-    pub fn conversation_entry(&self) -> ConversationEntry {
-        ConversationEntry {
+    pub fn conversation_entry(&self) -> Result<ConversationEntry, PersistenceError> {
+        let message_kind = ConversationMessageKind::from_wire(&self.message_kind)
+            .filter(|kind| kind.is_normal_speech())
+            .ok_or_else(|| {
+                PersistenceError::Invalid("pending delivery の messageKind が不正です".to_owned())
+            })?;
+        Ok(ConversationEntry {
             schema_version: 1,
             id: self.remark_id.clone(),
             created_at: self.created_at.clone(),
             role: ConversationRole::Companion,
             message: self.message.clone(),
+            message_kind: Some(message_kind),
             attachment_path: None,
             attachment_text: None,
             tutorial_response_key: None,
             screen_context: None,
             caused_by_ids: self.observation_ids.clone(),
             notification_priority: self.notification_priority.clone(),
-        }
+        })
     }
 }
 

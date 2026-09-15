@@ -9,7 +9,11 @@ use super::{BubblePresentation, BubbleRecord, BubbleState};
 use crate::presentation::PresentationEvent;
 use crate::ui_events::{Handling, PresenterId, UiEffect, UiEvent, UiTask, ViewCommand};
 use anyhow::{Context, Result};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -30,6 +34,11 @@ pub(crate) struct BubblePresenter {
     display: String,
     typing_epoch: u64,
     typing: Option<(String, usize, usize)>,
+    edge_recall: crate::bubble_edge_recall::EdgeRecallDebounce,
+    onboarding_disables_edge_recall: bool,
+    conversation_generation: u64,
+    main_focused: bool,
+    config_revision: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -45,16 +54,48 @@ impl BubblePresenter {
         model: Arc<Mutex<BubbleState>>,
         config: coosenpai_core::config::Config,
     ) -> Self {
+        let config_revision = config.revision;
+        Self::new_with_revision(model, config, Arc::new(AtomicU64::new(config_revision)))
+    }
+
+    pub(crate) fn new_with_revision(
+        model: Arc<Mutex<BubbleState>>,
+        config: coosenpai_core::config::Config,
+        config_revision: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             model,
             config,
+            config_revision,
             ..Self::default()
         }
     }
 
     pub(crate) fn initialize(&mut self, snapshot: &crate::snapshot::AppSnapshot) {
+        let onboarding_disables_edge_recall =
+            snapshot.onboarding.setup_required || snapshot.onboarding.tutorial_active;
+        let reset_edge_recall = self.config.revision != snapshot.config.revision
+            || self.config.bubble.edge_recall != snapshot.config.bubble.edge_recall
+            || self.config.bubble.position != snapshot.config.bubble.position
+            || self.config.bubble.display != snapshot.config.bubble.display
+            || self.conversation_generation != snapshot.selected_conversation_generation
+            || (!self.onboarding_disables_edge_recall && onboarding_disables_edge_recall);
         self.config = snapshot.config.clone();
         self.avatar_image_png = snapshot.avatar_image_png.clone();
+        self.onboarding_disables_edge_recall = onboarding_disables_edge_recall;
+        self.conversation_generation = snapshot.selected_conversation_generation;
+        if reset_edge_recall {
+            self.reset_edge_recall();
+        }
+    }
+
+    pub(crate) async fn sync_latest_coo_speech(&self, snapshot: &crate::snapshot::AppSnapshot) {
+        let record = latest_coo_speech(snapshot);
+        self.model.lock().await.set_latest_coo_speech(record);
+    }
+
+    fn reset_edge_recall(&mut self) {
+        self.edge_recall = crate::bubble_edge_recall::EdgeRecallDebounce::default();
     }
 
     pub(crate) async fn handle_input(
@@ -63,6 +104,10 @@ impl BubblePresenter {
         main_focused: bool,
         main_visible: bool,
     ) -> Handling {
+        if main_focused && !self.main_focused {
+            self.reset_edge_recall();
+        }
+        self.main_focused = main_focused;
         match event {
             UiEvent::BubbleClick { id, body } => {
                 let intro_click = if let Some(tutorial) = &self.tutorial {
@@ -278,6 +323,17 @@ impl BubblePresenter {
                 self.model.lock().await.expire(Instant::now());
                 self.refresh().await
             }
+            UiEvent::BubbleEdgePoll {
+                at_edge,
+                config_revision,
+            } => {
+                self.handle_edge_poll(at_edge, config_revision, main_focused)
+                    .await
+            }
+            UiEvent::BubbleEdgeRecallReset => {
+                self.reset_edge_recall();
+                Handling::Handled(Vec::new())
+            }
             UiEvent::BubbleSnapshot(reply) => {
                 let (snapshot, _) = self.snapshot().await;
                 let _ = reply.send(crate::commands::IpcResult::success((*snapshot).clone()));
@@ -288,9 +344,11 @@ impl BubblePresenter {
                 use super::BubbleMutation;
                 let hover = matches!(mutation, BubbleMutation::Hover { .. });
                 let appearance = matches!(mutation, BubbleMutation::Preview(_));
-                let changed = {
+                let conversation_generation_mutation =
+                    matches!(mutation, BubbleMutation::ConversationGeneration(_));
+                let (changed, conversation_generation) = {
                     let mut model = self.model.lock().await;
-                    match mutation {
+                    let changed = match mutation {
                         BubbleMutation::ConversationGeneration(generation) => {
                             model.advance_conversation_generation(generation)
                         }
@@ -313,8 +371,13 @@ impl BubblePresenter {
                             model.set_hover(&id, hovering);
                             false
                         }
-                    }
+                    };
+                    (changed, model.conversation_generation())
                 };
+                if conversation_generation_mutation && changed {
+                    self.conversation_generation = conversation_generation;
+                    self.reset_edge_recall();
+                }
                 let _ = reply.send(changed);
                 if appearance {
                     self.refresh_appearance().await
@@ -515,6 +578,7 @@ impl BubblePresenter {
                 }
             }
             UiEvent::BubbleRendererReady { attempt } => {
+                self.observe_conversation_generation().await;
                 let (snapshot, display) = self.snapshot().await;
                 let setup = snapshot
                     .records
@@ -536,6 +600,7 @@ impl BubblePresenter {
             UiEvent::BubbleRefresh | UiEvent::Mounted(_) => self.refresh().await,
             UiEvent::SnapshotUpdated(snapshot) => {
                 self.initialize(&snapshot);
+                self.sync_latest_coo_speech(&snapshot).await;
                 self.refresh_appearance().await
             }
             UiEvent::Present(ViewCommand::Hide) => {
@@ -601,12 +666,86 @@ impl BubblePresenter {
     }
 
     async fn refresh(&mut self) -> Handling {
+        self.observe_conversation_generation().await;
         let (snapshot, display) = self.snapshot().await;
         let Handling::Handled(mut effects) = self.update(snapshot, display) else {
             unreachable!()
         };
         effects.extend(self.schedule_expiry().await);
         Handling::Handled(effects)
+    }
+
+    async fn handle_edge_poll(
+        &mut self,
+        at_edge: bool,
+        config_revision: u64,
+        main_focused: bool,
+    ) -> Handling {
+        if config_revision != self.config.revision
+            || config_revision != self.config_revision.load(Ordering::Acquire)
+        {
+            self.reset_edge_recall();
+            return Handling::Handled(Vec::new());
+        }
+        self.observe_conversation_generation().await;
+        if !at_edge {
+            self.reset_edge_recall();
+            return Handling::Handled(Vec::new());
+        }
+        if self.edge_recall_is_suppressed(main_focused).await {
+            return Handling::Handled(Vec::new());
+        }
+
+        let now = Instant::now();
+        let (next, recalled) =
+            crate::bubble_edge_recall::observe_edge(self.edge_recall, at_edge, now);
+        self.edge_recall = next;
+        if !recalled {
+            return Handling::Handled(Vec::new());
+        }
+
+        let changed = self.model.lock().await.recall_latest(
+            now,
+            Duration::from_millis(self.config.notification.bubble_duration_ms),
+            self.config.bubble.max_stack,
+        );
+        if changed {
+            self.refresh().await
+        } else {
+            Handling::Handled(Vec::new())
+        }
+    }
+
+    async fn observe_conversation_generation(&mut self) {
+        let generation = self.model.lock().await.conversation_generation();
+        if generation != self.conversation_generation {
+            self.conversation_generation = generation;
+            self.reset_edge_recall();
+        }
+    }
+
+    async fn onboarding_disables_edge_recall(&mut self) -> bool {
+        let current = if let Some(tutorial) = self.tutorial.clone() {
+            let tutorial = tutorial.lock().await;
+            let state = tutorial.state();
+            state.tutorial_active() || state.needs_setup()
+        } else {
+            false
+        };
+        if current && !self.onboarding_disables_edge_recall {
+            self.reset_edge_recall();
+        }
+        self.onboarding_disables_edge_recall = current;
+        current
+    }
+
+    async fn edge_recall_is_suppressed(&mut self, main_focused: bool) -> bool {
+        crate::bubble_edge_recall::is_suppressed(
+            self.config.bubble.edge_recall,
+            main_focused,
+            self.onboarding_disables_edge_recall().await,
+            self.model.lock().await.can_poll_edge_recall(),
+        )
     }
 
     async fn schedule_expiry(&mut self) -> Vec<UiEffect> {
@@ -726,5 +865,61 @@ fn acknowledged_in_main() -> BubblePresentation {
         dismissed: CancellationToken::new(),
         registered_on_bubble_surface: false,
     }
+}
+
+fn latest_coo_speech(snapshot: &crate::snapshot::AppSnapshot) -> Option<BubbleRecord> {
+    let tutorial_input_ids = snapshot
+        .conversation
+        .iter()
+        .filter(|entry| {
+            entry.role == coosenpai_core::state::ConversationRole::User
+                && entry.tutorial_response_key.is_some()
+        })
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
+    let normal_user_input_ids = snapshot
+        .conversation
+        .iter()
+        .filter(|entry| entry.is_normal_user_input())
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
+    snapshot.conversation.iter().rev().find_map(|entry| {
+        if entry
+            .caused_by_ids
+            .iter()
+            .any(|id| tutorial_input_ids.contains(id))
+        {
+            return None;
+        }
+        let message_kind = if entry.is_normal_speech() {
+            entry.message_kind
+        } else if entry.role == coosenpai_core::state::ConversationRole::Companion
+            && entry.message_kind.is_none()
+            && entry.tutorial_response_key.is_none()
+            && !entry.message.trim().is_empty()
+            && entry
+                .caused_by_ids
+                .iter()
+                .any(|id| normal_user_input_ids.contains(id))
+        {
+            Some(coosenpai_core::state::ConversationMessageKind::Chat)
+        } else {
+            None
+        }?;
+        Some(BubbleRecord {
+            id: entry.id.clone(),
+            created_at: entry.created_at.clone(),
+            message: entry.message.clone(),
+            message_kind: message_kind.as_wire().to_owned(),
+            notification_priority: entry.notification_priority.clone(),
+            caused_by: entry.caused_by_ids.last().cloned(),
+            display_name: snapshot.companion_display_name.clone(),
+            persona: snapshot.config.companion.persona.clone(),
+            avatar_color: snapshot.config.ui.avatar_color.clone(),
+            conversation_generation: snapshot.selected_conversation_generation,
+            persistent: false,
+            interaction: None,
+        })
+    })
 }
 

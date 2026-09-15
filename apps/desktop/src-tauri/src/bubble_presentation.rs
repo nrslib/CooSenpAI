@@ -2,7 +2,6 @@ use super::{BubbleContent, BubblePresenter, BubbleWindowEvent};
 use crate::presentation::{PresentationAction, PresentationEvent};
 use crate::ui_events::{Handling, PresenterId, UiEffect, UiEvent, UiTask, ViewCommand};
 use std::sync::Arc;
-use std::time::Duration;
 
 impl BubblePresenter {
     pub(crate) fn handle(&mut self, event: UiEvent) -> Handling {
@@ -143,13 +142,16 @@ impl BubblePresenter {
                 layout,
             },
         ];
+        if has_content != had_content {
+            self.edge_recall = crate::bubble_edge_recall::suspend_edge_recall(self.edge_recall);
+        }
         if has_content && !had_content {
             effects.push(UiEffect::Pointer(true));
         }
         if !has_content && had_content {
             effects.push(UiEffect::Pointer(false));
             effects.push(UiEffect::Run(UiTask::Delay {
-                duration: Duration::from_millis(180),
+                duration: crate::bubbles::BUBBLE_EXIT_FADE,
                 event: UiEvent::BubbleHideExpired(snapshot.generation),
             }));
         }

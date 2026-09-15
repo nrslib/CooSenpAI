@@ -28,6 +28,7 @@ struct SpeechHelperTests {
         testTranscriptAccumulator()
         testSpeechEngine()
         testRecognitionSession()
+        testSpeechAudioGain()
         testAudioConverter()
         testWavInput()
         testWavDump()

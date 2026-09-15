@@ -23,12 +23,20 @@ type TerminalEventPermit = mpsc::OwnedPermit<HearingEventResult>;
 pub struct MacHearing {
     helper: PathBuf,
     logger: Arc<dyn RuntimeLogger>,
+    #[cfg(test)]
+    test_process_observer: Option<TestProcessObserver>,
 }
 
 impl MacHearing {
     pub fn new(helper: PathBuf, logger: Arc<dyn RuntimeLogger>) -> Self {
-        Self { helper, logger }
+        Self {
+            helper,
+            logger,
+            #[cfg(test)]
+            test_process_observer: None,
+        }
     }
+
 }
 
 #[async_trait]
@@ -46,6 +54,11 @@ impl HearingPort for MacHearing {
                 "聴覚観察の入力源が選択されていません".to_owned(),
             ));
         }
+
+        #[cfg(test)]
+        let process_guard = crate::test_support::acquire_helper_process_lock().await;
+        #[cfg(test)]
+        let test_process_observer = self.test_process_observer.clone();
 
         let mut specs = Vec::with_capacity(sources.len());
         for source in sources {
@@ -69,6 +82,12 @@ impl HearingPort for MacHearing {
                 Ok(process) => (Some(process), None),
                 Err(error) => (None, Some(process_error(error))),
             };
+            #[cfg(test)]
+            if initial_process.is_some() {
+                if let Some(observer) = test_process_observer.as_ref() {
+                    observer(source, TestProcessEvent::Spawned);
+                }
+            }
             let _ = self.logger.write("INFO", &format!("hearing-start: source={source:?} stage=spawn phase=end elapsed-ms={} success={}", started.elapsed().as_millis(), initial_process.is_some()));
             specs.push(SourceProcessSpec {
                 source,
@@ -78,6 +97,8 @@ impl HearingPort for MacHearing {
                 initial_error,
                 parent_cancellation: cancellation.clone(),
                 logger: self.logger.clone(),
+                #[cfg(test)]
+                test_process_observer: test_process_observer.clone(),
             });
         }
         if specs.iter().all(|spec| spec.initial_process.is_none()) {
@@ -97,6 +118,8 @@ impl HearingPort for MacHearing {
             event_tx,
             cancel_requested.clone(),
             cancellation,
+            #[cfg(test)]
+            process_guard,
         ));
         Ok(HearingSession::from_channels_with_cancellation(
             command_tx,
@@ -241,6 +264,7 @@ async fn run_session(
     events: mpsc::Sender<HearingEventResult>,
     cancel_requested: CancellationToken,
     parent_cancellation: CancellationToken,
+    #[cfg(test)] _process_guard: crate::test_support::HelperProcessLock,
 ) {
     let mut terminal_event = match events.clone().reserve_owned().await {
         Ok(permit) => Some(permit),

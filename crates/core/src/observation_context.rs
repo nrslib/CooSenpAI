@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::ActivityTriggerKind;
+use crate::ports::FocusElement;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -15,6 +16,8 @@ pub struct PendingFrameContext {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<FocusElement>,
 }
 
 impl PendingFrameContext {
@@ -27,6 +30,28 @@ impl PendingFrameContext {
         target: String,
         ocr_text: Option<String>,
     ) -> Self {
+        Self::bounded_with_focus(
+            id,
+            captured_at,
+            trigger,
+            front_app,
+            app,
+            target,
+            ocr_text,
+            None,
+        )
+    }
+
+    pub fn bounded_with_focus(
+        id: String,
+        captured_at: String,
+        trigger: ActivityTriggerKind,
+        front_app: Option<String>,
+        app: Option<String>,
+        target: String,
+        ocr_text: Option<String>,
+        focus: Option<FocusElement>,
+    ) -> Self {
         Self {
             id,
             captured_at,
@@ -35,6 +60,7 @@ impl PendingFrameContext {
             app: app.map(|value| super::truncate(&value, 300)),
             target: super::truncate(&target, 500),
             ocr_text: ocr_text.map(|value| super::truncate(&value, 2_000)),
+            focus: focus.map(FocusElement::bounded),
         }
     }
 }

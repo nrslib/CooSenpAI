@@ -149,6 +149,7 @@ export const desktopApi = {
   deleteMemory: (factId: string, confirmationId: string): Promise<IpcResult<MemoryCatalog>> => call("memory_delete", { payload: { factId, confirmationId } }),
   consolidateMemory: (period: string): Promise<IpcResult<MemoryCatalog>> => call("memory_consolidate", { payload: { period } }),
   openSystemSettings: (): Promise<IpcResult<null>> => call("panel_open_system_settings"),
+  openAccessibilitySettings: (): Promise<IpcResult<null>> => call("panel_open_accessibility_settings"),
   openLicenseDocument: (document: LicenseDocument): Promise<IpcResult<null>> => call("license_document_open", { payload: { document } }),
   relaunch: (): Promise<IpcResult<null>> => call("app_relaunch"),
   exit: (): Promise<IpcResult<null>> => call("app_exit"),

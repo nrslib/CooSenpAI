@@ -14,7 +14,9 @@ use coosenpai_core::debug::{
     ocr_preview, DebugCaptureBatch, DebugFrameRecord, DebugGateRecord, DebugStore,
 };
 use coosenpai_core::persistence::DirectoryLocks;
-use coosenpai_core::ports::{ActivitySnapshot, ApplicationCapturePort, OcrPort, RuntimeLogger};
+use coosenpai_core::ports::{
+    ActivitySnapshot, ApplicationCapturePort, FocusElementPort, OcrPort, RuntimeLogger,
+};
 use coosenpai_core::state::{ActivityTriggerKind, PendingFrameContext};
 use coosenpai_core::watch_coordinator::{
     application_capture_is_needed, application_is_foreground, ApplicationTriggerCoordinator,
@@ -103,6 +105,7 @@ impl ApplicationWatchSet {
         immediate_capture: bool,
         ocr_enabled: bool,
         capture: &dyn ApplicationCapturePort,
+        focus_element: &Arc<dyn FocusElementPort>,
         ocr: &dyn OcrPort,
         semaphore: &Arc<Semaphore>,
         memory: &mut WatchMemory,
@@ -171,6 +174,7 @@ impl ApplicationWatchSet {
                 trigger,
                 ocr_enabled,
                 capture,
+                focus_element,
                 ocr,
                 semaphore,
                 target,
@@ -203,6 +207,7 @@ async fn capture_application(
     trigger: ActivityTriggerKind,
     ocr_enabled: bool,
     capture: &dyn ApplicationCapturePort,
+    focus_element: &Arc<dyn FocusElementPort>,
     ocr: &dyn OcrPort,
     semaphore: &Arc<Semaphore>,
     target: &mut ApplicationWatchState,
@@ -222,6 +227,19 @@ async fn capture_application(
     else {
         return Err(anyhow::anyhow!("見守りの撮影が取り消されました"));
     };
+    let focus_task = config.watch.focus_element.then(|| {
+        let focus_element = focus_element.clone();
+        let cancellation = cancellation.clone();
+        let target_bundle_id = application.bundle_id.clone();
+        tokio::spawn(async move {
+            coosenpai_core::focus::read_focused_element(
+                focus_element.as_ref(),
+                &cancellation,
+                Some(target_bundle_id.as_str()),
+            )
+            .await
+        })
+    });
     let captured = capture
         .capture_application(
             &application.bundle_id,
@@ -231,6 +249,10 @@ async fn capture_application(
         )
         .await
         .map_err(anyhow::Error::new)?;
+    let focus = match focus_task {
+        Some(task) => task.await.ok().flatten(),
+        None => None,
+    };
     ensure_capture_active(&cancellation)?;
     if captured.is_empty() {
         target.last_capture = Instant::now();
@@ -268,6 +290,7 @@ async fn capture_application(
             memory.front_app.clone(),
             application.name.clone(),
             frame_target.clone(),
+            focus.clone(),
             config.debug.enabled,
         );
         if let Some(id) = &frame.debug_id {
@@ -446,7 +469,7 @@ async fn capture_application(
     let contexts = frames
         .iter()
         .map(|frame| {
-            PendingFrameContext::bounded(
+            PendingFrameContext::bounded_with_focus(
                 frame.context_id.clone(),
                 captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 trigger,
@@ -454,6 +477,7 @@ async fn capture_application(
                 Some(application.name.clone()),
                 frame.target.clone(),
                 frame.ocr_text.clone(),
+                frame.focus.clone(),
             )
         })
         .collect::<Vec<_>>();

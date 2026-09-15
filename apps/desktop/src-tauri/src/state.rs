@@ -16,7 +16,7 @@ use coosenpai_core::ports::{
     ClipboardReader, ClipboardWriter, ProviderApiKeyStore, RuntimeLogger, SelectedTextCopyPort,
 };
 use coosenpai_core::runtime::{RuntimeError, RuntimeErrorKind, RuntimeHandle, RuntimeLastError};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -101,6 +101,9 @@ pub(crate) struct DesktopState {
     watch_control: Mutex<WatchControl>,
     pub(crate) watch_intent_lock: Mutex<()>,
     runtime_active: AtomicBool,
+    bubble_edge_poll_failed: AtomicBool,
+    bubble_edge_last_observation: AtomicU8,
+    bubble_edge_last_config_revision: AtomicU64,
     shutting_down: AtomicBool,
     presence_startup_pending: AtomicBool,
     presence_inflight: Mutex<Option<String>>,
@@ -381,6 +384,11 @@ impl DesktopState {
             }),
             watch_intent_lock: Mutex::new(()),
             runtime_active: AtomicBool::new(runtime_active),
+            bubble_edge_poll_failed: AtomicBool::new(false),
+            bubble_edge_last_observation: AtomicU8::new(
+                crate::bubble_edge_recall::EDGE_POLL_UNKNOWN,
+            ),
+            bubble_edge_last_config_revision: AtomicU64::new(config_revision),
             shutting_down: AtomicBool::new(false),
             presence_startup_pending: AtomicBool::new(true),
             presence_inflight: Mutex::new(None),

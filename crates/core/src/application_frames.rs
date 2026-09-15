@@ -106,6 +106,7 @@ impl PreparedApplicationFrame {
         front_app: Option<String>,
         app: String,
         target: String,
+        focus: Option<crate::ports::FocusElement>,
         debug_enabled: bool,
     ) -> crate::observer::ObservationFrameInput {
         crate::observer::ObservationFrameInput {
@@ -122,6 +123,7 @@ impl PreparedApplicationFrame {
             app: Some(app),
             target,
             ocr_text: self.ocr.as_ref().map(|ocr| ocr.text.clone()),
+            focus,
             image_path: self.provider_path.clone(),
         }
     }

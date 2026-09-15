@@ -169,7 +169,7 @@ impl BubbleState {
             return false;
         }
         if self.history_id.is_some() {
-            return self.navigate(BubbleDeckDirection::Latest, now);
+            return self.return_to_latest_from_history(now);
         }
         // Actions keep their position; clicking their text only completes the typing effect.
         let finished = self.finish_reading(now);
@@ -180,10 +180,30 @@ impl BubbleState {
         finished || moved
     }
 
+    fn return_to_latest_from_history(&mut self, now: Instant) -> bool {
+        let Some(active_id) = self.active_id.clone() else {
+            return false;
+        };
+        if !self
+            .entries
+            .iter()
+            .any(|entry| entry.record.id == active_id)
+        {
+            return false;
+        }
+        self.pause_reading(now);
+        self.interrupted_history = None;
+        self.history_id = None;
+        self.reconcile_deck(now);
+        self.mark_changed();
+        true
+    }
+
     pub(crate) fn navigate(&mut self, direction: BubbleDeckDirection, now: Instant) -> bool {
         if self
             .active_entry()
             .is_some_and(|entry| entry.record.interaction.is_some())
+            || self.front_record().is_some_and(is_critical_notification)
         {
             return false;
         }
@@ -237,9 +257,7 @@ impl BubbleState {
             .entries
             .iter()
             .rev()
-            .find(|entry| {
-                entry.display_order.is_none() && entry.record.notification_priority == "critical"
-            })
+            .find(|entry| entry.display_order.is_none() && is_critical_notification(&entry.record))
             .map(|entry| entry.record.id.clone());
         if let Some(id) = critical {
             if let (Some(history), Some(active)) = (&self.history_id, &self.active_id) {
@@ -257,16 +275,17 @@ impl BubbleState {
         {
             changed |= self.finish_reading(now);
         }
-        if self.interrupted_history.is_some()
+        let restored_interrupted_history = self.interrupted_history.is_some()
             && !self.entries.iter().any(|entry| {
-                entry.record.notification_priority == "critical"
+                is_critical_notification(&entry.record)
                     && (!entry.read.is_cancelled() || entry.record.interaction.is_some())
-            })
-        {
+            });
+        if restored_interrupted_history {
             let (history, active) = self
                 .interrupted_history
-                .take()
-                .expect("interrupted history was checked");
+                .as_ref()
+                .expect("interrupted history was checked")
+                .clone();
             if self.entries.iter().any(|entry| entry.record.id == active) {
                 self.activate(active, now);
                 if self.entries.iter().any(|entry| entry.record.id == history) {
@@ -287,7 +306,7 @@ impl BubbleState {
                 .iter()
                 .find(|entry| {
                     entry.display_order.is_some()
-                        && entry.record.notification_priority == "critical"
+                        && is_critical_notification(&entry.record)
                         && !entry.read.is_cancelled()
                         && Some(&entry.record.id) != self.active_id.as_ref()
                 })
@@ -335,6 +354,9 @@ impl BubbleState {
             }
         }
         changed |= self.trim_deck();
+        if restored_interrupted_history {
+            self.interrupted_history = None;
+        }
         if changed {
             self.mark_changed();
         }
@@ -343,21 +365,22 @@ impl BubbleState {
 
     pub(super) fn trim_deck(&mut self) -> bool {
         let before = self.entries.len();
-        // Unanswered actions survive both limits. Pending ordinary notices keep only the newest n.
+        // Critical notices and the cards interrupted by one stay available for restoration.
         for displayed in [false, true] {
             while self
                 .entries
                 .iter()
                 .filter(|entry| {
-                    entry.display_order.is_some() == displayed && entry.record.interaction.is_none()
+                    entry.display_order.is_some() == displayed && is_stack_limited(entry)
                 })
                 .count()
                 > self.max_stack
             {
                 let candidate = self.entries.iter().find(|entry| {
                     entry.display_order.is_some() == displayed
-                        && entry.record.interaction.is_none()
+                        && is_stack_limited(entry)
                         && Some(&entry.record.id) != self.active_id.as_ref()
+                        && !self.is_interrupted_card(&entry.record.id)
                 });
                 let Some(id) = candidate.map(|entry| entry.record.id.clone()) else {
                     break;
@@ -371,4 +394,18 @@ impl BubbleState {
         }
         self.entries.len() != before
     }
+
+    fn is_interrupted_card(&self, id: &str) -> bool {
+        self.interrupted_history
+            .as_ref()
+            .is_some_and(|(history, active)| history == id || active == id)
+    }
+}
+
+fn is_critical_notification(record: &BubbleRecord) -> bool {
+    record.notification_priority == "critical"
+}
+
+fn is_stack_limited(entry: &BubbleEntry) -> bool {
+    !is_critical_notification(&entry.record) && entry.record.interaction.is_none()
 }

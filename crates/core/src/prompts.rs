@@ -184,6 +184,7 @@ pub struct ObserverPromptFrame {
     pub app: Option<String>,
     pub target: String,
     pub ocr_text: Option<String>,
+    pub focus: Option<crate::ports::FocusElement>,
 }
 
 pub fn build_observer_prompt(
@@ -225,8 +226,12 @@ pub fn build_observer_prompt(
                     });
                     format!("、ウィンドウ ID {window_id}{bounds}")
                 });
+                let focus = frame
+                    .focus
+                    .as_ref()
+                    .map_or_else(String::new, |value| format!("、{}", value.prompt_summary()));
                 format!(
-                    "フレーム {}: {} 秒、きっかけ: {}{target}{window}{display}{app}",
+                    "フレーム {}: {} 秒、きっかけ: {}{target}{window}{display}{app}{focus}",
                     frame.index,
                     frame.relative_seconds,
                     trigger_label(frame.trigger)
@@ -597,9 +602,10 @@ fn format_observation_summary(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .unwrap_or("なし");
+    let focus = format_focus_summaries(value);
     append_frame_paths(
         format!(
-            "- id={} 時刻={} きっかけ={} activity={} guess={} events={}\noutline:\n{}",
+            "- id={} 時刻={} きっかけ={} activity={} guess={} events={}{focus}\noutline:\n{}",
             observation_id(value).unwrap_or(""),
             value.get("createdAt").and_then(Value::as_str).unwrap_or(""),
             triggers,
@@ -655,14 +661,35 @@ fn format_omitted_observation(
     };
     append_frame_paths(
         format!(
-            "- 時刻={} activity={} events={}",
+            "- 時刻={} activity={} events={}{focus}",
             value.get("createdAt").and_then(Value::as_str).unwrap_or(""),
             single_line(activity),
-            events
+            events,
+            focus = format_focus_summaries(value),
         ),
         value,
         observation_frame_paths,
     )
+}
+
+fn format_focus_summaries(value: &Value) -> String {
+    let focus = value
+        .get("frames")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|frame| {
+            frame.get("focus").and_then(|focus| {
+                serde_json::from_value::<crate::ports::FocusElement>(focus.clone()).ok()
+            })
+        })
+        .map(|focus| focus.prompt_summary())
+        .collect::<Vec<_>>();
+    if focus.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", focus.join("\n"))
+    }
 }
 
 fn audio_source_label(value: &Value) -> &'static str {

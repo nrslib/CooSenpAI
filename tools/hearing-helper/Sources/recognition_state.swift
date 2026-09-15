@@ -27,63 +27,6 @@ enum RecognitionSegmentLifecycle: Equatable {
     case cancelling
 }
 
-final class RecognitionCallbackGate {
-    private let lock = NSLock()
-    private var isOpen = false
-    private var isDraining = false
-    private var isDiscarded = false
-    private var pendingCallbacks: [() -> Void] = []
-
-    func enqueue(_ callback: @escaping () -> Void) {
-        lock.lock()
-        guard !isDiscarded else {
-            lock.unlock()
-            return
-        }
-        guard isOpen, !isDraining else {
-            pendingCallbacks.append(callback)
-            lock.unlock()
-            return
-        }
-        lock.unlock()
-        callback()
-    }
-
-    func open() {
-        lock.lock()
-        guard !isDiscarded else {
-            lock.unlock()
-            return
-        }
-        isOpen = true
-        isDraining = true
-        lock.unlock()
-        while true {
-            lock.lock()
-            guard !isDiscarded else {
-                lock.unlock()
-                return
-            }
-            guard !pendingCallbacks.isEmpty else {
-                isDraining = false
-                lock.unlock()
-                return
-            }
-            let callbacks = pendingCallbacks
-            pendingCallbacks.removeAll(keepingCapacity: false)
-            lock.unlock()
-            callbacks.forEach { $0() }
-        }
-    }
-
-    func discard() {
-        lock.lock()
-        isDiscarded = true
-        pendingCallbacks.removeAll(keepingCapacity: false)
-        lock.unlock()
-    }
-}
-
 struct RecognitionRestartTracker {
     static let windowNanoseconds: UInt64 = 60_000_000_000
     static let maximumRestartCount = 30
@@ -120,21 +63,19 @@ struct AudioSourceAvailability {
     }
 }
 
-struct RecognitionState<Request, Task, Recognizer> {
+struct RecognitionState<Session> {
     let source: AudioSource
-    let request: Request
-    let task: Task
-    let recognizer: Recognizer
+    let session: Session
     let generation: Int
     var lifecycle: RecognitionSegmentLifecycle
-    var taskTerminalArrived: Bool
-    var taskCancellationRequested: Bool
+    var sessionTerminalArrived: Bool
+    var sessionCancellationRequested: Bool
     var closeReason: RecognitionSegmentCloseReason?
     var transcriptSequence: UInt64
 }
 
-struct RecognitionStateStore<Request, Task, Recognizer> {
-    typealias State = RecognitionState<Request, Task, Recognizer>
+struct RecognitionStateStore<Session> {
+    typealias State = RecognitionState<Session>
 
     private struct GenerationKey: Hashable {
         let source: AudioSource
@@ -155,9 +96,7 @@ struct RecognitionStateStore<Request, Task, Recognizer> {
 
     mutating func install(
         source: AudioSource,
-        request: Request,
-        task: Task,
-        recognizer: Recognizer,
+        session: Session,
         generation: Int,
         sourceIsActive: Bool
     ) -> Bool {
@@ -168,16 +107,14 @@ struct RecognitionStateStore<Request, Task, Recognizer> {
               !retiredGenerations.contains(key) else {
             return false
         }
-        let taskTerminalArrived = terminalGenerations.remove(key) != nil
+        let sessionTerminalArrived = terminalGenerations.remove(key) != nil
         states[source] = State(
             source: source,
-            request: request,
-            task: task,
-            recognizer: recognizer,
+            session: session,
             generation: generation,
-            lifecycle: taskTerminalArrived ? .terminal : .accepting,
-            taskTerminalArrived: taskTerminalArrived,
-            taskCancellationRequested: false,
+            lifecycle: sessionTerminalArrived ? .terminal : .accepting,
+            sessionTerminalArrived: sessionTerminalArrived,
+            sessionCancellationRequested: false,
             closeReason: nil,
             transcriptSequence: 0
         )
@@ -195,7 +132,7 @@ struct RecognitionStateStore<Request, Task, Recognizer> {
         return state.transcriptSequence
     }
 
-    mutating func markTaskTerminal(source: AudioSource, generation: Int) -> Bool {
+    mutating func markSessionTerminal(source: AudioSource, generation: Int) -> Bool {
         guard latestGenerations[source] == generation else { return false }
         let key = GenerationKey(source: source, generation: generation)
         guard !retiredGenerations.contains(key) else { return false }
@@ -206,10 +143,10 @@ struct RecognitionStateStore<Request, Task, Recognizer> {
             return true
         }
         guard state.generation == generation,
-              !state.taskTerminalArrived else {
+              !state.sessionTerminalArrived else {
             return false
         }
-        state.taskTerminalArrived = true
+        state.sessionTerminalArrived = true
         if state.lifecycle == .accepting {
             state.lifecycle = .terminal
         }
@@ -237,11 +174,11 @@ struct RecognitionStateStore<Request, Task, Recognizer> {
         guard var state = states[source],
               state.generation == generation,
               state.lifecycle == .ending,
-              !state.taskTerminalArrived else {
+              !state.sessionTerminalArrived else {
             return nil
         }
         state.lifecycle = .cancelling
-        state.taskCancellationRequested = true
+        state.sessionCancellationRequested = true
         states[source] = state
         return state
     }
@@ -253,7 +190,7 @@ struct RecognitionStateStore<Request, Task, Recognizer> {
         guard let state = states[source],
               state.generation == generation,
               state.lifecycle == .cancelling,
-              !state.taskTerminalArrived else {
+              !state.sessionTerminalArrived else {
             return nil
         }
         return remove(source: source, generation: generation)
@@ -276,20 +213,20 @@ struct RecognitionStateStore<Request, Task, Recognizer> {
             && latestGenerations[source] == generation
     }
 
-    func currentRequest(for source: AudioSource) -> Request? {
-        states[source]?.request
+    func currentSession(for source: AudioSource) -> Session? {
+        states[source]?.session
     }
 
     func currentGeneration(for source: AudioSource) -> Int? {
         states[source]?.generation
     }
 
-    func taskTerminalArrived(for source: AudioSource) -> Bool {
-        states[source]?.taskTerminalArrived == true
+    func sessionTerminalArrived(for source: AudioSource) -> Bool {
+        states[source]?.sessionTerminalArrived == true
     }
 
-    func taskCancellationRequested(for source: AudioSource) -> Bool {
-        states[source]?.taskCancellationRequested == true
+    func sessionCancellationRequested(for source: AudioSource) -> Bool {
+        states[source]?.sessionCancellationRequested == true
     }
 
     func closeReason(for source: AudioSource) -> RecognitionSegmentCloseReason? {

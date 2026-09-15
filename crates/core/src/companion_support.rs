@@ -4,7 +4,9 @@ use crate::persistence::JsonlStore;
 use crate::provider::{
     ProviderEventSink, ProviderMidTurnInput, ProviderResult, ProviderUsage, SessionRequest,
 };
-use crate::state::{ConversationEntry, ConversationRole, ObservationRecord};
+use crate::state::{
+    ConversationEntry, ConversationMessageKind, ConversationRole, ObservationRecord,
+};
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -213,12 +215,31 @@ pub(super) fn conversation_entry_with_causes_at(
     priority: &str,
     caused_by_ids: Vec<String>,
 ) -> ConversationEntry {
+    conversation_entry_with_kind_and_causes_at(
+        now,
+        role,
+        message,
+        priority,
+        ConversationMessageKind::Chat,
+        caused_by_ids,
+    )
+}
+
+pub(super) fn conversation_entry_with_kind_and_causes_at(
+    now: DateTime<Utc>,
+    role: ConversationRole,
+    message: String,
+    priority: &str,
+    message_kind: ConversationMessageKind,
+    caused_by_ids: Vec<String>,
+) -> ConversationEntry {
     ConversationEntry {
         schema_version: 1,
         id: Uuid::new_v4().to_string(),
         created_at: now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         role,
         message,
+        message_kind: Some(message_kind),
         attachment_path: None,
         attachment_text: None,
         tutorial_response_key: None,

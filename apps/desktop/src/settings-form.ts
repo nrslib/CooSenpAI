@@ -23,6 +23,7 @@ export interface FormState {
   avatarImageLoadFailed: boolean;
   persona: string;
   watchFullscreen: boolean;
+  watchFocusElement: boolean;
   watchApps: readonly WatchAppConfig[];
   voiceOutputEnabled: boolean;
   voiceOutputProvider: CooSenpaiConfig["voiceOutput"]["provider"];
@@ -107,6 +108,7 @@ export interface FormState {
   speechInputDevice: string;
   bubbleMaxStack: string;
   bubbleKeepLatest: boolean;
+  bubbleEdgeRecall: boolean;
   bubblePosition: "bottom-right" | "top-right" | "bottom-left" | "top-left";
   bubbleDisplay: "main" | "cursor" | "front";
   uiTheme: "system" | "light" | "dark";
@@ -131,6 +133,7 @@ export type SettingsUpdate = <K extends keyof FormState>(key: K, value: FormStat
 export type SettingsErrorFor = (path: string) => string | undefined;
 
 const tuningDefaults = {
+  watchFocusElement: false,
   sendIntervalMs: "60000", sendDebounceMs: "2000", framesPerSend: "4", appWindowLimit: "4", downscaleWidth: "1280",
   typingPauseMs: "2000", activeThresholdMs: "1000", appSwitch: true, appSwitchSettleMs: "1500",
   maxIntervalMs: "60000", minSpacingMs: "5000", pollMs: "1000", batteryEnabled: true,
@@ -146,6 +149,7 @@ const tuningDefaults = {
 };
 
 export const tuningHelp: Readonly<Record<string, { readonly defaultValue: string; readonly defaultValueKey?: TranslationKey; readonly descriptionKey: TranslationKey }>> = {
+  "watch.focusElement": { defaultValue: "disabled", defaultValueKey: "common.disabled", descriptionKey: "settings.tuning.focusElement" },
   "watch.sendIntervalMs": { defaultValue: "60000", descriptionKey: "settings.tuning.sendInterval" },
   "watch.sendDebounceMs": { defaultValue: "2000", descriptionKey: "settings.tuning.sendDebounce" },
   "watch.framesPerSend": { defaultValue: "4", descriptionKey: "settings.tuning.framesPerSend" },
@@ -193,6 +197,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     avatarImageLoadFailed,
     persona: config.companion.persona,
     watchFullscreen: config.watch.fullscreen,
+    watchFocusElement: config.watch.focusElement,
     watchApps: config.watch.apps.map((app) => ({ ...app })),
     voiceOutputEnabled: config.voiceOutput.enabled,
     voiceOutputProvider: config.voiceOutput.provider,
@@ -220,6 +225,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     imageQuickActions: [...config.popup.quickActions.image],
     bubbleMaxStack: String(config.bubble.maxStack),
     bubbleKeepLatest: config.bubble.keepLatest,
+    bubbleEdgeRecall: config.bubble.edgeRecall,
     bubblePosition: config.bubble.position,
     bubbleDisplay: config.bubble.display,
     uiTheme: config.ui.theme,
@@ -343,7 +349,7 @@ export function toPatch(form: FormState): ConfigPatch {
     speech: { locale: form.speechLocale, mode: form.speechMode, confirmBeforeSend: form.speechConfirmBeforeSend, inputDevice: form.speechInputDevice },
     keymap: { captureRegion: form.captureShortcut || null, microphone: form.microphoneShortcut || null, togglePanel: form.togglePanelShortcut || null, toggleAvatar: form.toggleAvatarShortcut || null, toggleWatch: form.toggleWatchShortcut || null, sendText: form.sendTextShortcut || null, copyLastReply: form.copyLastReplyShortcut || null, sendKey: form.sendKey },
     popup: { quickActions: { text: form.textQuickActions, image: form.imageQuickActions } },
-    bubble: { keepLatest: form.bubbleKeepLatest, maxStack: Number(form.bubbleMaxStack), position: form.bubblePosition, display: form.bubbleDisplay },
+    bubble: { keepLatest: form.bubbleKeepLatest, edgeRecall: form.bubbleEdgeRecall, maxStack: Number(form.bubbleMaxStack), position: form.bubblePosition, display: form.bubbleDisplay },
     ui: { avatarColor: form.avatarColor.toLowerCase() === DEFAULT_AVATAR_COLOR ? null : form.avatarColor, avatarPath: form.avatarPath, theme: form.uiTheme, font: form.uiFont, language: form.language, thoughtBubble: form.thoughtBubble },
     app: { checkForUpdates: form.checkForUpdates, launchAtLogin: form.launchAtLogin },
   };
@@ -353,6 +359,7 @@ function toBasePatch(form: FormState): ConfigPatch {
   return {
     watch: {
       fullscreen: form.watchFullscreen,
+      focusElement: form.watchFocusElement,
       apps: form.watchApps,
       sendIntervalMs: Number(form.sendIntervalMs),
       sendDebounceMs: Number(form.sendDebounceMs),

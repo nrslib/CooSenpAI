@@ -35,6 +35,7 @@ pub enum TextKey {
     TutorialGuideNotReady,
     ShortcutUnset,
     ShortcutSpace,
+    ShortcutTutorialOperationNotAllowed,
     EmptyClipboard,
     CopyCompleted,
     UpdateAvailable,
@@ -467,6 +468,12 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::ShortcutUnset, Locale::En) => "Not set",
         (TextKey::ShortcutSpace, Locale::Ja) => "空白",
         (TextKey::ShortcutSpace, Locale::En) => "Space",
+        (TextKey::ShortcutTutorialOperationNotAllowed, Locale::Ja) => {
+            "チュートリアル中はこの操作はできません。案内の段で試してください。"
+        }
+        (TextKey::ShortcutTutorialOperationNotAllowed, Locale::En) => {
+            "This operation is unavailable during the tutorial. Try it in the instructed step."
+        }
         (TextKey::EmptyClipboard, Locale::Ja) => "文章を選んで {shortcut} を押してください",
         (TextKey::EmptyClipboard, Locale::En) => "Select text, then press {shortcut}.",
         (TextKey::CopyCompleted, Locale::Ja) => "コピーしました",

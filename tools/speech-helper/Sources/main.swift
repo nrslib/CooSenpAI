@@ -101,6 +101,7 @@ private final class SpeechSession: @unchecked Sendable {
             let recognition = SpeechRecognitionSession(
                 locale: locale, audio: audio, analysis: analysis,
                 scheduler: MainQueueSpeechDeadlineScheduler(),
+                queue: DispatchQueue.main,
                 startRecording: { [weak self] in self?.startRecording(format: format, microphone: microphone) },
                 stopRecording: { [weak self] in self?.stopRecording() },
                 emit: { [weak self] output in self?.handleOutput(output) },

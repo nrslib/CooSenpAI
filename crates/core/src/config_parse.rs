@@ -237,6 +237,7 @@ fn parse_bubble(
         &[
             "alwaysShow",
             "keepLatest",
+            "edgeRecall",
             "maxStack",
             "position",
             "display",
@@ -246,6 +247,7 @@ fn parse_bubble(
     BubbleConfig {
         always_show: boolean(object, "alwaysShow", false, "bubble.alwaysShow", issues),
         keep_latest: boolean(object, "keepLatest", false, "bubble.keepLatest", issues),
+        edge_recall: boolean(object, "edgeRecall", true, "bubble.edgeRecall", issues),
         max_stack: positive_usize(object, "maxStack", 3, "bubble.maxStack", issues),
         position: enum_string(
             object,
@@ -300,6 +302,7 @@ fn parse_watch(
             "ocrGate",
             "enabled",
             "fullscreen",
+            "focusElement",
             "apps",
         ],
         "watch",
@@ -328,6 +331,7 @@ fn parse_watch(
     let result = WatchConfig {
         enabled: boolean(object, "enabled", false, "watch.enabled", issues),
         fullscreen: boolean(object, "fullscreen", true, "watch.fullscreen", issues),
+        focus_element: boolean(object, "focusElement", false, "watch.focusElement", issues),
         apps: parse_watch_apps(object.get("apps"), issues),
         send_interval_ms: positive_u64(
             object,

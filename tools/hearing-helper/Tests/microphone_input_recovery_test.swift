@@ -64,7 +64,7 @@ func testMicrophoneInputRecovery() {
 }
 
 private func testMicrophoneInputResetPreservesSpeaker() {
-    var controller = RecognitionSegmentController<String, String, String>(
+    var controller = RecognitionSegmentController<String>(
         pendingCapacityNanoseconds: 10_000, preRollCapacityNanoseconds: 10_000
     )
     let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
@@ -75,22 +75,20 @@ private func testMicrophoneInputResetPreservesSpeaker() {
     for source in AudioSource.allCases {
         let generation = controller.reserveGeneration(for: source)
         if source == .microphone { microphoneGeneration = generation }
-        assert(controller.install(source: source, request: source.rawValue,
-                                  task: source.rawValue, recognizer: source.rawValue,
+        assert(controller.install(source: source, session: source.rawValue,
                                   generation: generation, sourceIsActive: true))
         _ = controller.appendPending(pending, for: source, durationNanoseconds: 1)
         controller.appendPreRoll(pending, for: source, durationNanoseconds: 1)
     }
     let removed = controller.resetInput(for: .microphone)
     assert(removed?.source == .microphone)
-    assert(controller.currentRequest(for: .microphone) == nil)
+    assert(controller.currentSession(for: .microphone) == nil)
     assert(!controller.isCurrentState(.microphone, microphoneGeneration))
-    assert(!controller.install(source: .microphone, request: "stale", task: "stale",
-                               recognizer: "stale", generation: microphoneGeneration,
+    assert(!controller.install(source: .microphone, session: "stale", generation: microphoneGeneration,
                                sourceIsActive: true))
     assert(!controller.hasPendingAudio(for: .microphone))
     assert(controller.takePreRoll(for: .microphone).isEmpty)
-    assert(controller.currentRequest(for: .speaker) == AudioSource.speaker.rawValue)
+    assert(controller.currentSession(for: .speaker) == AudioSource.speaker.rawValue)
     assert(controller.hasPendingAudio(for: .speaker))
     assert(controller.takePreRoll(for: .speaker).count == 1)
 }
@@ -105,7 +103,7 @@ private final class SourceFailureAppendTarget: AudioBufferAppendTarget {
 
 private func testBackgroundSourceFailureStopsMicrophoneOnMain() {
     let session = HearingSession(
-        locale: Locale(identifier: "ja-JP"), inputDevice: "default",
+        locale: Locale(identifier: "ja-JP"), engine: .sf, inputDevice: "default",
         sources: [.microphone, .speaker], debugInputWavPath: nil,
         debugDumpAppendedPath: nil, debugRequestAuth: false, speakerBackend: .screenCaptureKit
     )
@@ -140,7 +138,7 @@ private func testBackgroundSourceFailureStopsMicrophoneOnMain() {
 
 private func testOldSourceFailureDoesNotStopReplacementMicrophone() {
     let session = HearingSession(
-        locale: Locale(identifier: "ja-JP"), inputDevice: "default",
+        locale: Locale(identifier: "ja-JP"), engine: .sf, inputDevice: "default",
         sources: [.microphone, .speaker], debugInputWavPath: nil,
         debugDumpAppendedPath: nil, debugRequestAuth: false, speakerBackend: .screenCaptureKit
     )

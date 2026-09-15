@@ -305,6 +305,7 @@ impl DesktopState {
         F: FnOnce(Config) -> Result<Config, coosenpai_core::config::ConfigError>,
     {
         let _audio = self.config_update.audio.lock().await;
+        let _edge_recall = self.config_update.edge_recall_write().await;
         let recovery = self.runtime.config();
         let (config, stop_session) = coosenpai_core::config::patch_config_before_save_if_revision(
             &self.paths,
@@ -392,6 +393,7 @@ impl DesktopState {
                 config.companion.persona = persona.clone();
                 Ok(config)
             })?;
+        self.config_update.observe_config_revision(config.revision);
         if previous == persona {
             transaction.commit_config(config.revision)?;
             self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(
@@ -449,6 +451,7 @@ impl DesktopState {
                 config.companion.persona = persona.clone();
                 Ok(config)
             })?;
+        self.config_update.observe_config_revision(config.revision);
         if previous == persona {
             transaction.commit_config(config.revision)?;
             self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(

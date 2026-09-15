@@ -38,7 +38,7 @@ pub(crate) fn current_audio_permissions(
 ) -> crate::snapshot::AudioPermissions {
     crate::snapshot::AudioPermissions {
         speech: current_permissions(&crate::platform::MacSpeechPermissions, "音声入力", logger),
-        hearing: current_permissions(&crate::platform::MacHearingPermissions, "聴覚観察", logger),
+        hearing: current_permissions(&crate::platform::MacSpeechPermissions, "聴覚観察", logger),
     }
 }
 

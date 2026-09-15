@@ -89,10 +89,120 @@ impl DesktopState {
                         }
                         state.consume_notification(&app_consumer, NotificationTarget::Bubble).await;
                         state.consume_notification(&notify_consumer, NotificationTarget::Os).await;
+                        state.poll_bubble_edge().await;
                     }
                 }
             }
         });
+    }
+
+    async fn poll_bubble_edge(self: &Arc<Self>) {
+        let _edge_recall = self.config_update.edge_recall_read().await;
+        let config = self.runtime_config();
+        if config.revision != self.config_update.current_revision() {
+            self.bubble_edge_poll_failed.store(false, Ordering::Release);
+            self.reset_bubble_edge_observation();
+            return;
+        }
+        if self.bubble_edge_recall_is_suppressed(&config).await {
+            self.bubble_edge_poll_failed.store(false, Ordering::Release);
+            self.reset_bubble_edge_observation();
+            return;
+        }
+        let Some(window) = self.app.get_webview_window("bubble") else {
+            self.bubble_edge_poll_failed.store(false, Ordering::Release);
+            self.reset_bubble_edge_observation();
+            return;
+        };
+        let observation = match crate::window_bubble::cursor_at_bubble_edge(
+            &window,
+            &config.bubble.position,
+            &config.bubble.display,
+        ) {
+            Ok(observation) => {
+                if let Some(error) = observation.warning.as_ref() {
+                    self.record_bubble_edge_error(|| {
+                        format!(
+                            "画面端再表示の前面画面解決に失敗し、主画面へフォールバックしました: {error}"
+                        )
+                    });
+                } else {
+                    self.bubble_edge_poll_failed.store(false, Ordering::Release);
+                }
+                observation
+            }
+            Err(error) => {
+                self.record_bubble_edge_error(|| {
+                    format!("画面端再表示のマウス位置取得に失敗しました: {error}")
+                });
+                return;
+            }
+        };
+        self.publish_bubble_edge_poll(config.revision, observation.at_edge);
+    }
+
+    async fn bubble_edge_recall_is_suppressed(
+        &self,
+        config: &coosenpai_core::config::Config,
+    ) -> bool {
+        crate::bubble_edge_recall::is_suppressed(
+            config.bubble.edge_recall,
+            self.main_window_focused.load(Ordering::Acquire),
+            self.tutorial_is_active().await || self.tutorial_needs_setup().await,
+            self.bubbles.lock().await.can_poll_edge_recall(),
+        )
+    }
+
+    fn reset_bubble_edge_observation(&self) {
+        self.bubble_edge_last_observation.store(
+            crate::bubble_edge_recall::EDGE_POLL_UNKNOWN,
+            Ordering::Release,
+        );
+    }
+
+    fn record_bubble_edge_error(&self, message: impl FnOnce() -> String) {
+        self.reset_bubble_edge_observation();
+        if !self.bubble_edge_poll_failed.swap(true, Ordering::AcqRel) {
+            self.ui.input(
+                crate::ui_events::UiView::Bubble,
+                crate::ui_events::UiEvent::BubbleEdgeRecallReset,
+            );
+            let _ = self.logger.write("WARN", &message());
+        }
+    }
+
+    fn publish_bubble_edge_poll(&self, config_revision: u64, at_edge: bool) {
+        let next = if at_edge {
+            crate::bubble_edge_recall::EDGE_POLL_AT_EDGE
+        } else {
+            crate::bubble_edge_recall::EDGE_POLL_AWAY
+        };
+        let revision_changed = self
+            .bubble_edge_last_config_revision
+            .swap(config_revision, Ordering::AcqRel)
+            != config_revision;
+        let previous = self
+            .bubble_edge_last_observation
+            .swap(next, Ordering::AcqRel);
+        let previous_at_edge = if revision_changed {
+            None
+        } else {
+            match previous {
+                crate::bubble_edge_recall::EDGE_POLL_AWAY => Some(false),
+                crate::bubble_edge_recall::EDGE_POLL_AT_EDGE => Some(true),
+                _ => None,
+            }
+        };
+        if !crate::bubble_edge_recall::should_publish_edge_poll(previous_at_edge, at_edge) {
+            return;
+        }
+        self.ui.input(
+            crate::ui_events::UiView::Bubble,
+            crate::ui_events::UiEvent::BubbleEdgePoll {
+                at_edge,
+                config_revision,
+            },
+        );
     }
 
     async fn consume_notification(
@@ -141,6 +251,7 @@ impl DesktopState {
                 self.clear_bubble_delivery_log(&notification_id).await;
             }
             if accepted && matches!(target, NotificationTarget::Bubble) {
+                self.refresh_conversation().await;
                 self.accept_voice_notification(&voice_record).await;
             }
         }

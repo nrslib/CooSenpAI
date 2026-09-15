@@ -1,7 +1,7 @@
 use crate::state::AudioObservationSource;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -23,6 +23,119 @@ pub enum PortError {
 pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusElement {
+    pub bundle_id: String,
+    pub window_title: Option<String>,
+    pub role: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FocusElementWire {
+    bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_title: Option<String>,
+    role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+}
+
+impl Serialize for FocusElement {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bounded = self.clone().bounded();
+        FocusElementWire {
+            bundle_id: bounded.bundle_id,
+            window_title: bounded.window_title,
+            role: bounded.role,
+            title: bounded.title,
+            description: bounded.description,
+            value: bounded.value,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FocusElement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = FocusElementWire::deserialize(deserializer)?;
+        Ok(Self {
+            bundle_id: value.bundle_id,
+            window_title: value.window_title,
+            role: value.role,
+            title: value.title,
+            description: value.description,
+            value: value.value,
+        }
+        .bounded())
+    }
+}
+
+pub const SECURE_TEXT_FIELD_ROLE: &str = "AXSecureTextField";
+
+impl FocusElement {
+    pub fn bounded(mut self) -> Self {
+        self.bundle_id = crate::state::truncate(&self.bundle_id, 300);
+        self.window_title = self
+            .window_title
+            .map(|value| crate::state::truncate(&value, 300));
+        self.role = crate::state::truncate(&self.role, 120);
+        self.title = self.title.map(|value| crate::state::truncate(&value, 300));
+        self.description = self
+            .description
+            .map(|value| crate::state::truncate(&value, 300));
+        self.value = if self.role == SECURE_TEXT_FIELD_ROLE {
+            None
+        } else {
+            self.value.map(|value| crate::state::truncate(&value, 600))
+        };
+        self
+    }
+
+    pub fn prompt_summary(&self) -> String {
+        let bounded = self.clone().bounded();
+        let window_title = bounded
+            .window_title
+            .as_deref()
+            .map_or_else(|| "（ウインドウ名なし）".to_owned(), single_line);
+        let value = bounded
+            .value
+            .as_deref()
+            .map_or_else(|| "（値なし）".to_owned(), single_line);
+        format!(
+            "フォーカス: {} / {} / {} / {}",
+            bounded.bundle_id, window_title, bounded.role, value
+        )
+    }
+}
+
+fn single_line(value: &str) -> String {
+    value.replace(['\r', '\n'], " ")
+}
+
+#[async_trait]
+pub trait FocusElementPort: Send + Sync {
+    async fn read_focused_element(
+        &self,
+        target_bundle_id: Option<&str>,
+    ) -> Result<Option<FocusElement>, PortError>;
+}
+
+pub const FOCUS_ELEMENT_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub const SELECTED_TEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub const SELECTED_TEXT_POLL_TIMEOUT: Duration = Duration::from_millis(1000);

@@ -176,6 +176,7 @@ export function App(): ReactElement {
       onRestartSetup={() => handle(desktopApi.restartSetup())}
       onResetConversation={() => handle(desktopApi.resetConversation())}
       onOpenSystemSettings={() => void handle(desktopApi.openSystemSettings())}
+      onOpenAccessibilitySettings={() => void handle(desktopApi.openAccessibilitySettings())}
       onOpenLicenseDocument={(document) => void handle(desktopApi.openLicenseDocument(document))}
       onOpenSpeechSettings={(kind) => void handle(desktopApi.openSpeechSettings(kind))}
       onToggleAvatar={() => void handle(avatarApi.toggle())}

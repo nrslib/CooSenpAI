@@ -58,6 +58,7 @@ interface Props {
   readonly onRestartSetup: () => Promise<IpcResult<unknown>>;
   readonly onResetConversation: () => Promise<IpcResult<unknown>>;
   readonly onOpenSystemSettings: () => void;
+  readonly onOpenAccessibilitySettings?: () => void;
   readonly onOpenLicenseDocument: (document: LicenseDocument) => void;
   readonly onOpenSpeechSettings: (kind: "microphone" | "recognition") => void;
   readonly onToggleAvatar: () => void;
@@ -69,7 +70,7 @@ interface Props {
 
 export { SettingsDiscardDialog } from "./components/SettingsDiscardDialog.js";
 
-export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, onClose, onSave, onSelectPersona, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRefreshPersonas, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenLicenseDocument, onOpenSpeechSettings, onToggleAvatar, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
+export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, onClose, onSave, onSelectPersona, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRefreshPersonas, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenAccessibilitySettings, onOpenLicenseDocument, onOpenSpeechSettings, onToggleAvatar, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
   const { locale, t } = useI18n();
   const [formSync] = useState(() => new SettingsFormSync(toForm(snapshot.config, snapshot.avatarImageLoadFailed), snapshot.configRevision));
   const [form, setForm] = useState(formSync.form);
@@ -204,7 +205,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
         content = !searching && showTutorialPersonaSettings ? <TutorialPersonaSettings general={generalProps} provider={providerProps} /> : <GeneralSettings {...generalProps} />;
         break;
       case "vision":
-        content = <VisionSettings {...categoryProps} highlight={focusSection === "watch"} onOpenSystemSettings={onOpenSystemSettings} onRelaunch={onRelaunch} onResetTuning={resetTuning} />;
+        content = <VisionSettings {...categoryProps} highlight={focusSection === "watch"} onOpenSystemSettings={onOpenSystemSettings} onOpenAccessibilitySettings={onOpenAccessibilitySettings} onRelaunch={onRelaunch} onResetTuning={resetTuning} />;
         break;
       case "hearing":
         content = <HearingSettings {...categoryProps} onOpenSpeechSettings={onOpenSpeechSettings} />;

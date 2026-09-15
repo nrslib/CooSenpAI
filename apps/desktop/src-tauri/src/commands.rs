@@ -859,6 +859,27 @@ pub async fn panel_open_system_settings(
 }
 
 #[tauri::command]
+pub async fn panel_open_accessibility_settings(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::Main)?;
+    let result = crate::platform::MacSystemSettings
+        .open(
+            SystemSettingsPane::Accessibility,
+            state.cancellation.clone(),
+        )
+        .await;
+    Ok(match result {
+        Ok(()) => IpcResult::success(()),
+        _ => IpcResult::failure(text(
+            TextKey::SystemSettingsOpenFailed,
+            Locale::from_config(&state.runtime_config().ui.language),
+        )),
+    })
+}
+
+#[tauri::command]
 pub async fn app_relaunch(window: WebviewWindow, app: AppHandle) -> Result<IpcResult<()>, String> {
     authorize_window(&window, CommandOrigin::Main)?;
     app.request_restart();

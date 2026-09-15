@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use coosenpai_core::companion_storage::CompanionStorage;
 use coosenpai_core::onboarding_notice::TutorialNoticePlan;
 use coosenpai_core::runtime::RuntimeError;
-use coosenpai_core::state::{ConversationEntry, ConversationRole};
+use coosenpai_core::state::{ConversationEntry, ConversationMessageKind, ConversationRole};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -85,6 +85,7 @@ pub(super) async fn append_tutorial_conversation(
         created_at: created_at.to_owned(),
         role: ConversationRole::Companion,
         message: message.to_owned(),
+        message_kind: Some(ConversationMessageKind::Tutorial),
         attachment_path: None,
         attachment_text: None,
         tutorial_response_key: Some(tutorial_response_key.to_owned()),

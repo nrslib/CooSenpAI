@@ -25,6 +25,7 @@ mod deck;
 pub(crate) use deck::{reading_delay, BubbleDeckDirection};
 
 pub(crate) const TUTORIAL_TRANSITION_DELAY: Duration = Duration::from_millis(430);
+pub(crate) const BUBBLE_EXIT_FADE: Duration = Duration::from_millis(180);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +176,9 @@ pub struct BubbleState {
     history_id: Option<String>,
     interrupted_history: Option<(String, String)>,
     max_stack: usize,
+    latest_coo_speech: Option<BubbleRecord>,
+    edge_recall_fade_until: Option<Instant>,
+    edge_recall_entries_empty: bool,
 }
 
 impl Default for BubbleState {
@@ -192,12 +196,22 @@ impl Default for BubbleState {
             history_id: None,
             interrupted_history: None,
             max_stack: 3,
+            latest_coo_speech: None,
+            edge_recall_fade_until: None,
+            edge_recall_entries_empty: true,
         }
     }
 }
 
 impl BubbleState {
     fn mark_changed(&mut self) {
+        let entries_empty = self.entries.is_empty();
+        if !self.edge_recall_entries_empty && entries_empty && self.latest_coo_speech.is_some() {
+            self.edge_recall_fade_until = Some(Instant::now() + BUBBLE_EXIT_FADE);
+        } else if !entries_empty {
+            self.edge_recall_fade_until = None;
+        }
+        self.edge_recall_entries_empty = entries_empty;
         self.generation = self.generation.saturating_add(1);
     }
 
@@ -210,6 +224,10 @@ impl BubbleState {
 
     pub fn conversation_generation(&self) -> u64 {
         self.conversation_generation
+    }
+
+    pub(crate) fn set_latest_coo_speech(&mut self, record: Option<BubbleRecord>) {
+        self.latest_coo_speech = record;
     }
 
     pub(crate) fn set_appearance_preview(
@@ -258,6 +276,7 @@ impl BubbleState {
         }
         self.conversation_generation = generation;
         self.interrupted_history = None;
+        self.latest_coo_speech = None;
         retain_entries(&mut self.entries, |entry| {
             entry.record.conversation_generation >= generation
         });
@@ -277,6 +296,7 @@ impl BubbleState {
         }
         self.conversation_generation = generation;
         self.interrupted_history = None;
+        self.latest_coo_speech = None;
         retain_entries(&mut self.entries, |entry| {
             entry.record.conversation_generation == generation
         });
@@ -396,6 +416,30 @@ impl BubbleState {
         self.reconcile_deck(now);
         self.mark_changed();
         true
+    }
+
+    pub(crate) fn recall_latest(
+        &mut self,
+        now: Instant,
+        duration: Duration,
+        max_stack: usize,
+    ) -> bool {
+        if !self.entries.is_empty() {
+            return false;
+        }
+        let Some(mut record) = self.latest_coo_speech.clone() else {
+            return false;
+        };
+        record.persistent = false;
+        self.show_replacing(record, now, duration, max_stack, &[])
+    }
+
+    pub(crate) fn can_poll_edge_recall(&self) -> bool {
+        self.entries.is_empty()
+            && self.latest_coo_speech.is_some()
+            && self
+                .edge_recall_fade_until
+                .is_none_or(|until| until <= Instant::now())
     }
 
     pub(crate) fn clear_thought_bubbles(&mut self) -> bool {

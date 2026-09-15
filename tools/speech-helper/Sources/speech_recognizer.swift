@@ -14,6 +14,7 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
     private var finishRequested = false
     private var inputEnded = false
     private var terminal = false
+    private var reportedInputGain = false
 
     init(locale: Locale, diagnostic: @escaping (String) -> Void) {
         self.locale = locale
@@ -23,6 +24,7 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
     func start(receive: @escaping (SpeechAnalysisEvent) -> Void) {
         self.receive = receive
         let authorization = SFSpeechRecognizer.authorizationStatus()
+        diagnostic("event=analysis-authorization engine=SFSpeechRecognizer status=\(String(describing: authorization))")
         if authorization == .notDetermined {
             SFSpeechRecognizer.requestAuthorization { [weak self] status in
                 DispatchQueue.main.async { self?.prepare(status) }
@@ -50,6 +52,7 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
+        diagnostic("event=analysis-config engine=SFSpeechRecognizer shouldReportPartialResults=true requiresOnDeviceRecognition=true")
         self.request = request
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async { self?.handle(result, error: error) }
@@ -62,6 +65,15 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
     func append(_ buffer: AVAudioPCMBuffer) throws {
         guard !terminal, !finishRequested, let request else {
             throw SpeechAudioConversionError.inputClosed
+        }
+        let gainResult = try SpeechAudioGain.apply(to: buffer)
+        if gainResult.inputPeak > 0, !reportedInputGain {
+            reportedInputGain = true
+            diagnostic(
+                "event=analysis-input-gain engine=SFSpeechRecognizer "
+                    + "inputPeak=\(gainResult.inputPeak) gain=\(gainResult.gain) "
+                    + "targetPeak=\(SpeechAudioGain.targetPeak) maxGain=\(SpeechAudioGain.maximumGain)"
+            )
         }
         request.append(buffer)
     }

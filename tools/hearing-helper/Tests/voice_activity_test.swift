@@ -145,6 +145,7 @@ private func testNoiseFloorRequiresAQuietMovingWindow() {
         movingRmsWindowNanoseconds: 150,
         maximumSegmentNanoseconds: 15_000,
         trailingNanoseconds: 1_200,
+        startAttackNanoseconds: 1_000_000_000,
         maximumNoiseFloorRiseFractionPerSecond: 1_000_000_000
     )
     var detector = VoiceActivityDetector(configuration: configuration)
@@ -158,13 +159,46 @@ private func testNoiseFloorRequiresAQuietMovingWindow() {
         assert(
             observe(
                 &detector,
-                rms: 0.0015,
+                rms: 0.003,
                 at: UInt64(index + 15) * 10
             ) == .wait
         )
     }
     assert(detector.noiseFloorRms == floorBeforeLoudWaitingInput)
     assert(detector.phase == .waiting)
+}
+
+private func testAmbientNoiseAboveMinimumSustainClosesWithTrailing() {
+    let duration: UInt64 = 10_000_000
+    var detector = VoiceActivityDetector(configuration: .standard)
+    for _ in 0..<600 {
+        let noise = detector.audioTimeNanoseconds / duration % 2 == 0 ? 0.0012 : 0.0018
+        assert(
+            detector.observeSamples(rms: noise, durationNanoseconds: duration) == .wait
+        )
+    }
+    assert(
+        detector.noiseFloorRms
+            > VoiceActivityConfiguration.standard.minimumSustainRmsThreshold
+    )
+
+    var speechStarted = false
+    for _ in 0..<30 {
+        let action = detector.observeSamples(rms: 0.02, durationNanoseconds: duration)
+        speechStarted = speechStarted || action == .start
+    }
+    assert(speechStarted)
+
+    var closeReason: VoiceActivityFinishReason?
+    for _ in 0..<250 {
+        let noise = detector.audioTimeNanoseconds / duration % 2 == 0 ? 0.0012 : 0.0018
+        let action = detector.observeSamples(rms: noise, durationNanoseconds: duration)
+        if case let .appendAndFinish(reason) = action {
+            closeReason = reason
+            break
+        }
+    }
+    assert(closeReason == .trailing)
 }
 
 private func testNoiseFloorRiseRateIsLimited() {
@@ -539,6 +573,7 @@ func testVoiceActivity() {
     testVoiceActivityStateTransitions()
     testNoiseFloorAndThresholds()
     testNoiseFloorRequiresAQuietMovingWindow()
+    testAmbientNoiseAboveMinimumSustainClosesWithTrailing()
     testNoiseFloorRiseRateIsLimited()
     testThresholdsHaveAnUpperBound()
     testMovingRmsWindow()

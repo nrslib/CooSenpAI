@@ -198,6 +198,7 @@ func testAudioBufferIsMonoFloat32BeforeAppend() throws {
     let recognizer = FakeRecognizer()
     let session = HearingSession(
         locale: Locale(identifier: "ja-JP"),
+        engine: .sf,
         inputDevice: "default",
         sources: [.microphone],
         debugInputWavPath: nil,

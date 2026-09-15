@@ -140,7 +140,7 @@ impl HearingController {
             hearing_port: Mutex::new(
                 helper.map(|helper| crate::platform::hearing_port(helper, logger.clone())),
             ),
-            permission_port: Mutex::new(Arc::new(crate::platform::MacHearingPermissions)),
+            permission_port: Mutex::new(Arc::new(crate::platform::MacSpeechPermissions)),
             ingestion_barrier: Mutex::new(None),
             terminal_barrier: Mutex::new(None),
             lifecycle: Mutex::new(HearingLifecycle::default()),

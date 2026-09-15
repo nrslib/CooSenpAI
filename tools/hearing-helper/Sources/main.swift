@@ -7,7 +7,6 @@ import Foundation
 import Speech
 
 private let outputLock = NSLock()
-private let noSpeechDetectedErrorCode = 1110
 private let debugInputPlaybackRate = 1.0
 
 private func monotonicNanoseconds() -> UInt64 {
@@ -77,6 +76,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private let startupStartedAt = monotonicNanoseconds()
     private var reportedFirstAudioSamples: Set<AudioSource> = []
     private let locale: Locale
+    private let engine: SpeechEngine
     private let inputDevice: String
     private let sources: Set<AudioSource>
     private let debugInputWavPath: String?
@@ -88,11 +88,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         qos: .userInitiated
     )
     private let audioProcessingQueueKey = DispatchSpecificKey<Void>()
-    private var recognitionStates: RecognitionSegmentController<
-        SFSpeechAudioBufferRecognitionRequest,
-        SFSpeechRecognitionTask,
-        SFSpeechRecognizer
-    >
+    private var recognitionStates: RecognitionSegmentController<SpeechRecognitionSession>
     private var restartTrackers: [AudioSource: RecognitionRestartTracker] = [:]
     private var cancellationTimeoutRecoveryTrackers: [
         AudioSource: RecognitionCancellationTimeoutRecoveryTracker
@@ -107,7 +103,6 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var speakerMusicGate: SpeakerMusicGateSegment?
     private var speakerMusicGateToken = 0
     private var speakerMusicGateDisabled = false
-    private var recognizers: [AudioSource: SFSpeechRecognizer] = [:]
     private var sourceAvailability: AudioSourceAvailability
     private var audioEngine: AVAudioEngine?
     // Protected by sourceLock; keep the invalidated token until replacement starts.
@@ -119,7 +114,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
     private var debugInputPlayer: DebugInputWavPlayer?
     private var appendedAudioDump: AppendedAudioDump?
-    private var debugDumpOnlyRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var debugDumpOnly = false
     private var debugDumpOnlyGeneration: Int?
     private let speakerDeviceFactory: (() throws -> SpeakerAudioCapture)?
     private let speakerBackend: SpeakerBackend
@@ -154,6 +149,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     init(
         locale: Locale,
+        engine: SpeechEngine,
         inputDevice: String,
         sources: Set<AudioSource>,
         debugInputWavPath: String?,
@@ -165,6 +161,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.speakerDeviceFactory = speakerDeviceFactory
         self.speakerBackend = speakerBackend
         self.locale = locale
+        self.engine = engine
         self.inputDevice = inputDevice
         self.sources = sources
         self.debugInputWavPath = debugInputWavPath
@@ -204,6 +201,28 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     func authorizeAndStart() {
         if debugRequestAuth {
             requestSpeechAuthorizationForDebug()
+            return
+        }
+        guard engine == .sf else {
+            for source in sources {
+                emitStartupStage(for: source, stage: "speech-authorization", phase: "skipped")
+            }
+            emitStderr("speech-auth status=not-required engine=\(engine.name)")
+            guard prepareAppendedAudioDump() else { return }
+            startDiagnostics()
+            recognitionAuthorization = .authorized
+            let microphone = AVCaptureDevice.authorizationStatus(for: .audio)
+            if debugInputWavPath != nil {
+                handleMicrophoneAuthorization(.authorized, speechStatus: .authorized)
+            } else if sources.contains(.microphone) {
+                requestMicrophone { [weak self] microphone in
+                    DispatchQueue.main.async {
+                        self?.handleMicrophoneAuthorization(microphone, speechStatus: .authorized)
+                    }
+                }
+            } else {
+                handleMicrophoneAuthorization(microphone, speechStatus: .authorized)
+            }
             return
         }
         for source in sources {
@@ -271,6 +290,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     private func requestSpeechAuthorizationForDebug() {
+        guard engine == .sf else {
+            emitStderr("speech-auth status=not-required engine=\(engine.name)")
+            close()
+            return
+        }
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             DispatchQueue.main.async {
                 guard let self, !self.isTerminal() else { return }
@@ -514,9 +538,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             if source == .speaker { speakerMusicGate = nil }
             return state
         }
-        if let state, !state.taskTerminalArrived, !state.taskCancellationRequested {
-            cancelRecognitionTask(state.task, for: source,
-                                  generation: state.generation, reason: .inputChanged)
+        if let state, !state.sessionTerminalArrived, !state.sessionCancellationRequested {
+            cancelRecognitionSession(state.session, for: source,
+                                     generation: state.generation, reason: .inputChanged)
         }
     }
 
@@ -585,15 +609,12 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 path: path,
                 playbackRate: debugInputPlaybackRate
             )
-            let request = SFSpeechAudioBufferRecognitionRequest()
-            request.shouldReportPartialResults = true
-            request.requiresOnDeviceRecognition = true
             sourceLock.lock()
             guard !terminal, sourceAvailability.isActive(.microphone) else {
                 sourceLock.unlock()
                 return
             }
-            debugDumpOnlyRequest = request
+            debugDumpOnly = true
             debugDumpOnlyGeneration = 1
             sourceLock.unlock()
             debugInputPlayer = player
@@ -734,50 +755,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         ])
     }
 
-    private func speechRecognizer(for source: AudioSource) -> SFSpeechRecognizer? {
-        sourceLock.lock()
-        if let recognizer = recognizers[source] {
-            sourceLock.unlock()
-            return recognizer
-        }
-        sourceLock.unlock()
-
-        guard let created = SFSpeechRecognizer(locale: locale) else { return nil }
-        sourceLock.lock()
-        guard !terminal, sourceAvailability.isActive(source) else {
-            sourceLock.unlock()
-            return nil
-        }
-        if let existing = recognizers[source] {
-            sourceLock.unlock()
-            return existing
-        }
-        recognizers[source] = created
-        sourceLock.unlock()
-        return created
-    }
-
-    private func startRecognition(for source: AudioSource) -> Bool {
+    private func startRecognition(
+        for source: AudioSource,
+        inputFormat: AVAudioFormat
+    ) -> Bool {
         guard !isTerminal(), isSourceActive(source) else { return false }
-        guard let recognizer = speechRecognizer(for: source), recognizer.isAvailable else {
-            disableSource(
-                source,
-                kind: "recognition-\(source.rawValue)",
-                message: "指定したロケールの音声認識は利用できません: \(locale.identifier)"
-            )
-            return false
-        }
-        guard recognizer.supportsOnDeviceRecognition else {
-            disableSource(
-                source,
-                kind: "recognition-\(source.rawValue)",
-                message: "指定したロケールはオンデバイス音声認識に対応していません: \(locale.identifier)"
-            )
-            return false
-        }
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = true
         let generation: Int
         sourceLock.lock()
         guard !terminal,
@@ -788,23 +770,41 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         generation = recognitionStates.reserveGeneration(for: source)
         sourceLock.unlock()
-        let callbackGate = RecognitionCallbackGate()
-        let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            guard let self else { return }
-            callbackGate.enqueue {
-                if result?.isFinal == true || error != nil {
-                    self.markRecognitionTaskTerminal(source: source, generation: generation)
-                }
-                self.audioProcessingQueue.async { [weak self] in
-                    self?.handleRecognitionResult(
-                        result,
-                        error: error,
+
+        let analysis = engine.makeAnalysis(
+            locale: locale,
+            inputFormat: inputFormat,
+            traceResults: false,
+            diagnostic: { message in
+                emitStderr(
+                    "speech source=\(source.rawValue) generation=\(generation) \(message)"
+                )
+            }
+        )
+        let session = SpeechRecognitionSession(
+            locale: locale,
+            audio: SpeechAudioQueue(),
+            analysis: analysis,
+            scheduler: MainQueueSpeechDeadlineScheduler(),
+            queue: DispatchQueue.main,
+            startRecording: {},
+            stopRecording: {},
+            emit: { [weak self] output in
+                self?.audioProcessingQueue.async { [weak self] in
+                    self?.handleSpeechOutput(
+                        output,
                         source: source,
                         generation: generation
                     )
                 }
+            },
+            diagnostic: { message in
+                emitStderr(
+                    "speech source=\(source.rawValue) generation=\(generation) \(message)"
+                )
             }
-        }
+        )
+
         sourceLock.lock()
         let sourceIsActiveAtRegistration = sourceAvailability.isActive(source)
         guard !terminal,
@@ -812,54 +812,34 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
               recognitionStates.isCurrentGeneration(source, generation) else {
             recognitionStates.retireGeneration(source: source, generation: generation)
             sourceLock.unlock()
-            callbackGate.discard()
-            cancelRecognitionTask(
-                task,
-                for: source,
-                generation: generation,
-                reason: .registrationRejected
-            )
+            session.cancel()
             return false
         }
         let installed = recognitionStates.install(
             source: source,
-            request: request,
-            task: task,
-            recognizer: recognizer,
+            session: session,
             generation: generation,
             sourceIsActive: sourceIsActiveAtRegistration
         )
         guard installed else {
             recognitionStates.retireGeneration(source: source, generation: generation)
             sourceLock.unlock()
-            callbackGate.discard()
-            cancelRecognitionTask(
-                task,
-                for: source,
-                generation: generation,
-                reason: .registrationRejected
-            )
+            session.cancel()
             return false
         }
         let shouldReportRequestFormat = reportedRequestFormats.insert(source).inserted
         sourceLock.unlock()
         emitStderr(
-            "recognition-segment-open source=\(source.rawValue) generation=\(generation)"
+            "recognition-segment-open source=\(source.rawValue) generation=\(generation) engine=\(engine.name)"
         )
         if shouldReportRequestFormat {
             emitStderr(
-                "audio-format \(source.rawValue) request-native=\(audioFormatDescription(request.nativeAudioFormat))"
+                "audio-format \(source.rawValue) recognition-input=\(audioFormatDescription(inputFormat))"
             )
         }
         emitRecognizing(source: source, generation: generation, text: "")
-        callbackGate.open()
+        session.start()
         return true
-    }
-
-    private func markRecognitionTaskTerminal(source: AudioSource, generation: Int) {
-        syncOnAudioProcessingQueue {
-            _ = recognitionStates.markTaskTerminal(source: source, generation: generation)
-        }
     }
 
     private func emitRecognizing(source: AudioSource, generation: Int, text: String) {
@@ -874,73 +854,69 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         ])
     }
 
-    private func handleRecognitionResult(
-        _ result: SFSpeechRecognitionResult?,
-        error: Error?,
+    private func handleSpeechOutput(
+        _ output: SpeechOutput,
         source: AudioSource,
         generation: Int
     ) {
-        guard isCurrentRecognitionTask(source: source, generation: generation) else {
+        guard isCurrentRecognitionSession(source: source, generation: generation) else {
             return
         }
-        if let result, result.isFinal {
-            let text = result.bestTranscription.formattedString
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            completeRecognitionTask(
+        switch output {
+        case let .partial(text):
+            emitRecognizing(
+                source: source,
+                generation: generation,
+                text: text.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        case let .final(text):
+            _ = recognitionStates.markSessionTerminal(source: source, generation: generation)
+            completeRecognitionSession(
                 for: source,
                 generation: generation,
-                outcome: .success(text: text)
+                outcome: .success(text: text.trimmingCharacters(in: .whitespacesAndNewlines))
             )
-            return
-        }
-        if currentRecognitionLifecycle(for: source) == .cancelling {
-            guard currentRecognitionTaskTerminalArrived(for: source) else { return }
-            completeRecognitionTask(
+        case let .error(kind, message):
+            _ = recognitionStates.markSessionTerminal(source: source, generation: generation)
+            if kind == "no-speech" {
+                recordNoSpeechRestart(for: source)
+                let restartDecision = recordRecognitionRestart(for: source)
+                completeRecognitionSession(
+                    for: source,
+                    generation: generation,
+                    outcome: .noSpeech
+                )
+                if restartDecision?.thresholdReached == true {
+                    disableSource(
+                        source,
+                        kind: "recognition-" + source.rawValue,
+                        message: "音声認識の再開が異常に繰り返されています: recentRestarts="
+                            + String(restartDecision?.recentCount ?? 0)
+                            + " windowSeconds=60"
+                    )
+                }
+            } else {
+                completeRecognitionSession(
+                    for: source,
+                    generation: generation,
+                    outcome: .error(SpeechAnalysisFailure(kind: kind, message: message))
+                )
+            }
+        case .closed:
+            guard currentRecognitionLifecycle(for: source) == .cancelling else { return }
+            _ = recognitionStates.markSessionTerminal(source: source, generation: generation)
+            completeRecognitionSession(
                 for: source,
                 generation: generation,
                 outcome: .cancelled
             )
-            return
-        }
-        if let result, error == nil {
-            emitRecognizing(
-                source: source,
-                generation: generation,
-                text: result.bestTranscription.formattedString
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-        }
-        guard let error else { return }
-        if isNoSpeechError(error) {
-            recordNoSpeechRestart(for: source)
-            let restartDecision = recordRecognitionRestart(for: source)
-            completeRecognitionTask(
-                for: source,
-                generation: generation,
-                outcome: .noSpeech
-            )
-            if restartDecision?.thresholdReached == true {
-                disableSource(
-                    source,
-                    kind: "recognition-" + source.rawValue,
-                    message: "音声認識の再開が異常に繰り返されています: recentRestarts="
-                        + String(restartDecision?.recentCount ?? 0)
-                        + " windowSeconds=60"
-                )
-            }
-        } else {
-            completeRecognitionTask(
-                for: source,
-                generation: generation,
-                outcome: .error(error)
-            )
         }
     }
 
-    private func completeRecognitionTask(
+    private func completeRecognitionSession(
         for source: AudioSource,
         generation: Int,
-        outcome: RecognitionTaskOutcome
+        outcome: RecognitionSessionOutcome
     ) {
         if source == .speaker, speakerMusicGate?.decision == .pending {
             resolveSpeakerMusicGate(nil, token: speakerMusicGateToken)
@@ -978,7 +954,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         appendedAudioDump?.close(source: source, generation: generation)
         let musicGateSuppressed = source == .speaker
             && speakerMusicGate?.decision == .suppress
-        let terminalOutcome: RecognitionTaskOutcome
+        let terminalOutcome: RecognitionSessionOutcome
         if lifecycle == .cancelling {
             if case .success = outcome {
                 terminalOutcome = outcome
@@ -1009,7 +985,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 emit(["event": "no-speech", "source": source.rawValue,
                       "generation": generation, "sequence": transcriptSequence])
             }
-            emitRecognitionTaskFinished(
+            emitRecognitionSessionFinished(
                 source: source,
                 generation: generation,
                 outcome: "success"
@@ -1024,7 +1000,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                     reason: musicGateSuppressed ? .music : .noSpeech
                 )
             }
-            emitRecognitionTaskFinished(
+            emitRecognitionSessionFinished(
                 source: source,
                 generation: generation,
                 outcome: "noSpeech"
@@ -1037,7 +1013,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                     reason: musicGateSuppressed ? .music : .error
                 )
             }
-            emitRecognitionTaskFinished(
+            emitRecognitionSessionFinished(
                 source: source,
                 generation: generation,
                 outcome: "error",
@@ -1050,7 +1026,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             )
             return
         case .cancelled:
-            emitRecognitionTaskFinished(
+            emitRecognitionSessionFinished(
                 source: source,
                 generation: generation,
                 outcome: "cancelled"
@@ -1084,7 +1060,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         )
     }
 
-    private func isCurrentRecognitionTask(source: AudioSource, generation: Int) -> Bool {
+    private func isCurrentRecognitionSession(source: AudioSource, generation: Int) -> Bool {
         sourceLock.lock()
         let isCurrent = !terminal
             && sourceAvailability.isActive(source)
@@ -1093,14 +1069,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         return isCurrent
     }
 
-    private func currentRecognitionTaskTerminalArrived(for source: AudioSource) -> Bool {
-        sourceLock.lock()
-        let terminalArrived = recognitionStates.taskTerminalArrived(for: source)
-        sourceLock.unlock()
-        return terminalArrived
-    }
-
-    private func emitRecognitionTaskFinished(
+    private func emitRecognitionSessionFinished(
         source: AudioSource,
         generation: Int,
         outcome: String,
@@ -1108,7 +1077,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     ) {
         let suffix = details.map { " details=\($0)" } ?? ""
         emitStderr(
-            "recognition-task-finished source=\(source.rawValue) generation=\(generation) outcome=\(outcome)\(suffix)"
+            "recognition-session-finished source=\(source.rawValue) generation=\(generation) outcome=\(outcome)\(suffix)"
         )
     }
 
@@ -1122,16 +1091,16 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         )
     }
 
-    private func cancelRecognitionTask(
-        _ task: SFSpeechRecognitionTask,
+    private func cancelRecognitionSession(
+        _ session: SpeechRecognitionSession,
         for source: AudioSource,
         generation: Int,
-        reason: RecognitionTaskCancelReason
+        reason: RecognitionSessionCancelReason
     ) {
         emitStderr(
-            "recognition-task-cancel source=\(source.rawValue) generation=\(generation) reason=\(reason.rawValue)"
+            "recognition-session-cancel source=\(source.rawValue) generation=\(generation) reason=\(reason.rawValue)"
         )
-        task.cancel()
+        session.cancel()
     }
 
     func stream(
@@ -1173,28 +1142,6 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
     }
 
-    private func isNoSpeechError(_ error: Error) -> Bool {
-        let nsError = error as NSError
-        if nsError.domain == "kAFAssistantErrorDomain", nsError.code == noSpeechDetectedErrorCode {
-            return true
-        }
-        let normalized = [
-            nsError.localizedDescription,
-            nsError.localizedFailureReason ?? "",
-            String(describing: error),
-        ]
-        .joined(separator: " ")
-        .lowercased()
-        return [
-            "no speech detected",
-            "no speech was detected",
-            "speech not detected",
-            "音声を検出できません",
-            "音声が検出されません",
-            "話し声を検出できません",
-        ].contains { normalized.contains($0) }
-    }
-
     private func errorDetails(_ error: Error) -> String {
         let nsError = error as NSError
         return "domain=\(nsError.domain) code=\(nsError.code) description=\(nsError.localizedDescription)"
@@ -1234,10 +1181,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         pendingSourceDisables.remove(source)
         if source == .microphone {
-            debugDumpOnlyRequest = nil
+            debugDumpOnly = false
             debugDumpOnlyGeneration = nil
         }
-        recognizers.removeValue(forKey: source)
         timeoutWorkItem = recognitionTimeoutWorkItems.removeValue(forKey: source)
         cancellationWorkItem = recognitionCancellationWorkItems.removeValue(forKey: source)
         noActiveSources = !sourceAvailability.hasActiveSource
@@ -1273,10 +1219,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         appendedAudioDump?.close(source: source)
         if let state = recognitionState,
-           !state.taskTerminalArrived,
-           !state.taskCancellationRequested {
-            cancelRecognitionTask(
-                state.task,
+           !state.sessionTerminalArrived,
+           !state.sessionCancellationRequested {
+            cancelRecognitionSession(
+                state.session,
                 for: state.source,
                 generation: state.generation,
                 reason: .sourceDisabled
@@ -1322,8 +1268,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             return
         }
         terminal = true
-        recognizers.removeAll()
-        debugDumpOnlyRequest = nil
+        debugDumpOnly = false
         debugDumpOnlyGeneration = nil
         sourceLock.unlock()
         let recognitionStatesToCancel = syncOnAudioProcessingQueue {
@@ -1339,9 +1284,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         for workItem in recognitionTimeouts { workItem.cancel() }
         for workItem in recognitionCancellations { workItem.cancel() }
         for state in recognitionStatesToCancel
-            where !state.taskTerminalArrived && !state.taskCancellationRequested {
-            cancelRecognitionTask(
-                state.task,
+            where !state.sessionTerminalArrived && !state.sessionCancellationRequested {
+            cancelRecognitionSession(
+                state.session,
                 for: state.source,
                 generation: state.generation,
                 reason: .sessionClosed
@@ -1434,11 +1379,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         for source: AudioSource,
         reason: RecognitionSegmentCloseReason
     ) {
-        let state: RecognitionState<
-            SFSpeechAudioBufferRecognitionRequest,
-            SFSpeechRecognitionTask,
-            SFSpeechRecognizer
-        >
+        let state: RecognitionState<SpeechRecognitionSession>
         sourceLock.lock()
         guard !terminal,
               sourceAvailability.isActive(source),
@@ -1460,7 +1401,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             generation: generation,
             reason: reason
         )
-        state.request.endAudio()
+        state.session.finish()
         emitStderr(
             "recognition-input-ended source=\(source.rawValue) generation=\(generation)"
         )
@@ -1497,11 +1438,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         generation: Int
     ) {
         let cancellationStartedAt = monotonicNanoseconds()
-        let state: RecognitionState<
-            SFSpeechAudioBufferRecognitionRequest,
-            SFSpeechRecognitionTask,
-            SFSpeechRecognizer
-        >
+        let state: RecognitionState<SpeechRecognitionSession>
         sourceLock.lock()
         guard !terminal,
               sourceAvailability.isActive(source),
@@ -1521,8 +1458,8 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             "recognition-final-timeout source=\(source.rawValue) generation=\(generation)"
         )
         appendedAudioDump?.close(source: source, generation: generation)
-        cancelRecognitionTask(
-            state.task,
+        cancelRecognitionSession(
+            state.session,
             for: source,
             generation: generation,
             reason: .finalTimeout
@@ -1570,7 +1507,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         generation: Int,
         stage: RecognitionCancellationTimeoutStage
     ) {
-        let taskTerminalArrived: Bool
+        let sessionTerminalArrived: Bool
         let debugInputHasEnded: Bool
         sourceLock.lock()
         guard !terminal,
@@ -1580,10 +1517,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             sourceLock.unlock()
             return
         }
-        taskTerminalArrived = recognitionStates.taskTerminalArrived(for: source)
+        sessionTerminalArrived = recognitionStates.sessionTerminalArrived(for: source)
         debugInputHasEnded = debugInputEnded
         if stage == .cancellationTimeout,
-           !taskTerminalArrived,
+           !sessionTerminalArrived,
            !debugInputHasEnded {
             let graceWorkItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
@@ -1616,7 +1553,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         sourceLock.unlock()
 
         let action: String
-        if taskTerminalArrived {
+        if sessionTerminalArrived {
             action = "wait-for-terminal-handler"
         } else if debugInputHasEnded {
             action = "recover-at-debug-eof"
@@ -1624,9 +1561,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             action = "recover-after-grace"
         }
         emitStderr(
-            "recognition-cancellation-timeout source=\(source.rawValue) generation=\(generation) terminalArrived=\(taskTerminalArrived) action=\(action)"
+            "recognition-cancellation-timeout source=\(source.rawValue) generation=\(generation) terminalArrived=\(sessionTerminalArrived) action=\(action)"
         )
-        guard !taskTerminalArrived else { return }
+        guard !sessionTerminalArrived else { return }
         recoverRecognitionAfterCancellationTimeout(
             for: source,
             generation: generation
@@ -1675,7 +1612,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             speakerMusicGate = nil
         }
         appendedAudioDump?.close(source: source, generation: generation)
-        emitRecognitionTaskFinished(
+        emitRecognitionSessionFinished(
             source: source,
             generation: generation,
             outcome: "cancelled-timeout"
@@ -1811,21 +1748,21 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private func finishDebugInputOnProcessingQueue() {
         guard isSourceActive(.microphone) else { return }
         sourceLock.lock()
-        let hasDebugDumpOnlyRequest = debugDumpOnlyRequest != nil
+        let hasDebugDumpOnly = debugDumpOnly
         sourceLock.unlock()
-        if hasDebugDumpOnlyRequest {
+        if hasDebugDumpOnly {
             finishDebugDumpOnlyInputOnProcessingQueue()
             return
         }
 
         let recognitionGeneration: Int?
         let recognitionLifecycle: RecognitionSegmentLifecycle?
-        let recognitionTaskTerminalArrived: Bool
+        let recognitionSessionTerminalArrived: Bool
         let debugInputHasEnded: Bool
         sourceLock.lock()
         recognitionGeneration = recognitionStates.currentGeneration(for: .microphone)
         recognitionLifecycle = recognitionStates.lifecycle(for: .microphone)
-        recognitionTaskTerminalArrived = recognitionStates.taskTerminalArrived(
+        recognitionSessionTerminalArrived = recognitionStates.sessionTerminalArrived(
             for: .microphone
         )
         debugInputHasEnded = self.debugInputEnded
@@ -1834,7 +1771,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         if debugInputHasEnded,
            let generation = recognitionGeneration,
            recognitionLifecycle == .cancelling,
-           !recognitionTaskTerminalArrived {
+           !recognitionSessionTerminalArrived {
             recoverRecognitionAfterCancellationTimeout(
                 for: .microphone,
                 generation: generation
@@ -1881,7 +1818,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let generation: Int?
         sourceLock.lock()
         generation = debugDumpOnlyGeneration
-        debugDumpOnlyRequest = nil
+        debugDumpOnly = false
         debugDumpOnlyGeneration = nil
         sourceLock.unlock()
         guard let generation else {
@@ -1902,7 +1839,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             && debugInputEnded
             && sourceAvailability.isActive(.microphone)
             && recognitionStates.currentGeneration(for: .microphone) == nil
-            && debugDumpOnlyRequest == nil
+            && !debugDumpOnly
         sourceLock.unlock()
         guard canClose else { return }
         guard !recognitionStates.hasPendingAudio(for: .microphone),
@@ -2265,7 +2202,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             return
         case .start:
             let preRoll = takePreRollAudio(for: source)
-            guard startRecognition(for: source) else {
+            guard startRecognition(for: source, inputFormat: buffer.format) else {
                 guard isSourceActive(source) else { return }
                 voiceActivity[source]?.deferCurrentSegment()
                 for audio in preRoll {
@@ -2530,7 +2467,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private func isDebugDumpOnly(_ source: AudioSource) -> Bool {
         sourceLock.lock()
         let active = source == .microphone
-            && debugDumpOnlyRequest != nil
+            && debugDumpOnly
             && debugDumpOnlyGeneration != nil
         sourceLock.unlock()
         return active
@@ -2551,14 +2488,12 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         sourceLock.lock()
         guard !terminal,
               sourceAvailability.isActive(source),
-              let request = debugDumpOnlyRequest,
               let debugDumpOnlyGeneration else {
             sourceLock.unlock()
             return
         }
         generation = debugDumpOnlyGeneration
         shouldReportFormat = reportedAppendFormats.insert(source).inserted
-        request.append(buffer)
         switch source {
         case .microphone:
             microphoneStats.recordAppend()
@@ -2673,7 +2608,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         guard !terminal,
               sourceAvailability.isActive(source),
               recognitionStates.acceptsAudio(for: source),
-              let request = recognitionStates.currentRequest(for: source),
+              let session = recognitionStates.currentSession(for: source),
               let currentGeneration = recognitionStates.currentGeneration(for: source)
         else {
             sourceLock.unlock()
@@ -2681,14 +2616,14 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         generation = currentGeneration
         let shouldReportFormat = reportedAppendFormats.insert(source).inserted
-        request.append(buffer)
+        sourceLock.unlock()
+        session.append(buffer)
         switch source {
         case .microphone:
             microphoneStats.recordAppend()
         case .speaker:
             speakerStats.recordAppend()
         }
-        sourceLock.unlock()
         do {
             try appendedAudioDump?.append(buffer, source: source, generation: generation)
         } catch {
@@ -2751,6 +2686,7 @@ private enum HearingError: LocalizedError {
 
 struct Arguments {
     let locale: Locale
+    let engine: SpeechEngine
     let inputDevice: String
     let sources: Set<AudioSource>
     let debugInputWavPath: String?
@@ -2765,16 +2701,24 @@ func parseArguments() -> Arguments {
           arguments[0] == "--locale",
           arguments[2] == "--input-device",
           arguments[4] == "--sources" else {
-        emit(["event": "error", "kind": "arguments", "message": "--locale、--input-device、--sources を指定してください。任意で --debug-input-wav <path>、--debug-dump-appended <dir>、または --debug-request-auth を追加できます"])
+        emit(["event": "error", "kind": "arguments", "message": "--locale、--input-device、--sources を指定してください。任意で --engine auto|analyzer|sf、--debug-input-wav <path>、--debug-dump-appended <dir>、または --debug-request-auth を追加できます"])
         exit(2)
     }
     var debugInputWavPath: String?
     var debugDumpAppendedPath: String?
     var debugRequestAuth = false
     var backendSelection: String?
+    var engineSelection: String?
     var index = 6
     while index < arguments.count {
         switch arguments[index] {
+        case "--engine":
+            guard engineSelection == nil, index + 1 < arguments.count else {
+                emit(["event": "error", "kind": "arguments", "message": "--engine は値を付けて一度だけ指定してください"])
+                exit(2)
+            }
+            engineSelection = arguments[index + 1]
+            index += 2
         case "--speaker-backend":
             guard backendSelection == nil, index + 1 < arguments.count else {
                 emit(["event": "error", "kind": "arguments", "message": "--speaker-backend は値を付けて一度だけ指定してください"])
@@ -2825,6 +2769,16 @@ func parseArguments() -> Arguments {
         exit(2)
     }
     let locale = arguments[1] == "system" ? Locale.current : Locale(identifier: arguments[1])
+    let engine: SpeechEngine
+    do {
+        engine = try SpeechEngine.resolve(engineSelection ?? "auto")
+    } catch let failure as SpeechAnalysisFailure {
+        emit(["event": "error", "kind": failure.kind, "message": failure.message])
+        exit(2)
+    } catch {
+        emit(["event": "error", "kind": "arguments", "message": "音声認識 engine を選択できませんでした"])
+        exit(2)
+    }
     let speakerBackend: SpeakerBackend
     do {
         speakerBackend = try SpeakerBackend.select(backendSelection ?? "auto")
@@ -2838,6 +2792,7 @@ func parseArguments() -> Arguments {
     }
     return Arguments(
         locale: locale,
+        engine: engine,
         inputDevice: arguments[3],
         sources: sources,
         debugInputWavPath: debugInputWavPath,

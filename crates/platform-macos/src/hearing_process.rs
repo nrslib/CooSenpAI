@@ -12,6 +12,19 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_RESTART_ATTEMPTS: u8 = 3;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TestProcessEvent {
+    Spawned,
+    TerminationRequested,
+    Reaped,
+    RestartDelayStarted,
+}
+
+#[cfg(test)]
+pub(crate) type TestProcessObserver =
+    Arc<dyn Fn(AudioObservationSource, TestProcessEvent) + Send + Sync>;
+
 pub(crate) struct SourceProcessSpec {
     pub(crate) source: AudioObservationSource,
     pub(crate) executable: PathBuf,
@@ -20,6 +33,8 @@ pub(crate) struct SourceProcessSpec {
     pub(crate) initial_error: Option<PortError>,
     pub(crate) parent_cancellation: CancellationToken,
     pub(crate) logger: Arc<dyn RuntimeLogger>,
+    #[cfg(test)]
+    pub(crate) test_process_observer: Option<TestProcessObserver>,
 }
 
 pub(crate) struct SourceProcessEvent {
@@ -89,6 +104,8 @@ pub(crate) async fn run_source_process(
                     &cancellation,
                     &spec.parent_cancellation,
                     spec.logger.as_ref(),
+                    #[cfg(test)]
+                    spec.test_process_observer.as_ref(),
                 )
                 .await
                 {
@@ -105,6 +122,8 @@ pub(crate) async fn run_source_process(
             &cancellation,
             &spec.parent_cancellation,
             spec.logger.as_ref(),
+            #[cfg(test)]
+            spec.test_process_observer.as_ref(),
         )
         .await;
         match outcome {
@@ -121,6 +140,8 @@ pub(crate) async fn run_source_process(
                     &cancellation,
                     &spec.parent_cancellation,
                     spec.logger.as_ref(),
+                    #[cfg(test)]
+                    spec.test_process_observer.as_ref(),
                 )
                 .await
                 {
@@ -132,7 +153,7 @@ pub(crate) async fn run_source_process(
 }
 
 async fn spawn_process(spec: &SourceProcessSpec) -> Result<InteractiveProcess, PortError> {
-    InteractiveProcess::spawn(
+    let process = InteractiveProcess::spawn(
         InteractiveProcessRequest {
             executable: spec.executable.clone(),
             args: spec.args.clone(),
@@ -142,7 +163,12 @@ async fn spawn_process(spec: &SourceProcessSpec) -> Result<InteractiveProcess, P
         spec.parent_cancellation.clone(),
     )
     .await
-    .map_err(process_error)
+    .map_err(process_error)?;
+    #[cfg(test)]
+    if let Some(observer) = spec.test_process_observer.as_ref() {
+        observer(spec.source, TestProcessEvent::Spawned);
+    }
+    Ok(process)
 }
 
 async fn schedule_restart(
@@ -153,6 +179,7 @@ async fn schedule_restart(
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
+    #[cfg(test)] observer: Option<&TestProcessObserver>,
 ) -> bool {
     if !send_source_event(
         events,
@@ -187,8 +214,24 @@ async fn schedule_restart(
     }
     *restart_attempts += 1;
     let delay = restart_delay(*restart_attempts);
+    let delay_sleep = tokio::time::sleep(delay);
+    tokio::pin!(delay_sleep);
+    #[cfg(test)]
+    {
+        use std::future::Future;
+
+        // テスト通知を送る前にタイマーを登録し、通知を基準時刻として扱えるようにする。
+        std::future::poll_fn(|context| {
+            let _ = delay_sleep.as_mut().poll(context);
+            std::task::Poll::Ready(())
+        })
+        .await;
+        if let Some(observer) = observer {
+            observer(source, TestProcessEvent::RestartDelayStarted);
+        }
+    }
     tokio::select! {
-        _ = tokio::time::sleep(delay) => true,
+        _ = &mut delay_sleep => true,
         _ = cancellation.cancelled() => false,
         _ = parent_cancellation.cancelled() => false,
     }
@@ -201,6 +244,7 @@ async fn monitor_process(
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
+    #[cfg(test)] observer: Option<&TestProcessObserver>,
 ) -> ProcessOutcome {
     let control = process.control();
     let mut ready_seen = false;
@@ -247,6 +291,8 @@ async fn monitor_process(
                     Ok(HearingEvent::Error { ref kind, .. }) if kind == "no-input-source" => {}
                     Ok(HearingEvent::Closed) => {
                         return terminate_before_restart(
+                            #[cfg(test)]
+                            source,
                             process,
                             &control,
                             None,
@@ -254,6 +300,8 @@ async fn monitor_process(
                             cancellation,
                             parent_cancellation,
                             logger,
+                            #[cfg(test)]
+                            observer,
                         )
                         .await;
                     }
@@ -277,6 +325,8 @@ async fn monitor_process(
                             "聴覚観察 helper が不正な応答を返しました".to_owned(),
                         );
                         return terminate_before_restart(
+                            #[cfg(test)]
+                            source,
                             process,
                             &control,
                             Some(error),
@@ -284,6 +334,8 @@ async fn monitor_process(
                             cancellation,
                             parent_cancellation,
                             logger,
+                            #[cfg(test)]
+                            observer,
                         )
                         .await;
                     }
@@ -301,6 +353,8 @@ async fn monitor_process(
             }
             Some(Err(error)) => {
                 return terminate_before_restart(
+                    #[cfg(test)]
+                    source,
                     process,
                     &control,
                     Some(process_error(error)),
@@ -308,11 +362,15 @@ async fn monitor_process(
                     cancellation,
                     parent_cancellation,
                     logger,
+                    #[cfg(test)]
+                    observer,
                 )
                 .await;
             }
             None => {
                 return terminate_before_restart(
+                    #[cfg(test)]
+                    source,
                     process,
                     &control,
                     Some(PortError::Unavailable(
@@ -322,6 +380,8 @@ async fn monitor_process(
                     cancellation,
                     parent_cancellation,
                     logger,
+                    #[cfg(test)]
+                    observer,
                 )
                 .await;
             }
@@ -330,6 +390,7 @@ async fn monitor_process(
 }
 
 async fn terminate_before_restart(
+    #[cfg(test)] source: AudioObservationSource,
     process: &mut InteractiveProcess,
     control: &InteractiveProcessControl,
     restart_error: Option<PortError>,
@@ -337,8 +398,13 @@ async fn terminate_before_restart(
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
+    #[cfg(test)] observer: Option<&TestProcessObserver>,
 ) -> ProcessOutcome {
     let termination_error = control.terminate(false).await.err().map(process_error);
+    #[cfg(test)]
+    if let Some(observer) = observer {
+        observer(source, TestProcessEvent::TerminationRequested);
+    }
     let mut wait_error = restart_error;
     let mut stopping = cancellation.is_cancelled() || parent_cancellation.is_cancelled();
 
@@ -364,6 +430,10 @@ async fn terminate_before_restart(
         }
         match event {
             Some(Ok(InteractiveProcessEvent::Exited { .. })) => {
+                #[cfg(test)]
+                if let Some(observer) = observer {
+                    observer(source, TestProcessEvent::Reaped);
+                }
                 if stopping {
                     return ProcessOutcome::Stopped(Ok(()));
                 }
@@ -413,16 +483,24 @@ async fn cancel_and_reap(
     logger: &dyn RuntimeLogger,
 ) -> Result<(), PortError> {
     let _ = control.write_line(br#"{"op":"cancel"}"#.to_vec()).await;
-    control.terminate(false).await.map_err(process_error)?;
+    let mut wait_error = control.terminate(false).await.err().map(process_error);
     while let Some(event) = process.next_event().await {
         match event {
-            Ok(InteractiveProcessEvent::Exited { .. }) => return Ok(()),
+            Ok(InteractiveProcessEvent::Exited { .. }) => {
+                return wait_error.map_or(Ok(()), Err);
+            }
             Ok(InteractiveProcessEvent::StdoutLine(_)) => {}
             Ok(InteractiveProcessEvent::StderrLine(line)) => log_helper_stderr(logger, &line),
-            Err(error) => return Err(process_error(error)),
+            Err(error) => {
+                if wait_error.is_none() {
+                    wait_error = Some(process_error(error));
+                }
+            }
         }
     }
-    Ok(())
+    Err(wait_error.unwrap_or_else(|| {
+        PortError::Unavailable("聴覚観察 helper の終了を確認できませんでした".to_owned())
+    }))
 }
 
 fn restart_delay(attempt: u8) -> std::time::Duration {
@@ -458,3 +536,4 @@ fn log_helper_stderr(logger: &dyn RuntimeLogger, line: &[u8]) {
     }
     let _ = logger.write("INFO", &format!("聴覚観察 helper stderr: {message}"));
 }
+

@@ -79,6 +79,7 @@ pub struct ObservationFrameInput {
     pub app: Option<String>,
     pub target: String,
     pub ocr_text: Option<String>,
+    pub focus: Option<crate::ports::FocusElement>,
     pub image_path: PathBuf,
 }
 
@@ -363,6 +364,7 @@ impl ObserverAgent {
                 app: frame.app.clone(),
                 target: frame.target.clone(),
                 ocr_text: frame.ocr_text.clone(),
+                focus: frame.focus.clone(),
             })
             .collect::<Vec<_>>();
         let mut prompt = build_observer_prompt(
@@ -479,6 +481,7 @@ impl ObserverAgent {
                     ocr_text: frame
                         .ocr_text
                         .map(|value| crate::state::truncate(&value, 2_000)),
+                    focus: frame.focus.map(crate::ports::FocusElement::bounded),
                 })
                 .collect(),
             source_frame_paths,

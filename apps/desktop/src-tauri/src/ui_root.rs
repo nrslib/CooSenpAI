@@ -152,11 +152,18 @@ pub(crate) fn channel() -> (
                 state.shortcut_coordinator.clone(),
             ));
             root.capture = capture;
-            root.bubble = BubblePresenter::new(state.bubbles.clone(), config);
+            root.bubble = BubblePresenter::new_with_revision(
+                state.bubbles.clone(),
+                config,
+                state.config_update.config_revision_handle(),
+            );
             root.bubble.tutorial = Some(state.tutorial.clone());
             root.bubble.initialize(&initial);
             root.avatar = crate::avatar_presenter::AvatarPresenter::new(avatar);
-            tauri::async_runtime::spawn(root.run());
+            tauri::async_runtime::spawn(async move {
+                root.bubble.sync_latest_coo_speech(&initial).await;
+                root.run().await;
+            });
         },
     )
 }
@@ -213,6 +220,31 @@ pub(crate) fn test_capture_channel<P: UiPort>(
     let ui = UiHandle { sender };
     let (handle, capture) = crate::capture::channel(ui.clone());
     let mut root = UiRoot::with_activation(make_port(handle.clone()), receiver, activation);
+    root.capture = capture;
+    (handle, ui, tokio::spawn(root.run()))
+}
+
+#[cfg(test)]
+pub(crate) fn test_capture_channel_with_snapshot<P: UiPort>(
+    make_port: impl FnOnce(crate::capture::CaptureHandle) -> P,
+    activation: crate::activation_policy::ActivationPolicy,
+    snapshot: Arc<std::sync::Mutex<crate::snapshot::AppSnapshot>>,
+) -> (
+    crate::capture::CaptureHandle,
+    UiHandle,
+    tokio::task::JoinHandle<()>,
+) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let ui = UiHandle { sender };
+    let (handle, capture) = crate::capture::channel(ui.clone());
+    let mut root = UiRoot::with_activation(make_port(handle.clone()), receiver, activation);
+    root.snapshot = Some(crate::snapshot_presenter::SnapshotPresenter::new(
+        snapshot,
+        Arc::new(std::sync::Mutex::new(
+            crate::speech_lifecycle::SpeechLifecycle::default(),
+        )),
+        Arc::new(crate::capture::ShortcutCoordinator::default()),
+    ));
     root.capture = capture;
     (handle, ui, tokio::spawn(root.run()))
 }
@@ -656,6 +688,8 @@ impl<P: UiPort> UiRoot<P> {
                 event,
             }],
             event @ (UiEvent::BubbleExpiry(_)
+            | UiEvent::BubbleEdgePoll { .. }
+            | UiEvent::BubbleEdgeRecallReset
             | UiEvent::ThoughtObserved { .. }
             | UiEvent::ThoughtFlushExpired(_)
             | UiEvent::ThoughtClear { .. }) => vec![UiEffect::Deliver {

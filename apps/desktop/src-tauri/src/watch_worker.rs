@@ -49,6 +49,7 @@ pub(crate) struct DesktopWatchWorker {
     trigger_coordinator: TriggerCoordinator,
     application_watch: ApplicationWatchSet,
     application_capture: platform::MacApplicationCapture,
+    focus_element: Arc<dyn coosenpai_core::ports::FocusElementPort>,
     on_battery: bool,
     memory: WatchMemory,
     tutorial_initial_capture_pending: bool,
@@ -109,6 +110,8 @@ impl DesktopWatchWorker {
         );
         let application_capture =
             platform::MacApplicationCapture::with_logger(state.logger.clone());
+        let focus_element: Arc<dyn coosenpai_core::ports::FocusElementPort> =
+            Arc::new(platform::MacFocusedElement);
         let on_battery =
             state.runtime_config().watch.battery.enabled && platform::is_on_battery().await;
         let initial_interval = effective_max_interval_ms(&state.runtime_config(), on_battery);
@@ -156,6 +159,7 @@ impl DesktopWatchWorker {
             trigger_coordinator,
             application_watch,
             application_capture,
+            focus_element,
             on_battery,
             memory,
             tutorial_initial_capture_pending,
@@ -179,6 +183,7 @@ impl WatchWorker for DesktopWatchWorker {
             trigger_coordinator,
             application_watch,
             application_capture,
+            focus_element,
             on_battery,
             memory,
             tutorial_initial_capture_pending,
@@ -261,6 +266,7 @@ impl WatchWorker for DesktopWatchWorker {
                     &config,
                     *ocr_enabled,
                     screen_capture,
+                    focus_element,
                     ocr,
                     semaphore,
                     memory,
@@ -302,6 +308,7 @@ impl WatchWorker for DesktopWatchWorker {
                 tutorial_initial_capture,
                 *ocr_enabled,
                 application_capture,
+                focus_element,
                 ocr,
                 semaphore,
                 memory,

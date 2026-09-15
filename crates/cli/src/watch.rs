@@ -9,8 +9,8 @@ use coosenpai_core::notification::NotificationConsumer;
 use coosenpai_core::observer::ObservationFrameInput;
 use coosenpai_core::persistence::PublicationGate;
 use coosenpai_core::ports::{
-    ActivityPort, ApplicationCapturePort, Clock, HelperResolverPort, OcrPort, OwnWindowBoundsPort,
-    PowerEvent, PowerEventPort, RuntimeLogger, ScreenCapturePort, SystemClock,
+    ActivityPort, ApplicationCapturePort, Clock, FocusElementPort, HelperResolverPort, OcrPort,
+    OwnWindowBoundsPort, PowerEvent, PowerEventPort, RuntimeLogger, ScreenCapturePort, SystemClock,
 };
 use coosenpai_core::runtime::RuntimeActor;
 use coosenpai_core::screen_frames::prepare_screen_frames;
@@ -93,6 +93,7 @@ pub(crate) async fn run(
     );
     let screen_capture = platform::MacScreenCapture::default();
     let application_capture = platform::MacApplicationCapture::default();
+    let focus_element: Arc<dyn FocusElementPort> = Arc::new(platform::MacFocusedElement);
     let activity = platform::MacActivity;
     let ocr = platform::MacOcr::new(helper.clone());
     let clock = SystemClock;
@@ -111,6 +112,7 @@ pub(crate) async fn run(
         semaphore: &semaphore,
         screen_capture: &screen_capture,
         application_capture: &application_capture,
+        focus_element: focus_element.clone(),
         ocr_port: &ocr,
         own_window_bounds: &own_windows,
         clock: &clock,
@@ -459,6 +461,7 @@ struct CaptureEnvironment<'a> {
     semaphore: &'a Arc<Semaphore>,
     screen_capture: &'a dyn ScreenCapturePort,
     application_capture: &'a dyn ApplicationCapturePort,
+    focus_element: Arc<dyn FocusElementPort>,
     ocr_port: &'a dyn OcrPort,
     own_window_bounds: &'a dyn OwnWindowBoundsPort,
     clock: &'a dyn Clock,
@@ -543,6 +546,14 @@ async fn capture_and_deliver(
         }
     };
     let directory = tempfile::tempdir()?;
+    let focus_task = config.watch.focus_element.then(|| {
+        let focus_element = environment.focus_element.clone();
+        let cancellation = environment.cancellation.clone();
+        tokio::spawn(async move {
+            coosenpai_core::focus::read_focused_element(focus_element.as_ref(), &cancellation, None)
+                .await
+        })
+    });
     let captured_screens = environment
         .screen_capture
         .capture(
@@ -550,6 +561,10 @@ async fn capture_and_deliver(
             environment.cancellation.clone(),
         )
         .await?;
+    let focus = match focus_task {
+        Some(task) => task.await.ok().flatten(),
+        None => None,
+    };
     let prepared = prepare_screen_frames(
         captured_screens,
         directory.path(),
@@ -575,6 +590,7 @@ async fn capture_and_deliver(
             captured_at.duration_since(state.window_start).as_secs_f64(),
             trigger,
             front_app.clone(),
+            focus.clone(),
             config.debug.enabled,
         );
         let debug_id = frame.debug_id.clone();
@@ -613,9 +629,8 @@ async fn capture_and_deliver(
         "見守りの撮影が取り消されました"
     );
     for frame in &frames {
-        environment
-            .runtime
-            .register_pending_frame_context(PendingFrameContext::bounded(
+        environment.runtime.register_pending_frame_context(
+            PendingFrameContext::bounded_with_focus(
                 frame.context_id.clone(),
                 captured_at_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 trigger,
@@ -623,7 +638,9 @@ async fn capture_and_deliver(
                 None,
                 frame.target.clone(),
                 frame.ocr_text.clone(),
-            ))?;
+                frame.focus.clone(),
+            ),
+        )?;
     }
     state.last_hash = Some(prepared.comparison_hash.clone());
     state.last_ocr_signature = prepared.ocr_signature.clone();

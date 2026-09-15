@@ -26,6 +26,7 @@ impl PreparedScreenFrame {
         relative_seconds: f64,
         trigger: crate::state::ActivityTriggerKind,
         front_app: Option<String>,
+        focus: Option<crate::ports::FocusElement>,
         debug_enabled: bool,
     ) -> crate::observer::ObservationFrameInput {
         crate::observer::ObservationFrameInput {
@@ -42,6 +43,7 @@ impl PreparedScreenFrame {
             app: None,
             target: "fullscreen".to_owned(),
             ocr_text: self.ocr.as_ref().map(|ocr| ocr.text.clone()),
+            focus,
             image_path: self.provider_path.clone(),
         }
     }

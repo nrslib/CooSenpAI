@@ -10,6 +10,7 @@ mod avatar_window;
 mod bubble_click;
 mod bubble_controls_presenter;
 mod bubble_conversation;
+mod bubble_edge_recall;
 mod bubbles;
 mod capture;
 mod capture_notice;
@@ -326,6 +327,7 @@ pub fn run() -> anyhow::Result<()> {
             commands_memory::memory_delete,
             commands_memory::memory_consolidate,
             commands::panel_open_system_settings,
+            commands::panel_open_accessibility_settings,
             commands_license::license_document_open,
             commands::app_relaunch,
             commands::app_exit,

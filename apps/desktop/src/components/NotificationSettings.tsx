@@ -18,6 +18,9 @@ export function NotificationSettings({ form, snapshot, update, errorFor }: Setti
       <SettingsSearchItem label={t("settings.notifications.display")} path="bubble.display">
         <label><span>{t("settings.notifications.display")}</span><select id="setting-bubble-display" value={form.bubbleDisplay} onChange={(event) => update("bubbleDisplay", event.target.value as FormState["bubbleDisplay"])}><option value="main">{t("settings.notifications.mainScreen")}</option><option value="cursor">{t("settings.notifications.cursorScreen")}</option><option value="front">{t("settings.notifications.frontScreen")}</option></select></label>
       </SettingsSearchItem>
+      <SettingsSearchItem label={t("settings.notifications.edgeRecall")} path="bubble.edgeRecall" description={t("settings.notifications.edgeRecallDescription")}>
+        <label className="boolean-field"><span>{t("settings.notifications.edgeRecall")}</span><input id="setting-bubble-edgeRecall" type="checkbox" checked={form.bubbleEdgeRecall} onChange={(event) => update("bubbleEdgeRecall", event.target.checked)} /></label>
+      </SettingsSearchItem>
       <BooleanInput label={t("settings.notifications.thoughtBubble")} path="ui.thoughtBubble" value={form.thoughtBubble} update={(value) => update("thoughtBubble", value)} />
       <SettingsSearchItem label={t("settings.notifications.normalBubble")} path="bubble.keepLatest" description={t("settings.notifications.normalBubbleDescription")}>
         <label><span>{t("settings.notifications.normalBubble")}</span><select id="setting-bubble-keepLatest" value={form.bubbleKeepLatest ? "persistent" : "timed"} onChange={(event) => update("bubbleKeepLatest", event.target.value === "persistent")}><option value="timed">{t("settings.notifications.timed")}</option><option value="persistent">{t("settings.notifications.persistent")}</option></select></label>

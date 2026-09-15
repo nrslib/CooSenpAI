@@ -1,10 +1,11 @@
 use super::effects::{CaptureEffect, CaptureResult};
 use super::manager::{CaptureFuture, CapturePort};
 use super::{region, window, CaptureKind, ReadyAttachment, ReadyCapture};
-use crate::command_guard::{CommandSource, DesktopCommand};
+use crate::command_guard::{CommandSource, DesktopCommand, DispatchError, RejectReason};
 use crate::state::DesktopState;
-use coosenpai_core::locale::Locale;
+use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::ports::RuntimeLogger;
+use std::future::Future;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -178,9 +179,24 @@ impl DesktopCapturePort {
                     .fence(crate::command_guard::GenerationResource::Conversation)
                     .expect("capture start conversation"))
             });
-            let conversation = admission.await.map_err(|error| {
-                error.format_for_locale(Locale::from_config(&state.runtime_config().ui.language))
-            })?;
+            let locale = Locale::from_config(&state.runtime_config().ui.language);
+            let conversation = match resolve_capture_admission(
+                source,
+                command,
+                admission.await,
+                locale,
+                |message| {
+                    let state = state.clone();
+                    async move {
+                        crate::capture::publish_tutorial_shortcut_error(state, message).await;
+                    }
+                },
+            )
+            .await?
+            {
+                Some(conversation) => conversation,
+                None => return Ok(None),
+            };
             let _ = state.logger.write("DEBUG", "範囲選択: 段階=prepare");
             let previous_error = super::current_shortcut_error_token(&state).await;
             let mut events = port.session.open(generation, kind)?;
@@ -250,6 +266,49 @@ impl DesktopCapturePort {
             )),
         );
     }
+}
+
+pub(crate) async fn resolve_capture_admission<F, Fut>(
+    source: CommandSource,
+    command: DesktopCommand,
+    admission: Result<crate::command_guard::GenerationStamp, DispatchError>,
+    locale: Locale,
+    publish: F,
+) -> Result<Option<crate::command_guard::GenerationStamp>, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    match admission {
+        Ok(conversation) => Ok(Some(conversation)),
+        Err(error) => {
+            if let Some(message) =
+                tutorial_shortcut_rejection_message(source, command, &error, locale)
+            {
+                publish(message.to_owned()).await;
+                return Ok(None);
+            }
+            Err(error.format_for_locale(locale))
+        }
+    }
+}
+
+fn tutorial_shortcut_rejection_message(
+    source: CommandSource,
+    command: DesktopCommand,
+    error: &DispatchError,
+    locale: Locale,
+) -> Option<&'static str> {
+    (source == CommandSource::GlobalShortcut
+        && matches!(
+            command,
+            DesktopCommand::CaptureStartImage | DesktopCommand::CaptureStartText
+        )
+        && matches!(
+            error,
+            DispatchError::Rejected(RejectReason::TutorialOperationNotAllowed)
+        ))
+    .then_some(text(TextKey::ShortcutTutorialOperationNotAllowed, locale))
 }
 
 pub(super) async fn prepare_selected_capture(

@@ -177,6 +177,19 @@ async fn capture_application(
     watch: &mut WatchState,
 ) -> Result<CaptureDisposition> {
     let directory = tempfile::tempdir()?;
+    let focus_task = config.watch.focus_element.then(|| {
+        let focus_element = environment.focus_element.clone();
+        let cancellation = environment.cancellation.clone();
+        let target_bundle_id = application.bundle_id.clone();
+        tokio::spawn(async move {
+            coosenpai_core::focus::read_focused_element(
+                focus_element.as_ref(),
+                &cancellation,
+                Some(target_bundle_id.as_str()),
+            )
+            .await
+        })
+    });
     let source_directory = directory.path().join("captures");
     let captured = environment
         .application_capture
@@ -187,6 +200,10 @@ async fn capture_application(
             environment.cancellation.clone(),
         )
         .await?;
+    let focus = match focus_task {
+        Some(task) => task.await.ok().flatten(),
+        None => None,
+    };
     if captured.is_empty() {
         target.last_capture = Instant::now();
         return Ok(CaptureDisposition::Suppressed);
@@ -222,6 +239,7 @@ async fn capture_application(
             front_app.clone(),
             application.name.clone(),
             frame_target.clone(),
+            focus.clone(),
             config.debug.enabled,
         );
         if let Some(id) = &frame.debug_id {
@@ -293,7 +311,7 @@ async fn capture_application(
     let contexts = frames
         .iter()
         .map(|frame| {
-            PendingFrameContext::bounded(
+            PendingFrameContext::bounded_with_focus(
                 frame.context_id.clone(),
                 captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 trigger,
@@ -301,6 +319,7 @@ async fn capture_application(
                 Some(application.name.clone()),
                 frame.target.clone(),
                 frame.ocr_text.clone(),
+                frame.focus.clone(),
             )
         })
         .collect::<Vec<_>>();

@@ -282,6 +282,7 @@ impl DesktopState {
                 current.ui.language = language.to_owned();
                 Ok(current)
             })?;
+        self.config_update.observe_config_revision(config.revision);
         self.runtime
             .replace_config(
                 config.clone(),
@@ -557,6 +558,7 @@ impl DesktopState {
                 Ok(current)
             })?
         };
+        self.config_update.observe_config_revision(config.revision);
         if !self.tutorial.lock().await.setup_attempt_is_current(attempt) {
             return Ok(false);
         }

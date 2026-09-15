@@ -55,7 +55,7 @@ enum RecognitionSegmentCloseReason: String {
     case error
 }
 
-enum RecognitionTaskCancelReason: String {
+enum RecognitionSessionCancelReason: String {
     case finalTimeout = "final-timeout"
     case sourceDisabled = "source-disabled"
     case inputChanged = "input-changed"
@@ -63,7 +63,7 @@ enum RecognitionTaskCancelReason: String {
     case registrationRejected = "registration-rejected"
 }
 
-enum RecognitionTaskOutcome {
+enum RecognitionSessionOutcome {
     case success(text: String)
     case noSpeech
     case error(Error)
@@ -244,10 +244,10 @@ struct PendingAudioWindow<Element> {
     }
 }
 
-struct RecognitionSegmentController<Request, Task, Recognizer> {
-    typealias State = RecognitionState<Request, Task, Recognizer>
+struct RecognitionSegmentController<Session> {
+    typealias State = RecognitionState<Session>
 
-    private var states = RecognitionStateStore<Request, Task, Recognizer>()
+    private var states = RecognitionStateStore<Session>()
     private var pendingRecognition: [AudioSource: RecognitionPendingCoordinator]
     private var pendingAudioBuffers: [AudioSource: PendingAudioWindow<PendingAudioBuffer>]
     private var preRollAudioBuffers: [AudioSource: RollingAudioWindow<PendingAudioBuffer>]
@@ -279,24 +279,20 @@ struct RecognitionSegmentController<Request, Task, Recognizer> {
 
     mutating func install(
         source: AudioSource,
-        request: Request,
-        task: Task,
-        recognizer: Recognizer,
+        session: Session,
         generation: Int,
         sourceIsActive: Bool
     ) -> Bool {
         states.install(
             source: source,
-            request: request,
-            task: task,
-            recognizer: recognizer,
+            session: session,
             generation: generation,
             sourceIsActive: sourceIsActive
         )
     }
 
-    mutating func markTaskTerminal(source: AudioSource, generation: Int) -> Bool {
-        states.markTaskTerminal(source: source, generation: generation)
+    mutating func markSessionTerminal(source: AudioSource, generation: Int) -> Bool {
+        states.markSessionTerminal(source: source, generation: generation)
     }
 
     mutating func nextTranscriptSequence(source: AudioSource, generation: Int) -> UInt64? {
@@ -338,20 +334,20 @@ struct RecognitionSegmentController<Request, Task, Recognizer> {
         states.isCurrentState(source, generation)
     }
 
-    func currentRequest(for source: AudioSource) -> Request? {
-        states.currentRequest(for: source)
+    func currentSession(for source: AudioSource) -> Session? {
+        states.currentSession(for: source)
     }
 
     func currentGeneration(for source: AudioSource) -> Int? {
         states.currentGeneration(for: source)
     }
 
-    func taskTerminalArrived(for source: AudioSource) -> Bool {
-        states.taskTerminalArrived(for: source)
+    func sessionTerminalArrived(for source: AudioSource) -> Bool {
+        states.sessionTerminalArrived(for: source)
     }
 
-    func taskCancellationRequested(for source: AudioSource) -> Bool {
-        states.taskCancellationRequested(for: source)
+    func sessionCancellationRequested(for source: AudioSource) -> Bool {
+        states.sessionCancellationRequested(for: source)
     }
 
     func closeReason(for source: AudioSource) -> RecognitionSegmentCloseReason? {

@@ -1,4 +1,4 @@
-use super::support::conversation_entry_with_causes_at;
+use super::support::conversation_entry_with_kind_and_causes_at;
 use super::user::common_prepared_response;
 use super::*;
 use crate::companion_storage::{
@@ -6,7 +6,7 @@ use crate::companion_storage::{
     PendingObservation, TurnCommitKind,
 };
 use crate::prompts::{companion_system_prompt_for_locale, ordered_json_string};
-use crate::state::ConversationRole;
+use crate::state::{ConversationMessageKind, ConversationRole};
 
 impl CompanionAgent {
     pub(super) fn exclude_user_claimed_observations(
@@ -359,8 +359,11 @@ impl CompanionAgent {
     pub(super) fn prepare_pending_remark(
         &mut self,
         entry: &ConversationEntry,
-        message_kind: &str,
     ) -> Result<Option<PendingDelivery>, CompanionError> {
+        if !entry.is_normal_speech() {
+            return Err(CompanionError::Output);
+        }
+        let message_kind = entry.message_kind.ok_or(CompanionError::Output)?;
         let delivery = PendingDelivery {
             conversation_generation: self
                 .storage
@@ -372,7 +375,7 @@ impl CompanionAgent {
             created_at: entry.created_at.clone(),
             proactive_date: local_date_at(self.clock.now()),
             message: entry.message.clone(),
-            message_kind: message_kind.to_owned(),
+            message_kind: message_kind.as_wire().to_owned(),
             notification_priority: entry.notification_priority.clone(),
             observation_ids: entry.observation_ids().map(str::to_owned).collect(),
             enqueued: false,
@@ -459,17 +462,21 @@ impl CompanionAgent {
         let Some(message) = response.message.clone() else {
             return Ok((false, false));
         };
-        let entry = conversation_entry_with_causes_at(
+        let message_kind = ConversationMessageKind::from_wire(&response.message_kind)
+            .filter(|kind| kind.is_normal_speech())
+            .ok_or(CompanionError::Output)?;
+        let entry = conversation_entry_with_kind_and_causes_at(
             self.clock.now(),
             ConversationRole::Companion,
             message,
             &response.notification_priority,
+            message_kind,
             observations
                 .iter()
                 .map(|observation| observation.id().to_owned())
                 .collect(),
         );
-        let Some(delivery) = self.prepare_pending_remark(&entry, &response.message_kind)? else {
+        let Some(delivery) = self.prepare_pending_remark(&entry)? else {
             return Ok((true, false));
         };
         if !self.ensure_pending_remark_counted(&delivery)? {
@@ -794,7 +801,7 @@ impl CompanionAgent {
         &mut self,
         delivery: &PendingDelivery,
     ) -> Result<(), CompanionError> {
-        self.append_conversation_once(delivery.conversation_entry())
+        self.append_conversation_once(delivery.conversation_entry()?)
     }
 
     pub(super) fn append_conversation_once(

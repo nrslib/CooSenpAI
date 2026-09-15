@@ -2,8 +2,11 @@ use crate::factory::DesktopFactoryError;
 use coosenpai_core::config::{Config, ConfigValidationIssue};
 use coosenpai_core::locale::{localize_config_issue_message, localize_factory_message, Locale};
 use coosenpai_core::runtime::RuntimeError;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use tokio::sync::{Mutex, RwLock};
 
 pub(crate) struct ConfigUpdateOutcome {
     pub config: Config,
@@ -15,12 +18,14 @@ pub(crate) struct ConfigUpdateCoordinator {
     pub(crate) serial: Mutex<()>,
     pub(crate) audio: Mutex<()>,
     revision: AtomicU64,
-    config_revision: AtomicU64,
+    config_revision: Arc<AtomicU64>,
+    edge_recall: RwLock<()>,
 }
 
 pub(crate) struct ConfigUpdateTransaction<'a> {
     coordinator: &'a ConfigUpdateCoordinator,
     _guard: tokio::sync::MutexGuard<'a, ()>,
+    _edge_recall_guard: tokio::sync::RwLockWriteGuard<'a, ()>,
     pub(crate) base_revision: u64,
     pub(crate) base_config_revision: u64,
 }
@@ -31,15 +36,18 @@ impl ConfigUpdateCoordinator {
             serial: Mutex::new(()),
             audio: Mutex::new(()),
             revision: AtomicU64::new(0),
-            config_revision: AtomicU64::new(config_revision),
+            config_revision: Arc::new(AtomicU64::new(config_revision)),
+            edge_recall: RwLock::new(()),
         }
     }
 
     pub(crate) async fn begin(&self) -> ConfigUpdateTransaction<'_> {
         let guard = self.serial.lock().await;
+        let edge_recall_guard = self.edge_recall.write().await;
         ConfigUpdateTransaction {
             coordinator: self,
             _guard: guard,
+            _edge_recall_guard: edge_recall_guard,
             base_revision: self.revision.load(Ordering::Acquire),
             base_config_revision: self.config_revision.load(Ordering::Acquire),
         }
@@ -47,6 +55,18 @@ impl ConfigUpdateCoordinator {
 
     pub(crate) fn current_revision(&self) -> u64 {
         self.config_revision.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn config_revision_handle(&self) -> Arc<AtomicU64> {
+        self.config_revision.clone()
+    }
+
+    pub(crate) async fn edge_recall_read(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
+        self.edge_recall.read().await
+    }
+
+    pub(crate) async fn edge_recall_write(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.edge_recall.write().await
     }
 
     pub(crate) fn observe_config_revision(&self, revision: u64) {

@@ -119,6 +119,11 @@ pub(crate) enum UiEvent {
     },
     FactCandidateLoaded(Result<crate::presence_presenter::FactCandidateLoaded, String>),
     BubbleExpiry(u64),
+    BubbleEdgePoll {
+        at_edge: bool,
+        config_revision: u64,
+    },
+    BubbleEdgeRecallReset,
     ThoughtObserved {
         runtime: Box<coosenpai_core::runtime::RuntimeSnapshot>,
         initial: bool,
@@ -615,6 +620,8 @@ impl UiEvent {
             Self::PresenceTickCompleted { .. } => "PresenceTickCompleted".to_owned(),
             Self::FactCandidateLoaded(_) => "FactCandidateLoaded".to_owned(),
             Self::BubbleExpiry(epoch) => format!("BubbleExpiry({epoch})"),
+            Self::BubbleEdgePoll { at_edge, .. } => format!("BubbleEdgePoll({at_edge})"),
+            Self::BubbleEdgeRecallReset => "BubbleEdgeRecallReset".to_owned(),
             Self::ThoughtObserved { .. } => "ThoughtObserved".to_owned(),
             Self::ThoughtFlushExpired(epoch) => format!("ThoughtFlushExpired({epoch})"),
             Self::ThoughtClear { .. } => "ThoughtClear".to_owned(),

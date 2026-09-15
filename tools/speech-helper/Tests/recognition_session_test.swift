@@ -110,6 +110,7 @@ private final class SessionHarness {
         analysis.synchronousCancel = synchronousCancel
         session = SpeechRecognitionSession(
             locale: Locale(identifier: "ja-JP"), audio: audio, analysis: analysis, scheduler: scheduler,
+            queue: DispatchQueue(label: "speech-session-test"),
             startRecording: { output.startCount += 1 },
             stopRecording: { output.stopCount += 1 },
             emit: { output.events.append($0); output.onEmit?($0) },

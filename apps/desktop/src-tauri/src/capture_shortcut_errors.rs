@@ -1,7 +1,12 @@
+use crate::bubbles::BubbleRecord;
 use crate::snapshot::AppSnapshot;
 use crate::state::DesktopState;
 use coosenpai_core::locale::{localize_capture_message, localize_shortcut_message, Locale};
 use std::sync::Arc;
+use tauri::Manager;
+
+const TUTORIAL_SHORTCUT_ERROR_BUBBLE_ID: &str = "tutorial-shortcut-operation-not-allowed";
+const TUTORIAL_SHORTCUT_ERROR_DURATION_MS: u64 = 3_000;
 
 pub(super) async fn publish_shortcut_error(state: &DesktopState, error: String) -> AppSnapshot {
     state
@@ -67,6 +72,50 @@ pub(crate) async fn publish_transient_shortcut_error(state: Arc<DesktopState>, m
             },
         ))
         .await;
+}
+
+pub(crate) async fn publish_tutorial_shortcut_error(state: Arc<DesktopState>, message: String) {
+    let show_tutorial_bubble = state.tutorial_is_active().await && !main_window_is_visible(&state);
+    publish_transient_shortcut_error(state.clone(), message.clone()).await;
+    if show_tutorial_bubble {
+        let config = state.runtime_config();
+        let conversation_generation = state.bubbles.lock().await.conversation_generation();
+        crate::bubbles::show_best_effort(
+            state,
+            tutorial_shortcut_error_bubble_record(&config, conversation_generation, message),
+            TUTORIAL_SHORTCUT_ERROR_DURATION_MS,
+        )
+        .await;
+    }
+}
+
+fn main_window_is_visible(state: &DesktopState) -> bool {
+    state
+        .app
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
+fn tutorial_shortcut_error_bubble_record(
+    config: &coosenpai_core::config::Config,
+    conversation_generation: u64,
+    message: String,
+) -> BubbleRecord {
+    BubbleRecord {
+        id: TUTORIAL_SHORTCUT_ERROR_BUBBLE_ID.to_owned(),
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        message,
+        message_kind: "tutorial".to_owned(),
+        notification_priority: "critical".to_owned(),
+        caused_by: None,
+        display_name: config.companion.display_name.clone(),
+        persona: config.companion.persona.clone(),
+        avatar_color: config.ui.avatar_color.clone(),
+        conversation_generation,
+        persistent: false,
+        interaction: None,
+    }
 }
 
 pub(crate) async fn publish_speech_transient_shortcut_error(

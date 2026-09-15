@@ -27,6 +27,7 @@ export interface CooSenpaiConfig {
   readonly watch: {
     readonly enabled: boolean;
     readonly fullscreen: boolean;
+    readonly focusElement: boolean;
     readonly apps: readonly WatchAppConfig[];
     readonly sendIntervalMs: number;
     readonly sendDebounceMs: number;
@@ -80,6 +81,7 @@ export interface CooSenpaiConfig {
   readonly bubble: {
     readonly alwaysShow: boolean;
     readonly keepLatest: boolean;
+    readonly edgeRecall: boolean;
     readonly maxStack: number;
     readonly position: "bottom-right" | "top-right" | "bottom-left" | "top-left";
     readonly display: "main" | "cursor" | "front";
@@ -179,6 +181,7 @@ export interface ConversationEntry {
   readonly createdAt: string;
   readonly role: "user" | "companion";
   readonly message: string;
+  readonly messageKind: "chat" | "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "tutorial" | "notice" | "setup" | "fact-confirmation" | "thought" | "system";
   readonly attachmentPath?: string;
   readonly attachmentText?: string;
   readonly tutorialResponseKey?: string;
@@ -199,6 +202,14 @@ export interface ObservationFrame {
   readonly app: string | null;
   readonly target: string;
   readonly ocrText?: string;
+  readonly focus?: {
+    readonly bundleId: string;
+    readonly windowTitle?: string;
+    readonly role: string;
+    readonly title?: string;
+    readonly description?: string;
+    readonly value?: string;
+  };
 }
 
 export interface ObservationEvent {

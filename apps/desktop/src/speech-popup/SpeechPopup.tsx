@@ -36,7 +36,14 @@ export function SpeechPopupView(): ReactElement {
     void Promise.all([load.ready, input.ready, focus.ready]).then(() => speechPopupApi.ready());
     return () => { load.dispose(); input.dispose(); focus.dispose(); };
   }, [begin, receive]);
-  useLayoutEffect(() => { if (focusRequest > 0) textarea.current?.focus(); }, [focusRequest]);
+  useLayoutEffect(() => {
+    if (focusRequest === 0) return;
+    const input = textarea.current;
+    if (input === null) return;
+    input.focus();
+    const transcriptEnd = text.length;
+    input.setSelectionRange(transcriptEnd, transcriptEnd);
+  }, [focusRequest]);
   const cancel = (): void => { if (snapshot) void speechPopupApi.cancel(snapshot.speech.generation); };
   const send = (): void => {
     if (snapshot) void speechPopupApi.send(snapshot.speech.generation);

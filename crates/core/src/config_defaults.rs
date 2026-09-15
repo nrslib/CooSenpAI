@@ -135,6 +135,9 @@ pub(super) fn default_bubble_max_stack() -> usize {
 pub(super) fn default_bubble_keep_latest() -> bool {
     false
 }
+pub(super) fn default_bubble_edge_recall() -> bool {
+    true
+}
 pub(super) fn default_bubble_position() -> String {
     "bottom-right".to_owned()
 }

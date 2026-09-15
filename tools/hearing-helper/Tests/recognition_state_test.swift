@@ -6,7 +6,7 @@ private struct FakeRecognitionRequest {
     }
 }
 
-private final class FakeRecognitionTask {
+private final class FakeRecognitionSession {
     private(set) var cancelCount = 0
 
     func cancel() {
@@ -22,34 +22,18 @@ func testRecognitionState() {
     assert(boundedPartialTranscript("途中の発話") == "途中の発話")
     assert(boundedPartialTranscript(String(repeating: "あ", count: 2000)).utf8.count == 4095)
     assert(boundedPartialTranscript(String(repeating: "a", count: 4095) + "界") == String(repeating: "a", count: 4095))
-    var callbackValues: [Int] = []
-    let callbackGate = RecognitionCallbackGate()
-    callbackGate.enqueue { callbackValues.append(1) }
-    assert(callbackValues.isEmpty)
-    callbackGate.open()
-    assert(callbackValues == [1])
-    callbackGate.enqueue { callbackValues.append(2) }
-    assert(callbackValues == [1, 2])
-    let discardedCallbackGate = RecognitionCallbackGate()
-    discardedCallbackGate.enqueue { callbackValues.append(3) }
-    discardedCallbackGate.discard()
-    discardedCallbackGate.open()
-    assert(callbackValues == [1, 2])
-
-    var states = RecognitionStateStore<String, String, String>()
+    var states = RecognitionStateStore<String>()
     let firstGeneration = states.reserveGeneration(for: .microphone)
     assert(firstGeneration == 1)
     assert(
         states.install(
             source: .microphone,
-            request: "request-1",
-            task: "task-1",
-            recognizer: "recognizer-1",
+            session: "request-1",
             generation: firstGeneration,
             sourceIsActive: true
         )
     )
-    assert(states.currentRequest(for: .microphone) == "request-1")
+    assert(states.currentSession(for: .microphone) == "request-1")
     assert(states.nextTranscriptSequence(source: .microphone, generation: firstGeneration) == 1)
     assert(states.nextTranscriptSequence(source: .microphone, generation: firstGeneration) == 2)
 
@@ -58,14 +42,12 @@ func testRecognitionState() {
     assert(
         states.install(
             source: .microphone,
-            request: "stale-request",
-            task: "stale-task",
-            recognizer: "stale-recognizer",
+            session: "stale-request",
             generation: firstGeneration,
             sourceIsActive: true
         ) == false
     )
-    assert(states.currentRequest(for: .microphone) == "request-1")
+    assert(states.currentSession(for: .microphone) == "request-1")
     assert(!states.isCurrentGeneration(.microphone, firstGeneration))
     assert(states.isCurrentGeneration(.microphone, secondGeneration))
     assert(!states.isCurrentState(.microphone, firstGeneration))
@@ -73,61 +55,53 @@ func testRecognitionState() {
 
     let replacementRejected = states.install(
         source: .microphone,
-        request: "request-2",
-        task: "task-2",
-        recognizer: "recognizer-2",
+        session: "request-2",
         generation: secondGeneration,
         sourceIsActive: true
     )
     assert(!replacementRejected)
-    assert(states.currentRequest(for: .microphone) == "request-1")
+    assert(states.currentSession(for: .microphone) == "request-1")
     assert(states.currentGeneration(for: .microphone) == firstGeneration)
 
     let removed = states.remove(source: .microphone, generation: firstGeneration)
-    assert(removed?.request == "request-1")
+    assert(removed?.session == "request-1")
     assert(
         states.install(
             source: .microphone,
-            request: "request-2",
-            task: "task-2",
-            recognizer: "recognizer-2",
+            session: "request-2",
             generation: secondGeneration,
             sourceIsActive: true
         )
     )
-    assert(states.currentRequest(for: .microphone) == "request-2")
+    assert(states.currentSession(for: .microphone) == "request-2")
     assert(states.currentGeneration(for: .microphone) == secondGeneration)
     assert(states.nextTranscriptSequence(source: .microphone, generation: secondGeneration) == 1)
 
     let removedSecond = states.remove(source: .microphone, generation: secondGeneration)
-    assert(removedSecond?.request == "request-2")
-    assert(states.currentRequest(for: .microphone) == nil)
+    assert(removedSecond?.session == "request-2")
+    assert(states.currentSession(for: .microphone) == nil)
     assert(!states.isCurrentState(.microphone, secondGeneration))
 
     var inactiveAvailability = AudioSourceAvailability(sources: [.speaker])
     assert(inactiveAvailability.disable(.speaker))
-    var inactiveStates = RecognitionStateStore<String, String, String>()
+    var inactiveStates = RecognitionStateStore<String>()
     let inactiveGeneration = inactiveStates.reserveGeneration(for: .speaker)
     assert(
         inactiveStates.install(
             source: .speaker,
-            request: "inactive-request",
-            task: "inactive-task",
-            recognizer: "inactive-recognizer",
+            session: "inactive-request",
             generation: inactiveGeneration,
             sourceIsActive: inactiveAvailability.isActive(.speaker)
         ) == false
     )
-    assert(inactiveStates.currentRequest(for: .speaker) == nil)
+    assert(inactiveStates.currentSession(for: .speaker) == nil)
 
-    var lifecycleStates = RecognitionStateStore<String, String, String>()
+    var lifecycleStates = RecognitionStateStore<String>()
     let lifecycleGeneration = lifecycleStates.reserveGeneration(for: .microphone)
     assert(
         lifecycleStates.install(
             source: .microphone,
-            request: "lifecycle-request",
-            task: "lifecycle-task",
-            recognizer: "lifecycle-recognizer",
+            session: "lifecycle-request",
             generation: lifecycleGeneration,
             sourceIsActive: true
         )
@@ -145,13 +119,13 @@ func testRecognitionState() {
     assert(lifecycleStates.closeReason(for: .microphone) == .trailing)
     assert(!lifecycleStates.acceptsAudio(for: .microphone))
     assert(
-        lifecycleStates.markTaskTerminal(
+        lifecycleStates.markSessionTerminal(
             source: .microphone,
             generation: lifecycleGeneration
         )
     )
     assert(lifecycleStates.lifecycle(for: .microphone) == .ending)
-    assert(lifecycleStates.taskTerminalArrived(for: .microphone))
+    assert(lifecycleStates.sessionTerminalArrived(for: .microphone))
     assert(
         lifecycleStates.beginEnding(
             source: .microphone,
@@ -166,7 +140,7 @@ func testRecognitionState() {
     )
     assert(lifecycleStates.lifecycle(for: .microphone) == .ending)
     assert(
-        !lifecycleStates.markTaskTerminal(
+        !lifecycleStates.markSessionTerminal(
             source: .microphone,
             generation: lifecycleGeneration
         )
@@ -178,20 +152,18 @@ func testRecognitionState() {
     assert(endedState?.lifecycle == .ending)
     assert(endedState?.closeReason == .trailing)
 
-    var finalBeforeVadClose = RecognitionStateStore<String, String, String>()
+    var finalBeforeVadClose = RecognitionStateStore<String>()
     let finalGeneration = finalBeforeVadClose.reserveGeneration(for: .microphone)
     assert(
         finalBeforeVadClose.install(
             source: .microphone,
-            request: "final-request",
-            task: "final-task",
-            recognizer: "recognizer",
+            session: "final-request",
             generation: finalGeneration,
             sourceIsActive: true
         )
     )
     assert(
-        finalBeforeVadClose.markTaskTerminal(
+        finalBeforeVadClose.markSessionTerminal(
             source: .microphone,
             generation: finalGeneration
         )
@@ -221,9 +193,7 @@ func testRecognitionState() {
     assert(
         lifecycleStates.install(
             source: .microphone,
-            request: "cancelling-request",
-            task: "cancelling-task",
-            recognizer: "cancelling-recognizer",
+            session: "cancelling-request",
             generation: cancellingGeneration,
             sourceIsActive: true
         )
@@ -241,10 +211,10 @@ func testRecognitionState() {
         )?.lifecycle == .cancelling
     )
     assert(lifecycleStates.currentGeneration(for: .microphone) == cancellingGeneration)
-    assert(!lifecycleStates.taskTerminalArrived(for: .microphone))
-    assert(lifecycleStates.taskCancellationRequested(for: .microphone))
+    assert(!lifecycleStates.sessionTerminalArrived(for: .microphone))
+    assert(lifecycleStates.sessionCancellationRequested(for: .microphone))
     assert(
-        lifecycleStates.markTaskTerminal(
+        lifecycleStates.markSessionTerminal(
             source: .microphone,
             generation: cancellingGeneration
         )
@@ -258,10 +228,10 @@ func testRecognitionState() {
         )?.lifecycle == .cancelling
     )
 
-    var terminalStates = RecognitionStateStore<String, String, String>()
+    var terminalStates = RecognitionStateStore<String>()
     let terminalGeneration = terminalStates.reserveGeneration(for: .speaker)
     assert(
-        terminalStates.markTaskTerminal(
+        terminalStates.markSessionTerminal(
             source: .speaker,
             generation: terminalGeneration
         )
@@ -269,9 +239,7 @@ func testRecognitionState() {
     assert(
         terminalStates.install(
             source: .speaker,
-            request: "terminal-request",
-            task: "terminal-task",
-            recognizer: "terminal-recognizer",
+            session: "terminal-request",
             generation: terminalGeneration,
             sourceIsActive: true
         )
@@ -279,7 +247,7 @@ func testRecognitionState() {
     assert(terminalStates.lifecycle(for: .speaker) == .terminal)
     assert(!terminalStates.acceptsAudio(for: .speaker))
     assert(
-        !terminalStates.markTaskTerminal(
+        !terminalStates.markSessionTerminal(
             source: .speaker,
             generation: terminalGeneration
         )
@@ -291,7 +259,7 @@ func testRecognitionState() {
         )?.lifecycle == .terminal
     )
     assert(
-        !terminalStates.markTaskTerminal(
+        !terminalStates.markSessionTerminal(
             source: .speaker,
             generation: terminalGeneration
         )
@@ -456,21 +424,19 @@ func testRecognitionState() {
 }
 
 private func testRecognitionTerminalOrderingAndSideEffects() {
-    var states = RecognitionStateStore<String, String, String>()
+    var states = RecognitionStateStore<String>()
     let generation = states.reserveGeneration(for: .microphone)
     assert(
         states.install(
             source: .microphone,
-            request: "request",
-            task: "task",
-            recognizer: "recognizer",
+            session: "request",
             generation: generation,
             sourceIsActive: true
         )
     )
 
     var request = FakeRecognitionRequest()
-    let task = FakeRecognitionTask()
+    let task = FakeRecognitionSession()
     if states.beginEnding(source: .microphone, generation: generation) != nil {
         request.endAudio()
     }
@@ -479,7 +445,7 @@ private func testRecognitionTerminalOrderingAndSideEffects() {
     }
     assert(request.endAudioCount == 1)
 
-    assert(states.markTaskTerminal(source: .microphone, generation: generation))
+    assert(states.markSessionTerminal(source: .microphone, generation: generation))
     assert(
         states.beginCancelling(source: .microphone, generation: generation) == nil
     )
@@ -492,9 +458,7 @@ private func testRecognitionTerminalOrderingAndSideEffects() {
     assert(
         states.install(
             source: .microphone,
-            request: "cancelling-request",
-            task: "cancelling-task",
-            recognizer: "recognizer",
+            session: "cancelling-request",
             generation: cancellingGeneration,
             sourceIsActive: true
         )
@@ -521,15 +485,13 @@ private func testRecognitionTerminalOrderingAndSideEffects() {
 }
 
 private func testRecognitionCancellationTimeoutRecovery() {
-    var states = RecognitionStateStore<String, FakeRecognitionTask, String>()
+    var states = RecognitionStateStore<FakeRecognitionSession>()
     let generation = states.reserveGeneration(for: .microphone)
-    let task = FakeRecognitionTask()
+    let task = FakeRecognitionSession()
     assert(
         states.install(
             source: .microphone,
-            request: "request",
-            task: task,
-            recognizer: "recognizer",
+            session: task,
             generation: generation,
             sourceIsActive: true
         )
@@ -540,7 +502,7 @@ private func testRecognitionCancellationTimeoutRecovery() {
         generation: generation
     )
     assert(cancellingState != nil)
-    assert(!states.taskTerminalArrived(for: .microphone))
+    assert(!states.sessionTerminalArrived(for: .microphone))
     task.cancel()
     assert(task.cancelCount == 1)
 
@@ -548,11 +510,11 @@ private func testRecognitionCancellationTimeoutRecovery() {
         source: .microphone,
         generation: generation
     )
-    assert(recovered?.taskCancellationRequested == true)
-    assert(recovered?.task.cancelCount == 1)
+    assert(recovered?.sessionCancellationRequested == true)
+    assert(recovered?.session.cancelCount == 1)
     assert(states.currentGeneration(for: .microphone) == nil)
     assert(
-        !states.markTaskTerminal(
+        !states.markSessionTerminal(
             source: .microphone,
             generation: generation
         )

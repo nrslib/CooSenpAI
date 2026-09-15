@@ -74,6 +74,7 @@ fn parse_config_value(key: &str, raw: &str) -> Result<Value> {
             | "thoughtBubble"
             | "alwaysShow"
             | "keepLatest"
+            | "edgeRecall"
             | "launchAtLogin"
             | "checkForUpdates"
     ) {

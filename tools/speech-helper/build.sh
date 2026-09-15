@@ -29,9 +29,11 @@ swiftc -target "$swift_target" -O -module-cache-path "$module_cache_dir" \
   "$script_dir/Sources/audio_queue.swift" \
   "$script_dir/Sources/wav_dump.swift" \
   "$script_dir/Sources/wav_file.swift" \
+  "$script_dir/Sources/speech_analysis.swift" \
   "$script_dir/Sources/transcript_accumulator.swift" \
   "$script_dir/Sources/recognition_session.swift" \
   "$script_dir/Sources/audio_converter.swift" \
+  "$script_dir/Sources/speech_audio_gain.swift" \
   "$script_dir/Sources/speech_analyzer.swift" \
   "$script_dir/Sources/speech_recognizer.swift" \
   "$script_dir/Sources/speech_engine.swift" \

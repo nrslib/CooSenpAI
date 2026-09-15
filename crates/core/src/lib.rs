@@ -12,6 +12,7 @@ pub mod conversation_archive;
 pub mod dataflow_log;
 pub mod debug;
 pub mod emotion;
+pub mod focus;
 pub mod frame_buffer;
 pub mod hearing_context;
 pub mod hearing_ingestion;

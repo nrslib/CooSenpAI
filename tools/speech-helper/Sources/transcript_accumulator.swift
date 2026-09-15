@@ -1,14 +1,6 @@
 import CoreMedia
 import Foundation
 
-struct SpeechTranscription {
-    let text: String
-    let audioRange: CMTimeRange
-    let resultsFinalizationTime: CMTime
-
-    var isFinal: Bool { CMTimeCompare(resultsFinalizationTime, audioRange.end) >= 0 }
-}
-
 enum SpeechTranscriptError: Error {
     case invalidAudioRange
     case invalidFinalizationTime

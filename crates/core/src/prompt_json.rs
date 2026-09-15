@@ -99,7 +99,16 @@ fn preferred_keys(value: &serde_json::Map<String, Value>) -> &'static [&'static 
             "wakeCompanion",
         ]
     } else if value.contains_key("trigger") && value.contains_key("frontApp") {
-        &["trigger", "frontApp"]
+        &["trigger", "frontApp", "app", "target", "ocrText", "focus"]
+    } else if value.contains_key("bundleId") && value.contains_key("role") {
+        &[
+            "bundleId",
+            "windowTitle",
+            "role",
+            "title",
+            "description",
+            "value",
+        ]
     } else if value.contains_key("region") && value.contains_key("text") {
         &["region", "app", "text"]
     } else if value.contains_key("type") && value.contains_key("detail") {

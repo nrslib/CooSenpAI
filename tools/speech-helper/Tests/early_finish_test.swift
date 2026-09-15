@@ -29,6 +29,7 @@ private final class EarlyFinishProbe {
         if mode == "session" {
             session = SpeechRecognitionSession(locale: Locale(identifier: "ja-JP"), audio: audio,
                 analysis: analysis, scheduler: MainQueueSpeechDeadlineScheduler(),
+                queue: DispatchQueue.main,
                 startRecording: { [self] in recordingStarts += 1 }, stopRecording: {},
                 emit: { [self] output in
                     switch output {
