@@ -78,10 +78,12 @@ fn config_read_error(error: ConfigError) -> RuntimeLastError {
     };
     RuntimeLastError {
         kind: RuntimeErrorKind::Config,
+        source: coosenpai_core::runtime::RuntimeErrorSource::Config,
         occurred_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         message: Some(message),
         issues,
         attachment_ocr: None,
         user_response: None,
+        user_input_id: None,
     }
 }

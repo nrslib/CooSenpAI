@@ -13,17 +13,47 @@ impl UiPort for Port {
             UiEffect::PanelOutput { reply, output } => {
                 let _ = reply.send(output);
             }
+            UiEffect::PanelUpdates { updates, .. } => {
+                println!("SETTINGS_ROOT {}", json!({"panelUpdates": updates}));
+                std::io::stdout().flush().unwrap();
+            }
             UiEffect::Log(_)
-            | UiEffect::View {
-                view: crate::ui_events::PresenterId::Details,
-                command: crate::ui_events::ViewCommand::Hide,
-            } => {}
+            | UiEffect::View { .. }
+            | UiEffect::RenderWindow(_)
+            | UiEffect::TrayRender(_)
+            | UiEffect::AppRender(_)
+            | UiEffect::StatusRender(_)
+            | UiEffect::ComposerRender(_)
+            | UiEffect::ConversationRender(_)
+            | UiEffect::WorkApprovalRender(_)
+            | UiEffect::AvatarRender(_)
+            | UiEffect::BubbleRender { .. }
+            | UiEffect::BubbleControls(_)
+            | UiEffect::BubbleTyping { .. }
+            | UiEffect::MainFocus(_) => {}
             _ => panic!("DOM bridge must not execute native effects"),
         }
         Ok(EffectResult::done())
     }
-    async fn run(&self, _task: UiTask) -> Result<EffectResult, String> {
-        panic!("DOM bridge must not execute native tasks")
+    async fn run(&self, task: UiTask) -> Result<EffectResult, String> {
+        match task {
+            UiTask::Load {
+                view,
+                generation,
+                request,
+            } => {
+                let mut result = EffectResult::done();
+                result.events.push(UiEvent::Window {
+                    view,
+                    event: crate::presentation::PresentationEvent::Loaded {
+                        generation,
+                        result: Ok(Some(crate::ui_load::test_content(request))),
+                    },
+                });
+                Ok(result)
+            }
+            _ => panic!("DOM bridge must not execute native tasks"),
+        }
     }
 }
 
@@ -44,6 +74,23 @@ async fn settings_dom_bridge() {
                         view: crate::ui_events::PresenterId::Details,
                         event: crate::presentation::PresentationEvent::Hide,
                     },
+                )
+                .await
+                .unwrap();
+                Value::Null
+            }
+            "open-details" => {
+                root.request(UiView::Application, UiEvent::OpenDetails)
+                    .await
+                    .unwrap();
+                Value::Null
+            }
+            "snapshot-updated" => {
+                let snapshot: crate::snapshot::AppSnapshot =
+                    serde_json::from_value(request["snapshot"].clone()).unwrap();
+                root.request(
+                    UiView::Application,
+                    UiEvent::SnapshotUpdated(std::sync::Arc::new(snapshot)),
                 )
                 .await
                 .unwrap();

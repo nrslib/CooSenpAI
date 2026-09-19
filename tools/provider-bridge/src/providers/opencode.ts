@@ -104,7 +104,9 @@ export class OpenCodeAgent implements ProviderAgent {
         agent: "coosenpai",
         tools: openCodeToolPolicy(),
         system: options.systemPrompt,
-        ...(options.effort === undefined || options.effort === "default" ? {} : { variant: options.effort }),
+        ...(options.effort === undefined || options.effort.value === "default"
+          ? {}
+          : { variant: options.effort.value }),
         parts: opencodeParts(options.message, options.schema, images),
       }, { signal: options.signal });
       let text = "";
@@ -117,6 +119,7 @@ export class OpenCodeAgent implements ProviderAgent {
           const event = next.value;
           const properties = event.properties as { sessionID?: unknown };
           if (properties.sessionID !== activeSessionId) continue;
+          options.emitProgress();
           if (event.type === "session.next.tool.called") {
             toolCalls.set(event.properties.callID, {
               tool: event.properties.tool,

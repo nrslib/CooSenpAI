@@ -4,7 +4,9 @@ use super::user_prompt::{
     turn_observations,
 };
 use super::*;
-use crate::companion_storage::{PendingInput, PendingUserMessage, PreparedUserResponse};
+use crate::companion_storage::{
+    JudgeFeedbackTarget, PendingInput, PendingUserMessage, PreparedUserResponse,
+};
 use crate::provider::ProviderMidTurnInput;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -13,6 +15,26 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const MAX_BATCHED_USER_PROMPT_BYTES: usize = 512 * 1024;
+
+fn judge_feedback_targets(inputs: &[PendingUserMessage]) -> Vec<JudgeFeedbackTarget> {
+    let mut targets = inputs
+        .iter()
+        .flat_map(|input| input.judge_feedback_targets.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut seen = HashSet::new();
+    targets.retain(|target| seen.insert(target.input_id.clone()));
+    targets
+}
+
+fn judge_feedback_messages(inputs: &[PendingUserMessage]) -> Vec<JudgeFeedbackMessage> {
+    inputs
+        .iter()
+        .map(|input| JudgeFeedbackMessage {
+            user_input_id: input.id.clone(),
+            message: input.message.clone(),
+        })
+        .collect()
+}
 
 fn tutorial_response_key(inputs: &[PendingUserMessage]) -> Result<Option<String>, CompanionError> {
     let key = inputs
@@ -38,7 +60,15 @@ pub(crate) struct UserOperationResult {
     pub(crate) data: crate::prompts::CompanionPromptData,
     pub(crate) observations: Vec<ObservationRecord>,
     pub(crate) source_ids: Vec<String>,
+    pub(crate) judge_feedback_targets: Vec<JudgeFeedbackTarget>,
+    pub(crate) judge_feedback_messages: Vec<JudgeFeedbackMessage>,
     pub(crate) dispatch_seq: u64,
+    pub(crate) call_id: Option<String>,
+}
+
+pub(crate) struct JudgeFeedbackMessage {
+    pub(crate) user_input_id: String,
+    pub(crate) message: String,
 }
 
 #[derive(Clone)]
@@ -240,17 +270,21 @@ impl CompanionAgent {
         for input in &inputs {
             self.ensure_user_input_pending(input)?;
         }
-        self.latest_user_activity_at = inputs
-            .iter()
-            .filter_map(|input| chrono::DateTime::parse_from_rfc3339(&input.created_at).ok())
-            .map(|created_at| created_at.with_timezone(&chrono::Utc))
-            .chain(self.latest_user_activity_at)
-            .max();
         let input_ids = inputs
             .iter()
             .map(|input| input.id.clone())
             .collect::<Vec<_>>();
         let tutorial_response_key = tutorial_response_key(&inputs)?;
+        let judge_feedback_targets = judge_feedback_targets(&inputs);
+        let judge_feedback_messages = judge_feedback_messages(&inputs);
+        if tutorial_response_key.is_none() {
+            self.latest_user_activity_at = inputs
+                .iter()
+                .filter_map(|input| chrono::DateTime::parse_from_rfc3339(&input.created_at).ok())
+                .map(|created_at| created_at.with_timezone(&chrono::Utc))
+                .chain(self.latest_user_activity_at)
+                .max();
+        }
         if let Some(prepared) = common_prepared_response(&inputs)? {
             let mut prepared = prepared;
             if tutorial_response_key.is_some() {
@@ -263,10 +297,13 @@ impl CompanionAgent {
                 data: crate::prompts::CompanionPromptData::default(),
                 observations: Vec::new(),
                 source_ids: Vec::new(),
+                judge_feedback_targets,
+                judge_feedback_messages,
                 dispatch_seq: self
                     .active_user_dispatch
                     .as_ref()
                     .map_or(0, |lease| lease.dispatch_seq),
+                call_id: None,
             });
         }
         self.refresh_runtime_observation_context(&mut inputs)?;
@@ -291,7 +328,7 @@ impl CompanionAgent {
         let image_paths = self
             .bounded_provider_image_paths(self.user_image_paths(&inputs)?, observation_image_paths);
         let (image_paths, attachment_ocr_text) = self
-            .prepare_image_attachments(image_paths, cancellation.child_token())
+            .prepare_image_attachments(image_paths, cancellation.child_token(), false)
             .await?;
         data.attachment_ocr_text = attachment_ocr_text;
         let checkpoint = UserCallCheckpoint::capture(self);
@@ -385,6 +422,7 @@ impl CompanionAgent {
                 )
                 .await?;
             outcome.response = completion.response;
+            outcome.call_id = Some(completion.call_id);
         }
         let prepared = PreparedUserResponse {
             audio_ids: Vec::new(),
@@ -413,10 +451,13 @@ impl CompanionAgent {
             data: outcome.data,
             observations: outcome.observations,
             source_ids: outcome.source_ids,
+            judge_feedback_targets,
+            judge_feedback_messages,
             dispatch_seq: self
                 .active_user_dispatch
                 .as_ref()
                 .map_or(0, |lease| lease.dispatch_seq),
+            call_id: outcome.call_id,
         })
     }
 

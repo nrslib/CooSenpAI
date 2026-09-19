@@ -151,12 +151,18 @@ export function observerStatus(snapshot: AppSnapshot, now = Date.now(), locale: 
 
 export function companionStatus(snapshot: AppSnapshot, locale: Locale = "ja"): string {
   const name = snapshot.companionDisplayName;
-  if (snapshot.lastError?.userResponse !== undefined) return t(locale, "view.userResponseStopped");
+  const timeout = snapshot.lastError?.kind === "provider-timeout";
+  const userResponseError = snapshot.lastError?.attachmentOcr === undefined
+    && snapshot.lastError?.userResponse !== undefined
+    && snapshot.companionRetryInSeconds === undefined;
+  if (userResponseError) {
+    return t(locale, timeout ? "view.userResponseStoppedTimeout" : "view.userResponseStopped");
+  }
   if (snapshot.lastError?.attachmentOcr !== undefined) {
     return attachmentOcrFailureMessage(snapshot.lastError.attachmentOcr.reason, locale);
   }
   if (snapshot.lastError !== undefined && snapshot.companionRetryInSeconds !== undefined) {
-    return t(locale, "view.companionRetry", { name, kind: snapshot.lastError.kind, seconds: snapshot.companionRetryInSeconds });
+    return t(locale, timeout ? "view.companionRetryTimeout" : "view.companionRetry", { name, kind: snapshot.lastError.kind, seconds: snapshot.companionRetryInSeconds });
   }
   if (snapshot.deliveryOutboxBlocked) return t(locale, "view.outboxBlocked", { count: snapshot.pendingDeliveries });
   if (snapshot.companion.phase === "thinking") return t(locale, "view.companionThinking", { name });
@@ -242,9 +248,3 @@ export function formatTime(value: string | undefined, locale: Locale = "ja"): st
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? t(locale, "common.none") : date.toLocaleTimeString(locale === "ja" ? "ja-JP" : "en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
-
-export function acceptSnapshot(current: AppSnapshot | undefined, event: SnapshotEventLike): AppSnapshot | undefined {
-  return current !== undefined && event.revision <= current.revision ? undefined : event.snapshot;
-}
-
-interface SnapshotEventLike { readonly revision: number; readonly snapshot: AppSnapshot }

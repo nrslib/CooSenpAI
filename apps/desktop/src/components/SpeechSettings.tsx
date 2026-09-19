@@ -4,11 +4,13 @@ import { useI18n } from "../i18n/index.js";
 import type { FormState } from "../settings-form.js";
 import { SettingsSearchItem } from "../settings-search.js";
 import type { SettingsCategoryProps } from "./SettingsCategoryProps.js";
-import { BooleanInput } from "./SettingsControls.js";
+import { BooleanInput, TextInput } from "./SettingsControls.js";
+import { VoiceOutputSettings } from "./VoiceOutputSettings.js";
 
-export function SpeechSettings({ form, snapshot, update }: SettingsCategoryProps): ReactElement {
+export function SpeechSettings({ form, snapshot, saving, update, errorFor }: SettingsCategoryProps): ReactElement {
   const { t } = useI18n();
   return <fieldset id="settings-speech"><legend>{t("settings.speechSettings.heading")}</legend>
+    <TextInput label={t("settings.speechSettings.locale")} path="speech.locale" value={form.speechLocale} update={(value) => update("speechLocale", value)} />
     <SettingsSearchItem label={t("settings.speechSettings.inputDevice")} path="speech.inputDevice">
       <label><span>{t("settings.speechSettings.inputDevice")}</span><select id="setting-speech-inputDevice" value={form.speechInputDevice} onChange={(event) => update("speechInputDevice", event.target.value)}><option value="default">{t("settings.speechSettings.systemDefault")}</option>{snapshot.speech.inputDevices.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}</select></label>
     </SettingsSearchItem>
@@ -17,5 +19,6 @@ export function SpeechSettings({ form, snapshot, update }: SettingsCategoryProps
     </SettingsSearchItem>
     <BooleanInput label={t("settings.speechSettings.confirmBeforeSend")} path="speech.confirmBeforeSend" value={form.speechConfirmBeforeSend} update={(value) => update("speechConfirmBeforeSend", value)} />
     <p className="field-help">{t("settings.speechSettings.help")}</p>
+    <VoiceOutputSettings form={form} snapshot={snapshot} saving={saving} update={update} errorFor={errorFor} />
   </fieldset>;
 }

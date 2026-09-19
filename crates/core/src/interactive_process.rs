@@ -4,12 +4,14 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 const LINE_LIMIT: usize = 256 * 1024;
 const STDERR_LIMIT: usize = 64 * 1024;
 const TERMINATION_GRACE: Duration = Duration::from_secs(1);
+const FORCE_TERMINATION_WAIT: Duration = Duration::from_secs(1);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct InteractiveProcessRequest {
@@ -52,11 +54,41 @@ enum ProcessCommand {
 pub struct InteractiveProcessControl {
     commands: mpsc::Sender<ProcessCommand>,
     termination_requested: CancellationToken,
+    force_termination_requested: CancellationToken,
+    pid: Option<u32>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ProcessCompletion {
+    completed: watch::Sender<bool>,
+}
+
+impl ProcessCompletion {
+    fn new() -> Self {
+        let (completed, _) = watch::channel(false);
+        Self { completed }
+    }
+
+    fn complete(&self) {
+        self.completed.send_replace(true);
+    }
+
+    pub(crate) async fn wait(&self) {
+        let mut completed = self.completed.subscribe();
+        while !*completed.borrow_and_update() {
+            completed
+                .changed()
+                .await
+                .expect("ProcessCompletion の送信元は待機中に破棄されません");
+        }
+    }
 }
 
 pub struct InteractiveProcess {
     control: InteractiveProcessControl,
     events: mpsc::Receiver<Result<InteractiveProcessEvent, InteractiveProcessError>>,
+    task: tokio::task::JoinHandle<()>,
+    completion: ProcessCompletion,
 }
 
 impl InteractiveProcess {
@@ -105,7 +137,9 @@ impl InteractiveProcess {
         let (command_tx, command_rx) = mpsc::channel(16);
         let (event_tx, event_rx) = mpsc::channel(32);
         let termination_requested = CancellationToken::new();
-        tokio::spawn(run_process(
+        let force_termination_requested = CancellationToken::new();
+        let completion = ProcessCompletion::new();
+        let task = tokio::spawn(run_process(
             child,
             stdin,
             stdout,
@@ -115,14 +149,20 @@ impl InteractiveProcess {
             event_tx,
             cancellation,
             termination_requested.clone(),
+            force_termination_requested.clone(),
             temporary_cwd,
+            completion.clone(),
         ));
         Ok(Self {
             control: InteractiveProcessControl {
                 commands: command_tx,
                 termination_requested,
+                force_termination_requested,
+                pid,
             },
             events: event_rx,
+            task,
+            completion,
         })
     }
 
@@ -130,10 +170,35 @@ impl InteractiveProcess {
         self.control.clone()
     }
 
+    pub(crate) fn completion(&self) -> ProcessCompletion {
+        self.completion.clone()
+    }
+
     pub async fn next_event(
         &mut self,
     ) -> Option<Result<InteractiveProcessEvent, InteractiveProcessError>> {
         self.events.recv().await
+    }
+
+    /// 子プロセスの終了を要求する。通常終了と強制終了の待ち時間には上限を設ける。
+    ///
+    /// `ProcessCompletion` は子プロセスの回収とプロセスグループの後始末まで完了した
+    /// 時点で通知されるため、呼び出し側は新しいプロセスを起動する前にそれを待つ。
+    pub async fn shutdown(self) {
+        let control = self.control.clone();
+        let mut task = self.task;
+        let _ = control.terminate(false).await;
+        let graceful = tokio::time::timeout(SHUTDOWN_GRACE, &mut task).await;
+        if graceful.is_ok() {
+            return;
+        }
+        let _ = control.terminate(true).await;
+        let _ = tokio::time::timeout(FORCE_TERMINATION_WAIT, &mut task).await;
+        if !task.is_finished() {
+            tokio::spawn(async move {
+                let _ = task.await;
+            });
+        }
     }
 }
 
@@ -153,10 +218,14 @@ impl InteractiveProcessControl {
 
     pub async fn terminate(&self, force: bool) -> Result<(), InteractiveProcessError> {
         self.termination_requested.cancel();
-        self.commands
-            .send(ProcessCommand::Terminate { force })
-            .await
-            .map_err(|_| InteractiveProcessError::Closed)
+        if force {
+            self.force_termination_requested.cancel();
+            terminate_process_group(self.pid, true);
+        }
+        match self.commands.try_send(ProcessCommand::Terminate { force }) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(InteractiveProcessError::Closed),
+        }
     }
 }
 
@@ -171,7 +240,9 @@ async fn run_process(
     events: mpsc::Sender<Result<InteractiveProcessEvent, InteractiveProcessError>>,
     cancellation: CancellationToken,
     termination_requested: CancellationToken,
+    force_termination_requested: CancellationToken,
     _temporary_cwd: Option<tempfile::TempDir>,
+    completion: ProcessCompletion,
 ) {
     let mut process_group = ActiveProcessGroup::register(pid);
     let mut lines = BufReader::new(stdout).lines();
@@ -243,7 +314,14 @@ async fn run_process(
             },
             instruction = commands.recv() => match instruction {
                 Some(ProcessCommand::Write(bytes)) => {
-                    if let Err(error) = stdin.write_all(&bytes).await {
+                    let write_result = tokio::select! {
+                        _ = force_termination_requested.cancelled() => {
+                            terminate_process_group(pid, true);
+                            break;
+                        }
+                        result = stdin.write_all(&bytes) => result,
+                    };
+                    if let Err(error) = write_result {
                         let _ = send_process_event(
                             &events,
                             Err(InteractiveProcessError::Io(error)),
@@ -253,7 +331,14 @@ async fn run_process(
                         terminate_process_group(pid, false);
                         break;
                     }
-                    if let Err(error) = stdin.flush().await {
+                    let flush_result = tokio::select! {
+                        _ = force_termination_requested.cancelled() => {
+                            terminate_process_group(pid, true);
+                            break;
+                        }
+                        result = stdin.flush() => result,
+                    };
+                    if let Err(error) = flush_result {
                         let _ = send_process_event(
                             &events,
                             Err(InteractiveProcessError::Io(error)),
@@ -285,45 +370,69 @@ async fn run_process(
                 terminate_process_group(pid, false);
                 break;
             }
+            _ = force_termination_requested.cancelled() => {
+                terminate_process_group(pid, true);
+                break;
+            }
         }
     }
     if status.is_none() {
-        status = match tokio::time::timeout(TERMINATION_GRACE, child.wait()).await {
-            Ok(Ok(value)) => Some(value.code().unwrap_or(-1)),
-            _ => {
+        let exited = tokio::select! {
+            result = child.wait() => Some(result.ok().map(|value| value.code().unwrap_or(-1))),
+            _ = force_termination_requested.cancelled() => None,
+            _ = tokio::time::sleep(TERMINATION_GRACE) => None,
+        };
+        status = match exited {
+            Some(status) => status,
+            None => {
                 terminate_process_group(pid, true);
-                child
-                    .wait()
-                    .await
-                    .ok()
-                    .map(|value| value.code().unwrap_or(-1))
+                wait_after_force_kill(&mut child, pid).await
             }
         };
     }
-    while stderr_open {
-        match read_stderr_chunk(
-            &mut stderr,
-            &mut stderr_buffer,
-            &mut stderr_output,
-            &mut stderr_pending,
-            &events,
-            &cancellation,
-            &termination_requested,
-        )
-        .await
-        {
-            Ok(open) => stderr_open = open,
-            Err(_) => break,
+    let _ = tokio::time::timeout(TERMINATION_GRACE, async {
+        while stderr_open {
+            tokio::select! {
+                _ = force_termination_requested.cancelled() => break,
+                result = read_stderr_chunk(
+                    &mut stderr,
+                    &mut stderr_buffer,
+                    &mut stderr_output,
+                    &mut stderr_pending,
+                    &events,
+                    &cancellation,
+                    &termination_requested,
+                ) => match result {
+                    Ok(open) => stderr_open = open,
+                    Err(_) => break,
+                }
+            }
         }
-    }
+    })
+    .await;
     cleanup_process_group(pid).await;
     process_group.disarm();
-    let _ = events
-        .send(Ok(InteractiveProcessEvent::Exited {
-            status,
-            stderr: stderr_output,
-        }))
-        .await;
+    let _ = events.try_send(Ok(InteractiveProcessEvent::Exited {
+        status,
+        stderr: stderr_output,
+    }));
+    completion.complete();
+}
+
+async fn wait_after_force_kill(child: &mut tokio::process::Child, pid: Option<u32>) -> Option<i32> {
+    match tokio::time::timeout(FORCE_TERMINATION_WAIT, child.wait()).await {
+        Ok(Ok(value)) => Some(value.code().unwrap_or(-1)),
+        _ => {
+            let _ = tokio::time::timeout(FORCE_TERMINATION_WAIT, child.kill()).await;
+            match tokio::time::timeout(FORCE_TERMINATION_WAIT, child.wait()).await {
+                Ok(Ok(value)) => Some(value.code().unwrap_or(-1)),
+                _ => {
+                    terminate_process_group(pid, true);
+                    None
+                }
+            }
+        }
+    }
 }
 
 async fn read_stderr_chunk(

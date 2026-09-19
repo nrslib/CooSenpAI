@@ -57,16 +57,8 @@ impl ConfigUpdateCoordinator {
         self.config_revision.load(Ordering::Acquire)
     }
 
-    pub(crate) fn config_revision_handle(&self) -> Arc<AtomicU64> {
-        self.config_revision.clone()
-    }
-
     pub(crate) async fn edge_recall_read(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
         self.edge_recall.read().await
-    }
-
-    pub(crate) async fn edge_recall_write(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
-        self.edge_recall.write().await
     }
 
     pub(crate) fn observe_config_revision(&self, revision: u64) {

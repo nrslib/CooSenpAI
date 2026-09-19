@@ -216,6 +216,7 @@ struct Session {
 #[derive(Default)]
 pub(crate) struct PanelPresenters {
     settings_hidden: bool,
+    details_snapshot: Option<Value>,
     sessions: BTreeMap<String, Session>,
 }
 
@@ -261,6 +262,34 @@ impl PanelPresenters {
                 panel.hidden(&mut session.io);
             }
         }
+    }
+
+    // Details 画面の snapshot 観測は Root の SnapshotUpdated 配送から取り込み、
+    // 採用した場合だけ購読中のセッションへ view state を配る。
+    pub(crate) fn observe_details_snapshot(
+        &mut self,
+        snapshot: Value,
+    ) -> Result<Vec<PanelUpdate>, String> {
+        if let Some(current) = &self.details_snapshot {
+            if details::snapshot_revision(current)? >= details::snapshot_revision(&snapshot)? {
+                return Ok(Vec::new());
+            }
+        }
+        self.details_snapshot = Some(snapshot.clone());
+        let mut updates = Vec::new();
+        for (id, session) in &mut self.sessions {
+            if let Panel::Details(panel) = &mut session.panel {
+                if panel.observe_snapshot(snapshot.clone())? {
+                    session.revision += 1;
+                    updates.push(PanelUpdate {
+                        session: id.clone(),
+                        revision: session.revision,
+                        state: panel.view()?,
+                    });
+                }
+            }
+        }
+        Ok(updates)
     }
 
     pub(crate) fn settings_hidden(&mut self) {
@@ -310,6 +339,15 @@ impl PanelPresenters {
                     revision: 0,
                 },
             );
+            if kind == PanelKind::Details {
+                if let (Some(seed), Some(current)) =
+                    (&self.details_snapshot, self.sessions.get_mut(&session))
+                {
+                    if let Panel::Details(panel) = &mut current.panel {
+                        panel.observe_snapshot(seed.clone())?;
+                    }
+                }
+            }
         }
         if matches!(kind, PanelKind::Persona | PanelKind::Vrm)
             && matches!(&event, PanelEvent::Action { name, .. } if matches!(name.as_str(), "save" | "delete" | "restore" | "select" | "remove" | "quality" | "toggle"))

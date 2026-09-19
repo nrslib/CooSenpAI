@@ -2,6 +2,7 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 import CoreMedia
+import CoreGraphics
 import Foundation
 @preconcurrency import ScreenCaptureKit
 import Speech
@@ -82,6 +83,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private let debugInputWavPath: String?
     private let debugDumpAppendedPath: String?
     private let debugRequestAuth: Bool
+    private let debugRequestScreenCaptureAuth: Bool
+    private let speakerIdentificationEnabled: Bool
+    private var speakerIdentifier: SpeakerIdentificationCoordinator?
+    private var speakerSegmentStarts: [Int: UInt64] = [:]
+    private var speakerSegmentEnds: [Int: UInt64] = [:]
     private let sourceLock = NSLock()
     private let audioProcessingQueue = DispatchQueue(
         label: "dev.nrslib.coosenpai.hearing.processing",
@@ -101,6 +107,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         .speaker: VoiceActivityDetector(configuration: .standard),
     ]
     private var speakerMusicGate: SpeakerMusicGateSegment?
+    private var speakerMusicGatePreRollCount = 0
     private var speakerMusicGateToken = 0
     private var speakerMusicGateDisabled = false
     private var sourceAvailability: AudioSourceAvailability
@@ -156,7 +163,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         debugDumpAppendedPath: String?,
         debugRequestAuth: Bool,
         speakerBackend: SpeakerBackend,
-        speakerDeviceFactory: (() throws -> SpeakerAudioCapture)? = nil
+        speakerIdentificationEnabled: Bool = false,
+        speakerModelPath: String? = nil,
+        speakerLedgerPath: String? = nil,
+        speakerDeviceFactory: (() throws -> SpeakerAudioCapture)? = nil,
+        debugRequestScreenCaptureAuth: Bool = false
     ) {
         self.speakerDeviceFactory = speakerDeviceFactory
         self.speakerBackend = speakerBackend
@@ -167,11 +178,40 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.debugInputWavPath = debugInputWavPath
         self.debugDumpAppendedPath = debugDumpAppendedPath
         self.debugRequestAuth = debugRequestAuth
+        self.debugRequestScreenCaptureAuth = debugRequestScreenCaptureAuth
+        self.speakerIdentificationEnabled = speakerIdentificationEnabled
+            && sources.contains(.speaker)
         self.recognitionStates = RecognitionSegmentController(
             pendingCapacityNanoseconds: pendingAudioWindowCapacityNanoseconds,
             preRollCapacityNanoseconds: preRollAudioWindowCapacityNanoseconds
         )
         self.sourceAvailability = AudioSourceAvailability(sources: sources)
+        if self.speakerIdentificationEnabled {
+            do {
+                guard let speakerLedgerPath else {
+                    throw SpeakerIdentificationFailure.ledgerPathMissing
+                }
+                self.speakerIdentifier = try SpeakerIdentificationCoordinator(
+                    modelPath: speakerModelPath,
+                    ledgerPath: speakerLedgerPath,
+                    log: emitStderr,
+                    status: { status in
+                        emit([
+                            "event": "speaker-identification",
+                            "status": status.rawValue,
+                        ])
+                    }
+                )
+            } catch {
+                emitStderr(
+                    "speaker-identification unavailable reason=\(error.localizedDescription)"
+                )
+                emit([
+                    "event": "speaker-identification",
+                    "status": SpeakerIdentificationPreparationStatus.unavailable.rawValue,
+                ])
+            }
+        }
         audioProcessingQueue.setSpecific(key: audioProcessingQueueKey, value: ())
     }
 
@@ -199,6 +239,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     func authorizeAndStart() {
+        if debugRequestScreenCaptureAuth {
+            requestScreenCaptureAuthorizationForDebug()
+            return
+        }
         if debugRequestAuth {
             requestSpeechAuthorizationForDebug()
             return
@@ -303,6 +347,49 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 )
                 self.close()
             }
+        }
+    }
+
+    private func requestScreenCaptureAuthorizationForDebug() {
+        guard #available(macOS 10.15, *) else {
+            emitStderr("screen-capture-auth status=unavailable reason=macOS-10.15-required")
+            close()
+            return
+        }
+        if CGPreflightScreenCaptureAccess() {
+            emitStderr("screen-capture-auth status=granted")
+            close()
+            return
+        }
+        let requested = CGRequestScreenCaptureAccess()
+        let requestResult = requested ? "granted" : "pending"
+        emitStderr("screen-capture-auth request=issued result=\(requestResult)")
+        if requested {
+            emitStderr("screen-capture-auth status=granted")
+            close()
+            return
+        }
+        pollScreenCaptureAuthorization(attempt: 0)
+    }
+
+    @available(macOS 10.15, *)
+    private func pollScreenCaptureAuthorization(attempt: Int) {
+        guard !isTerminal() else { return }
+        if CGPreflightScreenCaptureAccess() {
+            emitStderr("screen-capture-auth status=granted")
+            close()
+            return
+        }
+        guard attempt < 120 else {
+            emitStderr(
+                "screen-capture-auth status=denied "
+                    + "reason=システム設定の「プライバシーとセキュリティ」→「画面収録とシステムオーディオ録音」で HearingE2E を許可してから再実行してください"
+            )
+            close()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+            self?.pollScreenCaptureAuthorization(attempt: attempt + 1)
         }
     }
 
@@ -535,7 +622,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             let state = recognitionStates.resetInput(for: source)
             pendingDrainWorkItems.removeValue(forKey: source)?.cancel()
             voiceActivity[source]?.resetToWaiting()
-            if source == .speaker { speakerMusicGate = nil }
+            if source == .speaker {
+                speakerMusicGate = nil
+                speakerMusicGatePreRollCount = 0
+            }
             return state
         }
         if let state, !state.sessionTerminalArrived, !state.sessionCancellationRequested {
@@ -752,6 +842,8 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             "locale": locale.identifier,
             "microphone": permissionName(microphone),
             "recognition": permissionName(recognition),
+            "protocolVersion": 2,
+            "speakerIdentification": speakerIdentificationEnabled && speakerIdentifier != nil,
         ])
     }
 
@@ -760,6 +852,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         inputFormat: AVAudioFormat
     ) -> Bool {
         guard !isTerminal(), isSourceActive(source) else { return false }
+        let speakerSegmentStart = source == .speaker
+            ? voiceActivity[source]?.segmentStartAudioTimeNanoseconds ?? 0
+            : 0
         let generation: Int
         sourceLock.lock()
         guard !terminal,
@@ -835,6 +930,15 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         if shouldReportRequestFormat {
             emitStderr(
                 "audio-format \(source.rawValue) recognition-input=\(audioFormatDescription(inputFormat))"
+            )
+        }
+        if source == .speaker, speakerIdentificationEnabled {
+            speakerSegmentStarts[generation] = speakerSegmentStart
+            speakerSegmentEnds[generation] = speakerSegmentStart
+            speakerIdentifier?.beginSegment(
+                generation: generation,
+                sampleRate: inputFormat.sampleRate,
+                audioStartNanoseconds: speakerSegmentStart
             )
         }
         emitRecognizing(source: source, generation: generation, text: "")
@@ -964,6 +1068,19 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         } else {
             terminalOutcome = outcome
         }
+
+        let speakerIdentificationResult: SpeakerIdentificationResult?
+        if source == .speaker,
+           speakerIdentificationEnabled,
+           case let .success(text) = terminalOutcome,
+           !boundedFinalTranscript(text).isEmpty {
+            speakerIdentificationResult = finishSpeakerIdentification(generation: generation)
+        } else {
+            speakerIdentificationResult = nil
+            if source == .speaker, speakerIdentificationEnabled {
+                discardSpeakerIdentification(generation: generation)
+            }
+        }
         let needsSegmentClose = lifecycle == .accepting || lifecycle == .terminal
         switch terminalOutcome {
         case let .success(text):
@@ -979,8 +1096,17 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             )
             let boundedText = boundedFinalTranscript(text)
             if !boundedText.isEmpty {
-                emit(["event": "final", "source": source.rawValue, "text": boundedText,
-                      "generation": generation, "sequence": transcriptSequence])
+                var event: [String: Any] = [
+                    "event": "final", "source": source.rawValue, "text": boundedText,
+                    "generation": generation, "sequence": transcriptSequence
+                ]
+                if let speakerIdentificationResult {
+                    event.merge(
+                        speakerEventFields(speakerIdentificationResult),
+                        uniquingKeysWith: { _, new in new }
+                    )
+                }
+                emit(event)
             } else {
                 emit(["event": "no-speech", "source": source.rawValue,
                       "generation": generation, "sequence": transcriptSequence])
@@ -1058,6 +1184,36 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             rearmImmediately: rearmImmediately,
             discardPendingAudio: musicGateSuppressed
         )
+    }
+
+    private func finishSpeakerIdentification(generation: Int) -> SpeakerIdentificationResult {
+        let start = speakerSegmentStarts[generation] ?? 0
+        let end = max(speakerSegmentEnds[generation] ?? start &+ 1, start &+ 1)
+        if let speakerIdentifier {
+            let result = speakerIdentifier.finishSegment(
+                generation: generation,
+                audioEndNanoseconds: end
+            )
+            speakerSegmentStarts.removeValue(forKey: generation)
+            speakerSegmentEnds.removeValue(forKey: generation)
+            return result
+        }
+        speakerSegmentStarts.removeValue(forKey: generation)
+        speakerSegmentEnds.removeValue(forKey: generation)
+        return SpeakerIdentificationResult(
+            segmentID: UUID().uuidString.lowercased(),
+            audioStartMilliseconds: start / 1_000_000,
+            audioEndMilliseconds: max(end / 1_000_000, start / 1_000_000 + 1),
+            speakerID: nil,
+            registryID: nil,
+            status: .unavailable
+        )
+    }
+
+    private func discardSpeakerIdentification(generation: Int) {
+        speakerIdentifier?.cancel()
+        speakerSegmentStarts.removeValue(forKey: generation)
+        speakerSegmentEnds.removeValue(forKey: generation)
     }
 
     private func isCurrentRecognitionSession(source: AudioSource, generation: Int) -> Bool {
@@ -1214,6 +1370,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             self.voiceActivity[source]?.resetToWaiting()
             if source == .speaker {
                 self.speakerMusicGate = nil
+                self.speakerMusicGatePreRollCount = 0
             }
             return state
         }
@@ -1279,6 +1436,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 voiceActivity[source]?.resetToWaiting()
             }
             speakerMusicGate = nil
+            speakerMusicGatePreRollCount = 0
             return recognitionStates.removeAll()
         }
         for workItem in recognitionTimeouts { workItem.cancel() }
@@ -1292,6 +1450,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 reason: .sessionClosed
             )
         }
+        speakerIdentifier?.shutdown()
         debugInputPlayer?.stop()
         debugInputPlayer = nil
         stopMicrophoneInput()
@@ -1610,6 +1769,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         voiceActivity[source]?.resetToWaiting()
         if source == .speaker {
             speakerMusicGate = nil
+            speakerMusicGatePreRollCount = 0
         }
         appendedAudioDump?.close(source: source, generation: generation)
         emitRecognitionSessionFinished(
@@ -1651,6 +1811,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             recognitionStates.clearPendingAndPreRoll(for: source)
             recognitionStates.markPendingReady(for: source)
             speakerMusicGate = nil
+            speakerMusicGatePreRollCount = 0
             closeDebugInputIfFinished()
             return
         }
@@ -2225,7 +2386,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                startSpeakerMusicGate(preRoll: preRoll, current: current) {
                 return
             }
-            appendSegmentBuffers(preRoll + [current], for: source)
+            appendSegmentBuffers(
+                preRoll + [current],
+                for: source,
+                firstSpeakerIdentificationIndex: preRoll.count
+            )
         case .append:
             if source == .speaker,
                appendToSpeakerMusicGateIfPending(
@@ -2236,7 +2401,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                ) {
                 return
             }
-            guard append(buffer, for: source) else {
+            guard append(buffer, for: source, identifySpeaker: true) else {
                 if isSourceActive(source) {
                     bufferPendingAudio(buffer, for: source, rms: rms, at: timestamp)
                 }
@@ -2254,7 +2419,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 speakerMusicGate?.requestClose(reason: closeReason)
                 return
             }
-            guard append(buffer, for: source) else {
+            guard append(buffer, for: source, identifySpeaker: true) else {
                 if isSourceActive(source) {
                     bufferPendingAudio(buffer, for: source, rms: rms, at: timestamp)
                 }
@@ -2302,11 +2467,14 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     private func appendSegmentBuffers(
         _ buffers: [PendingAudioBuffer],
-        for source: AudioSource
+        for source: AudioSource,
+        firstSpeakerIdentificationIndex: Int? = nil
     ) {
         for index in buffers.indices {
             let audio = buffers[index]
-            guard append(audio.buffer, for: source) else {
+            let identifySpeaker = source != .speaker
+                || firstSpeakerIdentificationIndex.map { index >= $0 } ?? true
+            guard append(audio.buffer, for: source, identifySpeaker: identifySpeaker) else {
                 guard isSourceActive(source) else { return }
                 for pendingAudio in buffers[index...] {
                     bufferPendingAudio(
@@ -2329,6 +2497,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         speakerMusicGateToken += 1
         let token = speakerMusicGateToken
         let buffers = preRoll + [current]
+        speakerMusicGatePreRollCount = preRoll.count
         var durations: [UInt64] = []
         for audio in buffers {
             guard let durationNanoseconds = audioDurationNanoseconds(for: audio.buffer) else {
@@ -2442,11 +2611,18 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             return
         case .pass:
             speakerMusicGate = nil
-            appendSegmentBuffers(buffered, for: .speaker)
+            let firstSpeakerIdentificationIndex = speakerMusicGatePreRollCount
+            speakerMusicGatePreRollCount = 0
+            appendSegmentBuffers(
+                buffered,
+                for: .speaker,
+                firstSpeakerIdentificationIndex: firstSpeakerIdentificationIndex
+            )
             if let closeReason {
                 endRecognition(for: .speaker, reason: closeReason)
             }
         case .suppress:
+            speakerMusicGatePreRollCount = 0
             endRecognition(for: .speaker, reason: .music)
         }
     }
@@ -2587,7 +2763,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     @discardableResult
-    private func append(_ buffer: AVAudioPCMBuffer, for source: AudioSource) -> Bool {
+    private func append(
+        _ buffer: AVAudioPCMBuffer,
+        for source: AudioSource,
+        identifySpeaker: Bool
+    ) -> Bool {
         let formatDescription = audioFormatDescription(buffer.format)
         let appendedAudioDump: AppendedAudioDump?
         if debugDumpAppendedPath != nil {
@@ -2618,6 +2798,15 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let shouldReportFormat = reportedAppendFormats.insert(source).inserted
         sourceLock.unlock()
         session.append(buffer)
+        if source == .speaker, speakerIdentificationEnabled, identifySpeaker {
+            speakerIdentifier?.append(buffer, generation: generation)
+            if let duration = audioDurationNanoseconds(for: buffer) {
+                let previousEnd = speakerSegmentEnds[generation]
+                    ?? speakerSegmentStarts[generation]
+                    ?? 0
+                speakerSegmentEnds[generation] = previousEnd &+ duration
+            }
+        }
         switch source {
         case .microphone:
             microphoneStats.recordAppend()
@@ -2692,7 +2881,11 @@ struct Arguments {
     let debugInputWavPath: String?
     let debugDumpAppendedPath: String?
     let debugRequestAuth: Bool
+    let debugRequestScreenCaptureAuth: Bool
     let speakerBackend: SpeakerBackend
+    let speakerIdentificationEnabled: Bool
+    let speakerModelPath: String?
+    let speakerLedgerPath: String?
 }
 
 func parseArguments() -> Arguments {
@@ -2701,12 +2894,16 @@ func parseArguments() -> Arguments {
           arguments[0] == "--locale",
           arguments[2] == "--input-device",
           arguments[4] == "--sources" else {
-        emit(["event": "error", "kind": "arguments", "message": "--locale、--input-device、--sources を指定してください。任意で --engine auto|analyzer|sf、--debug-input-wav <path>、--debug-dump-appended <dir>、または --debug-request-auth を追加できます"])
+        emit(["event": "error", "kind": "arguments", "message": "--locale、--input-device、--sources を指定してください。任意で --engine auto|analyzer|sf、--debug-input-wav <path>、--debug-dump-appended <dir>、--speaker-identification、--speaker-model <path>、--speaker-ledger <path>、--debug-request-auth、または --debug-request-screen-capture-auth を追加できます"])
         exit(2)
     }
     var debugInputWavPath: String?
     var debugDumpAppendedPath: String?
     var debugRequestAuth = false
+    var debugRequestScreenCaptureAuth = false
+    var speakerIdentificationEnabled = false
+    var speakerModelPath: String?
+    var speakerLedgerPath: String?
     var backendSelection: String?
     var engineSelection: String?
     var index = 6
@@ -2753,6 +2950,40 @@ func parseArguments() -> Arguments {
             }
             debugRequestAuth = true
             index += 1
+        case "--debug-request-screen-capture-auth":
+            guard !debugRequestScreenCaptureAuth else {
+                emit(["event": "error", "kind": "arguments", "message": "--debug-request-screen-capture-auth は一度だけ指定してください"])
+                exit(2)
+            }
+            debugRequestScreenCaptureAuth = true
+            index += 1
+        case "--speaker-identification":
+            guard !speakerIdentificationEnabled else {
+                emit(["event": "error", "kind": "arguments", "message": "--speaker-identification は一度だけ指定してください"])
+                exit(2)
+            }
+            speakerIdentificationEnabled = true
+            index += 1
+        case "--speaker-model":
+            guard speakerModelPath == nil,
+                  index + 1 < arguments.count,
+                  !arguments[index + 1].isEmpty,
+                  !arguments[index + 1].hasPrefix("--") else {
+                emit(["event": "error", "kind": "arguments", "message": "話者識別モデルは --speaker-model <path> で指定してください"])
+                exit(2)
+            }
+            speakerModelPath = arguments[index + 1]
+            index += 2
+        case "--speaker-ledger":
+            guard speakerLedgerPath == nil,
+                  index + 1 < arguments.count,
+                  !arguments[index + 1].isEmpty,
+                  !arguments[index + 1].hasPrefix("--") else {
+                emit(["event": "error", "kind": "arguments", "message": "話者台帳は --speaker-ledger <path> で指定してください"])
+                exit(2)
+            }
+            speakerLedgerPath = arguments[index + 1]
+            index += 2
         default:
             emit(["event": "error", "kind": "arguments", "message": "未対応の引数です: \(arguments[index])"])
             exit(2)
@@ -2790,6 +3021,18 @@ func parseArguments() -> Arguments {
         emit(["event": "error", "kind": "arguments", "message": "--speaker-backend は speaker source と一緒に指定してください"])
         exit(2)
     }
+    guard !speakerIdentificationEnabled || sources.contains(.speaker) else {
+        emit(["event": "error", "kind": "arguments", "message": "--speaker-identification は speaker source と一緒に指定してください"])
+        exit(2)
+    }
+    guard speakerModelPath == nil || sources.contains(.speaker) else {
+        emit(["event": "error", "kind": "arguments", "message": "--speaker-model は speaker source と一緒に指定してください"])
+        exit(2)
+    }
+    guard speakerLedgerPath == nil || sources.contains(.speaker) else {
+        emit(["event": "error", "kind": "arguments", "message": "--speaker-ledger は speaker source と一緒に指定してください"])
+        exit(2)
+    }
     return Arguments(
         locale: locale,
         engine: engine,
@@ -2798,7 +3041,11 @@ func parseArguments() -> Arguments {
         debugInputWavPath: debugInputWavPath,
         debugDumpAppendedPath: debugDumpAppendedPath,
         debugRequestAuth: debugRequestAuth,
-        speakerBackend: speakerBackend
+        debugRequestScreenCaptureAuth: debugRequestScreenCaptureAuth,
+        speakerBackend: speakerBackend,
+        speakerIdentificationEnabled: speakerIdentificationEnabled,
+        speakerModelPath: speakerModelPath,
+        speakerLedgerPath: speakerLedgerPath
     )
 }
 

@@ -77,9 +77,19 @@ pub(super) fn apply_config_patch(
     signed_build: bool,
 ) -> Result<Config, ConfigError> {
     validate_config_patch(&patch)?;
+    let previous_companion_provider = current.companion.provider.clone();
+    let companion_provider_changed = patch
+        .get("companion")
+        .and_then(Value::as_object)
+        .and_then(|companion| companion.get("provider"))
+        .and_then(Value::as_str)
+        .is_some_and(|provider| provider != previous_companion_provider);
     let audio_was_enabled = current.audio.enabled;
     let mut merged = serde_json::to_value(current)?;
     deep_merge(&mut merged, patch);
+    if companion_provider_changed {
+        merged["companion"]["proactiveModel"] = Value::String(String::new());
+    }
     let mut config = parse_config(merged)?;
     coosenpai_core::config::normalize_audio_sources_on_enable(audio_was_enabled, &mut config);
     if !signed_build && config.notification.mode != "bubble" {

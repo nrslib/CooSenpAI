@@ -2,6 +2,40 @@ export type Provider = "codex" | "claude" | "opencode";
 
 export type ProviderSessionMode = "new" | "resume" | "ephemeral";
 
+export type StandardEffort =
+  | "default"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra"
+  | "persistent";
+
+export type EffortSelection =
+  | { readonly kind: "candidate"; readonly value: StandardEffort }
+  | { readonly kind: "custom"; readonly value: string };
+
+const STANDARD_EFFORTS: readonly StandardEffort[] = [
+  "default",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "persistent",
+];
+
+export function classifyEffort(value: string): EffortSelection {
+  const candidate = STANDARD_EFFORTS.find((effort) => effort === value);
+  return candidate === undefined
+    ? { kind: "custom", value }
+    : { kind: "candidate", value: candidate };
+}
+
 export interface ProviderSession {
   readonly mode: ProviderSessionMode;
   readonly id?: string;
@@ -42,7 +76,7 @@ export interface ProviderCallOptions {
   readonly requestId: string;
   readonly session: ProviderSession;
   readonly model?: string;
-  readonly effort?: string;
+  readonly effort?: EffortSelection;
   readonly systemPrompt: string;
   readonly message: string;
   readonly images: readonly ProviderImageAttachment[];
@@ -54,6 +88,7 @@ export interface ProviderCallOptions {
   readonly signal: AbortSignal;
   readonly emitDelta: (text: string) => void;
   readonly resetDelta: () => void;
+  readonly emitProgress: () => void;
   readonly onToolExecution?: (execution: ProviderToolExecution) => void;
 }
 

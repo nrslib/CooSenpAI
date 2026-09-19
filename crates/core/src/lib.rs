@@ -18,6 +18,7 @@ pub mod hearing_context;
 pub mod hearing_ingestion;
 pub mod image_processing;
 pub mod interactive_process;
+pub mod judge;
 pub mod locale;
 pub mod logging;
 pub mod mailbox;
@@ -43,6 +44,7 @@ pub mod runtime;
 pub mod state;
 pub mod timing;
 pub mod usage;
+pub mod utterance_feedback;
 pub mod voice_output;
 pub mod watch_coordinator;
 

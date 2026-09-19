@@ -54,11 +54,22 @@ pub(crate) struct CompanionCallOutcome {
     pub(crate) remark_created: bool,
     pub(crate) counted_emit: bool,
     pub(crate) usage: Option<ProviderUsage>,
+    pub(crate) call_id: Option<String>,
+}
+
+/// 自発発言の確定結果。`consumed_ids` は消費済み観測、`utterance_observation_ids` は
+/// 発話を実際に生成した観測の ID で、発言評価が発言と LLM 判断を対応付ける正本。
+pub(crate) struct ProactiveCommitOutcome {
+    pub(crate) response: CompanionResponse,
+    pub(crate) consumed_ids: Vec<String>,
+    pub(crate) call_id: Option<String>,
+    pub(crate) utterance_observation_ids: Vec<String>,
 }
 
 pub(super) struct ProviderCallOutcome {
     pub response: CompanionResponse,
     pub usage: Option<ProviderUsage>,
+    pub call_id: String,
 }
 
 pub(super) struct ProviderTurn<'a> {

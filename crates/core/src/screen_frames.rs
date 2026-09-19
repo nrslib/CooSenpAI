@@ -19,6 +19,7 @@ pub struct PreparedScreenFrame {
 }
 
 impl PreparedScreenFrame {
+    #[allow(clippy::too_many_arguments)]
     pub fn observation_frame(
         &self,
         scope_generation: u64,

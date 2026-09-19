@@ -94,10 +94,8 @@ impl SpeechPresenter {
                 return Some(vec![
                     UiEffect::Log(format!("送信の{label}にあわせてメイン画面を前面に出します")),
                     UiEffect::Deliver {
-                        child: crate::ui_events::PresenterId::Capture,
-                        event: UiEvent::CaptureCompleted(Box::new(
-                            crate::capture::CaptureEvent::Ui(UiEvent::OpenMain),
-                        )),
+                        child: crate::ui_events::PresenterId::Root,
+                        event: UiEvent::OpenMain,
                     },
                 ]);
             }

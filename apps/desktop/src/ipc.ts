@@ -1,4 +1,4 @@
-import type { PanelCommand, PanelEvent, PanelKind, PanelOutput } from "./usePanelPresenter.js";
+import type { PanelCommand, PanelEvent, PanelKind, PanelOutput, PanelUpdate } from "./usePanelPresenter.js";
 import type { UpdateSnapshot } from "./app-update.js";
 import type { VoiceOutputSnapshot, VoiceOutputVoice } from "./voice-output.js";
 import type { AvatarSnapshot } from "./avatar/state.js";
@@ -8,7 +8,7 @@ import type { WorkSnapshot } from "./work.js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { AppSnapshot, BubbleSnapshot, CapturePopupSnapshot, CompanionModelCatalog, ConfigPatch, CooSenpaiConfig, DataFlowLog, IpcResult, LicenseDocument, MemoryCatalog, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, RunningApplication, SettingsAppearancePreviewPayload, SnapshotEvent, SpeechPopupSnapshot } from "./types.js";
+import type { AppSnapshot, BubbleSnapshot, CapturePopupSnapshot, CompanionModelCatalog, ConfigPatch, CooSenpaiConfig, DataFlowLog, IpcResult, LicenseDocument, MemoryCatalog, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, RunningApplication, SettingsAppearancePreviewPayload, SpeakerManagementPayload, SpeechPopupSnapshot } from "./types.js";
 
 // 各 WebView は独立した JS コンテキストなので、最後に受け取った snapshot の言語を
 // IPC の transport 例外にも使う。最初の snapshot 前は config の既定値 ja とする。
@@ -19,7 +19,6 @@ export function setIpcLocale(locale: Locale): void {
 }
 
 export const ipcChannels = {
-  snapshotUpdated: "coosenpai:snapshot:updated",
   conversationSelected: "coosenpai:conversation:selected",
   settingsRequested: "coosenpai:settings:requested",
   settingsFocus: "coosenpai:settings:focus",
@@ -157,7 +156,6 @@ export const desktopApi = {
   markUnreadRead: (): Promise<IpcResult<null>> => call("unread_read"),
   adviceSelected: (id: string): Promise<IpcResult<null>> => call("advice_selected", { payload: { id } }),
   settingsRequested: (): Promise<IpcResult<null>> => call("settings_requested"),
-  subscribeSnapshots: (listener: (event: SnapshotEvent) => void) => subscribeLocal(ipcChannels.snapshotUpdated, listener),
   subscribeSelection: (listener: (id: string) => void) => subscribe(ipcChannels.conversationSelected, listener),
   subscribeSettingsRequested: (listener: () => void) => subscribe<void>(ipcChannels.settingsRequested, listener),
   subscribeSettingsFocus: (listener: (section: "watch") => void) => subscribe<"watch">(ipcChannels.settingsFocus, listener),
@@ -166,6 +164,7 @@ export const desktopApi = {
   finishSpeech: (): Promise<IpcResult<null>> => call("speech_finish"),
   cancelSpeech: (): Promise<IpcResult<null>> => call("speech_cancel"),
   openSpeechSettings: (kind: "microphone" | "recognition"): Promise<IpcResult<null>> => call("speech_open_system_settings", { payload: { kind } }),
+  speakerManagement: (payload: SpeakerManagementPayload): Promise<IpcResult<null>> => call("speaker_management", { payload }),
 };
 
 export const motionApi = {
@@ -196,7 +195,6 @@ export const speechPopupApi = {
   subscribeInput: (listener: (input: { generation: number; editRevision: number; text: string; sending: boolean; canSend: boolean; error?: string }) => void) => subscribeLocal("coosenpai:speech-popup:input", listener),
   subscribeFocus: (listener: () => void) => subscribeLocal("coosenpai:speech-popup:focus", listener),
   cancel: (generation: number): Promise<IpcResult<null>> => callSpeech("speech_popup_cancel", { payload: { generation } }),
-  subscribeSnapshots: (listener: (event: SnapshotEvent) => void) => subscribeLocal(ipcChannels.snapshotUpdated, listener),
 };
 
 export const modelPopupApi = {
@@ -204,23 +202,20 @@ export const modelPopupApi = {
   subscribeView: (listener: (view: import("./model-popup/view.js").ModelPickerView) => void) => subscribeLocal("coosenpai:model-picker:view", listener),
   ready: (): Promise<IpcResult<null>> => call("ui_view_mounted"),
   subscribeCatalog: (listener: (catalog: CompanionModelCatalog) => void) => subscribeLocal("coosenpai:model-catalog:load", listener),
-  getSnapshot: (): Promise<IpcResult<AppSnapshot>> => call("model_popup_snapshot"),
   updateConfig: (patch: ConfigPatch): Promise<IpcResult<CooSenpaiConfig>> => call("model_popup_config_update", { patch }),
   companionModelCatalog: (): Promise<IpcResult<CompanionModelCatalog>> => call("model_popup_companion_model_catalog"),
   reloadOpencodeModels: (): Promise<IpcResult<CompanionModelCatalog>> => call("model_popup_opencode_models_reload"),
   close: (): Promise<IpcResult<null>> => call("model_popup_close"),
-  subscribeSnapshots: (listener: (event: SnapshotEvent) => void) => subscribeLocal(ipcChannels.snapshotUpdated, listener),
 };
 
 export const detailsApi = {
   subscribeDataFlow: (listener: (result: IpcResult<DataFlowLog>) => void) => subscribeLocal("coosenpai:dataflow:load", listener),
+  subscribePanelUpdates: (listener: (updates: readonly PanelUpdate[]) => void) => subscribeLocal("coosenpai:panel:updates", listener),
   ready: (): Promise<IpcResult<null>> => call("ui_view_mounted"),
-  getSnapshot: (): Promise<IpcResult<AppSnapshot>> => call("details_snapshot"),
   getDataFlowLog: (): Promise<IpcResult<DataFlowLog>> => call("details_dataflow_log"),
   openDataFlowPath: (path: string): Promise<IpcResult<null>> => call("details_dataflow_open_path", { payload: { path } }),
   resetCompanionEmotions: (): Promise<IpcResult<AppSnapshot>> => call("companion_emotions_reset"),
   selectConversationGeneration: (generation: number): Promise<IpcResult<AppSnapshot>> => call("conversation_select", { payload: { generation } }),
-  subscribeSnapshots: (listener: (event: SnapshotEvent) => void) => subscribeLocal(ipcChannels.snapshotUpdated, listener),
 };
 
 export const bubbleApi = {
@@ -258,5 +253,4 @@ export const capturePopupApi = {
   send: (captureId: string): Promise<IpcResult<string>> => call("capture_popup_send", { payload: { captureId } }),
   cancel: (generation: number, source: "esc" | "closeButton"): Promise<IpcResult<null>> => call("capture_popup_cancel", { payload: { generation, source } }),
   openAccessibilitySettings: (): Promise<IpcResult<null>> => call("capture_popup_open_accessibility_settings"),
-  subscribeSnapshots: (listener: (event: SnapshotEvent) => void) => subscribeLocal(ipcChannels.snapshotUpdated, listener),
 };

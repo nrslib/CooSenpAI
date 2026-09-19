@@ -47,6 +47,7 @@ impl CompanionAgent {
         &self,
         image_paths: Vec<PathBuf>,
         cancellation: CancellationToken,
+        proactive: bool,
     ) -> Result<(Vec<PathBuf>, Option<String>), CompanionError> {
         let image_paths = image_paths
             .into_iter()
@@ -55,10 +56,11 @@ impl CompanionAgent {
         if image_paths.is_empty() {
             return Ok((image_paths, None));
         }
+        let model = self.resolved_model_and_effort(proactive).0;
         let capabilities = self
             .provider
             .resolve_model_capabilities(
-                Some(self.config.model.as_str()),
+                Some(model),
                 cancellation.child_token(),
                 Duration::from_millis(self.config.timeout_ms),
             )

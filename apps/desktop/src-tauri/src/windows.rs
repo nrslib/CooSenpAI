@@ -207,7 +207,7 @@ pub(crate) fn dispatch_capture_cancel(state: Arc<DesktopState>) {
         });
 }
 
-fn create_bubble_window(app: &App) -> tauri::Result<tauri::WebviewWindow> {
+pub(crate) fn create_bubble_window(app: &App) -> tauri::Result<tauri::WebviewWindow> {
     let config = app
         .config()
         .app

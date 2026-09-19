@@ -1,3 +1,4 @@
+use crate::presentation::PresentationEvent;
 use crate::tutorial_events::{TutorialEvent, TutorialTask};
 use crate::tutorial_notice::TutorialBubbleOutcome;
 use crate::tutorial_progress_presenter::{step_intro_key, ProgressEvent};
@@ -64,8 +65,11 @@ pub(crate) fn handle(event: LifecycleEvent) -> Vec<UiEffect> {
     match event {
         LifecycleEvent::Started(reply) => vec![
             UiEffect::Deliver {
-                child: PresenterId::Chat,
-                event: UiEvent::Close,
+                child: PresenterId::Root,
+                event: UiEvent::Window {
+                    view: PresenterId::Chat,
+                    event: PresentationEvent::Hide,
+                },
             },
             task(LifecycleTask::Intro {
                 follows_setup_ok: false,
@@ -139,7 +143,7 @@ pub(crate) fn handle(event: LifecycleEvent) -> Vec<UiEffect> {
         } => {
             if finish_display_is_accepted(&display) && cleanup_ok {
                 vec![UiEffect::Deliver {
-                    child: PresenterId::Chat,
+                    child: PresenterId::Root,
                     event: UiEvent::OpenMain,
                 }]
             } else {

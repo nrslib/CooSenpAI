@@ -10,6 +10,7 @@ impl DesktopState {
             && (!next.audio.enabled
                 || previous.audio.mic != next.audio.mic
                 || previous.audio.speaker != next.audio.speaker
+                || previous.audio.speaker_identification != next.audio.speaker_identification
                 || previous.observer.hearing.interval_ms != next.observer.hearing.interval_ms
                 || previous.audio.debug_dump_dir != next.audio.debug_dump_dir)
     }

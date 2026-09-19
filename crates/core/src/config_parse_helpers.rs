@@ -1,6 +1,6 @@
 use super::super::{
     is_valid_avatar_path, issue, unknown_issue, AudioConfig, ChatConfig, ConfigValidationIssue,
-    DebugConfig, SpeechConfig, UiConfig, VoiceOutputConfig,
+    DebugConfig, SpeakerIdentificationConfig, SpeechConfig, UiConfig, VoiceOutputConfig,
 };
 use serde_json::{Map, Value};
 use std::convert::TryFrom;
@@ -231,6 +231,24 @@ pub(super) fn string(
     }
 }
 
+pub(super) fn string_or_empty(
+    object: &Map<String, Value>,
+    key: &str,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> String {
+    let Some(value) = object.get(key) else {
+        return String::new();
+    };
+    match value.as_str() {
+        Some(value) => value.to_owned(),
+        None => {
+            issues.push(issue(path, "文字列で指定してください。"));
+            String::new()
+        }
+    }
+}
+
 pub(super) fn optional_string(
     object: &Map<String, Value>,
     key: &str,
@@ -256,14 +274,52 @@ pub(super) fn parse_audio(
 ) -> AudioConfig {
     issues.extend(unknown_keys(
         object,
-        &["enabled", "mic", "speaker", "debugDumpDir"],
+        &[
+            "enabled",
+            "mic",
+            "speaker",
+            "speakerIdentification",
+            "debugDumpDir",
+        ],
         "audio",
     ));
+    let speaker_identification = match object.get("speakerIdentification") {
+        None => SpeakerIdentificationConfig::default(),
+        Some(Value::Object(value)) => parse_speaker_identification(value, issues),
+        Some(_) => {
+            issues.push(issue(
+                "audio.speakerIdentification",
+                "設定はオブジェクトで指定してください。",
+            ));
+            SpeakerIdentificationConfig::default()
+        }
+    };
     AudioConfig {
         enabled: boolean(object, "enabled", false, "audio.enabled", issues),
         mic: boolean(object, "mic", true, "audio.mic", issues),
         speaker: boolean(object, "speaker", true, "audio.speaker", issues),
+        speaker_identification,
         debug_dump_dir: optional_string(object, "debugDumpDir", "audio.debugDumpDir", issues),
+    }
+}
+
+fn parse_speaker_identification(
+    object: &Map<String, Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> SpeakerIdentificationConfig {
+    issues.extend(unknown_keys(
+        object,
+        &["enabled"],
+        "audio.speakerIdentification",
+    ));
+    SpeakerIdentificationConfig {
+        enabled: boolean(
+            object,
+            "enabled",
+            false,
+            "audio.speakerIdentification.enabled",
+            issues,
+        ),
     }
 }
 
@@ -409,6 +465,24 @@ pub(super) fn effort(
         None => {
             issues.push(issue(path, "空白以外の文字列で指定してください。"));
             default.to_owned()
+        }
+    }
+}
+
+pub(super) fn effort_or_empty(
+    object: &Map<String, Value>,
+    key: &str,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> String {
+    let Some(value) = object.get(key) else {
+        return String::new();
+    };
+    match value.as_str().map(str::trim) {
+        Some(value) => value.to_owned(),
+        None => {
+            issues.push(issue(path, "文字列で指定してください。"));
+            String::new()
         }
     }
 }

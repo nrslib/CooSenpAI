@@ -98,6 +98,11 @@ pub struct ProviderCall {
     pub session: SessionRequest,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// companion だけが、同じ session を別 model で継続できる。
+    pub allow_session_model_change: bool,
+    /// bridge からのイベントが途切れたときに切るまでの時間。
+    pub stall_timeout: Duration,
+    /// provider 呼び出し全体の絶対上限。
     pub timeout: Duration,
     pub tutorial_response_key: Option<String>,
 }
@@ -152,6 +157,7 @@ pub struct ProviderCompactSessionOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderErrorKind {
     Retryable,
+    Timeout,
     Auth,
     Unsupported,
     InvalidModel,
@@ -162,11 +168,16 @@ impl ProviderErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Retryable => "retryable",
+            Self::Timeout => "timeout",
             Self::Auth => "auth",
             Self::Unsupported => "unsupported",
             Self::InvalidModel => "invalid-model",
             Self::InvalidOutput => "invalid-output",
         }
+    }
+
+    pub fn is_retryable(self) -> bool {
+        matches!(self, Self::Retryable | Self::Timeout)
     }
 }
 
@@ -179,6 +190,7 @@ pub struct ProviderError {
 
 pub trait ProviderEventSink: Send + Sync {
     fn delta(&self, _text: &str) {}
+    fn progress(&self) {}
     fn usage(&self, _usage: &ProviderUsage) {}
     fn reset(&self) {}
     fn mid_turn_accepted(&self, _source_id: &str) {}

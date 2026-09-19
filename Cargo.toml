@@ -1,10 +1,17 @@
 [workspace]
-members = ["crates/core", "crates/platform-macos", "crates/cli", "apps/desktop/src-tauri"]
+members = [
+    "crates/core",
+    "crates/platform-macos",
+    "crates/cli",
+    "apps/desktop/src-tauri",
+    "tools/judge-fixed-plugin",
+    "tools/judge-fixed-plugin-notify",
+]
 exclude = ["spikes/macos-tauri-objc2"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89"
 license = "PolyForm-Shield-1.0.0"

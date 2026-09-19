@@ -42,6 +42,7 @@ impl PendingFrameContext {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn bounded_with_focus(
         id: String,
         captured_at: String,

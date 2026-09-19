@@ -77,9 +77,27 @@ impl Screen {
             },
         })
     }
+    fn observe_snapshot(&mut self, value: Value) {
+        for update in self.panels.observe_details_snapshot(value).unwrap() {
+            if update.session == "test" {
+                self.last.revision = update.revision;
+                self.last.state = update.state;
+            }
+        }
+    }
 }
 fn config() -> Value {
     json!({"revision":1,"ui":{"language":"ja","theme":"system","avatarPath":null},"companion":{"persona":"default","displayName":"Coo"},"watch":{"downscaleWidth":1280,"apps":[]}})
+}
+fn merge_config(current: &Value, patch: &Value) -> Value {
+    let Some(patch) = patch.as_object() else {
+        return patch.clone();
+    };
+    let mut merged = current.as_object().cloned().unwrap_or_default();
+    for (key, value) in patch {
+        merged.insert(key.clone(), merge_config(&current[key], value));
+    }
+    Value::Object(merged)
 }
 fn form_fields(config: &Value) -> Value {
     fn visit(value: &Value, path: Vec<String>, fields: &mut serde_json::Map<String, Value>) {
@@ -97,6 +115,7 @@ fn form_fields(config: &Value) -> Value {
                 "companion.displayName" => "displayName".into(),
                 "companion.persona" => "persona".into(),
                 "ui.theme" => "uiTheme".into(),
+                "watch.enabled" => "watchEnabled".into(),
                 "watch.downscaleWidth" => "downscaleWidth".into(),
                 "watch.apps" => "watchApps".into(),
                 "ui.avatarPath" => "avatarPath".into(),
@@ -121,8 +140,11 @@ fn form_fields(config: &Value) -> Value {
 fn observation(config: Value) -> Value {
     json!({"configRevision":config["revision"],"fields":form_fields(&config),"config":config,"avatarImageLoadFailed":false,"issues":[],"onboarding":{"tutorialActive":false},"focusSection":null})
 }
+fn draft_with_basis(config: Value, revision: u64, basis: &Value) -> Value {
+    json!({"fields":form_fields(&config),"revision":revision,"avatarImage":null,"avatarFileName":null,"basis":{"configRevision":1,"generation":0,"fields":form_fields(basis),"avatarImage":null,"avatarFileName":null}})
+}
 fn draft(config: Value, revision: u64) -> Value {
-    json!({"fields":form_fields(&config),"revision":revision,"avatarImage":null,"avatarFileName":null,"basis":{"configRevision":1,"generation":0,"fields":form_fields(&self::config()),"avatarImage":null,"avatarFileName":null}})
+    draft_with_basis(config, revision, &self::config())
 }
 fn settings() -> Screen {
     Screen::new(
@@ -171,6 +193,61 @@ fn settings_dirty_external_adoption_save_diff_and_success_timer() {
     s.action("snapshot", observation(config()));
     assert!(s.last.commands.is_empty());
 }
+
+#[test]
+fn settings_visible_edit_preserves_all_non_visible_config_values() {
+    let hidden = json!({
+        "watch": {
+            "sendDebounceMs": 1234, "framesPerSend": 5, "appWindowLimit": 5, "downscaleWidth": 1400,
+            "triggers": {"typingPauseMs": 3000, "activeThresholdMs": 1500, "appSwitch": false, "appSwitchSettleMs": 2000, "maxIntervalMs": 70000, "minSpacingMs": 6000, "pollMs": 1000},
+            "battery": {"enabled": false, "multiplier": 3},
+            "ocrGate": {"enabled": false, "level": "fast", "timeoutMs": 4000, "executable": "/bin/sh"}
+        },
+        "observer": {
+            "vision": {"effort": "high", "intervalMs": 70000, "stallTimeoutMs": 130000, "timeoutMs": 700000, "textTotalMaxChars": 3000, "changesMaxCount": 9, "executable": "/bin/sh"},
+            "hearing": {"effort": "high", "intervalMs": 70000, "stallTimeoutMs": 130000, "timeoutMs": 700000, "textTotalMaxChars": 3000, "changesMaxCount": 9, "executable": "/bin/sh"}
+        },
+        "companion": {
+            "effort": "high", "proactiveEffort": "high", "proactiveIdleMs": 700000, "stallTimeoutMs": 130000, "timeoutMs": 1900000,
+            "wakeCoalesceMax": 6, "sessionMaxCalls": 61, "stuckAfterMs": 900001, "pendingDeliveryLimit": 21, "pendingDeliveryMaxBytes": 22000000,
+            "contextRefreshCalls": 21, "proactiveQuietMinutes": 2, "executable": "/bin/sh"
+        },
+        "bubble": {"maxStack": 4},
+        "memory": {"graceMinutes": 61, "jobRetentionDays": 31, "sourceMaxBytes": 200000, "promptMaxBytes": 8192, "factLimit": 999, "factMaxBytes": 100000, "candidateLimit": 49, "candidateMaxBytes": 50000, "storageMaxBytes": 11000000},
+        "debug": {"enabled": true},
+        "audio": {"debugDumpDir": "/tmp/coosenpai-audio"}
+    });
+    let base = merge_config(&config(), &hidden);
+    let mut s = Screen::new(
+        PanelKind::Settings,
+        json!({"observation":observation(base.clone()),"draft":draft_with_basis(base.clone(),0,&base)}),
+    );
+    let mut edited = base.clone();
+    edited["ui"]["theme"] = json!("dark");
+    s.event(PanelEvent::Change {
+        value: draft_with_basis(edited, 1, &base),
+    });
+    s.action("save", Value::Null);
+    let save = s.command("save");
+    assert_eq!(save.payload["patch"], json!({"ui":{"theme":"dark"}}));
+    assert_eq!(
+        merge_config(&base, &save.payload["patch"])["watch"],
+        base["watch"]
+    );
+    assert_eq!(
+        merge_config(&base, &save.payload["patch"])["observer"],
+        base["observer"]
+    );
+    assert_eq!(
+        merge_config(&base, &save.payload["patch"])["companion"],
+        base["companion"]
+    );
+    assert_eq!(
+        merge_config(&base, &save.payload["patch"])["memory"],
+        base["memory"]
+    );
+}
+
 #[test]
 fn settings_save_preserves_edits_made_during_save_and_stale_timer() {
     let mut s = settings();
@@ -292,12 +369,8 @@ fn settings_tutorial_focus_persona_selection_confirmation_and_errors() {
     s.action("openPicker", Value::Null);
     assert_eq!(s.last.state["personaPickerOpen"], false);
     s.action("focusIssue", json!("voiceOutput.provider"));
-    assert_eq!(s.last.state["activeCategory"], "beta");
+    assert_eq!(s.last.state["activeCategory"], "speech");
     s.command("focusIssue");
-    s.action("confirm", json!("tuning"));
-    s.action("acceptConfirmation", Value::Null);
-    s.command("resetTuning");
-    assert!(s.last.state["confirmation"].is_null());
     s.action("confirm", json!("conversation-reset"));
     s.action("acceptConfirmation", Value::Null);
     s.command("resetConversation");
@@ -321,6 +394,82 @@ fn settings_tutorial_focus_persona_selection_confirmation_and_errors() {
         "new"
     );
 }
+
+#[test]
+fn settings_restore_page_and_all_defaults_keep_one_undo_generation() {
+    let mut s = settings();
+    s.action("confirm", json!({"scope":"page","category":"providers"}));
+    assert_eq!(s.last.state["confirmation"], "settings-reset");
+    assert_eq!(s.last.state["resetScope"], "page");
+    assert_eq!(s.last.state["resetCategory"], "providers");
+    s.action(
+        "acceptConfirmation",
+        json!({"fields":{"companionTimeoutMs":{"value":"120000","patch":{"companion":{"timeoutMs":120000}}}}}),
+    );
+    let page_reset = s.command("resetDraft");
+    assert_eq!(page_reset.payload["scope"], "page");
+    assert_eq!(page_reset.payload["category"], "providers");
+    assert_eq!(
+        page_reset.payload["defaults"]["companion"]["timeoutMs"],
+        1_800_000
+    );
+    assert_eq!(
+        page_reset.payload["fields"]["companionTimeoutMs"]["value"],
+        "120000"
+    );
+    assert_eq!(s.last.state["canUndoReset"], true);
+
+    s.action("confirm", json!({"scope":"all"}));
+    s.action(
+        "acceptConfirmation",
+        json!({"fields":{"displayName":{"value":"before","patch":{"companion":{"displayName":"before"}}}}}),
+    );
+    let all_reset = s.command("resetDraft");
+    assert_eq!(all_reset.payload["scope"], "all");
+    assert!(all_reset.payload["category"].is_null());
+    assert!(all_reset.payload["fields"]["companionTimeoutMs"].is_null());
+
+    s.action("selectPersona", json!("new"));
+    let select = s.command("selectPersona");
+    let mut selected = config();
+    selected["revision"] = json!(2);
+    selected["companion"]["persona"] = json!("new");
+    s.done(&select, selected);
+    assert_eq!(
+        s.command("reflect").payload["config"]["companion"]["persona"],
+        "new"
+    );
+
+    s.action("undoReset", Value::Null);
+    let undo = s.command("restoreReset");
+    assert_eq!(undo.payload["scope"], "all");
+    assert!(undo.payload["category"].is_null());
+    assert_eq!(undo.payload["fields"]["displayName"]["value"], "before");
+    assert!(undo.payload["fields"]["persona"].is_null());
+    assert!(undo.payload["fields"]["avatarPath"].is_null());
+    assert!(undo.payload["avatarImage"].is_null());
+    assert_eq!(s.last.state["canUndoReset"], false);
+}
+
+#[test]
+fn settings_reset_undo_is_discarded_after_the_screen_closes() {
+    let mut s = settings();
+    s.action("confirm", json!({"scope":"all"}));
+    s.action("acceptConfirmation", json!({"fields":{}}));
+    s.command("resetDraft");
+    assert_eq!(s.last.state["canUndoReset"], true);
+
+    s.action("close", Value::Null);
+    let clear = s.command("clearPreview");
+    s.done(&clear, Value::Null);
+    assert_eq!(s.last.state["canUndoReset"], false);
+    s.action("undoReset", Value::Null);
+    assert!(s.last.commands.is_empty());
+
+    let reopened = settings();
+    assert_eq!(reopened.last.state["canUndoReset"], false);
+}
+
 #[test]
 fn persona_save_delete_restore_wait_for_reflection_before_closing_and_fail_open() {
     for operation in ["save", "delete", "restore"] {
@@ -508,6 +657,34 @@ fn snapshot(revision: u64) -> Value {
     json!({"revision":revision,"observer":{},"audio":{"generation":1,"phase":"off","recentEvents":[]},"conversation":[],"conversationGenerations":[{"generation":1},{"generation":2}],"selectedConversationGeneration":1})
 }
 #[test]
+fn details_snapshot_is_fed_from_the_window_observation_and_seeds_late_mounts() {
+    let mut panels = PanelPresenters::default();
+    assert!(panels
+        .observe_details_snapshot(snapshot(7))
+        .unwrap()
+        .is_empty());
+    let mounted = panels
+        .handle(PanelRequest {
+            session: "late".into(),
+            kind: PanelKind::Details,
+            event: PanelEvent::Mount { value: Value::Null },
+        })
+        .unwrap();
+    assert_eq!(mounted.state["snapshot"]["revision"], 7);
+    let updates = panels.observe_details_snapshot(snapshot(8)).unwrap();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].session, "late");
+    assert_eq!(updates[0].state["snapshot"]["revision"], 8);
+    assert!(panels
+        .observe_details_snapshot(snapshot(8))
+        .unwrap()
+        .is_empty());
+    assert!(panels
+        .observe_details_snapshot(snapshot(6))
+        .unwrap()
+        .is_empty());
+}
+#[test]
 fn details_tabs_debug_selection_and_history_acceptance_are_independent() {
     let mut s = Screen::new(PanelKind::Details, Value::Null);
     s.command("ready");
@@ -515,7 +692,7 @@ fn details_tabs_debug_selection_and_history_acceptance_are_independent() {
         "history",
         json!({"ok":true,"value":{"observations":[],"transcripts":[]}}),
     );
-    s.action("snapshot", snapshot(1));
+    s.observe_snapshot(snapshot(1));
     s.action("tab", json!("conversation"));
     s.action("debug", json!({"title":"trace"}));
     s.action("select", json!(1));
@@ -527,7 +704,7 @@ fn details_tabs_debug_selection_and_history_acceptance_are_independent() {
     assert!(s.last.commands.is_empty());
     let mut fresh = snapshot(3);
     fresh["selectedConversationGeneration"] = json!(2);
-    s.action("snapshot", fresh);
+    s.observe_snapshot(fresh);
     s.done(&select, snapshot(2));
     assert_eq!(s.last.state["snapshot"]["revision"], 3);
     assert_eq!(s.last.state["switching"], false);
@@ -539,11 +716,11 @@ fn details_tabs_debug_selection_and_history_acceptance_are_independent() {
 #[test]
 fn dataflow_preserves_live_events_when_history_arrives_and_bounds_deduplicated_events() {
     let mut s = Screen::new(PanelKind::Details, Value::Null);
-    s.action("snapshot", snapshot(1));
+    s.observe_snapshot(snapshot(1));
     for revision in 2..=205 {
         let mut next = snapshot(revision);
         next["latestCompanionDecision"] = json!({"sequence":revision,"occurredAt":format!("2026-09-08T00:{:02}:{:02}.000Z",revision/60,revision%60),"emit":false,"thought":"wait"});
-        s.action("snapshot", next);
+        s.observe_snapshot(next);
     }
     s.action(
         "history",
@@ -553,7 +730,7 @@ fn dataflow_preserves_live_events_when_history_arrives_and_bounds_deduplicated_e
     assert_eq!(events.len(), 200);
     assert_eq!(events.last().unwrap()["id"], "coo-decision:205");
     let saved = events.clone();
-    s.action("snapshot", snapshot(1));
+    s.observe_snapshot(snapshot(1));
     assert_eq!(s.last.state["dataFlow"]["events"], json!(saved));
     s.action(
         "history",
@@ -564,13 +741,13 @@ fn dataflow_preserves_live_events_when_history_arrives_and_bounds_deduplicated_e
 #[test]
 fn dataflow_hearing_interruption_and_first_history_use_recorded_times() {
     let mut s = Screen::new(PanelKind::Details, Value::Null);
-    s.action("snapshot", snapshot(1));
+    s.observe_snapshot(snapshot(1));
     let mut next = snapshot(2);
     next["audio"]["phase"] = json!("listening");
     next["audio"]["recentEvents"] = json!([{"id":"final","stage":"confirmed","createdAt":"2026-09-08T01:00:00Z","text":"hello","source":"microphone"}]);
     next["latestUserInterruption"] =
         json!({"sequence":4,"occurredAt":"2026-09-08T01:00:01Z","observer":true,"proactive":true});
-    s.action("snapshot", next);
+    s.observe_snapshot(next);
     let events = s.last.state["dataFlow"]["events"].as_array().unwrap();
     assert_eq!(events.len(), 4);
     assert_eq!(
@@ -633,7 +810,7 @@ fn dataflow_distinguishes_thought_speech_and_their_observation_and_conversation_
     let mut snapshot = snapshot(1);
     snapshot["conversation"] = json!([{"id":"user-1","role":"user","createdAt":"2026-09-10T00:00:00Z","message":"直近の会話"}]);
     let mut s = Screen::new(PanelKind::Details, Value::Null);
-    s.action("snapshot", snapshot.clone());
+    s.observe_snapshot(snapshot.clone());
     s.action("history", json!({"ok":true,"value":{"observations":[screen,hearing],"transcripts":[{"observationId":"utterance","text":"音声の全文","source":"speaker"}]}}));
     let events = s.last.state["dataFlow"]["events"].as_array().unwrap();
     let ocr = events
@@ -657,7 +834,7 @@ fn dataflow_distinguishes_thought_speech_and_their_observation_and_conversation_
     assert_eq!(audio["references"][0]["text"], "音声の全文");
     snapshot["revision"] = json!(2);
     snapshot["latestCompanionDecision"] = json!({"sequence":1,"occurredAt":at,"emit":false,"thought":"今は待つ","observationIds":["screen","heard"]});
-    s.action("snapshot", snapshot.clone());
+    s.observe_snapshot(snapshot.clone());
     let events = s.last.state["dataFlow"]["events"].as_array().unwrap();
     let thought = events
         .iter()
@@ -676,7 +853,7 @@ fn dataflow_distinguishes_thought_speech_and_their_observation_and_conversation_
     assert!(!events.iter().any(|event| event["marker"] == "speech"));
     snapshot["revision"] = json!(3);
     snapshot["conversation"].as_array_mut().unwrap().push(json!({"id":"reply","role":"companion","createdAt":at,"message":"表示した返事","causedByIds":["user-1"]}));
-    s.action("snapshot", snapshot.clone());
+    s.observe_snapshot(snapshot.clone());
     assert_eq!(
         s.last.state["dataFlow"]["events"]
             .as_array()
@@ -688,7 +865,7 @@ fn dataflow_distinguishes_thought_speech_and_their_observation_and_conversation_
     );
     std::fs::remove_file(&frame).unwrap();
     snapshot["revision"] = json!(4);
-    s.action("snapshot", snapshot);
+    s.observe_snapshot(snapshot);
     let events = s.last.state["dataFlow"]["events"].as_array().unwrap();
     let ocr = events
         .iter()
@@ -842,10 +1019,10 @@ fn category_mapping_preserves_path_families() {
         ("work.allowedRoots[0].path", "work"),
         ("observer.vision.provider", "providers"),
         ("observer.vision.textExcerptMaxChars", "vision"),
-        ("speech.locale", "general"),
-        ("retention.observationDays", "vision"),
+        ("speech.locale", "speech"),
+        ("retention.observationDays", "general"),
         ("audio.enabled", "hearing"),
-        ("voiceOutput.rate", "beta"),
+        ("voiceOutput.rate", "speech"),
         ("companion.emotionsEnabled", "general"),
         ("companion.proactiveQuietMinutes", "vision"),
         ("companion.timeoutMs", "providers"),
@@ -956,7 +1133,7 @@ async fn root_routes_panel_input_and_completion_to_each_registered_parent() {
 #[test]
 fn malformed_history_failure_is_rejected_without_poisoning_the_session() {
     let mut s = Screen::new(PanelKind::Details, Value::Null);
-    s.action("snapshot", snapshot(1));
+    s.observe_snapshot(snapshot(1));
     let result = s.panels.handle(PanelRequest {
         session: "test".into(),
         kind: PanelKind::Details,
@@ -1689,7 +1866,7 @@ fn settings_field_merge_preserves_every_value_kind_without_field_name_rules() {
 #[test]
 fn details_reset_commands_track_completion_and_reject_hidden_and_unmounted_results() {
     let mut s = Screen::new(PanelKind::Details, Value::Null);
-    s.action("snapshot", snapshot(1));
+    s.observe_snapshot(snapshot(1));
     s.action("resetEmotions", Value::Null);
     let first = s.command("resetEmotions");
     assert_eq!(s.last.state["resetting"], true);
@@ -1701,7 +1878,7 @@ fn details_reset_commands_track_completion_and_reject_hidden_and_unmounted_resul
     s.action("resetEmotions", Value::Null);
     let retry = s.command("resetEmotions");
     assert!(retry.id > first.id);
-    s.action("snapshot", snapshot(3));
+    s.observe_snapshot(snapshot(3));
     s.done(&retry, snapshot(2));
     assert_eq!(s.last.state["snapshot"]["revision"], 3);
     assert_eq!(s.last.state["resetting"], false);

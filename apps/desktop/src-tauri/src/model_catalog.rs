@@ -24,10 +24,15 @@ const MAX_REMOTE_BODY_BYTES: usize = 64 * 1024;
 const OPENCODE_MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CANDIDATES: usize = 256;
 const MAX_HISTORY: usize = 50;
-const CODEX_BUILTIN_CANDIDATES: &[&str] =
-    &["default", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+const CODEX_BUILTIN_CANDIDATES: &[&str] = &[
+    "default",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-6-astra",
+];
 const CLAUDE_BUILTIN_CANDIDATES: &[&str] = &["default", "opus", "sonnet", "haiku"];
-const BUILTIN_EFFORT_CANDIDATES: &[&str] = &["default", "low", "medium", "high", "xhigh"];
+const BUILTIN_EFFORT_CANDIDATES: &[&str] = &["default", "low", "medium", "high", "xhigh", "max"];
 
 static REMOTE_REFRESH_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
@@ -425,11 +430,33 @@ fn builtin_candidates(provider: &str) -> Vec<String> {
     }
 }
 
-fn builtin_efforts() -> Vec<String> {
+pub(crate) fn builtin_efforts() -> Vec<String> {
     BUILTIN_EFFORT_CANDIDATES
         .iter()
         .map(|value| (*value).to_owned())
         .collect()
+}
+
+pub(crate) fn builtin_model_efforts(provider: &str) -> BTreeMap<String, Vec<String>> {
+    if provider != "codex" {
+        return BTreeMap::new();
+    }
+    ["gpt-5.6-luna", "gpt-6-astra"]
+        .into_iter()
+        .map(|model| (model.to_owned(), builtin_efforts()))
+        .collect()
+}
+
+pub(crate) fn effort_candidates_for_model(
+    model_efforts: &BTreeMap<String, Vec<String>>,
+    model: &str,
+    provider_efforts: &[String],
+) -> Vec<String> {
+    let model_specific = model_efforts
+        .get(model)
+        .into_iter()
+        .flat_map(|values| values.iter().cloned());
+    unique_values(model_specific.chain(provider_efforts.iter().cloned()))
 }
 
 fn unique_values(values: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -448,30 +475,38 @@ fn candidates_for(
     cached: Option<&[String]>,
     remote_available: bool,
 ) -> Vec<String> {
-    remote_available
+    let remote = remote_available
         .then_some(cached)
         .flatten()
-        .map(|values| values.to_vec())
-        .unwrap_or_else(|| builtin_candidates(provider))
+        .into_iter()
+        .flat_map(|values| values.iter().cloned());
+    unique_values(remote.chain(builtin_candidates(provider)))
 }
 
 fn efforts_for(cached: Option<&[String]>, remote_available: bool) -> Vec<String> {
-    remote_available
+    let remote = remote_available
         .then_some(cached)
         .flatten()
-        .map(|values| values.to_vec())
-        .unwrap_or_else(builtin_efforts)
+        .into_iter()
+        .flat_map(|values| values.iter().cloned());
+    unique_values(remote.chain(builtin_efforts()))
 }
 
 fn model_efforts_for(
+    provider: &str,
     model_efforts: &BTreeMap<String, Vec<String>>,
     remote_available: bool,
 ) -> BTreeMap<String, Vec<String>> {
+    let mut merged = builtin_model_efforts(provider);
     if remote_available {
-        model_efforts.clone()
-    } else {
-        BTreeMap::new()
+        for (model, efforts) in model_efforts {
+            merged
+                .entry(model.clone())
+                .or_default()
+                .extend(efforts.iter().cloned());
+        }
     }
+    merged
 }
 
 fn history_for<'a>(history: &'a ModelHistory, provider: &str) -> &'a [String] {
@@ -539,7 +574,7 @@ fn view_from_state(
                 codex_candidates,
                 history_for(&state.history, "codex"),
                 codex_efforts,
-                model_efforts_for(&state.codex_model_efforts, state.remote_available),
+                model_efforts_for("codex", &state.codex_model_efforts, state.remote_available),
                 config,
             ),
             provider_view(
@@ -547,7 +582,11 @@ fn view_from_state(
                 claude_candidates,
                 history_for(&state.history, "claude"),
                 claude_efforts,
-                model_efforts_for(&state.claude_model_efforts, state.remote_available),
+                model_efforts_for(
+                    "claude",
+                    &state.claude_model_efforts,
+                    state.remote_available,
+                ),
                 config,
             ),
             provider_view(
@@ -555,7 +594,11 @@ fn view_from_state(
                 opencode_candidates,
                 history_for(&state.history, "opencode"),
                 opencode_efforts,
-                model_efforts_for(&state.opencode_model_efforts, state.remote_available),
+                model_efforts_for(
+                    "opencode",
+                    &state.opencode_model_efforts,
+                    state.remote_available,
+                ),
                 config,
             ),
         ],

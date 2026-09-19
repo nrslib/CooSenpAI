@@ -31,6 +31,7 @@ enum CommandClass {
     EmotionsReset,
     PresentationDismiss,
     BubbleDeck,
+    UtteranceFeedback,
     TutorialInteract,
     TutorialAdvance,
     TutorialSettingsPresented,
@@ -99,6 +100,7 @@ pub(crate) fn permit_class(command: DesktopCommand) -> PermitClass {
         | DesktopCommand::BubbleDismiss
         | DesktopCommand::BubbleFastForward
         | DesktopCommand::BubbleNavigate
+        | DesktopCommand::UtteranceFeedback
         | DesktopCommand::TutorialSettingsPresented
         | DesktopCommand::TutorialResume
         | DesktopCommand::SetupPrompt
@@ -195,6 +197,7 @@ fn finish_decision(class: CommandClass) -> Admission {
         | CommandClass::ConversationReset
         | CommandClass::ConversationSelect
         | CommandClass::TutorialInteract
+        | CommandClass::UtteranceFeedback
         | CommandClass::EmotionsReset
         | CommandClass::TutorialAdvance
         | CommandClass::TutorialSettingsPresented
@@ -243,6 +246,7 @@ fn setup_decision(class: CommandClass) -> Admission {
         | CommandClass::Memory
         | CommandClass::ConversationReset
         | CommandClass::ConversationSelect
+        | CommandClass::UtteranceFeedback
         | CommandClass::TutorialAdvance
         | CommandClass::EmotionsReset
         | CommandClass::TutorialSettingsPresented
@@ -338,6 +342,7 @@ fn tutorial_decision(
         | CommandClass::Memory
         | CommandClass::ConversationReset
         | CommandClass::ConversationSelect
+        | CommandClass::UtteranceFeedback
         | CommandClass::TutorialSettingsPresented
         | CommandClass::TutorialRestart
         | CommandClass::SetupPrompt
@@ -369,6 +374,7 @@ fn normal_decision(class: CommandClass) -> Admission {
         | CommandClass::ConversationSelect
         | CommandClass::PresentationDismiss
         | CommandClass::BubbleDeck
+        | CommandClass::UtteranceFeedback
         | CommandClass::EmotionsReset
         | CommandClass::TutorialRestart
         | CommandClass::SetupRestart
@@ -440,6 +446,7 @@ fn command_class(command: DesktopCommand) -> CommandClass {
         DesktopCommand::BubbleFastForward | DesktopCommand::BubbleNavigate => {
             CommandClass::BubbleDeck
         }
+        DesktopCommand::UtteranceFeedback => CommandClass::UtteranceFeedback,
         DesktopCommand::SettingsAppearancePreview => CommandClass::AppearancePreview,
         DesktopCommand::TutorialAdvance => CommandClass::TutorialAdvance,
         DesktopCommand::TutorialSettingsPresented => CommandClass::TutorialSettingsPresented,
@@ -485,6 +492,7 @@ fn requires_runtime(command: DesktopCommand) -> bool {
         | DesktopCommand::VoiceOutputStop
         | DesktopCommand::BubbleFastForward
         | DesktopCommand::BubbleNavigate
+        | DesktopCommand::UtteranceFeedback
         | DesktopCommand::SettingsAppearancePreview
         | DesktopCommand::ConfigDisplayUpdate
         | DesktopCommand::ConfigAudioUpdate
@@ -548,6 +556,7 @@ fn transition_for(class: CommandClass) -> Option<TransitionOperation> {
         | CommandClass::Memory
         | CommandClass::PresentationDismiss
         | CommandClass::BubbleDeck
+        | CommandClass::UtteranceFeedback
         | CommandClass::EmotionsReset
         | CommandClass::TutorialInteract
         | CommandClass::TutorialAdvance
@@ -599,6 +608,7 @@ fn completion_for(class: CommandClass) -> CompletionPoint {
         CommandClass::Cleanup
         | CommandClass::PresentationDismiss
         | CommandClass::BubbleDeck
+        | CommandClass::UtteranceFeedback
         | CommandClass::SetupPrompt
         | CommandClass::SettingsOpen
         | CommandClass::LicenseOpen

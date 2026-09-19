@@ -336,15 +336,19 @@ fn status_banner(s: &AppSnapshot) -> Option<BannerView> {
             Some(Settings),
         ));
     }
-    if s.last_error
-        .as_ref()
-        .is_some_and(|error| error.user_response.is_some())
-    {
-        return Some(banner(
-            "error",
-            Text::message("view.userResponseStopped"),
-            None,
-        ));
+    if s.last_error.as_ref().is_some_and(|error| {
+        error.attachment_ocr.is_none()
+            && error.user_response.is_some()
+            && s.companion_retry_in_seconds.is_none()
+    }) {
+        let key = if s.last_error.as_ref().is_some_and(|error| {
+            error.kind == coosenpai_core::runtime::RuntimeErrorKind::ProviderTimeout
+        }) {
+            "view.userResponseStoppedTimeout"
+        } else {
+            "view.userResponseStopped"
+        };
+        return Some(banner("error", Text::message(key), None));
     }
     if let Some(failure) = s
         .last_error
@@ -366,6 +370,21 @@ fn status_banner(s: &AppSnapshot) -> Option<BannerView> {
                     retry(s.companion_retry_in_seconds.filter(|_| failure.retryable)),
                 ],
             },
+            None,
+        ));
+    }
+    if let (Some(error), Some(seconds)) = (&s.last_error, s.companion_retry_in_seconds) {
+        let key = if error.kind == coosenpai_core::runtime::RuntimeErrorKind::ProviderTimeout {
+            "view.companionRetryTimeout"
+        } else {
+            "view.companionRetry"
+        };
+        return Some(banner(
+            "info",
+            Text::message(key)
+                .arg("name", Text::literal(&s.companion_display_name))
+                .arg("kind", Text::literal(error.kind.as_str()))
+                .arg("seconds", Text::literal(seconds)),
             None,
         ));
     }
@@ -401,9 +420,14 @@ fn status_banner(s: &AppSnapshot) -> Option<BannerView> {
         ));
     }
     s.last_error.as_ref().map(|error| {
+        let key = if error.kind == coosenpai_core::runtime::RuntimeErrorKind::ProviderTimeout {
+            "view.companionFailedTimeout"
+        } else {
+            "view.companionFailed"
+        };
         banner(
             "info",
-            Text::message("view.companionFailed")
+            Text::message(key)
                 .arg("name", Text::literal(&s.companion_display_name))
                 .arg("kind", Text::literal(error.kind.as_str()))
                 .arg("retry", retry(s.companion_retry_in_seconds)),

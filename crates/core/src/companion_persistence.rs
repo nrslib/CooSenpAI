@@ -133,6 +133,7 @@ impl CompanionAgent {
             storage.prune_attachments()?;
         }
         self.conversation = storage.load_conversation()?;
+        self.latest_user_activity_at = self.latest_normal_user_conversation_at();
         if let Some(summary) = storage.load_summary()? {
             self.previous_summary = Some(summary);
         }
@@ -890,11 +891,12 @@ impl CompanionAgent {
         &mut self,
         request: &SessionRequest,
         returned: Option<ProviderSession>,
+        expected_model: Option<&str>,
     ) -> Result<(), CompanionError> {
         let mut context_compacted = false;
         match (request, returned) {
             (SessionRequest::New, Some(session)) => {
-                self.validate_returned_session(&session)?;
+                self.validate_returned_session(&session, expected_model)?;
                 self.session = Some(session);
             }
             (SessionRequest::New, None) => {
@@ -910,7 +912,7 @@ impl CompanionAgent {
                         message: "companion provider の session provider が一致しません".to_owned(),
                     }));
                 }
-                self.validate_returned_session(&session)?;
+                self.validate_returned_session(&session, expected_model)?;
                 context_compacted = session.id != expected.id;
                 self.session = Some(session);
             }
@@ -929,8 +931,8 @@ impl CompanionAgent {
     pub(super) fn validate_returned_session(
         &self,
         session: &ProviderSession,
+        expected_model: Option<&str>,
     ) -> Result<(), CompanionError> {
-        let expected_model = (self.config.model != "default").then_some(self.config.model.as_str());
         if session.id.trim().is_empty() {
             return Err(CompanionError::Provider(ProviderError {
                 kind: ProviderErrorKind::InvalidOutput,
@@ -947,7 +949,7 @@ impl CompanionAgent {
                 message: "companion provider の session provider が一致しません".to_owned(),
             }));
         }
-        if session.model.as_deref() != expected_model {
+        if session.model.as_deref() != expected_model.filter(|value| *value != "default") {
             return Err(CompanionError::Provider(ProviderError {
                 kind: ProviderErrorKind::InvalidOutput,
                 message: "companion provider の session model が一致しません".to_owned(),

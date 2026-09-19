@@ -4,11 +4,43 @@ use super::operation_state::{
 };
 use super::*;
 use crate::companion_storage::PendingUserMessage;
+use crate::observer::ScopedObservationOptions;
 use crate::persistence::PersistenceError;
 use futures_util::FutureExt;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinError;
+use uuid::Uuid;
+
+fn judge_silenced_observation(
+    frames: &[ObservationFrameInput],
+    audio: &[crate::state::AudioObservation],
+) -> ObservationRecord {
+    let input_id = frames
+        .first()
+        .map(|frame| frame.context_id.as_str())
+        .or_else(|| audio.first().map(|record| record.id.as_str()))
+        .unwrap_or("unknown");
+    let now = frames
+        .first()
+        .map(|frame| {
+            frame
+                .captured_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        })
+        .or_else(|| audio.first().map(|record| record.created_at.clone()))
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    ObservationRecord::NoChange(crate::state::NoChangeObservation {
+        kind: "no-change".to_owned(),
+        schema_version: 1,
+        id: format!("judge-silenced:{input_id}:{}", Uuid::new_v4()),
+        created_at: now.clone(),
+        window_start: now.clone(),
+        window_end: now,
+        stagnation: None,
+    })
+}
+
 impl RuntimeActor {
     pub(super) fn preempt_operation_for_user(&mut self, operation: &mut RunningOperation) -> bool {
         if !operation.preempt_for_user() {
@@ -35,12 +67,14 @@ impl RuntimeActor {
                 ) {
                     self.last_error = Some(RuntimeLastError {
                         kind: RuntimeErrorKind::Logging,
+                        source: RuntimeErrorSource::Runtime,
                         occurred_at: chrono::Utc::now()
                             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                         message: Some(error.to_string()),
                         issues: Vec::new(),
                         attachment_ocr: None,
                         user_response: None,
+                        user_input_id: None,
                     });
                 }
             }
@@ -97,7 +131,13 @@ impl RuntimeActor {
          * volatile branch is used only by the CLI's non-owning companion.
          */
         if inputs.is_empty() {
-            if let Err(error) = self.restore_terminal_user_failure(&companion) {
+            let terminal_error_kind = self
+                .last_error
+                .as_ref()
+                .filter(|error| error.is_user_response_error() || error.is_attachment_error())
+                .map_or(RuntimeErrorKind::Provider, |error| error.kind);
+            if let Err(error) = self.restore_terminal_user_failure(&companion, terminal_error_kind)
+            {
                 self.schedule_user_retry(initialization_error_kind(&error), snapshot_tx);
                 self.companion = Some(companion);
                 return StartResult::Completed;
@@ -385,7 +425,50 @@ impl RuntimeActor {
         )))
     }
 
-    pub(super) fn finish_operation(
+    pub(super) fn start_judge_feed(
+        &mut self,
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+        cancelled: bool,
+        response: oneshot::Sender<Result<(), RuntimeError>>,
+    ) -> StartResult {
+        let Some(cancellation) = self
+            .operation_cancellation
+            .cancellation_for_start_lane(OperationLane::Coo)
+        else {
+            let _ = response.send(Err(RuntimeError::ProviderStartsBlocked));
+            return StartResult::Completed;
+        };
+        let judge = self.judge.clone();
+        let token = cancellation.token.clone();
+        let task = tokio::spawn(async move {
+            let result = judge
+                .feed_event(
+                    crate::judge::JudgeFeedEvent {
+                        event_id: &event_id,
+                        input_id: &input_id,
+                        event_time: None,
+                        sign,
+                        strength,
+                        source: crate::judge::JudgeFeedSource::Explicit,
+                        cancelled,
+                    },
+                    token,
+                )
+                .await
+                .map_err(|error| RuntimeError::Factory(error.to_string()));
+            Box::new(OperationOutcome::JudgeFeed { result })
+        });
+        StartResult::Running(Box::new(RunningOperation::new(
+            cancellation,
+            OperationReply::JudgeFeed(response),
+            task,
+        )))
+    }
+
+    pub(super) async fn finish_operation(
         &mut self,
         operation: RunningOperation,
         result: Result<Box<OperationOutcome>, JoinError>,
@@ -404,14 +487,17 @@ impl RuntimeActor {
             stop.cancel();
         }
         let pending_user_drain = match result {
-            Ok(outcome) => self.apply_operation_outcome(
-                *outcome,
-                reply,
-                append_restart_requested,
-                preempted_for_user,
-                config_update_cancelled,
-                snapshot_tx,
-            ),
+            Ok(outcome) => {
+                self.apply_operation_outcome(
+                    *outcome,
+                    reply,
+                    append_restart_requested,
+                    preempted_for_user,
+                    config_update_cancelled,
+                    snapshot_tx,
+                )
+                .await
+            }
             Err(_) => {
                 self.agent_rebuild_pending = true;
                 if user_input_ids.is_empty() {
@@ -421,12 +507,18 @@ impl RuntimeActor {
                 }
                 self.last_error = Some(RuntimeLastError {
                     kind: RuntimeErrorKind::Provider,
+                    source: if user_input_ids.is_empty() {
+                        RuntimeErrorSource::Companion
+                    } else {
+                        RuntimeErrorSource::UserResponse
+                    },
                     occurred_at: chrono::Utc::now()
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     message: Some("provider 操作が異常終了しました".to_owned()),
                     issues: Vec::new(),
                     attachment_ocr: None,
                     user_response: None,
+                    user_input_id: user_input_ids.first().cloned(),
                 });
                 if !user_input_ids.is_empty() {
                     self.schedule_user_retry(RuntimeErrorKind::Provider, snapshot_tx);
@@ -500,6 +592,7 @@ impl RuntimeActor {
             OperationOutcome::Consolidate { memory, .. } => {
                 self.memory = Some(*memory);
             }
+            OperationOutcome::JudgeFeed { .. } => {}
         }
     }
 
@@ -510,6 +603,7 @@ impl RuntimeActor {
         request_cancellation: CancellationToken,
         response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
+        judge_result_tx: &tokio::sync::mpsc::Sender<ControlCommand>,
     ) -> StartResult {
         if !frames.is_empty() && !self.accepts_watch_scope(&frames) {
             let _ = response.send(Err(RuntimeError::StaleWatchScope));
@@ -548,46 +642,106 @@ impl RuntimeActor {
         );
         let catch_panic_to_keep_agent = self.factory.is_none();
         let hearing_context = self.hearing_context.clone();
+        let audio_to_ack = audio.clone();
+        let judge = self.judge.clone();
+        let judge_generation = self.judge_generation;
+        let judge_follow = self.config.judge.follow;
+        let judge_enabled = judge.enabled();
+        if judge_enabled {
+            judge.register_evaluation(&frames, &audio);
+        }
+        if judge_enabled && !judge_follow {
+            let judge = judge.clone();
+            let frames_for_judge = frames.clone();
+            let audio_for_judge = audio.clone();
+            let result_tx = judge_result_tx.clone();
+            let shutdown = self.operation_cancellation.shutdown_token();
+            tokio::spawn(async move {
+                let evaluation = judge
+                    .evaluate(&frames_for_judge, &audio_for_judge, shutdown)
+                    .await;
+                if let Some(decision) = evaluation.decision {
+                    let _ = result_tx
+                        .send(ControlCommand::JudgeCompleted {
+                            generation: judge_generation,
+                            decision,
+                        })
+                        .await;
+                }
+            });
+        }
         let task = tokio::spawn(async move {
-            let observe = observer.observe_scoped(
-                frames,
-                audio,
-                provider_cancellation,
-                expected_generation,
-                scope_generation,
-                scope_commit_lock,
-            );
-            let result = if catch_panic_to_keep_agent {
-                std::panic::AssertUnwindSafe(observe)
-                    .catch_unwind()
-                    .await
-                    .map_or_else(
-                        |_| Err(RuntimeError::Closed),
-                        |result| match result {
-                            Ok(observation) => Ok(ObservationRecord::Visual(observation)),
-                            Err(ObserverError::OutboxPending { record }) => Ok(*record),
-                            Err(ObserverError::StaleScope) => Err(RuntimeError::StaleWatchScope),
-                            Err(error) => Err(RuntimeError::from(error)),
-                        },
-                    )
+            let (judge_decision, companion_delivery) = if judge_follow && judge_enabled {
+                let evaluation = judge
+                    .evaluate(&frames, &audio, provider_cancellation.clone())
+                    .await;
+                (evaluation.decision, evaluation.companion_delivery)
             } else {
-                observe.await.map_or_else(
-                    |error| match error {
-                        ObserverError::OutboxPending { record } => Ok(*record),
-                        ObserverError::StaleScope => Err(RuntimeError::StaleWatchScope),
-                        error => Err(RuntimeError::from(error)),
+                (None, true)
+            };
+            let silence = judge_decision.as_ref().is_some_and(|decision| {
+                judge_follow
+                    && decision.action == crate::judge::JudgeAction::Silence
+                    && !provider_cancellation.is_cancelled()
+            });
+            let result = if silence {
+                let audio_ids = audio
+                    .iter()
+                    .map(|record| record.id.clone())
+                    .collect::<Vec<_>>();
+                observer
+                    .mark_audio_consumed(&audio_ids)
+                    .map(|_| judge_silenced_observation(&frames, &audio))
+                    .map_err(RuntimeError::from)
+            } else {
+                let observe = observer.observe_scoped_with_companion_delivery(
+                    frames,
+                    audio,
+                    provider_cancellation,
+                    ScopedObservationOptions {
+                        expected_generation,
+                        scope_generation,
+                        scope_commit_lock,
+                        allow_companion_delivery: companion_delivery,
                     },
-                    |observation| Ok(ObservationRecord::Visual(observation)),
-                )
+                );
+                if catch_panic_to_keep_agent {
+                    std::panic::AssertUnwindSafe(observe)
+                        .catch_unwind()
+                        .await
+                        .map_or_else(
+                            |_| Err(RuntimeError::Closed),
+                            |result| match result {
+                                Ok(observation) => Ok(ObservationRecord::Visual(observation)),
+                                Err(ObserverError::OutboxPending { record }) => Ok(*record),
+                                Err(ObserverError::StaleScope) => {
+                                    Err(RuntimeError::StaleWatchScope)
+                                }
+                                Err(error) => Err(RuntimeError::from(error)),
+                            },
+                        )
+                } else {
+                    observe.await.map_or_else(
+                        |error| match error {
+                            ObserverError::OutboxPending { record } => Ok(*record),
+                            ObserverError::StaleScope => Err(RuntimeError::StaleWatchScope),
+                            error => Err(RuntimeError::from(error)),
+                        },
+                        |observation| Ok(ObservationRecord::Visual(observation)),
+                    )
+                }
             };
             // 保存済みの結果は、helper 再起動や返信先の取消、outbox 配達失敗でも消費する。
             let result = result.and_then(|record| {
+                let mut buffer = hearing_context.lock().map_err(|_| {
+                    CompanionError::Persistence(PersistenceError::Invalid(
+                        "音声文脈のロックが壊れています".to_owned(),
+                    ))
+                })?;
+                for record in &audio_to_ack {
+                    buffer.acknowledge_saved_audio(&record.id);
+                }
                 if let ObservationRecord::Visual(observation) = &record {
-                    let mut buffer = hearing_context.lock().map_err(|_| {
-                        CompanionError::Persistence(PersistenceError::Invalid(
-                            "音声文脈のロックが壊れています".to_owned(),
-                        ))
-                    })?;
                     for segment in &observation.audio_segments {
                         buffer.acknowledge_saved_audio(&segment.id);
                     }
@@ -597,6 +751,9 @@ impl RuntimeActor {
             Box::new(OperationOutcome::Observe {
                 observer: Box::new(observer),
                 result,
+                judge_generation,
+                judge_decision,
+                companion_delivery,
             })
         });
         StartResult::Running(Box::new(RunningOperation::linked(
@@ -816,7 +973,7 @@ impl RuntimeActor {
         )))
     }
 
-    fn apply_operation_outcome(
+    async fn apply_operation_outcome(
         &mut self,
         outcome: OperationOutcome,
         reply: OperationReply,
@@ -827,8 +984,22 @@ impl RuntimeActor {
     ) -> PendingUserDrain {
         let mut pending_user_drain = PendingUserDrain::Unchanged;
         match outcome {
-            OperationOutcome::Observe { observer, result } => {
+            OperationOutcome::Observe {
+                observer,
+                result,
+                judge_generation,
+                judge_decision,
+                companion_delivery,
+            } => {
                 self.observer = Some(*observer);
+                if let Ok(observation) = &result {
+                    self.judge_trace_store.associate_observation(observation);
+                }
+                if judge_generation == self.judge_generation {
+                    if let Some(judge_decision) = judge_decision {
+                        self.latest_judge_decision = Some(judge_decision);
+                    }
+                }
                 let result = if config_update_cancelled {
                     Err(RuntimeError::ConfigUpdateCancelled)
                 } else if preempted_for_user {
@@ -845,6 +1016,7 @@ impl RuntimeActor {
                         {
                             Ok(observation)
                         }
+                        Ok(observation) if !companion_delivery => Ok(observation),
                         Ok(observation) => {
                             self.pending_observations.push(observation.clone());
                             if let Some(companion) = self.companion.as_mut() {
@@ -943,16 +1115,21 @@ impl RuntimeActor {
                                 match companion
                                     .commit_proactive_candidate_if_current(candidate, user_epoch)
                                 {
-                                    Ok(Some((response, consumed_ids))) => {
+                                    Ok(Some(commit)) => {
                                         if decision_produced {
                                             self.accept_companion_response(
                                                 &companion,
-                                                &response,
-                                                consumed_ids.clone(),
+                                                &commit.response,
+                                                commit.consumed_ids.clone(),
+                                                commit.call_id.clone(),
+                                                commit.utterance_observation_ids.clone(),
                                             );
                                         }
                                         self.pending_observations.retain(|observation| {
-                                            !consumed_ids.iter().any(|id| id == observation.id())
+                                            !commit
+                                                .consumed_ids
+                                                .iter()
+                                                .any(|id| id == observation.id())
                                         });
                                         self.clear_non_user_error();
                                         self.initialization_retry_at = None;
@@ -960,7 +1137,7 @@ impl RuntimeActor {
                                         self.companion_recovery_at = companion
                                             .proactive_retry_after()
                                             .map(|delay| Instant::now() + delay);
-                                        Ok(response)
+                                        Ok(commit.response)
                                     }
                                     Ok(None) => {
                                         self.companion_recovery_pending = true;
@@ -1032,7 +1209,13 @@ impl RuntimeActor {
                 }
                 if result.is_ok() && !preempted_for_user {
                     if let Ok(Some(response)) = &result {
-                        self.accept_companion_response(&companion, response, Vec::new());
+                        self.accept_companion_response(
+                            &companion,
+                            response,
+                            Vec::new(),
+                            None,
+                            Vec::new(),
+                        );
                     }
                     self.pending_observations.clear();
                     self.companion_recovery_at =
@@ -1060,6 +1243,7 @@ impl RuntimeActor {
                 let mut response_ids = waiter_ids.clone();
                 let mut retry_without_response = false;
                 let response_result;
+                let mut response_call_id = None;
                 let cancelled = self
                     .cancelled_user_message_ids
                     .iter()
@@ -1078,6 +1262,7 @@ impl RuntimeActor {
                     let mut committed_result = match result {
                         Ok(completed) => {
                             response_ids = completed.input_ids.clone();
+                            response_call_id = completed.call_id.clone();
                             let turn_commit_lock = self.turn_commit_lock.clone();
                             let _turn_commit_guard = turn_commit_lock
                                 .lock()
@@ -1098,9 +1283,14 @@ impl RuntimeActor {
                                                     .iter()
                                                     .any(|id| id == observation.id())
                                             });
-                                            self.last_error = None;
-                                            self.user_retry_at = None;
-                                            self.user_retry_delay = Duration::from_secs(1);
+                                            self.schedule_judge_feed(
+                                                &completed.judge_feedback_targets,
+                                                &completed.judge_feedback_messages,
+                                            );
+                                            self.complete_user_response(
+                                                &companion,
+                                                &completed.input_ids,
+                                            );
                                             Ok(completed.response.clone())
                                         }
                                         Err(error) => Err(RuntimeError::Companion(error)),
@@ -1169,8 +1359,14 @@ impl RuntimeActor {
                             }
                         }
                     }
-                    if committed_result.is_ok() || terminal_user_failure {
-                        if let Err(error) = self.restore_terminal_user_failure(&companion) {
+                    if terminal_user_failure {
+                        let terminal_error_kind = match &committed_result {
+                            Err(RuntimeError::Companion(error)) => initialization_error_kind(error),
+                            _ => RuntimeErrorKind::Provider,
+                        };
+                        if let Err(error) =
+                            self.restore_terminal_user_failure(&companion, terminal_error_kind)
+                        {
                             self.schedule_user_retry(
                                 initialization_error_kind(&error),
                                 snapshot_tx,
@@ -1182,15 +1378,34 @@ impl RuntimeActor {
                 }
                 self.resume_proactive_after_user(&companion, cancelled || response_result.is_ok());
                 if let Ok(response) = &response_result {
-                    self.accept_companion_response(&companion, response, Vec::new());
+                    self.accept_companion_response(
+                        &companion,
+                        response,
+                        response_ids.clone(),
+                        response_call_id,
+                        Vec::new(),
+                    );
                 }
                 self.companion = Some(companion);
                 self.active_user_message_id = None;
                 self.companion_draft = None;
+                let pending_user_work = match self.companion.as_ref() {
+                    Some(companion) => match companion.has_runnable_user_inputs() {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            self.schedule_user_retry(
+                                initialization_error_kind(&error),
+                                snapshot_tx,
+                            );
+                            true
+                        }
+                    },
+                    None => false,
+                };
                 pending_user_drain = if cancelled
                     || append_restart_requested
-                    || response_result.is_ok()
                     || terminal_user_failure
+                    || (response_result.is_ok() && pending_user_work)
                 {
                     self.user_retry_at = None;
                     self.user_retry_delay = Duration::from_secs(1);
@@ -1255,6 +1470,8 @@ impl RuntimeActor {
                         self.companion_display_name = companion.display_name().to_owned();
                     }
                     self.companion = agents.companion.take();
+                    let config = self.config.clone();
+                    self.refresh_judge(&config).await;
                     self.refresh_user_preparer();
                     self.memory = agents.memory.take();
                     self.memory_run_at = self.memory.as_ref().map(|_| Instant::now());
@@ -1291,6 +1508,11 @@ impl RuntimeActor {
                     })
                     .map_err(RuntimeError::Factory);
                 if let OperationReply::Revision(response) = reply {
+                    let _ = response.send(result);
+                }
+            }
+            OperationOutcome::JudgeFeed { result } => {
+                if let OperationReply::JudgeFeed(response) = reply {
                     let _ = response.send(result);
                 }
             }

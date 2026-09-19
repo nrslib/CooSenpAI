@@ -149,7 +149,9 @@ impl DesktopState {
             config.bubble.edge_recall,
             self.main_window_focused.load(Ordering::Acquire),
             self.tutorial_is_active().await || self.tutorial_needs_setup().await,
-            self.bubbles.lock().await.can_poll_edge_recall(),
+            crate::bubbles::can_poll_edge_recall(self)
+                .await
+                .unwrap_or(false),
         )
     }
 
@@ -295,6 +297,10 @@ impl DesktopState {
         &self,
     ) -> crate::bubbles::presenter::NotificationContext {
         let runtime = self.runtime_snapshot();
+        let recorded_feedback_ids =
+            coosenpai_core::utterance_feedback::UtteranceFeedbackStore::from_paths(&self.paths)
+                .recorded_utterance_ids()
+                .unwrap_or_default();
         crate::bubbles::presenter::NotificationContext {
             config: self.runtime_config(),
             display_name: runtime.companion_display_name,
@@ -302,6 +308,7 @@ impl DesktopState {
             tutorial_active: self.tutorial.lock().await.state().tutorial_active(),
             latest_thought: runtime.latest_companion_thought,
             latest_thought_generation: runtime.latest_companion_thought_generation,
+            recorded_feedback_ids,
         }
     }
 
@@ -310,7 +317,10 @@ impl DesktopState {
         generation: u64,
     ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         let guard = self.conversation_sync.clone().lock_owned().await;
-        (generation == self.bubbles.lock().await.conversation_generation()).then_some(guard)
+        match crate::bubbles::conversation_generation(self).await {
+            Ok(current) if current == generation => Some(guard),
+            _ => None,
+        }
     }
 
     async fn clear_bubble_delivery_log(&self, notification_id: &str) {

@@ -12,6 +12,7 @@ use coosenpai_core::state::{
     VisualObservation,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Default)]
 pub struct AudioPermissions {
@@ -75,6 +76,8 @@ pub struct AppSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_companion_decision: Option<coosenpai_core::runtime::CompanionDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_judge_decision: Option<coosenpai_core::runtime::JudgeDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_user_interruption: Option<coosenpai_core::runtime::UserInterruption>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_image_png: Option<Vec<u8>>,
@@ -83,6 +86,8 @@ pub struct AppSnapshot {
     pub speech: SpeechView,
     pub audio: AudioView,
     pub onboarding: OnboardingView,
+    #[serde(skip)]
+    pub(crate) recorded_utterance_feedback_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -331,13 +336,6 @@ pub struct NotificationView {
     pub minimum_priority: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotEvent {
-    pub revision: u64,
-    pub snapshot: AppSnapshot,
-}
-
 impl AppSnapshot {
     pub(crate) fn finish_watch(&mut self, failed: bool) {
         self.observer_running = false;
@@ -428,6 +426,7 @@ impl AppSnapshot {
             companion_draft: None,
             latest_companion_thought: None,
             latest_companion_decision: None,
+            latest_judge_decision: None,
             latest_user_interruption: None,
             companion_emotions: Default::default(),
             companion_emotions_revision: 0,
@@ -469,6 +468,7 @@ impl AppSnapshot {
             onboarding: OnboardingView::from_state(
                 &coosenpai_core::onboarding::OnboardingState::default(),
             ),
+            recorded_utterance_feedback_ids: HashSet::new(),
         }
     }
 
@@ -491,6 +491,7 @@ impl AppSnapshot {
         self.companion_draft = runtime.companion_draft.clone();
         self.latest_companion_thought = runtime.latest_companion_thought.clone();
         self.latest_companion_decision = runtime.latest_companion_decision.clone();
+        self.latest_judge_decision = runtime.latest_judge_decision.clone();
         self.latest_user_interruption = runtime.latest_user_interruption.clone();
         // リセット応答と監視通知の到着順が逆でも、古い感情へ戻さない。
         if runtime.revision >= self.companion_emotions_revision {

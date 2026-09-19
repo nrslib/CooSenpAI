@@ -24,6 +24,7 @@ use defaults::*;
 pub use paths::ConfigPaths;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io;
 use std::ops::{Deref, DerefMut};
 pub use storage::{
@@ -35,12 +36,16 @@ use thiserror::Error;
 pub use validate::validate_config;
 pub const CONFIG_VERSION: u8 = 3;
 pub const PRODUCT_DIR: &str = ".coosenpai";
+pub const LEGACY_PROVIDER_TIMEOUT_MS: u64 = 120_000;
+pub const LEGACY_OBSERVER_DAILY_CALL_LIMIT: u32 = 120;
+pub const DEFAULT_COMPANION_TIMEOUT_MS: u64 = 1_800_000;
+pub const DEFAULT_OBSERVER_TIMEOUT_MS: u64 = 600_000;
+pub const DEFAULT_OBSERVER_DAILY_CALL_LIMIT: u32 = 1_000;
 pub const PENDING_DELIVERY_ITEM_MAX_BYTES: usize = 1_052_672;
 pub const POPUP_QUICK_ACTION_LIMIT: usize = 12;
 pub const POPUP_QUICK_ACTION_LABEL_MAX_CHARS: usize = 40;
 pub const POPUP_QUICK_ACTION_MESSAGE_MAX_BYTES: usize = 32 * 1_024;
 pub const NUMERIC_CONFIG_PATHS: &[&str] = &[
-    "watch.sendIntervalMs",
     "watch.sendDebounceMs",
     "watch.framesPerSend",
     "watch.appWindowLimit",
@@ -53,20 +58,21 @@ pub const NUMERIC_CONFIG_PATHS: &[&str] = &[
     "watch.triggers.pollMs",
     "watch.battery.multiplier",
     "watch.ocrGate.timeoutMs",
+    "judge.timeoutMs",
+    "judge.modules[n].weight",
     "observer.vision.intervalMs",
+    "observer.vision.stallTimeoutMs",
     "observer.vision.timeoutMs",
     "observer.vision.dailyCallLimit",
-    "observer.vision.textExcerptMaxChars",
-    "observer.vision.textExcerptMaxCount",
     "observer.vision.textTotalMaxChars",
     "observer.vision.changesMaxCount",
     "observer.hearing.intervalMs",
+    "observer.hearing.stallTimeoutMs",
     "observer.hearing.timeoutMs",
     "observer.hearing.dailyCallLimit",
-    "observer.hearing.textExcerptMaxChars",
-    "observer.hearing.textExcerptMaxCount",
     "observer.hearing.textTotalMaxChars",
     "observer.hearing.changesMaxCount",
+    "companion.stallTimeoutMs",
     "companion.timeoutMs",
     "companion.dailyProactiveLimit",
     "companion.wakeCoalesceMax",
@@ -76,6 +82,7 @@ pub const NUMERIC_CONFIG_PATHS: &[&str] = &[
     "companion.pendingDeliveryMaxBytes",
     "companion.contextRefreshCalls",
     "companion.proactiveQuietMinutes",
+    "companion.proactiveIdleMs",
     "notification.bubbleDurationMs",
     "voiceOutput.rate",
     "voiceOutput.voicevoxStyleId",
@@ -122,6 +129,8 @@ pub struct Config {
     #[serde(default)]
     pub debug: DebugConfig,
     #[serde(default)]
+    pub judge: JudgeConfig,
+    #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
     pub speech: SpeechConfig,
@@ -151,6 +160,7 @@ impl Default for Config {
             retention: RetentionConfig::default(),
             memory: MemoryConfig::default(),
             debug: DebugConfig::default(),
+            judge: JudgeConfig::default(),
             audio: AudioConfig::default(),
             speech: SpeechConfig::default(),
             voice_output: VoiceOutputConfig::default(),
@@ -215,6 +225,54 @@ pub struct DebugConfig {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum JudgeComposition {
+    #[default]
+    Single,
+    Ensemble,
+    Weighted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JudgeModuleConfig {
+    pub executable: String,
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    #[serde(default = "default_judge_weight")]
+    pub weight: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JudgeConfig {
+    #[serde(default)]
+    pub follow: bool,
+    #[serde(default)]
+    pub composition: JudgeComposition,
+    #[serde(default)]
+    pub veto: bool,
+    #[serde(default)]
+    pub modules: Vec<JudgeModuleConfig>,
+    #[serde(default = "default_judge_timeout")]
+    pub timeout_ms: u64,
+}
+
+impl Default for JudgeConfig {
+    fn default() -> Self {
+        Self {
+            follow: false,
+            composition: JudgeComposition::Single,
+            veto: false,
+            modules: Vec::new(),
+            timeout_ms: default_judge_timeout(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WatchConfig {
@@ -226,8 +284,6 @@ pub struct WatchConfig {
     pub focus_element: bool,
     #[serde(default)]
     pub apps: Vec<WatchAppConfig>,
-    #[serde(default = "default_send_interval")]
-    pub send_interval_ms: u64,
     #[serde(default = "default_send_debounce")]
     pub send_debounce_ms: u64,
     #[serde(default = "default_frames_per_send")]
@@ -251,7 +307,6 @@ impl Default for WatchConfig {
             fullscreen: false,
             focus_element: false,
             apps: Vec::new(),
-            send_interval_ms: default_send_interval(),
             send_debounce_ms: default_send_debounce(),
             frames_per_send: default_frames_per_send(),
             app_window_limit: default_app_window_limit(),
@@ -282,7 +337,16 @@ pub struct AudioConfig {
     #[serde(default = "default_true")]
     pub speaker: bool,
     #[serde(default)]
+    pub speaker_identification: SpeakerIdentificationConfig,
+    #[serde(default)]
     pub debug_dump_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpeakerIdentificationConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Default for AudioConfig {
@@ -291,6 +355,7 @@ impl Default for AudioConfig {
             enabled: false,
             mic: true,
             speaker: true,
+            speaker_identification: SpeakerIdentificationConfig::default(),
             debug_dump_dir: None,
         }
     }
@@ -504,14 +569,12 @@ pub struct AgentConfig {
     pub effort: String,
     #[serde(default)]
     pub executable: Option<String>,
-    #[serde(default = "default_agent_timeout")]
+    #[serde(default = "default_stall_timeout")]
+    pub stall_timeout_ms: u64,
+    #[serde(default = "default_observer_timeout")]
     pub timeout_ms: u64,
     #[serde(default = "default_observer_daily_limit")]
     pub daily_call_limit: u32,
-    #[serde(default = "default_excerpt_max_chars")]
-    pub text_excerpt_max_chars: usize,
-    #[serde(default = "default_excerpt_count")]
-    pub text_excerpt_max_count: usize,
     #[serde(default = "default_total_excerpt_chars")]
     pub text_total_max_chars: usize,
     #[serde(default = "default_changes_max")]
@@ -525,10 +588,9 @@ impl AgentConfig {
             model: default_model(),
             effort: default_effort(),
             executable: None,
-            timeout_ms: default_agent_timeout(),
+            stall_timeout_ms: default_stall_timeout(),
+            timeout_ms: default_observer_timeout(),
             daily_call_limit: default_observer_daily_limit(),
-            text_excerpt_max_chars: default_excerpt_max_chars(),
-            text_excerpt_max_count: default_excerpt_count(),
             text_total_max_chars: default_total_excerpt_chars(),
             changes_max_count: default_changes_max(),
         }
@@ -631,6 +693,10 @@ pub struct CompanionConfig {
     #[serde(default = "default_effort")]
     pub effort: String,
     #[serde(default)]
+    pub proactive_model: String,
+    #[serde(default)]
+    pub proactive_effort: String,
+    #[serde(default)]
     pub executable: Option<String>,
     #[serde(default = "default_persona")]
     pub persona: String,
@@ -638,7 +704,9 @@ pub struct CompanionConfig {
     pub display_name: String,
     #[serde(default = "default_assertiveness")]
     pub assertiveness: String,
-    #[serde(default = "default_agent_timeout")]
+    #[serde(default = "default_stall_timeout")]
+    pub stall_timeout_ms: u64,
+    #[serde(default = "default_companion_timeout")]
     pub timeout_ms: u64,
     #[serde(default)]
     pub daily_proactive_limit: Option<u32>,
@@ -662,6 +730,8 @@ pub struct CompanionConfig {
     pub quiet_report_every: Option<u32>,
     #[serde(default = "default_proactive_quiet_minutes")]
     pub proactive_quiet_minutes: u64,
+    #[serde(default = "default_proactive_idle_ms")]
+    pub proactive_idle_ms: u64,
 }
 
 impl Default for CompanionConfig {
@@ -671,11 +741,14 @@ impl Default for CompanionConfig {
             provider: default_codex(),
             model: default_model(),
             effort: default_effort(),
+            proactive_model: String::new(),
+            proactive_effort: String::new(),
             executable: None,
             persona: default_persona(),
             display_name: default_display_name(),
             assertiveness: default_assertiveness(),
-            timeout_ms: default_agent_timeout(),
+            stall_timeout_ms: default_stall_timeout(),
+            timeout_ms: default_companion_timeout(),
             daily_proactive_limit: None,
             wake_coalesce_max: default_wake_coalesce(),
             session_max_calls: default_session_max(),
@@ -687,7 +760,31 @@ impl Default for CompanionConfig {
             reminders: Vec::new(),
             quiet_report_every: None,
             proactive_quiet_minutes: default_proactive_quiet_minutes(),
+            proactive_idle_ms: default_proactive_idle_ms(),
         }
+    }
+}
+
+impl Config {
+    /// 旧版の provider 既定値を新しい既定値へ一度だけ移行する。
+    /// 明示的に旧既定値以外を設定している場合は変更しない。
+    pub fn migrate_legacy_provider_defaults(&mut self) -> bool {
+        let mut migrated = false;
+        if self.companion.timeout_ms == LEGACY_PROVIDER_TIMEOUT_MS {
+            self.companion.timeout_ms = DEFAULT_COMPANION_TIMEOUT_MS;
+            migrated = true;
+        }
+        for profile in [&mut self.observer.vision, &mut self.observer.hearing] {
+            if profile.timeout_ms == LEGACY_PROVIDER_TIMEOUT_MS {
+                profile.timeout_ms = DEFAULT_OBSERVER_TIMEOUT_MS;
+                migrated = true;
+            }
+            if profile.daily_call_limit == LEGACY_OBSERVER_DAILY_CALL_LIMIT {
+                profile.daily_call_limit = DEFAULT_OBSERVER_DAILY_CALL_LIMIT;
+                migrated = true;
+            }
+        }
+        migrated
     }
 }
 
@@ -700,15 +797,11 @@ pub struct NotificationConfig {
     pub min_priority: String,
     #[serde(default = "default_notification_ttl")]
     pub bubble_duration_ms: u64,
-    #[serde(default)]
-    pub show_priority: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BubbleConfig {
-    #[serde(default)]
-    pub always_show: bool,
     #[serde(default = "default_bubble_keep_latest")]
     pub keep_latest: bool,
     #[serde(default = "default_bubble_edge_recall")]
@@ -724,7 +817,6 @@ pub struct BubbleConfig {
 impl Default for BubbleConfig {
     fn default() -> Self {
         Self {
-            always_show: false,
             keep_latest: default_bubble_keep_latest(),
             edge_recall: default_bubble_edge_recall(),
             max_stack: default_bubble_max_stack(),
@@ -740,7 +832,6 @@ impl Default for NotificationConfig {
             mode: default_notification_mode(),
             min_priority: default_notification_min_priority(),
             bubble_duration_ms: default_notification_ttl(),
-            show_priority: false,
         }
     }
 }
@@ -928,6 +1019,19 @@ pub fn parse_config(value: Value) -> Result<Config, ConfigError> {
         return Err(ConfigError::UnsupportedVersion(version));
     }
     config_parse::parse_v3(value).map(normalize_config)
+}
+
+pub(super) fn parse_config_file(value: Value) -> Result<Config, ConfigError> {
+    let (value, mut legacy_issues) = config_parse::normalize_legacy_file(value);
+    match parse_config(value) {
+        Ok(config) if legacy_issues.is_empty() => Ok(config),
+        Ok(_) => Err(ConfigError::Validation(legacy_issues)),
+        Err(ConfigError::Validation(mut issues)) => {
+            legacy_issues.append(&mut issues);
+            Err(ConfigError::Validation(legacy_issues))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn issue(path: impl Into<String>, message: impl Into<String>) -> ConfigValidationIssue {

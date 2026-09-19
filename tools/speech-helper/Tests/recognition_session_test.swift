@@ -143,12 +143,12 @@ func testRecognitionSession() {
             expect(h.analysis.samples.isEmpty, "finish 後の PCM を渡さない")
             h.analysis.synchronousCancel = true
             switch ending {
-            case "complete": h.analysis.send(.completedTranscript(""))
+            case "complete": h.analysis.send(.completed)
             case "cancel": h.session.cancel()
             default: h.analysis.send(.failed(SpeechAnalysisFailure(kind: "recognition", message: "認識失敗")))
             }
             h.ready()
-            h.analysis.send(.completedTranscript("遅い結果"))
+            h.analysis.send(.completed)
             expect(h.output.startCount == 0 && h.output.stopCount == 1, "終了後も録音を開始せず二重停止しない")
             expect(h.output.closedCount == 1 && h.output.finals.isEmpty, "停止・取消・エラーを一度だけ処理する")
             expect(h.output.errors == (ending == "cancel" ? [] : [ending == "complete" ? "no-speech" : "recognition"]), "終了理由を保持する")
@@ -166,22 +166,72 @@ func testRecognitionSession() {
         expect(h.output.errors == ["permission-speech"] && h.output.closedCount == 1, "準備エラーを保持する")
     }
 
-    runTest("SFSpeechRecognizer の全文訂正を反映し、finish 後の確定通知だけを採用する") {
+    runTest("SFSpeechRecognizer の区間結果を蓄積し、finish 後の確定通知だけを採用する") {
         let h = SessionHarness()
         h.ready()
         h.append(1)
-        h.analysis.send(.partialTranscript("最初の文"))
-        h.analysis.send(.partialTranscript("続きの文"))
-        h.analysis.send(.partialTranscript("続きの文"))
-        expect(h.output.events == [.partial("最初の文"), .partial("続きの文")], "古い全文を連結・再送しない")
+        h.analysis.result("最初の文", start: 0, end: 48_000)
+        h.analysis.result("続きの文", start: 96_000, end: 144_000)
+        h.analysis.result("続きの文", start: 96_000, end: 144_000)
+        expect(h.output.events == [.partial("最初の文"), .partial("最初の文続きの文")], "古い区間を保持し、同じ全文を再送しない")
         expect(h.audio.enqueue(makeBuffer(2)), "未処理の PCM を保持する")
         h.session.finish()
         h.scheduler.advance(by: 3)
         expect(h.output.finals.isEmpty, "固定時間で部分結果を確定しない")
         expect(h.analysis.samples == [1, 2] && h.analysis.finishCount == 1, "終了前に全 PCM を渡す")
-        h.analysis.send(.completedTranscript("続きの確定文"))
-        h.analysis.send(.completedTranscript("遅い結果"))
-        expect(h.output.finals == ["続きの確定文"] && h.output.closedCount == 1, "確定は一度だけ")
+        h.analysis.result("続きの確定文", start: 96_000, end: 144_000, isFinal: true)
+        h.analysis.send(.completed)
+        h.analysis.send(.completed)
+        expect(h.output.finals == ["最初の文続きの確定文"] && h.output.closedCount == 1, "確定済み区間を含めて一度だけ返す")
+    }
+
+    runTest("SFSpeechRecognizer の音声範囲がない非空結果は次の範囲付き結果を待つ") {
+        let noSegments = try OnDeviceSpeechRecognizer.transcription(
+            text: "まだ区間のない partial", segments: [], isFinal: false
+        )
+        expect(noSegments == nil, "segment がない非空 partial を本文へ反映しない")
+
+        let emptyFinal = try OnDeviceSpeechRecognizer.transcription(
+            text: "区間のない final", segments: [], isFinal: true
+        )
+        expect(emptyFinal == nil, "segment がない final も本文へ反映しない")
+
+        let zeroRange = try OnDeviceSpeechRecognizer.transcription(
+            text: "長さのない partial",
+            segments: [SpeechRecognitionSegment(timestamp: 0, duration: 0)],
+            isFinal: false
+        )
+        expect(zeroRange == nil, "全 segment が長さ0の partial を待機扱いにする")
+
+        let ranged = try OnDeviceSpeechRecognizer.transcription(
+            text: "次の本文",
+            segments: [
+                SpeechRecognitionSegment(timestamp: 0, duration: 0),
+                SpeechRecognitionSegment(timestamp: 1, duration: 0.5),
+                SpeechRecognitionSegment(timestamp: 5, duration: 0),
+            ],
+            isFinal: false
+        )
+        guard let ranged else {
+            expect(false, "範囲付き結果を捨てない")
+            return
+        }
+        expect(
+            CMTimeCompare(ranged.audioRange.start, CMTime(seconds: 1, preferredTimescale: 1_000_000)) == 0
+                && CMTimeCompare(ranged.audioRange.end, CMTime(seconds: 1.5, preferredTimescale: 1_000_000)) == 0,
+            "長さ0の segment が有効範囲を広げない"
+        )
+
+        do {
+            _ = try OnDeviceSpeechRecognizer.transcription(
+                text: "不正な結果",
+                segments: [SpeechRecognitionSegment(timestamp: Double.nan, duration: 1)],
+                isFinal: false
+            )
+            expect(false, "不正な timestamp を待機扱いにしない")
+        } catch {
+            // 不正な音声時刻は認識失敗として扱う。
+        }
     }
 
     runTest("SFSpeechRecognizer の早期終了・空結果・取消後の結果を送信しない") {
@@ -189,10 +239,10 @@ func testRecognitionSession() {
             let h = SessionHarness()
             h.analysis.synchronousCancel = true
             h.ready()
-            h.analysis.send(.partialTranscript("途中の文"))
+            if scenario != "empty" { h.analysis.result("途中の文") }
             if scenario != "early" { h.session.finish() }
             if scenario == "cancel" { h.session.cancel() }
-            h.analysis.send(.completedTranscript(scenario == "empty" ? "" : "確定文"))
+            h.analysis.send(.completed)
             expect(h.output.finals.isEmpty && h.output.closedCount == 1, "失敗と取消で本文を返さない")
             expect(h.output.errors == (scenario == "cancel" ? [] : [scenario == "empty" ? "no-speech" : "recognition"]), "終端の原因を保持する")
         }

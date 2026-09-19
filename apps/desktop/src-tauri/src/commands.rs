@@ -466,15 +466,6 @@ pub async fn model_popup_close(
 }
 
 #[tauri::command]
-pub async fn model_popup_snapshot(
-    window: WebviewWindow,
-    state: State<'_, Arc<DesktopState>>,
-) -> TauriIpcResult<AppSnapshot> {
-    authorize_window(&window, CommandOrigin::ModelPopup)?;
-    Ok(IpcResult::success(state.snapshot().await))
-}
-
-#[tauri::command]
 pub async fn model_popup_config_update(
     window: WebviewWindow,
     state: State<'_, Arc<DesktopState>>,

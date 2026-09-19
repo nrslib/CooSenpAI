@@ -6,8 +6,9 @@ use serde_json::Value;
 
 pub(super) fn session_json<'a>(
     provider: ProviderName,
-    model: Option<&'a str>,
+    model: Option<&str>,
     request: &'a SessionRequest,
+    allow_session_model_change: bool,
 ) -> Result<(&'static str, Option<&'a str>), ProviderError> {
     match request {
         SessionRequest::New => Ok(("new", None)),
@@ -19,7 +20,9 @@ pub(super) fn session_json<'a>(
                     message: "セッションの provider が現在の provider と一致しません。".to_owned(),
                 });
             }
-            if session.model.as_deref() != model.filter(|value| *value != "default") {
+            if !allow_session_model_change
+                && session.model.as_deref() != model.filter(|value| *value != "default")
+            {
                 return Err(ProviderError {
                     kind: ProviderErrorKind::InvalidModel,
                     message: "セッションのモデルが現在の設定と一致しません。".to_owned(),
@@ -74,6 +77,7 @@ pub(super) fn validate_call(
 
 pub(super) fn parse_error_kind(kind: Option<&str>) -> ProviderErrorKind {
     match kind {
+        Some("timeout") => ProviderErrorKind::Timeout,
         Some("auth") => ProviderErrorKind::Auth,
         Some("unsupported") => ProviderErrorKind::Unsupported,
         Some("invalid-model") => ProviderErrorKind::InvalidModel,
@@ -102,6 +106,13 @@ pub(super) fn remove_null_fields(value: &mut Value) {
 pub(super) fn retryable(message: &str) -> ProviderError {
     ProviderError {
         kind: ProviderErrorKind::Retryable,
+        message: message.to_owned(),
+    }
+}
+
+pub(super) fn timeout(message: &str) -> ProviderError {
+    ProviderError {
+        kind: ProviderErrorKind::Timeout,
         message: message.to_owned(),
     }
 }

@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-core"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-desktop"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -650,8 +650,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "coosenpai-judge-fixed-plugin"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "coosenpai-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "coosenpai-judge-fixed-plugin-notify"
+version = "0.4.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "coosenpai-platform-macos"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",

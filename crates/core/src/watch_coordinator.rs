@@ -184,11 +184,10 @@ pub fn next_send_seconds(
 }
 
 #[test]
-fn vision_send_interval_is_independent_from_hearing_and_the_legacy_watch_field() {
+fn vision_send_interval_is_independent_from_hearing() {
     let mut config = Config::default();
     config.observer.vision.interval_ms = 30_000;
     config.observer.hearing.interval_ms = 90_000;
-    config.watch.send_interval_ms = 120_000;
     assert_eq!(next_send_seconds(&config, None, 0), 30);
     assert!(!watch_send_due(&config, 1, 0, 29_999));
     assert!(watch_send_due(&config, 1, 0, 30_000));

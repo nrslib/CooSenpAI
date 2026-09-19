@@ -1,5 +1,6 @@
 import type { CompanionReminder, ConfigPatch, CooSenpaiConfig, PopupQuickAction, ProviderName, WatchAppConfig, WorkAllowedRoot } from "./types.js";
 import { t, type Locale, type TranslationKey } from "./i18n/index.js";
+import type { SettingsCategory } from "./settings-categories.js";
 
 export const DEFAULT_AVATAR_COLOR = "#efead8";
 
@@ -22,6 +23,7 @@ export interface FormState {
   avatarFileName?: string;
   avatarImageLoadFailed: boolean;
   persona: string;
+  watchEnabled: boolean;
   watchFullscreen: boolean;
   watchFocusElement: boolean;
   watchApps: readonly WatchAppConfig[];
@@ -32,12 +34,17 @@ export interface FormState {
   audioEnabled: boolean;
   audioMic: boolean;
   audioSpeaker: boolean;
+  audioSpeakerIdentificationEnabled: boolean;
+  audioDebugDumpDir: string;
   providerObserver: ProviderName;
   providerCompanion: ProviderName;
   observerModel: string;
   companionModel: string;
   observerEffort: string;
   companionEffort: string;
+  proactiveModel: string;
+  proactiveEffort: string;
+  proactiveIdleMs: string;
   observerExecutable: string;
   observerIntervalMs: string;
   companionExecutable: string;
@@ -46,10 +53,9 @@ export interface FormState {
   hearingEffort: string;
   hearingExecutable: string;
   hearingIntervalMs: string;
+  hearingStallTimeoutMs: string;
   hearingTimeoutMs: string;
   hearingLimit: string;
-  hearingTextExcerptMaxChars: string;
-  hearingTextExcerptMaxCount: string;
   hearingTextTotalMaxChars: string;
   hearingChangesMaxCount: string;
   captureShortcut: string;
@@ -62,7 +68,6 @@ export interface FormState {
   textQuickActions: PopupQuickAction[];
   imageQuickActions: PopupQuickAction[];
   assertiveness: "low" | "normal" | "high";
-  sendIntervalMs: string;
   sendDebounceMs: string;
   framesPerSend: string;
   appWindowLimit: string;
@@ -81,10 +86,10 @@ export interface FormState {
   ocrGateTimeoutMs: string;
   ocrGateExecutable: string;
   observerTimeoutMs: string;
+  observerStallTimeoutMs: string;
   companionTimeoutMs: string;
+  companionStallTimeoutMs: string;
   observerLimit: string;
-  observerTextExcerptMaxChars: string;
-  observerTextExcerptMaxCount: string;
   observerTextTotalMaxChars: string;
   observerChangesMaxCount: string;
   companionLimit: string;
@@ -121,10 +126,10 @@ export interface FormState {
   notificationMode: "bubble" | "os" | "both";
   minPriority: "info" | "warning" | "critical";
   bubbleDurationMs: string;
-  showPriority: boolean;
   observationDays: string;
   conversationDays: string;
   debugEnabled: boolean;
+  judgeFollow: boolean;
   checkForUpdates: boolean;
   launchAtLogin: boolean;
 }
@@ -132,57 +137,50 @@ export interface FormState {
 export type SettingsUpdate = <K extends keyof FormState>(key: K, value: FormState[K]) => void;
 export type SettingsErrorFor = (path: string) => string | undefined;
 
-const tuningDefaults = {
-  watchFocusElement: false,
-  sendIntervalMs: "60000", sendDebounceMs: "2000", framesPerSend: "4", appWindowLimit: "4", downscaleWidth: "1280",
-  typingPauseMs: "2000", activeThresholdMs: "1000", appSwitch: true, appSwitchSettleMs: "1500",
-  maxIntervalMs: "60000", minSpacingMs: "5000", pollMs: "1000", batteryEnabled: true,
-  batteryMultiplier: "2", ocrGateEnabled: true, ocrGateLevel: "accurate" as const, ocrGateTimeoutMs: "3000",
-  observerIntervalMs: "60000",
-  observerTextExcerptMaxChars: "600", observerTextExcerptMaxCount: "6",
-  observerTextTotalMaxChars: "2000", observerChangesMaxCount: "8",
-  hearingIntervalMs: "60000",
-  hearingTextExcerptMaxChars: "600", hearingTextExcerptMaxCount: "6",
-  hearingTextTotalMaxChars: "2000", hearingChangesMaxCount: "8",
-  companionWakeCoalesceMax: "5", companionSessionMaxCalls: "60", companionStuckAfterMs: "900000",
-  pendingDeliveryLimit: "20", pendingDeliveryMaxBytes: "21053440",
+export type ConfigFormKey = keyof Omit<FormState, "avatarImage" | "avatarFileName" | "avatarImageLoadFailed">;
+
+const pageFields: Readonly<Record<SettingsCategory, readonly ConfigFormKey[]>> = {
+  work: ["workApprovalMode", "workAllowedRoots"],
+  general: [
+    "displayName", "avatarColor", "avatarPath", "persona", "assertiveness", "emotionsEnabled", "uiTheme", "uiFont", "language",
+    "memoryEnabled", "memoryProviderConsent", "checkForUpdates", "launchAtLogin", "reviewTime", "reminders", "whileThinking",
+    "memoryDailyRetentionDays", "memoryWeeklyRetentionWeeks", "factPromptDailyLimit", "observationDays", "conversationDays",
+  ],
+  vision: ["watchFullscreen", "watchApps", "watchFocusElement"],
+  hearing: ["audioMic", "audioSpeaker", "audioSpeakerIdentificationEnabled"],
+  speech: ["speechLocale", "speechInputDevice", "speechMode", "speechConfirmBeforeSend", "voiceOutputEnabled", "voiceOutputProvider", "voiceOutputRate", "voicevoxStyleId"],
+  notifications: ["notificationMode", "bubblePosition", "bubbleDisplay", "bubbleEdgeRecall", "thoughtBubble", "bubbleKeepLatest", "textQuickActions", "imageQuickActions", "minPriority", "bubbleDurationMs"],
+  providers: [
+    "providerObserver", "observerModel", "observerEffort", "observerLimit", "providerHearing", "hearingModel", "hearingEffort", "hearingLimit", "providerCompanion", "companionModel",
+    "companionEffort", "proactiveModel", "proactiveEffort", "companionLimit",
+  ],
+  shortcuts: ["captureShortcut", "microphoneShortcut", "togglePanelShortcut", "toggleAvatarShortcut", "toggleWatchShortcut", "sendTextShortcut", "copyLastReplyShortcut", "sendKey"],
+  setup: [],
+  developer: ["ocrGateExecutable", "observerExecutable", "hearingExecutable", "companionExecutable", "debugEnabled", "audioDebugDumpDir", "judgeFollow"],
 };
+
+const globalSettingsFields = ["watchEnabled", "audioEnabled"] as const satisfies readonly ConfigFormKey[];
+const allSettingsFields = [
+  ...globalSettingsFields,
+  ...pageFields.work,
+  ...pageFields.general,
+  ...pageFields.vision,
+  ...pageFields.hearing,
+  ...pageFields.speech,
+  ...pageFields.notifications,
+  ...pageFields.providers,
+  ...pageFields.shortcuts,
+  ...pageFields.setup,
+  ...pageFields.developer,
+] as const satisfies readonly ConfigFormKey[];
+
+export type SettingsResetRequest =
+  | { readonly scope: "page"; readonly category: SettingsCategory }
+  | { readonly scope: "all" };
 
 export const tuningHelp: Readonly<Record<string, { readonly defaultValue: string; readonly defaultValueKey?: TranslationKey; readonly descriptionKey: TranslationKey }>> = {
   "watch.focusElement": { defaultValue: "disabled", defaultValueKey: "common.disabled", descriptionKey: "settings.tuning.focusElement" },
-  "watch.sendIntervalMs": { defaultValue: "60000", descriptionKey: "settings.tuning.sendInterval" },
-  "watch.sendDebounceMs": { defaultValue: "2000", descriptionKey: "settings.tuning.sendDebounce" },
-  "watch.framesPerSend": { defaultValue: "4", descriptionKey: "settings.tuning.framesPerSend" },
-  "watch.appWindowLimit": { defaultValue: "4", descriptionKey: "settings.tuning.appWindowLimit" },
-  "watch.downscaleWidth": { defaultValue: "1280", descriptionKey: "settings.tuning.downscaleWidth" },
-  "watch.triggers.typingPauseMs": { defaultValue: "2000", descriptionKey: "settings.tuning.typingPause" },
-  "watch.triggers.activeThresholdMs": { defaultValue: "1000", descriptionKey: "settings.tuning.activeThreshold" },
-  "watch.triggers.appSwitchSettleMs": { defaultValue: "1500", descriptionKey: "settings.tuning.appSwitchSettle" },
-  "watch.triggers.maxIntervalMs": { defaultValue: "60000", descriptionKey: "settings.tuning.maxInterval" },
-  "watch.triggers.minSpacingMs": { defaultValue: "5000", descriptionKey: "settings.tuning.minSpacing" },
-  "watch.triggers.pollMs": { defaultValue: "1000", descriptionKey: "settings.tuning.poll" },
-  "watch.triggers.appSwitch": { defaultValue: "enabled", defaultValueKey: "settings.tuning.enabled", descriptionKey: "settings.tuning.appSwitch" },
-  "watch.battery.enabled": { defaultValue: "enabled", defaultValueKey: "settings.tuning.enabled", descriptionKey: "settings.tuning.batteryEnabled" },
-  "watch.battery.multiplier": { defaultValue: "2", descriptionKey: "settings.tuning.batteryMultiplier" },
-  "watch.ocrGate.enabled": { defaultValue: "enabled", defaultValueKey: "settings.tuning.enabled", descriptionKey: "settings.tuning.ocrEnabled" },
-  "watch.ocrGate.level": { defaultValue: "accurate", descriptionKey: "settings.tuning.ocrLevel" },
-  "watch.ocrGate.timeoutMs": { defaultValue: "3000", descriptionKey: "settings.tuning.ocrTimeout" },
-  "observer.vision.intervalMs": { defaultValue: "60000", descriptionKey: "settings.tuning.observerInterval" },
-  "observer.vision.textExcerptMaxChars": { defaultValue: "600", descriptionKey: "settings.tuning.textExcerptMaxChars" },
-  "observer.vision.textExcerptMaxCount": { defaultValue: "6", descriptionKey: "settings.tuning.textExcerptMaxCount" },
-  "observer.vision.textTotalMaxChars": { defaultValue: "2000", descriptionKey: "settings.tuning.textTotalMaxChars" },
-  "observer.vision.changesMaxCount": { defaultValue: "8", descriptionKey: "settings.tuning.changesMaxCount" },
-  "observer.hearing.intervalMs": { defaultValue: "60000", descriptionKey: "settings.tuning.hearingInterval" },
-  "observer.hearing.textExcerptMaxChars": { defaultValue: "600", descriptionKey: "settings.tuning.hearingTextExcerptMaxChars" },
-  "observer.hearing.textExcerptMaxCount": { defaultValue: "6", descriptionKey: "settings.tuning.hearingTextExcerptMaxCount" },
-  "observer.hearing.textTotalMaxChars": { defaultValue: "2000", descriptionKey: "settings.tuning.hearingTextTotalMaxChars" },
-  "observer.hearing.changesMaxCount": { defaultValue: "8", descriptionKey: "settings.tuning.hearingChangesMaxCount" },
   "companion.dailyProactiveLimit": { defaultValue: "unlimited", defaultValueKey: "settings.tuning.unlimited", descriptionKey: "settings.tuning.dailyProactiveLimit" },
-  "companion.wakeCoalesceMax": { defaultValue: "5", descriptionKey: "settings.tuning.wakeCoalesceMax" },
-  "companion.sessionMaxCalls": { defaultValue: "60", descriptionKey: "settings.tuning.sessionMaxCalls" },
-  "companion.stuckAfterMs": { defaultValue: "900000", descriptionKey: "settings.tuning.stuckAfterMs" },
-  "companion.pendingDeliveryLimit": { defaultValue: "20", descriptionKey: "settings.tuning.pendingDeliveryLimit" },
-  "companion.pendingDeliveryMaxBytes": { defaultValue: "21053440", descriptionKey: "settings.tuning.pendingDeliveryMaxBytes" },
   "companion.assertiveness": { defaultValue: "normal", descriptionKey: "settings.tuning.assertiveness" },
 };
 
@@ -196,6 +194,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     avatarPath: config.ui.avatarPath ?? null,
     avatarImageLoadFailed,
     persona: config.companion.persona,
+    watchEnabled: config.watch.enabled,
     watchFullscreen: config.watch.fullscreen,
     watchFocusElement: config.watch.focusElement,
     watchApps: config.watch.apps.map((app) => ({ ...app })),
@@ -206,6 +205,8 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     audioEnabled: config.audio.enabled,
     audioMic: config.audio.mic,
     audioSpeaker: config.audio.speaker,
+    audioSpeakerIdentificationEnabled: config.audio.speakerIdentification.enabled,
+    audioDebugDumpDir: config.audio.debugDumpDir ?? "",
     ...toBaseForm(config),
     contextRefreshCalls: String(config.companion.contextRefreshCalls),
     memoryEnabled: config.memory.enabled,
@@ -238,10 +239,10 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     notificationMode: config.notification.mode,
     minPriority: config.notification.minPriority,
     bubbleDurationMs: String(config.notification.bubbleDurationMs),
-    showPriority: config.notification.showPriority,
     observationDays: String(config.retention.observationDays),
     conversationDays: String(config.retention.conversationDays),
     debugEnabled: config.debug.enabled,
+    judgeFollow: config.judge?.follow ?? false,
     checkForUpdates: config.app.checkForUpdates,
     launchAtLogin: config.app.launchAtLogin,
   };
@@ -257,6 +258,9 @@ function toBaseForm(source: CooSenpaiConfig) {
     companionModel: source.companion.model,
     observerEffort: vision.effort,
     companionEffort: source.companion.effort,
+    proactiveModel: source.companion.proactiveModel,
+    proactiveEffort: source.companion.proactiveEffort,
+    proactiveIdleMs: String(source.companion.proactiveIdleMs),
     observerExecutable: vision.executable ?? "",
     observerIntervalMs: String(vision.intervalMs),
     companionExecutable: source.companion.executable ?? "",
@@ -265,10 +269,9 @@ function toBaseForm(source: CooSenpaiConfig) {
     hearingEffort: hearing.effort,
     hearingExecutable: hearing.executable ?? "",
     hearingIntervalMs: String(hearing.intervalMs),
+    hearingStallTimeoutMs: String(hearing.stallTimeoutMs),
     hearingTimeoutMs: String(hearing.timeoutMs),
     hearingLimit: String(hearing.dailyCallLimit),
-    hearingTextExcerptMaxChars: String(hearing.textExcerptMaxChars),
-    hearingTextExcerptMaxCount: String(hearing.textExcerptMaxCount),
     hearingTextTotalMaxChars: String(hearing.textTotalMaxChars),
     hearingChangesMaxCount: String(hearing.changesMaxCount),
     captureShortcut: source.keymap.captureRegion ?? "",
@@ -277,7 +280,6 @@ function toBaseForm(source: CooSenpaiConfig) {
     toggleAvatarShortcut: source.keymap.toggleAvatar ?? "",
     toggleWatchShortcut: source.keymap.toggleWatch ?? "",
     assertiveness: source.companion.assertiveness,
-    sendIntervalMs: String(source.watch.sendIntervalMs),
     sendDebounceMs: String(source.watch.sendDebounceMs),
     framesPerSend: String(source.watch.framesPerSend),
     appWindowLimit: String(source.watch.appWindowLimit),
@@ -296,10 +298,10 @@ function toBaseForm(source: CooSenpaiConfig) {
     ocrGateTimeoutMs: String(source.watch.ocrGate.timeoutMs),
     ocrGateExecutable: source.watch.ocrGate.executable ?? "",
     observerTimeoutMs: String(vision.timeoutMs),
+    observerStallTimeoutMs: String(vision.stallTimeoutMs),
     companionTimeoutMs: String(source.companion.timeoutMs),
+    companionStallTimeoutMs: String(source.companion.stallTimeoutMs),
     observerLimit: String(vision.dailyCallLimit),
-    observerTextExcerptMaxChars: String(vision.textExcerptMaxChars),
-    observerTextExcerptMaxCount: String(vision.textExcerptMaxCount),
     observerTextTotalMaxChars: String(vision.textTotalMaxChars),
     observerChangesMaxCount: String(vision.changesMaxCount),
     companionLimit: source.companion.dailyProactiveLimit === null ? "" : String(source.companion.dailyProactiveLimit),
@@ -312,7 +314,6 @@ function toBaseForm(source: CooSenpaiConfig) {
     notificationMode: source.notification.mode,
     minPriority: source.notification.minPriority,
     bubbleDurationMs: String(source.notification.bubbleDurationMs),
-    showPriority: source.notification.showPriority,
     observationDays: String(source.retention.observationDays),
     conversationDays: String(source.retention.conversationDays),
     debugEnabled: source.debug.enabled,
@@ -326,7 +327,13 @@ export function toPatch(form: FormState): ConfigPatch {
     ...base,
     work: { approvalMode: form.workApprovalMode, allowedRoots: form.workAllowedRoots },
     voiceOutput: { enabled: form.voiceOutputEnabled, provider: form.voiceOutputProvider, rate: Number(form.voiceOutputRate), voicevoxStyleId: form.voicevoxStyleId },
-    audio: { enabled: form.audioEnabled, mic: form.audioMic, speaker: form.audioSpeaker },
+    audio: {
+      enabled: form.audioEnabled,
+      mic: form.audioMic,
+      speaker: form.audioSpeaker,
+      speakerIdentification: { enabled: form.audioSpeakerIdentificationEnabled },
+      debugDumpDir: form.audioDebugDumpDir === "" ? null : form.audioDebugDumpDir,
+    },
     companion: {
       ...(base.companion as Record<string, unknown>),
       displayName: form.displayName.trim() || "Coo",
@@ -337,6 +344,7 @@ export function toPatch(form: FormState): ConfigPatch {
       reminders: form.reminders,
       proactiveQuietMinutes: Number(form.proactiveQuietMinutes),
     },
+    judge: { follow: form.judgeFollow ?? false },
     memory: {
       enabled: form.memoryEnabled,
       providerConsent: form.memoryProviderConsent,
@@ -358,10 +366,10 @@ export function toPatch(form: FormState): ConfigPatch {
 function toBasePatch(form: FormState): ConfigPatch {
   return {
     watch: {
+      enabled: form.watchEnabled,
       fullscreen: form.watchFullscreen,
       focusElement: form.watchFocusElement,
       apps: form.watchApps,
-      sendIntervalMs: Number(form.sendIntervalMs),
       sendDebounceMs: Number(form.sendDebounceMs),
       framesPerSend: Number(form.framesPerSend),
       appWindowLimit: Number(form.appWindowLimit),
@@ -390,10 +398,9 @@ function toBasePatch(form: FormState): ConfigPatch {
         effort: form.observerEffort,
         executable: form.observerExecutable === "" ? null : form.observerExecutable,
         intervalMs: Number(form.observerIntervalMs),
+        stallTimeoutMs: Number(form.observerStallTimeoutMs),
         timeoutMs: Number(form.observerTimeoutMs),
         dailyCallLimit: Number(form.observerLimit),
-        textExcerptMaxChars: Number(form.observerTextExcerptMaxChars),
-        textExcerptMaxCount: Number(form.observerTextExcerptMaxCount),
         textTotalMaxChars: Number(form.observerTextTotalMaxChars),
         changesMaxCount: Number(form.observerChangesMaxCount),
       },
@@ -403,10 +410,9 @@ function toBasePatch(form: FormState): ConfigPatch {
         effort: form.hearingEffort,
         executable: form.hearingExecutable === "" ? null : form.hearingExecutable,
         intervalMs: Number(form.hearingIntervalMs),
+        stallTimeoutMs: Number(form.hearingStallTimeoutMs),
         timeoutMs: Number(form.hearingTimeoutMs),
         dailyCallLimit: Number(form.hearingLimit),
-        textExcerptMaxChars: Number(form.hearingTextExcerptMaxChars),
-        textExcerptMaxCount: Number(form.hearingTextExcerptMaxCount),
         textTotalMaxChars: Number(form.hearingTextTotalMaxChars),
         changesMaxCount: Number(form.hearingChangesMaxCount),
       },
@@ -415,8 +421,12 @@ function toBasePatch(form: FormState): ConfigPatch {
       provider: form.providerCompanion,
       model: form.companionModel,
       effort: form.companionEffort,
+      proactiveModel: form.proactiveModel,
+      proactiveEffort: form.proactiveEffort,
+      proactiveIdleMs: Number(form.proactiveIdleMs),
       executable: form.companionExecutable === "" ? null : form.companionExecutable,
       assertiveness: form.assertiveness,
+      stallTimeoutMs: Number(form.companionStallTimeoutMs),
       timeoutMs: Number(form.companionTimeoutMs),
       dailyProactiveLimit: form.companionLimit === "" ? null : Number(form.companionLimit),
       wakeCoalesceMax: Number(form.companionWakeCoalesceMax),
@@ -425,16 +435,61 @@ function toBasePatch(form: FormState): ConfigPatch {
       pendingDeliveryLimit: Number(form.pendingDeliveryLimit),
       pendingDeliveryMaxBytes: Number(form.pendingDeliveryMaxBytes),
     },
-    notification: { mode: form.notificationMode, minPriority: form.minPriority, bubbleDurationMs: Number(form.bubbleDurationMs), showPriority: form.showPriority },
+    notification: { mode: form.notificationMode, minPriority: form.minPriority, bubbleDurationMs: Number(form.bubbleDurationMs) },
     retention: { observationDays: Number(form.observationDays), conversationDays: Number(form.conversationDays) },
     debug: { enabled: form.debugEnabled },
   };
 }
 
-export function defaultTuningForm(): Partial<FormState> { return { ...tuningDefaults }; }
+const RESET_EXCLUDED_KEYS: ReadonlySet<ConfigFormKey> = new Set(["avatarPath", "persona"]);
 
-export function tuningIsDefault(form: Pick<FormState, keyof typeof tuningDefaults>): boolean {
-  return Object.entries(tuningDefaults).every(([key, value]) => form[key as keyof typeof tuningDefaults] === value);
+function resettableFields(fields: readonly ConfigFormKey[]): readonly ConfigFormKey[] {
+  return fields.filter((key) => !RESET_EXCLUDED_KEYS.has(key));
+}
+
+export function settingsResetFields(request: SettingsResetRequest): readonly ConfigFormKey[] {
+  switch (request.scope) {
+    case "page": return resettableFields(pageFields[request.category]);
+    case "all": return resettableFields(allSettingsFields);
+  }
+}
+
+export function resetSettingsForm(form: FormState, defaults: CooSenpaiConfig, request: SettingsResetRequest): FormState {
+  const defaultForm = toForm(defaults, form.avatarImageLoadFailed);
+  const keys = settingsResetFields(request);
+  const next = { ...form };
+  for (const key of keys) Object.assign(next, { [key]: defaultForm[key] });
+  return next;
+}
+
+export type ResetFormValues = Partial<Pick<FormState, ConfigFormKey>>;
+
+export function sameFormValue(left: unknown, right: unknown): boolean {
+  return Object.is(left, right) || JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function restoreSettingsForm(form: FormState, previous: ResetFormValues, defaults: CooSenpaiConfig, request: SettingsResetRequest, excludedKeys: ReadonlySet<ConfigFormKey> = new Set()): FormState {
+  const resetForm = resetSettingsForm(form, defaults, request);
+  const next = { ...form };
+  for (const key of settingsResetFields(request)) {
+    if (!excludedKeys.has(key) && Object.prototype.hasOwnProperty.call(previous, key) && sameFormValue(form[key], resetForm[key])) {
+      Object.assign(next, { [key]: previous[key] });
+    }
+  }
+  return next;
+}
+
+export function defaultValueForPath(config: CooSenpaiConfig | undefined, path: string, locale: Locale = "ja"): string | undefined {
+  if (config === undefined) return undefined;
+  let value: unknown = config;
+  for (const part of path.split(".")) {
+    if (typeof value !== "object" || value === null || !(part in value)) return undefined;
+    value = (value as Record<string, unknown>)[part];
+  }
+  if (typeof value === "boolean") return t(locale, value ? "common.enabled" : "common.disabled");
+  if (typeof value === "number" || typeof value === "string") return String(value);
+  if (value === null && path === "companion.dailyProactiveLimit") return t(locale, "settings.tuning.unlimited");
+  return undefined;
 }
 
 export function appearancePreview(form: FormState): SettingsAppearancePreview {
@@ -463,6 +518,7 @@ export function configIssueLabel(path: string, locale: Locale = "ja"): string {
   if (path.startsWith("watch.")) return t(locale, "settings.configIssue.watch");
   if (path.startsWith("audio.")) return t(locale, "settings.configIssue.audio");
   if (path.startsWith("memory.")) return t(locale, "settings.configIssue.memory");
+  if (path.startsWith("judge.")) return t(locale, "settings.configIssue.judge");
   if (path.startsWith("voiceOutput.")) return t(locale, "settings.configIssue.voiceOutput");
   if (path.startsWith("speech.")) return t(locale, "settings.configIssue.speech");
   if (path.startsWith("keymap.")) return t(locale, "settings.configIssue.keymap");

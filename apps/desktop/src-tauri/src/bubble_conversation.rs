@@ -34,7 +34,9 @@ pub(crate) fn reset_prompt_record_for_locale(
 
 pub(crate) async fn show_reset_complete(state: Arc<DesktopState>) {
     let config = state.runtime_config();
-    let conversation_generation = state.bubbles.lock().await.conversation_generation();
+    let Ok(conversation_generation) = crate::bubbles::conversation_generation(&state).await else {
+        return;
+    };
     let record = BubbleRecord {
         id: format!("conversation-reset-complete-{conversation_generation}"),
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -58,7 +60,9 @@ pub(crate) async fn show_reset_complete(state: Arc<DesktopState>) {
 
 pub(crate) async fn show_tutorial_complete(state: Arc<DesktopState>) {
     let config = state.runtime_config();
-    let conversation_generation = state.bubbles.lock().await.conversation_generation();
+    let Ok(conversation_generation) = crate::bubbles::conversation_generation(&state).await else {
+        return;
+    };
     let record = BubbleRecord {
         id: format!("tutorial-complete-{conversation_generation}"),
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),

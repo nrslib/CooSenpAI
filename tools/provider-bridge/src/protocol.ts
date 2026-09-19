@@ -34,6 +34,7 @@ export interface SendRequest extends RequestBase {
   readonly cwd: string;
   readonly toolsDisabled: boolean;
   readonly isolateTools?: boolean;
+  readonly stallTimeoutMs: number;
   readonly timeoutMs: number;
 }
 
@@ -80,6 +81,7 @@ const SEND_KEYS = [
   "cwd",
   "toolsDisabled",
   "isolateTools",
+  "stallTimeoutMs",
   "timeoutMs",
 ] as const;
 const CANCEL_KEYS = [...BASE_KEYS, "targetId"] as const;
@@ -158,6 +160,9 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
   if (record.isolateTools === true && (session(record).mode !== "ephemeral" || images.length !== 0)) {
     throw new BridgeError("protocol", "isolated calls require an ephemeral session without images");
   }
+  if (typeof record.stallTimeoutMs !== "number" || !Number.isSafeInteger(record.stallTimeoutMs) || record.stallTimeoutMs <= 0) {
+    throw new BridgeError("protocol", "stallTimeoutMs must be a positive integer");
+  }
   if (typeof record.timeoutMs !== "number" || !Number.isSafeInteger(record.timeoutMs) || record.timeoutMs <= 0) {
     throw new BridgeError("protocol", "timeoutMs must be a positive integer");
   }
@@ -181,6 +186,7 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
     cwd,
     toolsDisabled: true,
     isolateTools: record.isolateTools === true,
+    stallTimeoutMs: record.stallTimeoutMs,
     timeoutMs: record.timeoutMs,
   };
 }

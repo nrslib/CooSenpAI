@@ -7,6 +7,7 @@ use crate::persistence::{prune_daily_jsonl_at, JsonlStore, PersistenceError};
 use crate::ports::{Clock, RuntimeLogger, SystemClock};
 use crate::prompts::{
     build_observer_prompt, observer_schema, observer_system_prompt, ObserverPromptFrame,
+    PromptAudioSegment,
 };
 use crate::provider::{
     ProviderCall, ProviderClient, ProviderError, ProviderErrorKind, ProviderResult,
@@ -19,6 +20,7 @@ use crate::state::{
 use crate::usage::{try_reserve_observer_role, ObserverCallKind, UsageError};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
@@ -33,6 +35,160 @@ use uuid::Uuid;
 const MAX_OBSERVER_ATTEMPTS: usize = 3;
 // 観察 prompt は毎回現在の比較データを再構成するため、長期 session の履歴だけが判断へ残り続けないようにする。
 const OBSERVER_SESSION_MAX_CALLS: usize = 60;
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SpeakerAliasIndex {
+    schema_version: u8,
+    registry_id: String,
+    aliases: BTreeMap<String, String>,
+}
+
+fn load_speaker_aliases(paths: &ConfigPaths) -> Result<SpeakerAliasIndex, ObserverError> {
+    let path = paths.speakers.join("aliases.json");
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(SpeakerAliasIndex {
+                schema_version: 1,
+                registry_id: String::new(),
+                aliases: BTreeMap::new(),
+            });
+        }
+        Err(_) => return Err(ObserverError::Output),
+    };
+    let index: SpeakerAliasIndex =
+        serde_json::from_slice(&data).map_err(|_| ObserverError::Output)?;
+    if index.schema_version != 1 || uuid::Uuid::parse_str(&index.registry_id).is_err() {
+        return Err(ObserverError::Output);
+    }
+    if index.aliases.iter().any(|(source, target)| {
+        !valid_prompt_speaker_id(source) || !valid_prompt_speaker_id(target) || source == target
+    }) {
+        return Err(ObserverError::Output);
+    }
+    for source in index.aliases.keys() {
+        let mut current = source.as_str();
+        let mut visited = HashSet::new();
+        while let Some(next) = index.aliases.get(current) {
+            if !visited.insert(current) {
+                return Err(ObserverError::Output);
+            }
+            current = next;
+        }
+    }
+    Ok(index)
+}
+
+fn valid_prompt_speaker_id(value: &str) -> bool {
+    value
+        .strip_prefix("speaker-")
+        .and_then(|number| number.parse::<u64>().ok())
+        .is_some_and(|number| number > 0)
+}
+
+fn canonical_prompt_speaker_id(id: &str, aliases: &BTreeMap<String, String>) -> String {
+    let mut current = id.to_owned();
+    let mut visited = HashSet::new();
+    while let Some(next) = aliases.get(&current) {
+        if !visited.insert(current.clone()) {
+            break;
+        }
+        current = next.clone();
+    }
+    current
+}
+
+fn namespaced_prompt_speaker_id(registry_id: &str, id: &str) -> Option<String> {
+    let namespace = speaker_registry_namespace(registry_id)?;
+    let prefix = format!("{namespace}/");
+    if let Some(raw_id) = id.strip_prefix(&prefix) {
+        return valid_prompt_speaker_id(raw_id).then(|| id.to_owned());
+    }
+    valid_prompt_speaker_id(id).then(|| format!("{namespace}/{id}"))
+}
+
+fn speaker_registry_namespace(registry_id: &str) -> Option<String> {
+    let uuid = Uuid::parse_str(registry_id).ok()?;
+    let digest = Sha256::digest(uuid.as_bytes());
+    Some(format!(
+        "r-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7]
+    ))
+}
+
+fn prompt_speaker_id(record: &AudioObservation, aliases: &SpeakerAliasIndex) -> Option<String> {
+    if record.source != crate::state::AudioObservationSource::Speaker
+        || record.speaker_status != Some(crate::state::SpeakerIdentificationStatus::Identified)
+    {
+        return None;
+    }
+    let id = record.speaker_id.as_deref()?;
+    if record.speaker_registry_id.as_deref() == Some(aliases.registry_id.as_str()) {
+        valid_prompt_speaker_id(id).then(|| canonical_prompt_speaker_id(id, &aliases.aliases))
+    } else {
+        namespaced_prompt_speaker_id(record.speaker_registry_id.as_deref()?, id)
+    }
+}
+
+fn sanitize_previous_audio(value: &Value, aliases: &SpeakerAliasIndex) -> Value {
+    let mut sanitized = value.clone();
+    let Some(segments) = sanitized
+        .get_mut("audioSegments")
+        .and_then(Value::as_array_mut)
+    else {
+        return sanitized;
+    };
+    for segment in segments {
+        let Some(object) = segment.as_object_mut() else {
+            continue;
+        };
+        let registry_id = object
+            .get("speakerRegistryId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        object.remove("speakerRegistryId");
+        if object.get("speakerStatus").and_then(Value::as_str) == Some("identified") {
+            let mut replacements = Vec::new();
+            let mut invalid = false;
+            for speaker_key in ["speakerTag", "speakerId"] {
+                if let Some(value) = object.get(speaker_key) {
+                    let replacement = value.as_str().and_then(|id| {
+                        if registry_id.as_deref() == Some(aliases.registry_id.as_str()) {
+                            valid_prompt_speaker_id(id)
+                                .then(|| canonical_prompt_speaker_id(id, &aliases.aliases))
+                        } else {
+                            registry_id
+                                .as_deref()
+                                .and_then(|registry| namespaced_prompt_speaker_id(registry, id))
+                        }
+                    });
+                    if let Some(replacement) = replacement {
+                        replacements.push((speaker_key, replacement));
+                    } else {
+                        invalid = true;
+                    }
+                }
+            }
+            if invalid || replacements.is_empty() {
+                object.remove("speakerTag");
+                object.remove("speakerId");
+                object.insert(
+                    "speakerStatus".to_owned(),
+                    Value::String("unknown".to_owned()),
+                );
+            } else {
+                for (speaker_key, replacement) in replacements {
+                    object.insert(speaker_key.to_owned(), Value::String(replacement));
+                }
+            }
+        } else {
+            object.remove("speakerTag");
+            object.remove("speakerId");
+        }
+    }
+    sanitized
+}
 
 fn require_active_observation(cancellation: &CancellationToken) -> Result<(), ObserverError> {
     if cancellation.is_cancelled() {
@@ -57,7 +213,8 @@ fn session_mode(session: &SessionRequest) -> &'static str {
 mod storage;
 pub use storage::{
     append_observation, excluded_bounds_for_self, mark_audio_consumed, migrate_legacy_audio,
-    observation_store, read_audio_by_ids, read_unobserved_audio, record_audio_observation,
+    observation_store, read_audio_by_ids, read_observations_by_ids, read_unobserved_audio,
+    record_audio_observation,
 };
 use storage::{
     append_observation_record, read_latest_observation, reconcile_transcripts, stagnation_identity,
@@ -81,6 +238,13 @@ pub struct ObservationFrameInput {
     pub ocr_text: Option<String>,
     pub focus: Option<crate::ports::FocusElement>,
     pub image_path: PathBuf,
+}
+
+pub(crate) struct ScopedObservationOptions {
+    pub(crate) expected_generation: u64,
+    pub(crate) scope_generation: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) scope_commit_lock: Arc<std::sync::Mutex<()>>,
+    pub(crate) allow_companion_delivery: bool,
 }
 
 #[derive(Debug, Error)]
@@ -161,8 +325,6 @@ impl ObserverAgent {
         let config = config.into();
         let vision_config = config.clone();
         let limits = ObservationLimits {
-            text_excerpt_max_chars: config.text_excerpt_max_chars,
-            text_excerpt_max_count: config.text_excerpt_max_count,
             text_total_max_chars: config.text_total_max_chars,
             changes_max_count: config.changes_max_count,
         };
@@ -232,6 +394,13 @@ impl ObserverAgent {
         self
     }
 
+    pub(crate) fn mark_audio_consumed(&self, ids: &[String]) -> Result<(), ObserverError> {
+        if let Some(paths) = &self.observation_paths {
+            mark_audio_consumed(paths, ids)?;
+        }
+        Ok(())
+    }
+
     fn configure_observation_store(&mut self, paths: &ConfigPaths, retention_days: u64) {
         self.observation_enabled = true;
         self.observation_directory = Some(paths.observations.clone());
@@ -295,11 +464,37 @@ impl ObserverAgent {
         scope_generation: Arc<std::sync::atomic::AtomicU64>,
         scope_commit_lock: Arc<std::sync::Mutex<()>>,
     ) -> Result<VisualObservation, ObserverError> {
-        self.observe_inner(
+        self.observe_scoped_with_companion_delivery(
             frames,
             audio,
             cancellation,
-            Some((expected_generation, scope_generation, scope_commit_lock)),
+            ScopedObservationOptions {
+                expected_generation,
+                scope_generation,
+                scope_commit_lock,
+                allow_companion_delivery: true,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn observe_scoped_with_companion_delivery(
+        &mut self,
+        frames: Vec<ObservationFrameInput>,
+        audio: Vec<AudioObservation>,
+        cancellation: CancellationToken,
+        options: ScopedObservationOptions,
+    ) -> Result<VisualObservation, ObserverError> {
+        self.observe_inner_with_companion_delivery(
+            frames,
+            audio,
+            cancellation,
+            Some((
+                options.expected_generation,
+                options.scope_generation,
+                options.scope_commit_lock,
+            )),
+            options.allow_companion_delivery,
         )
         .await
     }
@@ -314,6 +509,22 @@ impl ObserverAgent {
             Arc<std::sync::atomic::AtomicU64>,
             Arc<std::sync::Mutex<()>>,
         )>,
+    ) -> Result<VisualObservation, ObserverError> {
+        self.observe_inner_with_companion_delivery(frames, audio, cancellation, scope_guard, true)
+            .await
+    }
+
+    async fn observe_inner_with_companion_delivery(
+        &mut self,
+        frames: Vec<ObservationFrameInput>,
+        audio: Vec<AudioObservation>,
+        cancellation: CancellationToken,
+        scope_guard: Option<(
+            u64,
+            Arc<std::sync::atomic::AtomicU64>,
+            Arc<std::sync::Mutex<()>>,
+        )>,
+        allow_companion_delivery: bool,
     ) -> Result<VisualObservation, ObserverError> {
         require_active_observation(&cancellation)?;
         self.select_role(if frames.is_empty() && !audio.is_empty() {
@@ -335,6 +546,20 @@ impl ObserverAgent {
         if frames.is_empty() && audio.is_empty() {
             return Err(ObserverError::Output);
         }
+        let speaker_aliases = match &self.observation_paths {
+            Some(paths) if !audio.is_empty() || self.previous.is_some() => {
+                load_speaker_aliases(paths)?
+            }
+            _ => SpeakerAliasIndex {
+                schema_version: 1,
+                registry_id: String::new(),
+                aliases: BTreeMap::new(),
+            },
+        };
+        let previous_for_prompt = self
+            .previous
+            .as_ref()
+            .map(|value| sanitize_previous_audio(value, &speaker_aliases));
         let mut source_frame_paths = BTreeMap::new();
         if let Some(frame_buffer) = &self.frame_buffer {
             frame_buffer
@@ -369,7 +594,7 @@ impl ObserverAgent {
             .collect::<Vec<_>>();
         let mut prompt = build_observer_prompt(
             &prompt_frames,
-            self.previous.as_ref(),
+            previous_for_prompt.as_ref(),
             self.limits.outline_max_bytes(),
             self.limits.changes_max_count,
         );
@@ -389,11 +614,29 @@ impl ObserverAgent {
                             .to_string_lossy()
                             .into_owned()
                     }),
+                    speaker_tag: prompt_speaker_id(record, &speaker_aliases),
+                    speaker_registry_id: record.speaker_registry_id.clone(),
+                    speaker_status: record.speaker_status,
                 })
             })
             .collect::<Result<Vec<_>, ObserverError>>()?;
         if !audio.is_empty() {
-            prompt.push_str(&crate::prompts::observer_audio_context(&audio)?);
+            let prompt_audio = audio
+                .iter()
+                .map(|record| PromptAudioSegment {
+                    kind: Some(record.kind.clone()),
+                    schema_version: Some(record.schema_version),
+                    id: record.id.clone(),
+                    created_at: record.created_at.clone(),
+                    window_start: Some(record.window_start.clone()),
+                    window_end: Some(record.window_end.clone()),
+                    source: record.source,
+                    text: record.text.clone(),
+                    speaker_id: prompt_speaker_id(record, &speaker_aliases),
+                    speaker_status: record.speaker_status,
+                })
+                .collect::<Vec<_>>();
+            prompt.push_str(&crate::prompts::observer_audio_context(&prompt_audio)?);
         }
         let image_paths: Vec<PathBuf> = frames
             .iter()
@@ -402,7 +645,9 @@ impl ObserverAgent {
         let mut system_prompt = observer_system_prompt();
         if !audio.is_empty() {
             system_prompt.push_str("\n\n");
-            system_prompt.push_str(crate::prompts::OBSERVER_AUDIO_INSTRUCTIONS);
+            system_prompt.push_str(
+                crate::prompts::BUILTIN_OBSERVER_AUDIO_INSTRUCTIONS.trim_end_matches('\n'),
+            );
         }
         let debug_call_id = DebugStore::new_id();
         if let Some(store) = &self.debug_store {
@@ -517,7 +762,10 @@ impl ObserverAgent {
             return Err(ObserverError::StaleScope);
         }
         require_active_observation(&cancellation)?;
-        if let Err(error) = self.persist_record(&ObservationRecord::Visual(record.clone())) {
+        if let Err(error) = self.persist_record_with_companion_delivery(
+            &ObservationRecord::Visual(record.clone()),
+            allow_companion_delivery,
+        ) {
             if record.frame_count > 0 {
                 self.previous = serde_json::to_value(&record).ok();
             }
@@ -541,8 +789,6 @@ impl ObserverAgent {
             self.reset_session();
         }
         self.limits = ObservationLimits {
-            text_excerpt_max_chars: config.text_excerpt_max_chars,
-            text_excerpt_max_count: config.text_excerpt_max_count,
             text_total_max_chars: config.text_total_max_chars,
             changes_max_count: config.changes_max_count,
         };
@@ -594,8 +840,6 @@ impl ObserverAgent {
             }
         }
         self.limits = ObservationLimits {
-            text_excerpt_max_chars: self.config.text_excerpt_max_chars,
-            text_excerpt_max_count: self.config.text_excerpt_max_count,
             text_total_max_chars: self.config.text_total_max_chars,
             changes_max_count: self.config.changes_max_count,
         };
@@ -708,6 +952,8 @@ impl ObserverAgent {
                     session: session.clone(),
                     model: Some(self.config.model.clone()),
                     effort: Some(self.config.effort.clone()),
+                    allow_session_model_change: false,
+                    stall_timeout: Duration::from_millis(self.config.stall_timeout_ms),
                     timeout: Duration::from_millis(self.config.timeout_ms),
                     tutorial_response_key: None,
                 },
@@ -778,9 +1024,7 @@ impl ObserverAgent {
                         session = SessionRequest::New;
                         continue;
                     }
-                    if error.kind == ProviderErrorKind::Retryable
-                        && attempt + 1 < MAX_OBSERVER_ATTEMPTS
-                    {
+                    if error.kind.is_retryable() && attempt + 1 < MAX_OBSERVER_ATTEMPTS {
                         last_error = Some(error);
                         tokio::select! {
                             _ = cancellation.cancelled() => return Err(ProviderError {
@@ -1055,6 +1299,14 @@ impl ObserverAgent {
     }
 
     fn persist_record(&mut self, record: &ObservationRecord) -> Result<(), ObserverError> {
+        self.persist_record_with_companion_delivery(record, true)
+    }
+
+    fn persist_record_with_companion_delivery(
+        &mut self,
+        record: &ObservationRecord,
+        allow_companion_delivery: bool,
+    ) -> Result<(), ObserverError> {
         if self.observation_enabled {
             let directory = self.observation_directory.clone().ok_or_else(|| {
                 ObserverError::Persistence(PersistenceError::Invalid(
@@ -1065,6 +1317,9 @@ impl ObserverAgent {
             if let Some(retention_days) = self.observation_retention_days {
                 self.maintain_observation_retention(&directory, retention_days);
             }
+        }
+        if !allow_companion_delivery {
+            return Ok(());
         }
         match self.frame_context_delivery_decision(record) {
             Ok(true) => return Ok(()),

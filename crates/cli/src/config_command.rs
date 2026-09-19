@@ -63,8 +63,7 @@ fn parse_config_value(key: &str, raw: &str) -> Result<Value> {
     }
     if matches!(
         field,
-        "showPriority"
-            | "enabled"
+        "enabled"
             | "appSwitch"
             | "providerConsent"
             | "fullscreen"
@@ -72,7 +71,6 @@ fn parse_config_value(key: &str, raw: &str) -> Result<Value> {
             | "speaker"
             | "confirmBeforeSend"
             | "thoughtBubble"
-            | "alwaysShow"
             | "keepLatest"
             | "edgeRecall"
             | "launchAtLogin"

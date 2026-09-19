@@ -2,13 +2,14 @@ use crate::companion::{
     AttachmentOcrFailureKind, CompanionAgent, CompanionError, CompanionResponse,
 };
 use crate::config::{validate_config, Config};
+use crate::judge::JudgeAgent;
 use crate::locale::{text, Locale, TextKey};
 use crate::memory::{MemoryService, MemoryStatus};
 use crate::observer::{ObservationFrameInput, ObserverAgent, ObserverError};
 use crate::ports::RuntimeLogger;
 use crate::provider::ProviderUsage;
 use crate::state::ObservationRecord;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -37,10 +38,11 @@ use operation_state::{
 };
 #[path = "runtime_types.rs"]
 mod types;
+pub use crate::judge::JudgeDecision;
 pub use types::{
     CompanionDecision, ObservationDelivery, RuntimeAgents, RuntimeAttachmentOcrFailure,
-    RuntimeError, RuntimeErrorKind, RuntimeFactory, RuntimeLastError, RuntimePhase,
-    RuntimeSnapshot, RuntimeUserResponseFailure, UserInterruption,
+    RuntimeError, RuntimeErrorKind, RuntimeErrorSource, RuntimeFactory, RuntimeLastError,
+    RuntimePhase, RuntimeSnapshot, RuntimeUserResponseFailure, UserInterruption,
 };
 #[path = "runtime_handle_types.rs"]
 mod handle_types;
@@ -131,8 +133,98 @@ impl RuntimeHandle {
         result.await.map_err(|_| RuntimeError::ResponseDropped)?
     }
 
+    pub async fn feed_judge(
+        &self,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<(), RuntimeError> {
+        self.feed_judge_with_event(input_id, sign, strength)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn feed_judge_with_event(
+        &self,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<String, RuntimeError> {
+        self.ensure_open()?;
+        let event_id = format!("coosenpai:explicit:{}", uuid::Uuid::new_v4());
+        self.send_judge_feed(event_id.clone(), input_id, sign, strength, false)
+            .await?;
+        Ok(event_id)
+    }
+
+    pub async fn correct_judge_feed(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<(), RuntimeError> {
+        self.send_judge_feed(event_id, input_id, sign, strength, false)
+            .await
+    }
+
+    pub async fn cancel_judge_feed(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<(), RuntimeError> {
+        self.send_judge_feed(event_id, input_id, sign, strength, true)
+            .await
+    }
+
+    async fn send_judge_feed(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+        cancelled: bool,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        let (response, result) = oneshot::channel();
+        self.control_tx
+            .send(ControlCommand::JudgeFeed {
+                event_id,
+                input_id,
+                sign,
+                strength,
+                cancelled,
+                response,
+            })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
+
     pub fn snapshot(&self) -> RuntimeSnapshot {
         self.snapshot_rx.borrow().clone()
+    }
+
+    pub fn judge_trace_for_input(&self, input_id: &str) -> Option<crate::judge::JudgeTrace> {
+        self.judge_trace_store.get(input_id)
+    }
+
+    pub fn judge_trace_for_observation(
+        &self,
+        observation_id: &str,
+    ) -> Option<crate::judge::JudgeTrace> {
+        self.judge_trace_store.get_for_observation(observation_id)
+    }
+
+    pub fn install_fixture_judge_trace(
+        &self,
+        observation: &crate::state::ObservationRecord,
+        trace: crate::judge::JudgeTrace,
+    ) {
+        self.judge_trace_store.insert_for_fixture(trace);
+        self.judge_trace_store.associate_observation(observation);
     }
 
     pub fn subscribe_snapshots(&self) -> watch::Receiver<RuntimeSnapshot> {
@@ -189,6 +281,7 @@ impl RuntimeHandle {
 
 pub struct RuntimeActor {
     observer: Option<ObserverAgent>,
+    judge: std::sync::Arc<JudgeAgent>,
     companion: Option<CompanionAgent>,
     config: Config,
     full_config_revision: u64,
@@ -203,6 +296,7 @@ pub struct RuntimeActor {
     user_retry_at: Option<Instant>,
     user_retry_delay: Duration,
     last_error: Option<RuntimeLastError>,
+    suppressed_terminal_user_failure_ids: HashSet<String>,
     provider_build_failed: bool,
     memory: Option<MemoryService>,
     memory_run_at: Option<Instant>,
@@ -221,12 +315,16 @@ pub struct RuntimeActor {
     companion_draft: Option<String>,
     latest_companion_thought: Option<String>,
     latest_companion_decision: Option<CompanionDecision>,
+    judge_generation: u64,
+    latest_judge_decision: Option<crate::judge::JudgeDecision>,
+    judge_trace_store: crate::judge::JudgeTraceStore,
     latest_user_interruption: Option<UserInterruption>,
     companion_decision_sequence: u64,
     latest_companion_thought_generation: Option<u64>,
     provider_usage: ProviderUsage,
     companion_recovery_pending: bool,
     companion_recovery_at: Option<Instant>,
+    automatic_companion_recovery: bool,
     stream_tx: mpsc::UnboundedSender<ProviderStreamUpdate>,
     user_waiters: HashMap<String, oneshot::Sender<Result<CompanionResponse, RuntimeError>>>,
     user_work_pending: bool,
@@ -303,6 +401,27 @@ impl RuntimeActor {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn spawn_with_judge_for_test(
+        config: Config,
+        observer: Option<ObserverAgent>,
+        companion: Option<CompanionAgent>,
+        judge: std::sync::Arc<JudgeAgent>,
+    ) -> RuntimeHandle {
+        Self::spawn_internal_with_memory_and_judge(
+            config,
+            observer,
+            companion,
+            None,
+            ObservationDelivery::Companion,
+            None,
+            None,
+            CancellationToken::new(),
+            None,
+            Some(judge),
+        )
+    }
+
     pub fn spawn_with_factory_logger_and_cancellation(
         config: Config,
         observer: Option<ObserverAgent>,
@@ -368,6 +487,32 @@ impl RuntimeActor {
     fn spawn_internal_with_memory(
         config: Config,
         observer: Option<ObserverAgent>,
+        companion: Option<CompanionAgent>,
+        memory: Option<MemoryService>,
+        observation_delivery: ObservationDelivery,
+        factory: Option<std::sync::Arc<dyn RuntimeFactory>>,
+        logger: Option<std::sync::Arc<dyn RuntimeLogger>>,
+        cancellation: CancellationToken,
+        initial_error: Option<RuntimeLastError>,
+    ) -> RuntimeHandle {
+        Self::spawn_internal_with_memory_and_judge(
+            config,
+            observer,
+            companion,
+            memory,
+            observation_delivery,
+            factory,
+            logger,
+            cancellation,
+            initial_error,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_internal_with_memory_and_judge(
+        config: Config,
+        observer: Option<ObserverAgent>,
         mut companion: Option<CompanionAgent>,
         memory: Option<MemoryService>,
         observation_delivery: ObservationDelivery,
@@ -375,6 +520,7 @@ impl RuntimeActor {
         logger: Option<std::sync::Arc<dyn RuntimeLogger>>,
         cancellation: CancellationToken,
         initial_error: Option<RuntimeLastError>,
+        judge_override: Option<std::sync::Arc<JudgeAgent>>,
     ) -> RuntimeHandle {
         let companion_display_name = companion.as_ref().map_or_else(
             || config.companion.display_name.clone(),
@@ -395,6 +541,19 @@ impl RuntimeActor {
         let (priority_tx, mut priority_rx) = mpsc::channel::<PriorityCommand>(COMMAND_CAPACITY);
         let (user_tx, mut user_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+        let judge_feedback_store = companion
+            .as_ref()
+            .and_then(CompanionAgent::judge_feedback_store_path);
+        let automatic_companion_recovery = judge_override.is_none();
+        let judge = judge_override.unwrap_or_else(|| {
+            std::sync::Arc::new(
+                JudgeAgent::new(config.judge.clone())
+                    .with_feedback_store_if_present(judge_feedback_store)
+                    .with_logger(logger.clone()),
+            )
+        });
+        let judge_trace_store = judge.trace_store();
+        let handle_judge_trace_store = judge_trace_store.clone();
         let (snapshot_tx, snapshot_rx) = watch::channel(RuntimeSnapshot {
             companion_emotions: crate::emotion::EmotionState::default(),
             revision: 0,
@@ -417,6 +576,7 @@ impl RuntimeActor {
             companion_draft: None,
             latest_companion_thought: None,
             latest_companion_decision: None,
+            latest_judge_decision: None,
             latest_user_interruption: None,
             latest_companion_thought_generation: None,
             provider_usage: ProviderUsage::default(),
@@ -433,6 +593,7 @@ impl RuntimeActor {
         let actor_watch_scope_commit_lock = watch_scope_commit_lock.clone();
         let actor_turn_commit_lock = turn_commit_lock.clone();
         let actor_user_preparer = user_preparer.clone();
+        let actor_control_tx = control_tx.clone();
         tokio::spawn(async move {
             let initialization_retry_at = if initial_error.is_none()
                 && (companion.is_some()
@@ -447,6 +608,7 @@ impl RuntimeActor {
             };
             let mut actor = Self {
                 observer,
+                judge,
                 companion,
                 full_config_revision: config.revision,
                 config,
@@ -461,6 +623,7 @@ impl RuntimeActor {
                 user_retry_at: None,
                 user_retry_delay: Duration::from_secs(1),
                 last_error: initial_error,
+                suppressed_terminal_user_failure_ids: HashSet::new(),
                 provider_build_failed: false,
                 memory_run_at: memory.as_ref().map(|_| Instant::now()),
                 memory,
@@ -477,12 +640,16 @@ impl RuntimeActor {
                 companion_draft: None,
                 latest_companion_thought: None,
                 latest_companion_decision: None,
+                judge_generation: 0,
+                latest_judge_decision: None,
+                judge_trace_store: judge_trace_store.clone(),
                 latest_user_interruption: None,
                 companion_decision_sequence: 0,
                 latest_companion_thought_generation: None,
                 provider_usage: ProviderUsage::default(),
                 companion_recovery_pending: false,
                 companion_recovery_at: None,
+                automatic_companion_recovery,
                 stream_tx,
                 user_waiters: HashMap::new(),
                 user_work_pending: false,
@@ -547,6 +714,7 @@ impl RuntimeActor {
                     }
                     if running_coo.is_none()
                         && !actor.user_work_is_pending(&volatile_users)
+                        && actor.automatic_companion_recovery
                         && actor.companion_recovery_pending
                         && actor.companion_recovery_can_start()
                     {
@@ -577,6 +745,14 @@ impl RuntimeActor {
                     let Some(command) = control_queue.pop_front() else {
                         break;
                     };
+                    if let ControlCommand::JudgeCompleted {
+                        generation,
+                        decision,
+                    } = command
+                    {
+                        actor.apply_judge_decision(generation, decision, &snapshot_tx);
+                        continue;
+                    }
                     let observer_command = control_uses_observer(&command);
                     if matches!(&command, ControlCommand::CompanionObservations { .. })
                         && actor.observation_delivery == ObservationDelivery::Companion
@@ -609,7 +785,15 @@ impl RuntimeActor {
                         control_queue.push_back(command);
                         continue;
                     }
-                    match actor.start_control_operation(command, &snapshot_tx, &config_tx) {
+                    match actor
+                        .start_control_operation(
+                            command,
+                            &snapshot_tx,
+                            &config_tx,
+                            &actor_control_tx,
+                        )
+                        .await
+                    {
                         StartResult::Running(operation) if observer_command => {
                             running_observer = Some(*operation);
                             observer_started = true;
@@ -648,6 +832,7 @@ impl RuntimeActor {
                             actor.operation_cancellation.renew_lane(OperationLane::Coo);
                         }
                         actor.close_user_waiters();
+                        actor.judge.shutdown().await;
                         break;
                     }
                     _ = &mut fairness_deadline, if user_commands_processed >= MAX_QUEUED_USER_COMMANDS_PER_TURN
@@ -657,7 +842,9 @@ impl RuntimeActor {
                     }
                     observer_result = wait_for_running(&mut running_observer), if running_observer.is_some() && priority_rx.is_empty() => {
                         if let Some(operation) = running_observer.take() {
-                            let _ = actor.finish_operation(operation, observer_result, &snapshot_tx);
+                            let _ = actor
+                                .finish_operation(operation, observer_result, &snapshot_tx)
+                                .await;
                             if actor.queued_user_work(&volatile_users) {
                                 actor.user_work_pending = true;
                             }
@@ -688,7 +875,10 @@ impl RuntimeActor {
                         }
                         if let Some(operation) = running_coo.take() {
                             let was_user_operation = operation.is_user();
-                            match actor.finish_operation(operation, coo_result, &snapshot_tx) {
+                            match actor
+                                .finish_operation(operation, coo_result, &snapshot_tx)
+                                .await
+                            {
                                 PendingUserDrain::Continue => actor.user_work_pending = true,
                                 PendingUserDrain::Pause => {
                                     actor.user_work_pending = actor.queued_user_work(&volatile_users)
@@ -798,7 +988,7 @@ impl RuntimeActor {
                                 let _ = response.send(Ok(revision));
                             }
                             PriorityCommand::UpdateConfigWithoutFactory { config, response } => {
-                                let result = actor.update_config_without_factory(*config);
+                                let result = actor.update_config_without_factory(*config).await;
                                 if result.is_ok() {
                                     let _ = config_tx.send(actor.config.clone());
                                 }
@@ -962,6 +1152,7 @@ impl RuntimeActor {
             snapshot_rx,
             config_rx,
             user_preparer,
+            judge_trace_store: handle_judge_trace_store,
         }
     }
 
@@ -1055,7 +1246,7 @@ impl RuntimeActor {
                 self.publish(snapshot_tx);
             }
             PriorityCommand::UpdateConfigWithoutFactory { config, response } => {
-                let result = self.update_config_without_factory(*config);
+                let result = self.update_config_without_factory(*config).await;
                 if result.is_ok() {
                     let _ = config_tx.send(self.config.clone());
                 }
@@ -1068,7 +1259,7 @@ impl RuntimeActor {
                 response,
             } => {
                 self.advance_watch_scope_generation(&config);
-                let result = self.replace_config(*config, *agents);
+                let result = self.replace_config(*config, *agents).await;
                 if result.is_ok() {
                     let _ = config_tx.send(self.config.clone());
                 }

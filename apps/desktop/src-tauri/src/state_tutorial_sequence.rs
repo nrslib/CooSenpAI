@@ -87,10 +87,9 @@ impl DesktopState {
                 })
         };
         let has_completion = if let Ok((id, _)) = &details {
-            self.bubbles
-                .lock()
+            bubbles::card_completion(self, id, milestone)
                 .await
-                .card_completion(id, milestone)
+                .unwrap_or(None)
                 .is_some()
         } else {
             false

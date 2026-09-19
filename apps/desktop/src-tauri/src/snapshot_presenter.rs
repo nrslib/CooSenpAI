@@ -127,6 +127,15 @@ impl SnapshotPresenter {
         self.snapshot.lock().expect("snapshot lock").clone()
     }
 
+    pub(crate) fn speech_phase(&self) -> String {
+        self.snapshot
+            .lock()
+            .expect("snapshot lock")
+            .speech
+            .phase
+            .clone()
+    }
+
     pub(crate) fn handle(&mut self, input: SnapshotInput) -> Vec<UiEffect> {
         self.adopt(input.event, Some((input.config_revision, input.work)))
     }
@@ -159,6 +168,7 @@ impl SnapshotPresenter {
                                 != runtime.cancelled_user_message_ids
                             || previous.latest_companion_decision
                                 != runtime.latest_companion_decision
+                            || previous.latest_judge_decision != runtime.latest_judge_decision
                             || previous.pending_deliveries != runtime.pending_deliveries
                             || previous.last_error != runtime.last_error
                     });
@@ -172,7 +182,7 @@ impl SnapshotPresenter {
                 self.runtime = Some(runtime.clone());
                 if thought_changed {
                     effects.push(UiEffect::Deliver {
-                        child: PresenterId::Bubble,
+                        child: PresenterId::Root,
                         event: UiEvent::ThoughtObserved {
                             runtime: Box::new(runtime),
                             initial,
@@ -369,11 +379,19 @@ impl SnapshotPresenter {
             return effects;
         }
         count.published += 1;
+        let focus_after_speech =
+            previous_speech.speech.phase == "sending" && snapshot.speech.phase == "idle";
         let voice_changed = (previous_speech.speech.phase != "idle"
             || snapshot.speech.phase != "idle")
             && previous_speech != crate::speech::SpeechPopupSnapshot::from_app(&snapshot);
         snapshot.revision = snapshot.revision.saturating_add(1);
         effects.extend(snapshot_effects(&snapshot, voice_changed));
+        if focus_after_speech {
+            effects.push(UiEffect::Deliver {
+                child: PresenterId::Root,
+                event: UiEvent::FocusComposer,
+            });
+        }
         effects
     }
 
@@ -395,7 +413,7 @@ fn snapshot_effects(snapshot: &AppSnapshot, speech_changed: bool) -> Vec<UiEffec
     let mut effects = Vec::new();
     if speech_changed {
         effects.push(UiEffect::Deliver {
-            child: PresenterId::Capture,
+            child: PresenterId::Root,
             event: UiEvent::CaptureCompleted(Box::new(
                 crate::capture::CaptureEvent::VoiceProgress(Arc::new(
                     crate::speech::SpeechPopupSnapshot::from_app(&result),

@@ -12,6 +12,22 @@ use tokio_util::sync::CancellationToken;
 pub(crate) trait CoreRuntimePort: Send + Sync {
     fn config(&self) -> Config;
     fn snapshot(&self) -> RuntimeSnapshot;
+    fn judge_trace_for_input(&self, input_id: &str) -> Option<coosenpai_core::judge::JudgeTrace>;
+    fn judge_trace_for_observation(
+        &self,
+        observation_id: &str,
+    ) -> Option<coosenpai_core::judge::JudgeTrace>;
+    #[allow(dead_code)]
+    fn install_fixture_judge_trace(
+        &self,
+        observation: &ObservationRecord,
+        trace: coosenpai_core::judge::JudgeTrace,
+    );
+    #[allow(dead_code)]
+    async fn companion_observations(
+        &self,
+        observations: Vec<ObservationRecord>,
+    ) -> Result<CompanionResponse, RuntimeError>;
     fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot>;
     fn watch_scope_generation(&self) -> u64;
     fn begin_hearing_context(
@@ -99,6 +115,32 @@ impl CoreRuntimePort for RuntimeHandle {
 
     fn snapshot(&self) -> RuntimeSnapshot {
         RuntimeHandle::snapshot(self)
+    }
+
+    fn judge_trace_for_input(&self, input_id: &str) -> Option<coosenpai_core::judge::JudgeTrace> {
+        RuntimeHandle::judge_trace_for_input(self, input_id)
+    }
+
+    fn judge_trace_for_observation(
+        &self,
+        observation_id: &str,
+    ) -> Option<coosenpai_core::judge::JudgeTrace> {
+        RuntimeHandle::judge_trace_for_observation(self, observation_id)
+    }
+
+    fn install_fixture_judge_trace(
+        &self,
+        observation: &ObservationRecord,
+        trace: coosenpai_core::judge::JudgeTrace,
+    ) {
+        RuntimeHandle::install_fixture_judge_trace(self, observation, trace);
+    }
+
+    async fn companion_observations(
+        &self,
+        observations: Vec<ObservationRecord>,
+    ) -> Result<CompanionResponse, RuntimeError> {
+        RuntimeHandle::companion_observations(self, observations).await
     }
 
     fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot> {

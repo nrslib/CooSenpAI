@@ -226,8 +226,62 @@ impl BubbleState {
         self.conversation_generation
     }
 
-    pub(crate) fn set_latest_coo_speech(&mut self, record: Option<BubbleRecord>) {
+    pub(crate) fn set_latest_coo_speech(&mut self, mut record: Option<BubbleRecord>) {
+        if let (Some(previous), Some(next)) = (self.latest_coo_speech.as_ref(), record.as_mut()) {
+            if previous.id == next.id
+                && is_recorded_feedback(&previous.interaction)
+                && is_feedback_interaction(&next.interaction)
+            {
+                next.interaction = previous.interaction.clone();
+            }
+        }
         self.latest_coo_speech = record;
+    }
+
+    pub(crate) fn sync_feedback_interactions(
+        &mut self,
+        config: &coosenpai_core::config::Config,
+        recorded_ids: &HashSet<String>,
+    ) -> bool {
+        let mut changed = false;
+        for entry in &mut self.entries {
+            changed |= sync_feedback_interaction(&mut entry.record, config, recorded_ids);
+        }
+        if let Some(record) = self.latest_coo_speech.as_mut() {
+            changed |= sync_feedback_interaction(record, config, recorded_ids);
+        }
+        if changed {
+            self.mark_changed();
+        }
+        changed
+    }
+
+    pub(crate) fn set_interaction(
+        &mut self,
+        id: &str,
+        interaction: Option<BubbleInteraction>,
+    ) -> bool {
+        let mut changed = false;
+        for entry in &mut self.entries {
+            if entry.record.id == id && entry.record.interaction != interaction {
+                entry.record.interaction = interaction.clone();
+                changed = true;
+            }
+        }
+        if let Some(record) = self
+            .latest_coo_speech
+            .as_mut()
+            .filter(|record| record.id == id)
+        {
+            if record.interaction != interaction {
+                record.interaction = interaction;
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_changed();
+        }
+        changed
     }
 
     pub(crate) fn set_appearance_preview(
@@ -589,7 +643,11 @@ impl BubbleState {
             .as_ref()
             .is_some_and(|input| input.action == action)
         {
-            return value.is_some_and(|value| !value.trim().is_empty());
+            return if crate::utterance_feedback::is_optional_text_action(action) {
+                value.is_some()
+            } else {
+                value.is_some_and(|value| !value.trim().is_empty())
+            };
         }
         interaction.select.as_ref().is_some_and(|select| {
             select.action == action
@@ -710,9 +768,57 @@ fn retain_entries(entries: &mut Vec<BubbleEntry>, mut keep: impl FnMut(&BubbleEn
     });
 }
 
+fn sync_feedback_interaction(
+    record: &mut BubbleRecord,
+    config: &coosenpai_core::config::Config,
+    recorded_ids: &HashSet<String>,
+) -> bool {
+    let is_feedback = is_feedback_interaction(&record.interaction);
+    if record.interaction.is_some() && !is_feedback {
+        return false;
+    }
+    let next = crate::utterance_feedback::interaction_for_speech(
+        config,
+        &record.message_kind,
+        recorded_ids.contains(&record.id),
+    );
+    if record.interaction == next {
+        return false;
+    }
+    record.interaction = next;
+    true
+}
+
+fn is_feedback_interaction(interaction: &Option<BubbleInteraction>) -> bool {
+    interaction.as_ref().is_some_and(|interaction| {
+        interaction
+            .actions
+            .iter()
+            .any(|action| crate::utterance_feedback::is_feedback_action(&action.id))
+            || interaction
+                .select
+                .as_ref()
+                .is_some_and(|select| crate::utterance_feedback::is_feedback_action(&select.action))
+            || interaction
+                .secret_input
+                .as_ref()
+                .is_some_and(|input| crate::utterance_feedback::is_feedback_action(&input.action))
+    })
+}
+
+fn is_recorded_feedback(interaction: &Option<BubbleInteraction>) -> bool {
+    interaction.as_ref().is_some_and(|interaction| {
+        interaction
+            .actions
+            .iter()
+            .any(|action| action.id == crate::utterance_feedback::TOGGLE_ACTION)
+    })
+}
+
 #[derive(Debug)]
 pub(crate) enum BubbleMutation {
     ConversationGeneration(u64),
+    SwitchConversationGeneration(u64),
     Preview(Option<BubbleAppearancePreview>),
     FastForward(Option<String>),
     Navigate(BubbleDeckDirection),
@@ -722,7 +828,21 @@ pub(crate) enum BubbleMutation {
     ClearThoughtBubbles,
     SetMaxStack(usize),
     DismissMessageKind(String),
-    Hover { id: String, hovering: bool },
+    SetInteraction {
+        id: String,
+        interaction: Option<Box<BubbleInteraction>>,
+    },
+    Hover {
+        id: String,
+        hovering: bool,
+    },
+    #[cfg(test)]
+    Seed {
+        record: Box<BubbleRecord>,
+        shown_ago: Duration,
+        duration: Duration,
+        replaced_ids: Vec<String>,
+    },
 }
 
 pub(crate) async fn mutate_checked(
@@ -815,6 +935,77 @@ pub async fn set_hover(state: Arc<DesktopState>, id: &str, hovering: bool) {
         },
     )
     .await;
+}
+
+pub(crate) async fn conversation_generation(state: &DesktopState) -> Result<u64, String> {
+    state
+        .ui
+        .query(crate::ui_events::UiView::Bubble, |reply| {
+            crate::ui_events::UiEvent::BubbleQuery(
+                crate::ui_events::BubbleQuery::ConversationGeneration(reply),
+            )
+        })
+        .await
+}
+
+pub(crate) async fn accepts_interaction(
+    state: &DesktopState,
+    id: &str,
+    action: &str,
+    value: Option<&str>,
+) -> Result<bool, String> {
+    state
+        .ui
+        .query(crate::ui_events::UiView::Bubble, |reply| {
+            crate::ui_events::UiEvent::BubbleQuery(
+                crate::ui_events::BubbleQuery::AcceptsInteraction {
+                    id: id.to_owned(),
+                    action: action.to_owned(),
+                    value: value.map(str::to_owned),
+                    reply,
+                },
+            )
+        })
+        .await
+}
+
+pub(crate) async fn can_poll_edge_recall(state: &DesktopState) -> Result<bool, String> {
+    state
+        .ui
+        .query(crate::ui_events::UiView::Bubble, |reply| {
+            crate::ui_events::UiEvent::BubbleQuery(
+                crate::ui_events::BubbleQuery::CanPollEdgeRecall(reply),
+            )
+        })
+        .await
+}
+
+pub(crate) async fn setup_record(state: &DesktopState) -> Result<Option<BubbleRecord>, String> {
+    state
+        .ui
+        .query(crate::ui_events::UiView::Bubble, |reply| {
+            crate::ui_events::UiEvent::BubbleQuery(crate::ui_events::BubbleQuery::SetupRecord(
+                reply,
+            ))
+        })
+        .await
+}
+
+pub(crate) async fn card_completion(
+    state: &DesktopState,
+    id: &str,
+    milestone: BubbleMilestone,
+) -> Result<Option<(CancellationToken, CancellationToken)>, String> {
+    state
+        .ui
+        .query(crate::ui_events::UiView::Bubble, |reply| {
+            crate::ui_events::UiEvent::BubbleQuery(crate::ui_events::BubbleQuery::CardCompletion {
+                id: id.to_owned(),
+                milestone,
+                reply,
+            })
+        })
+        .await
 }
 
 pub(crate) async fn sync_window(state: &DesktopState) -> Result<()> {

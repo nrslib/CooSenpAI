@@ -51,6 +51,7 @@ swiftc -target "$swift_target" -O -parse-as-library -module-cache-path "$module_
   "$script_dir/Sources/audio_input_processing.swift" \
   "$script_dir/Sources/music_gate.swift" \
   "$script_dir/Sources/microphone_input_recovery.swift" \
+  "$script_dir/Sources/speaker_identification.swift" \
   "$script_dir/../speech-helper/Sources/speech_analysis.swift" \
   "$script_dir/../speech-helper/Sources/audio_queue.swift" \
   "$script_dir/../speech-helper/Sources/transcript_accumulator.swift" \

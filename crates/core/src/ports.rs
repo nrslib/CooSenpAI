@@ -1,4 +1,4 @@
-use crate::state::AudioObservationSource;
+use crate::state::{AudioObservationSource, SpeakerIdentificationStatus};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -411,6 +411,16 @@ pub enum HearingEvent {
         locale: String,
         microphone: SpeechPermissionKind,
         recognition: SpeechPermissionKind,
+        #[serde(
+            rename = "protocolVersion",
+            default = "default_hearing_protocol_version"
+        )]
+        protocol_version: u8,
+        #[serde(rename = "speakerIdentification", default)]
+        speaker_identification: bool,
+    },
+    SpeakerIdentification {
+        status: SpeakerIdentificationPreparationStatus,
     },
     Recognizing {
         source: AudioObservationSource,
@@ -428,6 +438,8 @@ pub enum HearingEvent {
         generation: u64,
         sequence: u64,
         text: String,
+        #[serde(flatten)]
+        speaker: Option<HearingSpeakerMetadata>,
     },
     Warning {
         kind: String,
@@ -438,6 +450,86 @@ pub enum HearingEvent {
         message: String,
     },
     Closed,
+}
+
+fn default_hearing_protocol_version() -> u8 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpeakerIdentificationPreparationStatus {
+    Preparing,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HearingSpeakerMetadata {
+    pub segment_id: String,
+    pub audio_start_ms: u64,
+    pub audio_end_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_registry_id: Option<String>,
+    pub speaker_status: SpeakerIdentificationStatus,
+}
+
+impl HearingSpeakerMetadata {
+    pub fn is_valid_for(&self, source: AudioObservationSource) -> bool {
+        if source != AudioObservationSource::Speaker
+            || self.segment_id.is_empty()
+            || uuid::Uuid::parse_str(&self.segment_id).is_err()
+            || self.audio_end_ms <= self.audio_start_ms
+            || self
+                .speaker_registry_id
+                .as_deref()
+                .is_some_and(|value| uuid::Uuid::parse_str(value).is_err())
+        {
+            return false;
+        }
+        match self.speaker_status {
+            SpeakerIdentificationStatus::Identified => {
+                self.speaker_id
+                    .as_deref()
+                    .is_some_and(valid_hearing_speaker_id)
+                    && self.speaker_registry_id.is_some()
+            }
+            SpeakerIdentificationStatus::Unknown
+            | SpeakerIdentificationStatus::Mixed
+            | SpeakerIdentificationStatus::Unavailable => {
+                self.speaker_id.is_none() && self.speaker_registry_id.is_none()
+            }
+        }
+    }
+}
+
+impl HearingEvent {
+    pub fn is_valid_for_source(&self, source: AudioObservationSource) -> bool {
+        match self {
+            HearingEvent::Final {
+                source: event_source,
+                speaker,
+                ..
+            } => {
+                event_source == &source
+                    && speaker
+                        .as_ref()
+                        .is_none_or(|metadata| metadata.is_valid_for(source))
+            }
+            HearingEvent::SpeakerIdentification { .. } => source == AudioObservationSource::Speaker,
+            _ => true,
+        }
+    }
+}
+
+fn valid_hearing_speaker_id(value: &str) -> bool {
+    let Some(number) = value.strip_prefix("speaker-") else {
+        return false;
+    };
+    !number.is_empty() && number.parse::<u64>().is_ok_and(|value| value > 0)
 }
 
 pub enum HearingCommand {
@@ -492,13 +584,18 @@ impl HearingSessionControl {
     pub async fn cancel(&self) -> Result<(), PortError> {
         let (completed, result) = oneshot::channel();
         self.cancel_requested.cancel();
-        self.commands
+        if self
+            .commands
             .send(HearingCommand::Cancel { completed })
             .await
-            .map_err(|_| PortError::Unavailable("聴覚観察は停止しています".to_owned()))?;
-        result.await.map_err(|_| {
-            PortError::Unavailable("聴覚観察の終了を確認できませんでした".to_owned())
-        })?
+            .is_err()
+        {
+            return Ok(());
+        }
+        match result.await {
+            Ok(result) => result,
+            Err(_) => Ok(()),
+        }
     }
 }
 
@@ -512,6 +609,27 @@ pub trait HearingPort: Send + Sync {
         debug_dump_dir: Option<&str>,
         cancellation: CancellationToken,
     ) -> Result<HearingSession, PortError>;
+
+    async fn start_with_options(
+        &self,
+        locale: &str,
+        input_device: &str,
+        sources: Vec<AudioObservationSource>,
+        debug_dump_dir: Option<&str>,
+        options: HearingStartOptions,
+        cancellation: CancellationToken,
+    ) -> Result<HearingSession, PortError> {
+        let _ = options;
+        self.start(locale, input_device, sources, debug_dump_dir, cancellation)
+            .await
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HearingStartOptions {
+    pub speaker_identification_enabled: bool,
+    pub speaker_model: Option<PathBuf>,
+    pub speaker_ledger: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

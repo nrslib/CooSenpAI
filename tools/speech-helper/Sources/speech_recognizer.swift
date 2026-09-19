@@ -1,20 +1,29 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 import Speech
 
-// SFSpeechRecognizer の結果は区間差分ではなく、その時点の認識全文として扱う。
+struct SpeechRecognitionSegment {
+    let timestamp: TimeInterval
+    let duration: TimeInterval
+}
+
+// SFSpeechRecognizer の結果も音声区間へ変換し、SpeechAnalyzer と同じ蓄積器へ渡す。
 final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
+    private static let timeScale: CMTimeScale = 1_000_000
+
     private let locale: Locale
     private let diagnostic: (String) -> Void
     private var receive: ((SpeechAnalysisEvent) -> Void)?
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
-    private var latestText = ""
+    private var latestRangeEnd: CMTime?
     private var finishRequested = false
     private var inputEnded = false
     private var terminal = false
     private var reportedInputGain = false
+    private var cancellationReported = false
 
     init(locale: Locale, diagnostic: @escaping (String) -> Void) {
         self.locale = locale
@@ -37,15 +46,15 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
     private func prepare(_ authorization: SFSpeechRecognizerAuthorizationStatus) {
         guard !terminal else { return }
         guard authorization == .authorized else {
-            receive?(.failed(SpeechAnalysisFailure(kind: "permission-speech", message: "音声認識の使用が許可されていません")))
+            reportFailure(SpeechAnalysisFailure(kind: "permission-speech", message: "音声認識の使用が許可されていません"))
             return
         }
         guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
-            receive?(.failed(SpeechAnalysisFailure(kind: "locale-unavailable", message: "指定したロケールの音声認識は利用できません: \(locale.identifier)")))
+            reportFailure(SpeechAnalysisFailure(kind: "locale-unavailable", message: "指定したロケールの音声認識は利用できません: \(locale.identifier)"))
             return
         }
         guard recognizer.supportsOnDeviceRecognition else {
-            receive?(.failed(SpeechAnalysisFailure(kind: "on-device-unsupported", message: "指定したロケールはオンデバイス音声認識に対応していません: \(locale.identifier)")))
+            reportFailure(SpeechAnalysisFailure(kind: "on-device-unsupported", message: "指定したロケールはオンデバイス音声認識に対応していません: \(locale.identifier)"))
             return
         }
         self.recognizer = recognizer
@@ -92,47 +101,120 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
         if let result {
             let text = result.bestTranscription.formattedString
             diagnostic("event=analysis-result engine=SFSpeechRecognizer isFinal=\(result.isFinal) finishRequested=\(inputEnded) chars=\(text.count)")
-            // 旧経路と同じく、終了通知だけの空結果で最後の認識全文を消さない。
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                latestText = text
+            do {
+                if let transcription = try makeTranscription(from: result) {
+                    rememberRangeEnd(transcription.audioRange.end)
+                    receive?(.result(transcription))
+                } else if result.isFinal, let latestRangeEnd {
+                    receive?(.finalizedThrough(latestRangeEnd))
+                }
+            } catch let failure as SpeechAnalysisFailure {
+                reportFailure(failure)
+                return
+            } catch {
+                reportFailure(SpeechAnalysisFailure(kind: "recognition", message: "音声認識が正常に完了しませんでした"))
+                return
             }
             if result.isFinal {
-                complete(latestText)
-            } else {
-                receive?(.partialTranscript(text))
+                finishRecognition()
             }
         } else if let error {
             let details = error as NSError
-            if inputEnded, latestText.isEmpty,
-               details.domain == "kAFAssistantErrorDomain", details.code == 1110 {
+            if inputEnded, details.domain == "kAFAssistantErrorDomain", details.code == 1110 {
                 diagnostic("event=analysis-no-speech engine=SFSpeechRecognizer")
-                complete("")
+                if let latestRangeEnd { receive?(.finalizedThrough(latestRangeEnd)) }
+                finishRecognition()
                 return
             }
             diagnostic("event=analysis-error engine=SFSpeechRecognizer domain=\(details.domain) code=\(details.code)")
-            receive?(.failed(SpeechAnalysisFailure(kind: "recognition", message: "音声認識が正常に完了しませんでした")))
+            reportFailure(SpeechAnalysisFailure(kind: "recognition", message: "音声認識が正常に完了しませんでした"))
         }
     }
 
-    private func complete(_ text: String) {
-        terminal = true
-        request = nil
-        task = nil
-        recognizer = nil
-        receive?(.completedTranscript(text))
+    private func rememberRangeEnd(_ end: CMTime) {
+        if let latestRangeEnd, CMTimeCompare(latestRangeEnd, end) >= 0 { return }
+        latestRangeEnd = end
     }
 
-    func cancel() {
-        guard !terminal else {
-            receive?(.cancelled)
-            return
+    private func makeTranscription(from result: SFSpeechRecognitionResult) throws -> SpeechTranscription? {
+        let transcription = result.bestTranscription
+        let segments = transcription.segments.map {
+            SpeechRecognitionSegment(timestamp: $0.timestamp, duration: $0.duration)
         }
+        return try Self.transcription(text: transcription.formattedString, segments: segments, isFinal: result.isFinal)
+    }
+
+    static func transcription(
+        text: String,
+        segments: [SpeechRecognitionSegment],
+        isFinal: Bool
+    ) throws -> SpeechTranscription? {
+        let ranges = try segments.compactMap { segment -> CMTimeRange? in
+            guard segment.timestamp.isFinite, segment.duration.isFinite,
+                  segment.timestamp >= 0, segment.duration >= 0 else {
+                throw SpeechAnalysisFailure(kind: "recognition", message: "音声認識が不正な区間の結果を返しました")
+            }
+            let start = CMTime(seconds: segment.timestamp, preferredTimescale: Self.timeScale)
+            let duration = CMTime(seconds: segment.duration, preferredTimescale: Self.timeScale)
+            let end = CMTimeAdd(start, duration)
+            guard start.isNumeric, duration.isNumeric, end.isNumeric,
+                  CMTimeCompare(start, .zero) >= 0, CMTimeCompare(duration, .zero) >= 0,
+                  CMTimeCompare(end, start) >= 0 else {
+                throw SpeechAnalysisFailure(kind: "recognition", message: "音声認識が不正な区間の結果を返しました")
+            }
+            guard CMTimeCompare(end, start) > 0 else { return nil }
+            return CMTimeRange(start: start, end: end)
+        }
+        guard let firstRange = ranges.first else { return nil }
+        let start = ranges.dropFirst().reduce(firstRange.start) {
+            CMTimeCompare($1.start, $0) < 0 ? $1.start : $0
+        }
+        let end = ranges.dropFirst().reduce(firstRange.end) {
+            CMTimeCompare($1.end, $0) > 0 ? $1.end : $0
+        }
+        guard CMTimeCompare(end, start) > 0 else {
+            return nil
+        }
+        guard start.isNumeric, end.isNumeric, CMTimeCompare(start, .zero) >= 0, CMTimeCompare(end, start) > 0 else {
+            throw SpeechAnalysisFailure(kind: "recognition", message: "音声認識が不正な区間の結果を返しました")
+        }
+        return SpeechTranscription(
+            text: text,
+            audioRange: CMTimeRange(start: start, end: end),
+            resultsFinalizationTime: isFinal ? end : .zero
+        )
+    }
+
+    private func finishRecognition() {
+        guard !terminal else { return }
         terminal = true
-        request?.endAudio()
+        cleanupResources()
+        receive?(.completed)
+    }
+
+    private func cleanupResources() {
+        if !inputEnded {
+            inputEnded = true
+            request?.endAudio()
+        }
         task?.cancel()
         request = nil
         task = nil
         recognizer = nil
+    }
+
+    private func reportFailure(_ failure: SpeechAnalysisFailure) {
+        guard !terminal else { return }
+        terminal = true
+        cleanupResources()
+        receive?(.failed(failure))
+    }
+
+    func cancel() {
+        terminal = true
+        cleanupResources()
+        guard !cancellationReported else { return }
+        cancellationReported = true
         receive?(.cancelled)
     }
 }

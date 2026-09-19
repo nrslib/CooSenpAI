@@ -9,6 +9,9 @@ pub(crate) struct HearingSessionSettings {
     pub(crate) input_device: String,
     pub(crate) sources: Vec<AudioObservationSource>,
     pub(crate) debug_dump_dir: Option<String>,
+    pub(crate) speaker_identification_enabled: bool,
+    pub(crate) speaker_model_path: Option<String>,
+    pub(crate) speaker_ledger_path: Option<String>,
 }
 
 impl HearingSessionSettings {
@@ -22,11 +25,26 @@ impl HearingSessionSettings {
             input_device: input_device.into(),
             sources,
             debug_dump_dir: None,
+            speaker_identification_enabled: false,
+            speaker_model_path: None,
+            speaker_ledger_path: None,
         }
     }
 
     pub(crate) fn with_debug_dump_dir(mut self, debug_dump_dir: Option<String>) -> Self {
         self.debug_dump_dir = debug_dump_dir;
+        self
+    }
+
+    pub(crate) fn with_speaker_identification(
+        mut self,
+        enabled: bool,
+        model_path: Option<String>,
+        ledger_path: Option<String>,
+    ) -> Self {
+        self.speaker_identification_enabled = enabled;
+        self.speaker_model_path = model_path;
+        self.speaker_ledger_path = ledger_path;
         self
     }
 }

@@ -410,8 +410,6 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                 .collect::<Vec<_>>();
             let previous = input.get("previousObservation");
             let observer_limits = ObservationLimits {
-                text_excerpt_max_chars: case.config.observer.text_excerpt_max_chars,
-                text_excerpt_max_count: case.config.observer.text_excerpt_max_count,
                 text_total_max_chars: case.config.observer.text_total_max_chars,
                 changes_max_count: case.config.observer.changes_max_count,
             };
@@ -433,6 +431,8 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                         session: SessionRequest::Ephemeral,
                         model: Some(case.model.to_owned()),
                         effort: Some(case.effort.to_owned()),
+                        allow_session_model_change: false,
+                        stall_timeout: Duration::from_millis(case.config.observer.stall_timeout_ms),
                         timeout: Duration::from_millis(case.config.observer.timeout_ms),
                         tutorial_response_key: None,
                     },
@@ -574,6 +574,10 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                         session: SessionRequest::New,
                         model: Some(case.model.to_owned()),
                         effort: Some(case.effort.to_owned()),
+                        allow_session_model_change: false,
+                        stall_timeout: Duration::from_millis(
+                            case.config.companion.stall_timeout_ms,
+                        ),
                         timeout: Duration::from_millis(case.config.companion.timeout_ms),
                         tutorial_response_key: None,
                     },
@@ -610,6 +614,8 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                             session: SessionRequest::Ephemeral,
                             model: Some(case.model.to_owned()),
                             effort: Some(case.effort.to_owned()),
+                            allow_session_model_change: false,
+                            stall_timeout: Duration::from_millis(case.config.companion.stall_timeout_ms),
                             timeout: Duration::from_millis(case.config.companion.timeout_ms),
                             tutorial_response_key: None,
                         },

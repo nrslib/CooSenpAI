@@ -88,6 +88,33 @@ pub(crate) async fn execute(state: Arc<DesktopState>, command: UserCommand) -> U
                 reply,
             }
         }
+        UserCommand::ConversationSelect {
+            generation,
+            source,
+            reply,
+        } => {
+            let handler = state.clone();
+            let result = dispatch_result(
+                state,
+                source,
+                DesktopCommand::ConversationSelect,
+                move |context| async move {
+                    let locale = Locale::from_config(&handler.runtime_config().ui.language);
+                    match handler
+                        .command_select_conversation(&context, generation)
+                        .await
+                    {
+                        Ok(()) => IpcResult::success(handler.snapshot().await),
+                        Err(error) => crate::commands::runtime_failure_for_locale(error, locale),
+                    }
+                },
+            )
+            .await;
+            CommandCompletion::Snapshot {
+                result: Box::new(result),
+                reply,
+            }
+        }
         UserCommand::ChatCancel(reply) => CommandCompletion::Text {
             result: chat_operation(state, false).await,
             reply,
@@ -426,6 +453,9 @@ pub(crate) fn tutorial_advance_action(
 }
 
 pub(crate) fn bubble_interaction_command(action: &str) -> DesktopCommand {
+    if crate::utterance_feedback::is_feedback_action(action) {
+        return DesktopCommand::UtteranceFeedback;
+    }
     match action {
         "memory-confirm" => DesktopCommand::MemoryConfirm,
         "memory-reject" => DesktopCommand::MemoryReject,

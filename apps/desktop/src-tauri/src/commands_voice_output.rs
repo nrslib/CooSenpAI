@@ -103,7 +103,10 @@ pub(crate) async fn voice_output_test(
         CommandSource::IpcMain,
         DesktopCommand::VoiceOutputTest,
         move |_context| async move {
-            let generation = handler.voice_conversation_generation().await;
+            let generation = match handler.voice_conversation_generation().await {
+                Ok(generation) => generation,
+                Err(message) => return IpcResult::failure(message),
+            };
             let locale = Locale::from_config(&handler.runtime_config().ui.language);
             match handler
                 .voice_output

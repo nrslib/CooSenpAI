@@ -11,7 +11,7 @@ export type SettingsCategory =
   | "providers"
   | "shortcuts"
   | "setup"
-  | "beta";
+  | "developer";
 
 export interface SettingsCategoryDefinition {
   readonly id: SettingsCategory;
@@ -28,7 +28,7 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategoryDefinition[] = [
   { id: "providers", labelKey: "settings.categories.providers" },
   { id: "shortcuts", labelKey: "settings.categories.shortcuts" },
   { id: "setup", labelKey: "settings.categories.setup" },
-  { id: "beta", labelKey: "settings.categories.beta" },
+  { id: "developer", labelKey: "settings.categories.developer" },
 ];
 
 export function personaSelectionRoute(

@@ -44,12 +44,18 @@ final class ScreenCaptureSpeakerDevice: SpeakerScreenCaptureDevice, @unchecked S
                 stage("start-capture", "end")
                 DispatchQueue.main.async { completion(nil) }
             } catch let startError {
+                let details = startError as NSError
+                if details.code == -3801 {
+                    diagnostic(
+                        "screen-capture permission denied: 「プライバシーとセキュリティ」→「画面収録とシステムオーディオ録音」で HearingE2E を許可してから再実行してください"
+                    )
+                }
                 if let stream, let registeredOutput {
                     do {
                         try stream.removeStreamOutput(registeredOutput, type: .audio)
                     } catch {
-                        let details = error as NSError
-                        diagnostic("screen-capture remove-output failed: domain=\(details.domain) code=\(details.code) description=\(details.localizedDescription)")
+                        let cleanupDetails = error as NSError
+                        diagnostic("screen-capture remove-output failed: domain=\(cleanupDetails.domain) code=\(cleanupDetails.code) description=\(cleanupDetails.localizedDescription)")
                     }
                 }
                 self.stream = nil

@@ -57,11 +57,19 @@ impl MockProvider {
             return Ok((value.to_string(), Some(value)));
         }
         if properties.and_then(|value| value.get("emit")).is_some() {
+            // ユーザー対話の turn は返答契約（chat / priority none）に従う。
+            // 自発発言の turn は通知配送の検査ができるよう nudge / info を返す。
+            let user_turn = input.prompt.contains("今回はユーザーからの対話入力です");
+            let (message_kind, priority) = if user_turn {
+                ("chat", "none")
+            } else {
+                ("nudge", "info")
+            };
             let value = json!({
                 "emit": true,
                 "message": MOCK_COMPANION_RESPONSE,
-                "messageKind": "chat",
-                "notificationPriority": "none",
+                "messageKind": message_kind,
+                "notificationPriority": priority,
                 "factCandidates": [],
                 "factUpdates": []
             });

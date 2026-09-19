@@ -1,7 +1,7 @@
 pub use crate::companion_cursor::{
-    ActiveTurnCommit, CursorSnapshot, ObservationAttempt, ObservationConsumption,
-    PendingAttachmentFailure, PendingDelivery, PendingInput, PendingObservation,
-    PendingUserMessage, PreparedUserResponse, TurnCommitKind, TurnCommitPhase,
+    ActiveTurnCommit, CursorSnapshot, JudgeFeedbackTarget, ObservationAttempt,
+    ObservationConsumption, PendingAttachmentFailure, PendingDelivery, PendingInput,
+    PendingObservation, PendingUserMessage, PreparedUserResponse, TurnCommitKind, TurnCommitPhase,
     TurnCommitRecoveryAttempt, UserDispatchLease, MAX_USER_RESPONSE_ATTEMPTS,
 };
 use crate::config::ConfigPaths;

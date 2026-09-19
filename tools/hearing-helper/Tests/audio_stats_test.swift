@@ -75,5 +75,6 @@ struct AudioStatsTest {
         testMicrophoneInputRecovery()
         testSpeakerAudio()
         testSpeakerScreenCapture()
+        testSpeakerIdentification()
     }
 }

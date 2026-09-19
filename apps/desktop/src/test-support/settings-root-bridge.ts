@@ -30,8 +30,11 @@ export class SettingsRootBridge {
       });
       createInterface({ input: child.stdout }).on("line", (line) => {
         if (!line.startsWith("SETTINGS_ROOT ")) return;
-        const message = JSON.parse(line.slice("SETTINGS_ROOT ".length)) as { ready?: boolean; sequence?: number; value?: unknown };
+        const message = JSON.parse(line.slice("SETTINGS_ROOT ".length)) as { ready?: boolean; sequence?: number; value?: unknown; panelUpdates?: unknown };
         if (message.ready) resolve();
+        if (message.panelUpdates !== undefined) {
+          window.dispatchEvent(new CustomEvent("coosenpai:panel:updates", { detail: message.panelUpdates }));
+        }
         if (message.sequence !== undefined) {
           this.pending.get(message.sequence)?.resolve(message.value);
           this.pending.delete(message.sequence);

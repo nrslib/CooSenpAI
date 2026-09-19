@@ -94,7 +94,7 @@ pub(crate) struct ConversationPresenter {
     user_scrolled_up: bool,
     thinking_layout: Option<String>,
     active_response: bool,
-    snapshot: Option<Arc<AppSnapshot>>,
+    conversation_generation: Option<u64>,
     pending_sends: usize,
     next_token: u64,
     operation: Option<(u64, u64)>,
@@ -106,18 +106,13 @@ impl ConversationPresenter {
         pending_sends: usize,
     ) -> Vec<UiEffect> {
         if self
-            .snapshot
-            .as_ref()
-            .is_some_and(|current| current.revision > snapshot.revision)
+            .conversation_generation
+            .is_some_and(|current| current != snapshot.selected_conversation_generation)
         {
-            return vec![];
-        }
-        if self.snapshot.as_ref().is_some_and(|current| {
-            current.selected_conversation_generation != snapshot.selected_conversation_generation
-        }) {
             self.view.operation_generation += 1;
             self.view.error = None;
         }
+        self.conversation_generation = Some(snapshot.selected_conversation_generation);
         self.pending_sends = pending_sends;
         let newest = snapshot.conversation.last();
         let next = newest.map(|e| e.id.clone());
@@ -150,8 +145,7 @@ impl ConversationPresenter {
         if first || changed || (thinking_changed && !self.user_scrolled_up) {
             self.scroll();
         }
-        self.snapshot = Some(snapshot);
-        self.refresh_actions();
+        self.refresh_actions(Some(&snapshot));
         vec![self.render()]
     }
 
@@ -159,9 +153,13 @@ impl ConversationPresenter {
         self.operation.is_some()
     }
 
-    pub(crate) fn handle(&mut self, event: ConversationEvent) -> Vec<UiEffect> {
+    pub(crate) fn handle(
+        &mut self,
+        event: ConversationEvent,
+        snapshot: Option<&Arc<AppSnapshot>>,
+    ) -> Vec<UiEffect> {
         match event {
-            ConversationEvent::CancelCurrent => return self.cancel_current(),
+            ConversationEvent::CancelCurrent => return self.cancel_current(snapshot),
             ConversationEvent::Completed {
                 token,
                 conversation_generation,
@@ -172,29 +170,27 @@ impl ConversationPresenter {
                 }
                 self.operation = None;
                 self.view.operation_generation += 1;
-                if self
-                    .snapshot
-                    .as_ref()
+                if snapshot
                     .is_none_or(|s| s.selected_conversation_generation != conversation_generation)
                 {
-                    self.refresh_actions();
+                    self.refresh_actions(snapshot);
                     return vec![self.render(), UiEffect::Log("ui: presenter=Conversation event=Completed ignored=true reason=stale-conversation".into())];
                 }
                 match result {
-                    Ok(snapshot) => {
+                    Ok(completed) => {
                         self.view.error = None;
-                        let mut effects = self.observe(snapshot.clone(), self.pending_sends);
-                        effects.push(UiEffect::Deliver {
-                            child: PresenterId::Chat,
-                            event: UiEvent::ChatLoaded(snapshot),
-                        });
-                        self.refresh_actions();
-                        effects.push(self.render());
-                        return effects;
+                        self.refresh_actions(snapshot);
+                        return vec![
+                            UiEffect::Deliver {
+                                child: PresenterId::Chat,
+                                event: UiEvent::ChatLoaded(completed),
+                            },
+                            self.render(),
+                        ];
                     }
                     Err(error) => self.view.error = Some(error),
                 }
-                self.refresh_actions();
+                self.refresh_actions(snapshot);
             }
             ConversationEvent::Selected(id) => {
                 self.view.selected_id = Some(id.clone());
@@ -212,7 +208,7 @@ impl ConversationPresenter {
                     action,
                     input_id,
                     generation,
-                } => return self.action(action, input_id, generation),
+                } => return self.action(action, input_id, generation, snapshot),
                 ConversationInput::Mounted | ConversationInput::Opened => self.scroll(),
                 ConversationInput::Layout if !self.user_scrolled_up => {
                     self.view.scroll_request += 1
@@ -235,7 +231,7 @@ impl ConversationPresenter {
                     composing: false,
                     key_code,
                 } if key_code != 229 && self.active_response => {
-                    return self.cancel_current();
+                    return self.cancel_current(snapshot);
                 }
                 _ => {}
             },
@@ -243,18 +239,15 @@ impl ConversationPresenter {
         vec![self.render()]
     }
 
-    fn cancel_current(&mut self) -> Vec<UiEffect> {
-        let Some(id) = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.active_user_message_id.clone())
-        else {
+    fn cancel_current(&mut self, snapshot: Option<&Arc<AppSnapshot>>) -> Vec<UiEffect> {
+        let Some(id) = snapshot.and_then(|s| s.active_user_message_id.clone()) else {
             return vec![self.render()];
         };
         self.action(
             ConversationAction::Cancel,
             id,
             self.view.operation_generation,
+            snapshot,
         )
     }
 
@@ -263,6 +256,7 @@ impl ConversationPresenter {
         action: ConversationAction,
         input_id: String,
         generation: u64,
+        snapshot: Option<&Arc<AppSnapshot>>,
     ) -> Vec<UiEffect> {
         let accepted = self
             .view
@@ -283,7 +277,7 @@ impl ConversationPresenter {
                     .into(),
             )];
         }
-        let snapshot = self.snapshot.as_ref().unwrap();
+        let snapshot = snapshot.expect("row actions exist only after observing a snapshot");
         let message = (action == ConversationAction::Resend).then(|| {
             snapshot
                 .conversation
@@ -298,7 +292,7 @@ impl ConversationPresenter {
         self.operation = Some((self.next_token, conversation_generation));
         self.view.operation_generation += 1;
         self.view.error = None;
-        self.refresh_actions();
+        self.refresh_actions(Some(snapshot));
         vec![
             self.render(),
             UiEffect::Spawn(UiTask::Conversation(ConversationTask {
@@ -311,9 +305,9 @@ impl ConversationPresenter {
         ]
     }
 
-    fn refresh_actions(&mut self) {
+    fn refresh_actions(&mut self, snapshot: Option<&Arc<AppSnapshot>>) {
         self.view.busy = self.is_busy();
-        let Some(snapshot) = &self.snapshot else {
+        let Some(snapshot) = snapshot else {
             return;
         };
         let active = snapshot.active_user_message_id.as_deref();

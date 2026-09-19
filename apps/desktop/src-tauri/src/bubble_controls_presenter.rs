@@ -326,7 +326,9 @@ impl BubbleControlsPresenter {
                 if self.view.busy {
                     return vec![];
                 }
-                if value.trim().is_empty() {
+                if value.trim().is_empty()
+                    && !crate::utterance_feedback::is_optional_text_action(&secret.action)
+                {
                     self.view.required_input = true;
                     return vec![];
                 }

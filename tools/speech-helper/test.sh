@@ -4,7 +4,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 unit_only=0
-input_wav="$script_dir/Tests/Fixtures/two-utterances-microphone.wav"
+input_wav="$script_dir/Tests/Fixtures/two-utterances-issue-125.wav"
 case "$#:$*" in
   0:) ;;
   1:--unit-only) unit_only=1 ;;

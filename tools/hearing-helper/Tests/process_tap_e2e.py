@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import unicodedata
 
 root = Path(sys.argv[1])
 scenario = sys.argv[2] if len(sys.argv) > 2 else "normal"
@@ -120,7 +121,16 @@ finals = [e for e in result if e.get("event") == "final" and e.get("source") == 
 assert len(finals) == 2, finals
 assert len({e["generation"] for e in finals}) == 2, finals
 assert all(e["sequence"] > 0 and e["text"].strip() for e in finals), finals
-assert "アルファ" in finals[0]["text"] and finals[0]["text"] != finals[1]["text"], finals
+assert "アルファ" in finals[0]["text"] and "ベータ" in finals[1]["text"], finals
+
+def normalize(text):
+    return "".join(
+        character for character in text
+        if not character.isspace() and not unicodedata.category(character).startswith("P")
+    )
+
+assert normalize(finals[0]["text"]) not in normalize(finals[1]["text"]), finals
+assert finals[0]["text"] != finals[1]["text"], finals
 assert all(any(e.get("event") == "recognizing" and e.get("source") == "speaker"
                and e.get("generation") == final["generation"] for e in result) for final in finals), result
 for name in ("stdout", "stderr", "exit"):

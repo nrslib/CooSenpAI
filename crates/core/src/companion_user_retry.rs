@@ -108,21 +108,26 @@ impl CompanionAgent {
         Ok(terminal_ids)
     }
 
-    pub(crate) fn first_terminal_user_response(
-        &self,
-    ) -> Result<Option<(String, u8)>, CompanionError> {
+    pub(crate) fn terminal_user_responses(&self) -> Result<Vec<(String, u8)>, CompanionError> {
         let Some(storage) = &self.storage else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         Ok(storage
             .load_cursor()?
             .pending_inputs
             .into_iter()
-            .find_map(|pending| {
+            .filter_map(|pending| {
                 let PendingInput::UserMessage(input) = pending;
                 input
                     .response_terminal
                     .then_some((input.id, input.response_attempts))
-            }))
+            })
+            .collect())
+    }
+
+    pub(crate) fn first_terminal_user_response(
+        &self,
+    ) -> Result<Option<(String, u8)>, CompanionError> {
+        Ok(self.terminal_user_responses()?.into_iter().next())
     }
 }

@@ -56,11 +56,12 @@ impl DesktopState {
             drop(conversation_sync);
             return Err(error);
         }
-        let changed = self
-            .bubbles
-            .lock()
-            .await
-            .switch_conversation_generation(generation);
+        let changed = bubbles::mutate_checked(
+            &self.ui,
+            bubbles::BubbleMutation::SwitchConversationGeneration(generation),
+        )
+        .await
+        .map_err(RuntimeError::Factory)?;
         if changed {
             let _ = bubbles::sync_window(self).await;
         }

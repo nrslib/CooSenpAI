@@ -23,6 +23,11 @@ pub(crate) enum UserCommand {
         source: CommandSource,
         reply: Reply<AppSnapshot>,
     },
+    ConversationSelect {
+        generation: u64,
+        source: CommandSource,
+        reply: Reply<AppSnapshot>,
+    },
     ChatCancel(Reply<String>),
     ChatRetry(Reply<String>),
     TutorialNext(Reply<AppSnapshot>),

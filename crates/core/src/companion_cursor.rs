@@ -149,6 +149,16 @@ impl PendingInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JudgeFeedbackTarget {
+    pub input_id: String,
+    pub event_time: String,
+    /// まとめられた利用者入力の ID。入力ごとの停止要求を別の観測へ広げないために使う。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_input_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PendingUserMessage {
     pub id: String,
     #[serde(default)]
@@ -162,6 +172,9 @@ pub struct PendingUserMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_text: Option<String>,
     pub observations: Vec<ObservationRecord>,
+    /// この user message に直接添えられた観察だけを自動 feed の対象にする。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judge_feedback_targets: Vec<JudgeFeedbackTarget>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_frames: Vec<PendingFrameContext>,
     #[serde(

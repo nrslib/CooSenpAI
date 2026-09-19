@@ -49,6 +49,39 @@ struct Initial {
     draft: Draft,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResetConfirmation {
+    scope: String,
+    category: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResetAcceptance {
+    fields: Fields,
+}
+
+#[derive(Clone, Default)]
+struct ResetUndo {
+    fields: Fields,
+    scope: String,
+    category: Option<String>,
+}
+
+const SETTINGS_CATEGORIES: &[&str] = &[
+    "work",
+    "general",
+    "vision",
+    "hearing",
+    "speech",
+    "notifications",
+    "providers",
+    "shortcuts",
+    "setup",
+    "developer",
+];
+
 #[derive(Default)]
 pub(super) struct SettingsPresenter {
     base: Value,
@@ -71,6 +104,9 @@ pub(super) struct SettingsPresenter {
     picker_open: bool,
     discard: bool,
     confirmation: Option<String>,
+    reset_scope: Option<String>,
+    reset_category: Option<String>,
+    reset_undo: Option<ResetUndo>,
     recording: Option<String>,
     persona: Option<Value>,
     persona_load: Option<u64>,
@@ -151,6 +187,8 @@ impl SettingsPresenter {
         json!({"dirty":self.dirty(),"saving":self.saving.is_some(),"saved":self.saved,
             "issues":self.issues,"externalChanges":self.external,"discardConfirmOpen":self.discard,
             "confirmation":self.confirmation,"activeCategory":self.category.as_deref().unwrap_or("general"),
+            "resetScope":self.reset_scope,"resetCategory":self.reset_category,"canUndoReset":self.reset_undo.is_some(),
+            "defaultConfig":default_config_value(),
             "recordingShortcut":self.recording,"personaDocument":self.persona,"personaPickerOpen":self.picker_open && self.picker_allowed,
             "personaPickerAllowed":self.picker_allowed,"showTutorialPersonaSettings":self.tutorial_persona,
             "vrmControlsOpen":self.vrm_open,"closing":self.closing.is_some(),"escapeEnabled":self.escape_enabled()})
@@ -302,7 +340,7 @@ impl SettingsPresenter {
                     } else if self.discard {
                         self.discard = false;
                     } else if self.confirmation.is_some() {
-                        self.confirmation = None;
+                        self.clear_confirmation();
                     } else if self.vrm_open {
                         self.vrm_open = false;
                     } else {
@@ -313,20 +351,7 @@ impl SettingsPresenter {
             "recording" => self.recording = decode(value)?,
             "category" => {
                 let category: String = decode(value)?;
-                if ![
-                    "work",
-                    "general",
-                    "vision",
-                    "hearing",
-                    "speech",
-                    "notifications",
-                    "providers",
-                    "shortcuts",
-                    "setup",
-                    "beta",
-                ]
-                .contains(&category.as_str())
-                {
+                if !SETTINGS_CATEGORIES.contains(&category.as_str()) {
                     return Err(action_error(&category));
                 }
                 self.category = Some(category);
@@ -357,21 +382,70 @@ impl SettingsPresenter {
             }
             "selectPersona" => {}
             "confirm" => {
-                let confirmation: String = decode(value)?;
-                if !["tuning", "conversation-reset"].contains(&confirmation.as_str()) {
-                    return Err(action_error(&confirmation));
-                }
-                self.confirmation = Some(confirmation);
-            }
-            "cancelConfirmation" => self.confirmation = None,
-            "acceptConfirmation" if self.saving.is_none() => {
-                match self.confirmation.take().as_deref() {
-                    Some("tuning") => {
-                        self.issues.clear();
-                        io.command("resetTuning", ());
+                if let Some(confirmation) = value.as_str() {
+                    if confirmation != "conversation-reset" {
+                        return Err(action_error(confirmation));
                     }
+                    self.clear_confirmation();
+                    self.confirmation = Some(confirmation.into());
+                } else {
+                    let request: ResetConfirmation = decode(value)?;
+                    match request.scope.as_str() {
+                        "page" => {
+                            let category =
+                                request.category.ok_or("設定画面の各ページがありません")?;
+                            if !SETTINGS_CATEGORIES.contains(&category.as_str()) {
+                                return Err(action_error(&category));
+                            }
+                            self.confirmation = Some("settings-reset".into());
+                            self.reset_scope = Some("page".into());
+                            self.reset_category = Some(category);
+                        }
+                        "all" if request.category.is_none() => {
+                            self.confirmation = Some("settings-reset".into());
+                            self.reset_scope = Some("all".into());
+                            self.reset_category = None;
+                        }
+                        _ => return Err(action_error(&request.scope)),
+                    }
+                }
+            }
+            "cancelConfirmation" => self.clear_confirmation(),
+            "undoReset" if self.saving.is_none() => {
+                if let Some(previous) = self.reset_undo.take() {
+                    io.command(
+                        "restoreReset",
+                        json!({
+                            "fields": previous.fields,
+                            "scope": previous.scope,
+                            "category": previous.category,
+                            "defaults": default_config_value(),
+                        }),
+                    );
+                }
+            }
+            "undoReset" => {}
+            "acceptConfirmation" if self.saving.is_none() => {
+                let confirmation = self.confirmation.take();
+                match confirmation.as_deref() {
                     Some("conversation-reset") => {
                         io.command("resetConversation", ());
+                    }
+                    Some("settings-reset") => {
+                        let scope = self
+                            .reset_scope
+                            .take()
+                            .ok_or("設定の復元範囲がありません")?;
+                        let category = self.reset_category.take();
+                        let acceptance: ResetAcceptance = decode(value)?;
+                        let fields = reset_undo_fields(acceptance.fields)?;
+                        self.reset_undo = Some(ResetUndo {
+                            fields: fields.clone(),
+                            scope: scope.clone(),
+                            category: category.clone(),
+                        });
+                        self.issues.clear();
+                        io.command("resetDraft", json!({"fields":fields,"scope":scope,"category":category,"defaults":default_config_value()}));
                     }
                     _ => {}
                 }
@@ -392,7 +466,13 @@ impl SettingsPresenter {
         }
     }
     fn clear_and_close(&mut self, io: &mut PanelIo) {
+        self.clear_confirmation();
         self.closing = Some(io.command("clearPreview", ()));
+    }
+    fn clear_confirmation(&mut self) {
+        self.confirmation = None;
+        self.reset_scope = None;
+        self.reset_category = None;
     }
     fn reflect(&mut self, io: &mut PanelIo) {
         self.reflection_generation += 1;
@@ -485,6 +565,7 @@ impl SettingsPresenter {
             "clearPreview" if self.closing == Some(command.id) => {
                 self.closing = None;
                 if result.ok {
+                    self.reset_undo = None;
                     self.closed = true;
                     io.command("close", ());
                 } else {
@@ -523,4 +604,19 @@ impl SettingsPresenter {
             Locale::from_config(self.base["ui"]["language"].as_str().unwrap_or("ja")),
         )
     }
+}
+
+fn default_config_value() -> Value {
+    serde_json::to_value(coosenpai_core::config::default_config())
+        .expect("既定設定の JSON 化に失敗しました")
+}
+
+fn reset_undo_fields(fields: Fields) -> Result<Fields, String> {
+    if fields
+        .keys()
+        .any(|key| key == "persona" || key == "avatarPath")
+    {
+        return Err("設定の復元対象に対象外の項目があります".into());
+    }
+    Ok(fields)
 }

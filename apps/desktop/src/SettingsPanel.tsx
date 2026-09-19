@@ -1,15 +1,16 @@
 import { Fragment, lazy, Suspense, useEffect, useRef, useState, type ChangeEvent, type ComponentProps, type ReactElement } from "react";
 
-import type { AppSnapshot, ConfigIssue, ConfigPatch, CooSenpaiConfig, IpcResult, LicenseDocument, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName } from "./types.js";
+import type { AppSnapshot, ConfigIssue, ConfigPatch, CooSenpaiConfig, IpcResult, LicenseDocument, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, SpeakerManagementPayload } from "./types.js";
 import { t, useI18n, type Locale } from "./i18n/index.js";
 import { ConfirmationDialog } from "./components/ConfirmationDialog.js";
 import { GeneralSettings } from "./components/GeneralSettings.js";
 import { HearingSettings } from "./components/HearingSettings.js";
-import { VoiceOutputSettings } from "./components/VoiceOutputSettings.js";
+import { DeveloperSettings } from "./components/DeveloperSettings.js";
 import { NotificationSettings } from "./components/NotificationSettings.js";
 import { ProviderSettings } from "./components/ProviderSettings.js";
 import type { ProviderApiKeyDrafts } from "./components/ProviderApiKeyFields.js";
 import { SettingsTabs } from "./components/SettingsTabs.js";
+import { SettingsDefaultsProvider } from "./components/SettingsControls.js";
 import { SettingsDiscardDialog } from "./components/SettingsDiscardDialog.js";
 import { SetupSettings } from "./components/SetupSettings.js";
 import { WorkSettings } from "./components/WorkSettings.js";
@@ -20,10 +21,11 @@ import { VisionSettings } from "./components/VisionSettings.js";
 import { CloseIcon } from "./components/LineIcons.js";
 import { PersonaEditor } from "./components/PersonaEditor.js";
 import { PersonaPicker } from "./components/PersonaPicker.js";
-import { modelAfterProviderChange, settingsIssueHeading, settingsIssueTarget, unavailableProviderMessage } from "./settings-model.js";
+import { companionProviderChange, modelAfterProviderChange, settingsIssueHeading, settingsIssueTarget, unavailableProviderMessage } from "./settings-model.js";
 import { focusFirstSettingsControl } from "./settings-keyboard.js";
 import { SETTINGS_CATEGORIES, type SettingsCategory } from "./settings-categories.js";
-import { appearancePreview, defaultTuningForm, toForm, type FormState, type SettingsAppearancePreview } from "./settings-form.js";
+import { appearancePreview, resetSettingsForm, restoreSettingsForm, sameFormValue, toForm, type ConfigFormKey, type FormState, type ResetFormValues, type SettingsAppearancePreview, type SettingsResetRequest } from "./settings-form.js";
+import { resetFields, type SettingsResetFields } from "./settings-form-fields.js";
 import { useSettingsPresenter } from "./useSettingsPresenter.js";
 import { SettingsFormSync } from "./settings-form-sync.js";
 import { SettingsSearchCategory, SettingsSearchItem, SettingsSearchProvider } from "./settings-search.js";
@@ -35,6 +37,30 @@ export { resetShortcutToDefault, shortcutFromKeyboardEvent } from "./components/
 
 const AVATAR_CONFIG_PATH = "state/avatar.png";
 const MAX_AVATAR_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+function settingsResetRequest(scope: SettingsResetRequest["scope"] | null, category: SettingsCategory | null): SettingsResetRequest {
+  switch (scope) {
+    case "page":
+      if (category === null) throw new Error("Missing settings page");
+      return { scope, category };
+    case "all":
+      return { scope };
+    case null:
+      throw new Error("Missing settings reset scope");
+  }
+}
+
+function resetFormValues(fields: SettingsResetFields): ResetFormValues {
+  return Object.fromEntries(Object.entries(fields).map(([key, field]) => {
+    if (field === undefined) throw new Error("Missing reset setting value");
+    return [key, field.value];
+  })) as ResetFormValues;
+}
+
+interface ResetUndoTracking {
+  readonly keys: readonly ConfigFormKey[];
+  readonly manuallyChanged: Set<ConfigFormKey>;
+}
 
 interface Props {
   readonly snapshot: AppSnapshot;
@@ -61,6 +87,7 @@ interface Props {
   readonly onOpenAccessibilitySettings?: () => void;
   readonly onOpenLicenseDocument: (document: LicenseDocument) => void;
   readonly onOpenSpeechSettings: (kind: "microphone" | "recognition") => void;
+  readonly onSpeakerManagement?: (payload: SpeakerManagementPayload) => Promise<IpcResult<null>>;
   readonly onToggleAvatar: () => void;
   readonly onRelaunch: () => void;
   readonly onAppearancePreview: (preview?: SettingsAppearancePreview) => Promise<IpcResult<null>>;
@@ -70,7 +97,7 @@ interface Props {
 
 export { SettingsDiscardDialog } from "./components/SettingsDiscardDialog.js";
 
-export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, onClose, onSave, onSelectPersona, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRefreshPersonas, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenAccessibilitySettings, onOpenLicenseDocument, onOpenSpeechSettings, onToggleAvatar, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
+export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, onClose, onSave, onSelectPersona, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRefreshPersonas, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenAccessibilitySettings, onOpenLicenseDocument, onOpenSpeechSettings, onSpeakerManagement, onToggleAvatar, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
   const { locale, t } = useI18n();
   const [formSync] = useState(() => new SettingsFormSync(toForm(snapshot.config, snapshot.avatarImageLoadFailed), snapshot.configRevision));
   const [form, setForm] = useState(formSync.form);
@@ -79,18 +106,40 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
   const [issueFocusRequest, setIssueFocusRequest] = useState<{ readonly path: string }>();
   const panelRef = useRef<HTMLElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
+  const resetUndoTracking = useRef<ResetUndoTracking | undefined>(undefined);
   const presenter = useSettingsPresenter(snapshot, focusSection, formSync.input(), {
     save: onSave, selectPersona: onSelectPersona, getPersona: onGetPersona, reload: onReloadConfig,
     resetConversation: onResetConversation, clearPreview: () => onAppearancePreview(undefined), close: onClose,
     reflect: (value) => {
       if (formSync.reflect(value)) setForm(formSync.form);
     },
-    resetTuning: () => edit({ ...formSync.form, ...defaultTuningForm() }),
+    resetDraft: (payload) => {
+      const request = settingsResetRequest(payload.scope, payload.category);
+      edit(resetSettingsForm(formSync.form, payload.defaults, request), false);
+      resetUndoTracking.current = {
+        keys: Object.keys(payload.fields) as ConfigFormKey[],
+        manuallyChanged: new Set(),
+      };
+    },
+    restoreReset: (payload) => {
+      const request = settingsResetRequest(payload.scope, payload.category);
+      const manuallyChanged = resetUndoTracking.current?.manuallyChanged ?? new Set<ConfigFormKey>();
+      resetUndoTracking.current = undefined;
+      edit(restoreSettingsForm(formSync.form, resetFormValues(payload.fields), payload.defaults, request, manuallyChanged), false);
+    },
     focusIssue: (path) => { setSettingsQuery(""); setIssueFocusRequest({ path }); },
     focusFirst: () => { if (panelRef.current !== null) focusFirstSettingsControl(panelRef.current); },
   });
   const action = (name: string, value: unknown = null): void => presenter.send({ type: "action", name, value: name === "save" || name === "close" ? formSync.input() : value });
-  const edit = (next: FormState): void => {
+  const edit = (next: FormState, trackResetChanges = true): void => {
+    if (trackResetChanges) {
+      const tracking = resetUndoTracking.current;
+      if (tracking !== undefined) {
+        for (const key of tracking.keys) {
+          if (!sameFormValue(formSync.form[key], next[key])) tracking.manuallyChanged.add(key);
+        }
+      }
+    }
     formSync.edit(next);
     setForm(next);
     presenter.send({ type: "change", value: formSync.input() });
@@ -103,6 +152,9 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
   const externalChanges = state?.externalChanges ?? undefined;
   const discardConfirmOpen = state?.discardConfirmOpen === true;
   const confirmation = state?.confirmation;
+  const resetScope = state?.resetScope ?? null;
+  const resetCategory = state?.resetCategory ?? null;
+  const canUndoReset = state?.canUndoReset === true;
   const recordingShortcut = state?.recordingShortcut ?? undefined;
   const personaDocument = state?.personaDocument ?? undefined;
   const activeCategory = state?.activeCategory ?? "general";
@@ -159,11 +211,20 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     const current = formSync.form;
     if (target === "vision") edit({ ...current, providerObserver: provider, observerModel: model });
     else if (target === "hearing") edit({ ...current, providerHearing: provider, hearingModel: model });
-    else edit({ ...current, providerCompanion: provider, companionModel: model });
+    else edit({ ...current, ...companionProviderChange(provider, model) });
   };
   const requestClose = (): void => action("close");
   const discardAndClose = async (): Promise<void> => action("discard");
-  const resetTuning = (): void => action("confirm", "tuning");
+  const resetPage = (category: SettingsCategory): void => action("confirm", { scope: "page", category });
+  const resetAll = (): void => action("confirm", { scope: "all" });
+  const undoReset = (): void => action("undoReset");
+  const resetRequestForConfirmation = (): SettingsResetRequest => {
+    if (confirmation === "settings-reset") return settingsResetRequest(resetScope, resetCategory);
+    throw new Error("No settings reset confirmation");
+  };
+  const acceptReset = (): void => {
+    action("acceptConfirmation", { fields: resetFields(formSync.form, resetRequestForConfirmation()) });
+  };
   const editPersona = (): void => action("editPersona", formSync.form.persona);
   const selectPersona = (persona: string): void => action("selectPersona", persona);
   const focusIssue = (path: string): void => action("focusIssue", path);
@@ -197,7 +258,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     action("openPicker");
   };
   const generalProps: ComponentProps<typeof GeneralSettings> = { ...categoryProps, personas, avatarInputRef, onSelectAvatar: (event) => { void selectAvatar(event); }, onResetAvatar: resetAvatar, onReloadPersona: () => { void onReloadPersona(); }, onEditPersona: editPersona, onOpenPersonaPicker: openPersonaPicker };
-  const providerProps: ComponentProps<typeof ProviderSettings> = { ...categoryProps, providerModels, providerApiKeys, providerApiKeysError, providerApiKeyDrafts, onChangeProvider: changeProvider, onProviderApiKeyDraftChange: updateProviderApiKeyDraft, onSaveProviderApiKey, onDeleteProviderApiKey, onResetTuning: resetTuning };
+  const providerProps: ComponentProps<typeof ProviderSettings> = { ...categoryProps, providerModels, providerApiKeys, providerApiKeysError, providerApiKeyDrafts, onChangeProvider: changeProvider, onProviderApiKeyDraftChange: updateProviderApiKeyDraft, onSaveProviderApiKey, onDeleteProviderApiKey };
   const renderCategory = (category: SettingsCategory): ReactElement => {
     let content: ReactElement;
     switch (category) {
@@ -205,10 +266,10 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
         content = !searching && showTutorialPersonaSettings ? <TutorialPersonaSettings general={generalProps} provider={providerProps} /> : <GeneralSettings {...generalProps} />;
         break;
       case "vision":
-        content = <VisionSettings {...categoryProps} highlight={focusSection === "watch"} onOpenSystemSettings={onOpenSystemSettings} onOpenAccessibilitySettings={onOpenAccessibilitySettings} onRelaunch={onRelaunch} onResetTuning={resetTuning} />;
+        content = <VisionSettings {...categoryProps} highlight={focusSection === "watch"} onOpenSystemSettings={onOpenSystemSettings} onOpenAccessibilitySettings={onOpenAccessibilitySettings} onRelaunch={onRelaunch} />;
         break;
       case "hearing":
-        content = <HearingSettings {...categoryProps} onOpenSpeechSettings={onOpenSpeechSettings} />;
+        content = <HearingSettings {...categoryProps} onOpenSpeechSettings={onOpenSpeechSettings} onSpeakerManagement={onSpeakerManagement} />;
         break;
       case "speech":
         content = <SpeechSettings {...categoryProps} />;
@@ -228,11 +289,10 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
       case "work":
         content = <WorkSettings {...categoryProps} />;
         break;
-      case "beta":
+      case "developer":
         content = <>
-          <p className="field-help">{t("settings.beta.notice")}</p>
-          <VoiceOutputSettings {...categoryProps} />
-          <SettingsSearchItem label={t("app.vrmMenu")} description={t("settings.categories.beta")}>
+          <DeveloperSettings {...categoryProps} />
+          <SettingsSearchItem label={t("app.vrmMenu")} description={t("settings.categories.developer")}>
             <fieldset id="settings-vrm"><legend>{t("app.vrmMenu")}</legend>
               <div className="button-row">
                 <button type="button" onClick={() => action("openVrm")}>{t("app.vrmMenu")}</button>
@@ -245,14 +305,20 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     }
     const definition = SETTINGS_CATEGORIES.find((candidate) => candidate.id === category);
     if (definition === undefined) throw new Error(`Unknown settings category: ${category}`);
-    return <SettingsSearchCategory label={t(definition.labelKey)}>{content}</SettingsSearchCategory>;
+    return <SettingsSearchCategory label={t(definition.labelKey)}>
+      {content}
+      {searching ? null : <div className="button-row settings-reset-actions">
+        <button id={`settings-reset-page-${category}`} type="button" disabled={saving} onClick={() => resetPage(category)}>{t("settings.resetPage")}</button>
+      </div>}
+    </SettingsSearchCategory>;
   };
 
   return <div className="settings-overlay"><section ref={panelRef} className="settings-panel" aria-label={t("settings.label")}>
     {presenter.error === undefined ? null : <p role="alert">{presenter.error}</p>}
-    <div className="settings-heading"><div className="settings-heading-main"><div><span>{t("settings.label")}</span><h2>CooSenpAI</h2></div><label className="settings-search"><span>{t("settings.search")}</span><input id="settings-search" type="search" value={settingsQuery} placeholder={t("settings.searchPlaceholder")} aria-label={t("settings.search")} onChange={(event) => setSettingsQuery(event.target.value)} /></label></div><div className="settings-heading-actions"><span className={issues.length > 0 ? "save-state error-text" : "save-state"}>{saving ? t("settings.state.saving") : issues.length > 0 ? t("settings.state.notApplied") : dirty ? t("settings.state.unsaved") : saved ? t("settings.state.saved") : ""}</span><button className="icon-button" type="button" aria-label={t("settings.closeAria")} onClick={() => void requestClose()}><CloseIcon /></button></div></div>
+    <div className="settings-heading"><div className="settings-heading-main"><div><span>{t("settings.label")}</span><h2>CooSenpAI</h2></div><label className="settings-search"><span>{t("settings.search")}</span><input id="settings-search" type="search" value={settingsQuery} placeholder={t("settings.searchPlaceholder")} aria-label={t("settings.search")} onChange={(event) => setSettingsQuery(event.target.value)} /></label></div><div className="settings-heading-actions"><span className={issues.length > 0 ? "save-state error-text" : "save-state"}>{saving ? t("settings.state.saving") : issues.length > 0 ? t("settings.state.notApplied") : dirty ? t("settings.state.unsaved") : saved ? t("settings.state.saved") : ""}</span><button id="settings-reset-all" type="button" disabled={saving} onClick={resetAll}>{t("settings.resetAll")}</button>{canUndoReset ? <button id="settings-reset-undo" type="button" disabled={saving} onClick={undoReset}>{t("settings.undoReset")}</button> : null}<button className="icon-button" type="button" aria-label={t("settings.closeAria")} onClick={() => void requestClose()}><CloseIcon /></button></div></div>
     {issues.length === 0 && snapshot.lastError?.message === undefined && externalChanges === undefined ? null : <div className="settings-error-summary" role="alert"><strong>{settingsIssueHeading(issues.length > 0, locale)}</strong><span>{issues[0]?.message ?? snapshot.lastError?.message}</span>{externalChanges === undefined ? null : <span>{t("settings.externalChangesLabel", { items: externalChanges.length === 0 ? t("settings.noDifference") : externalChanges.join(locale === "ja" ? "、" : ", ") })}</span>}{issues[0] === undefined ? null : <button type="button" onClick={() => focusIssue(issues[0]?.path ?? "config")}>{t("settings.focusIssue")}</button>}</div>}
-    <SettingsSearchProvider query={settingsQuery}><div className="settings-layout">
+    <p className="field-help settings-defaults-notice">{t("settings.defaultsResetNotice")}</p>
+    <SettingsDefaultsProvider config={state?.defaultConfig}><SettingsSearchProvider query={settingsQuery}><div className="settings-layout">
       <SettingsTabs activeCategory={activeCategory} onSelect={(category) => action("category", category)} disabled={searching} />
       <div id={searching ? "settings-search-results" : `settings-category-${activeCategory}`} className="settings-category-panel" role={searching ? "region" : "tabpanel"} aria-label={searching ? t("settings.searchResultRegion") : undefined} aria-labelledby={searching ? undefined : `settings-tab-${activeCategory}`}>
         <form onKeyDown={(event) => { if (event.key === "Enter" && event.target instanceof HTMLInputElement) event.currentTarget.querySelector<HTMLElement>(":focus")?.blur(); }}>
@@ -261,9 +327,9 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
           <div className="settings-footer">{dirty ? <button type="button" disabled={saving} onClick={() => action("save")}>{saving ? t("settings.state.saving") : t("common.apply")}</button> : <span /> }<span>{saving ? t("settings.state.saving") : saved ? t("settings.state.saved") : issues.length > 0 ? t("settings.state.notApplied") : ""}</span></div>
         </form>
       </div>
-    </div></SettingsSearchProvider>
+    </div></SettingsSearchProvider></SettingsDefaultsProvider>
     {vrmControlsOpen ? <Suspense fallback={null}><VrmControls controlsOpen onCloseControls={() => action("closeVrm")} showClosedError={false} /></Suspense> : null}
-  </section>{discardConfirmOpen ? <SettingsDiscardDialog onCancel={() => action("cancelDiscard")} onConfirm={discardAndClose} /> : null}{confirmation === "tuning" ? <ConfirmationDialog id="settings-tuning-reset" title={t("settings.resetTuningTitle")} description={t("settings.resetTuningDescription")} cancelLabel={t("common.cancel")} confirmLabel={t("settings.resetDefault")} onCancel={() => action("cancelConfirmation")} onConfirm={() => action("acceptConfirmation")} /> : confirmation === "conversation-reset" ? <ConfirmationDialog id="settings-conversation-reset" title={t("app.resetConversationTitle")} description={t("app.resetConversationDescription")} cancelLabel={t("common.cancel")} confirmLabel={t("app.resetConversation")} onCancel={() => action("cancelConfirmation")} onConfirm={() => { action("acceptConfirmation"); }} /> : null}{personaDocument === undefined ? null : <PersonaEditor option={personas.find((option) => option.id === personaDocument.id) ?? { id: personaDocument.id, displayName: personaDocument.id, builtin: personaDocument.builtin }} document={personaDocument} onSave={onSavePersona} onDelete={onDeletePersona} onRestore={onRestorePersona} onRefresh={onRefreshPersonas} onClose={() => action("closePersona")} />}{state?.personaPickerOpen === true ? <PersonaPicker personas={personas} selectedPersona={form.persona} busy={saving} error={errorFor("companion.persona")} onSelect={(persona) => { void selectPersona(persona); }} onClose={() => action("closePicker")} /> : null}</div>;
+  </section>{discardConfirmOpen ? <SettingsDiscardDialog onCancel={() => action("cancelDiscard")} onConfirm={discardAndClose} /> : null}{confirmation === "settings-reset" ? <ConfirmationDialog id={resetScope === "all" ? "settings-all-reset" : "settings-page-reset"} title={resetScope === "all" ? t("settings.resetAllTitle") : t("settings.resetPageTitle", { category: resetCategory === null ? "" : t(SETTINGS_CATEGORIES.find((candidate) => candidate.id === resetCategory)!.labelKey) })} description={resetScope === "all" ? t("settings.resetAllDescription") : t("settings.resetPageDescription")} cancelLabel={t("common.cancel")} confirmLabel={t("settings.resetDefault")} onCancel={() => action("cancelConfirmation")} onConfirm={acceptReset} /> : confirmation === "conversation-reset" ? <ConfirmationDialog id="settings-conversation-reset" title={t("app.resetConversationTitle")} description={t("app.resetConversationDescription")} cancelLabel={t("common.cancel")} confirmLabel={t("app.resetConversation")} onCancel={() => action("cancelConfirmation")} onConfirm={() => { action("acceptConfirmation"); }} /> : null}{personaDocument === undefined ? null : <PersonaEditor option={personas.find((option) => option.id === personaDocument.id) ?? { id: personaDocument.id, displayName: personaDocument.id, builtin: personaDocument.builtin }} document={personaDocument} onSave={onSavePersona} onDelete={onDeletePersona} onRestore={onRestorePersona} onRefresh={onRefreshPersonas} onClose={() => action("closePersona")} />}{state?.personaPickerOpen === true ? <PersonaPicker personas={personas} selectedPersona={form.persona} busy={saving} error={errorFor("companion.persona")} onSelect={(persona) => { void selectPersona(persona); }} onClose={() => action("closePicker")} /> : null}</div>;
 }
 
 export function configIssueLabel(path: string, locale: Locale = "ja"): string {

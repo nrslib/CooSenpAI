@@ -383,6 +383,18 @@ pub enum TextKey {
     BubbleGenerationUnknown,
     BubbleHeightOutOfRange,
     BubbleResizeFailed,
+    UtteranceFeedbackOpen,
+    UtteranceFeedbackRecorded,
+    UtteranceFeedbackReasonNoActivity,
+    UtteranceFeedbackReasonRepeated,
+    UtteranceFeedbackReasonMisunderstood,
+    UtteranceFeedbackReasonBadTiming,
+    UtteranceFeedbackReasonOther,
+    UtteranceFeedbackFreeTextLabel,
+    UtteranceFeedbackFreeTextPlaceholder,
+    UtteranceFeedbackSubmit,
+    UtteranceFeedbackCancel,
+    UtteranceFeedbackUnavailable,
     MemoryPeriodInvalid,
     MemoryOperationFailed,
     PersonaOperationFailed,
@@ -1424,6 +1436,40 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         }
         (TextKey::InvalidBubbleAction, Locale::Ja) => "吹き出しの操作が不正です",
         (TextKey::InvalidBubbleAction, Locale::En) => "The bubble action is invalid.",
+        (TextKey::UtteranceFeedbackOpen, Locale::Ja) => "要らなかった",
+        (TextKey::UtteranceFeedbackOpen, Locale::En) => "Not needed",
+        (TextKey::UtteranceFeedbackRecorded, Locale::Ja) => "記録済み",
+        (TextKey::UtteranceFeedbackRecorded, Locale::En) => "Recorded",
+        (TextKey::UtteranceFeedbackReasonNoActivity, Locale::Ja) => {
+            "何も起きていないのに言った"
+        }
+        (TextKey::UtteranceFeedbackReasonNoActivity, Locale::En) => {
+            "Said it without anything happening"
+        }
+        (TextKey::UtteranceFeedbackReasonRepeated, Locale::Ja) => "同じことの繰り返し",
+        (TextKey::UtteranceFeedbackReasonRepeated, Locale::En) => "Repeated the same thing",
+        (TextKey::UtteranceFeedbackReasonMisunderstood, Locale::Ja) => {
+            "内容が違う（誤解）"
+        }
+        (TextKey::UtteranceFeedbackReasonMisunderstood, Locale::En) => {
+            "Wrong content (misunderstanding)"
+        }
+        (TextKey::UtteranceFeedbackReasonBadTiming, Locale::Ja) => "タイミングが悪い",
+        (TextKey::UtteranceFeedbackReasonBadTiming, Locale::En) => "Bad timing",
+        (TextKey::UtteranceFeedbackReasonOther, Locale::Ja) => "その他",
+        (TextKey::UtteranceFeedbackReasonOther, Locale::En) => "Other",
+        (TextKey::UtteranceFeedbackFreeTextLabel, Locale::Ja) => "理由を補足（任意）",
+        (TextKey::UtteranceFeedbackFreeTextLabel, Locale::En) => "Add a short note (optional)",
+        (TextKey::UtteranceFeedbackFreeTextPlaceholder, Locale::Ja) => "短く入力",
+        (TextKey::UtteranceFeedbackFreeTextPlaceholder, Locale::En) => "Short note",
+        (TextKey::UtteranceFeedbackSubmit, Locale::Ja) => "記録する",
+        (TextKey::UtteranceFeedbackSubmit, Locale::En) => "Record",
+        (TextKey::UtteranceFeedbackCancel, Locale::Ja) => "戻る",
+        (TextKey::UtteranceFeedbackCancel, Locale::En) => "Back",
+        (TextKey::UtteranceFeedbackUnavailable, Locale::Ja) => "この発言は評価できません",
+        (TextKey::UtteranceFeedbackUnavailable, Locale::En) => {
+            "This utterance cannot be rated."
+        }
         (TextKey::SetupConnectionTimeout, Locale::Ja) => "接続確認がタイムアウトしました",
         (TextKey::SetupConnectionTimeout, Locale::En) => "The connection check timed out.",
         (TextKey::SetupUnavailable, Locale::Ja) => "初回セットアップを開始できません",

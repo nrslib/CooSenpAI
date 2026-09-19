@@ -23,7 +23,7 @@ use coosenpai_core::provider_api_keys::{
 use coosenpai_core::runtime::{RuntimeAgents, RuntimeFactory};
 use coosenpai_core::work::{harness_environment, Harness, HarnessLaunch};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -35,6 +35,8 @@ pub struct ProviderModelOptions {
     pub provider: ProviderName,
     pub default_model: String,
     pub candidates: Vec<String>,
+    pub efforts: Vec<String>,
+    pub model_efforts: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -836,6 +838,8 @@ impl DesktopRuntimeFactory {
                 provider,
                 default_model: capabilities.default_model,
                 candidates: capabilities.model_candidates,
+                efforts: crate::model_catalog::builtin_efforts(),
+                model_efforts: crate::model_catalog::builtin_model_efforts(provider.as_str()),
             });
         }
         Ok(values)
@@ -960,6 +964,8 @@ fn tutorial_provider_model_options(config: &Config) -> Vec<ProviderModelOptions>
             provider,
             default_model: default_model.to_owned(),
             candidates,
+            efforts: crate::model_catalog::builtin_efforts(),
+            model_efforts: crate::model_catalog::builtin_model_efforts(provider.as_str()),
         }
     })
     .collect()
@@ -982,6 +988,8 @@ async fn run_connection_check(
                 session: SessionRequest::Ephemeral,
                 model: Some(model.to_owned()),
                 effort: None,
+                allow_session_model_change: false,
+                stall_timeout: Duration::from_secs(30),
                 timeout: Duration::from_secs(30),
                 tutorial_response_key: None,
             },

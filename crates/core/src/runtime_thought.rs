@@ -6,6 +6,8 @@ impl RuntimeActor {
         companion: &CompanionAgent,
         response: &CompanionResponse,
         observation_ids: Vec<String>,
+        call_id: Option<String>,
+        utterance_observation_ids: Vec<String>,
     ) {
         self.companion_decision_sequence += 1;
         self.latest_companion_decision = Some(CompanionDecision {
@@ -16,6 +18,8 @@ impl RuntimeActor {
             message: response.message.clone(),
             thought: response.thought.clone(),
             observation_ids,
+            call_id,
+            utterance_observation_ids,
         });
         let Some(thought) = response.thought.as_deref() else {
             return;

@@ -82,10 +82,9 @@ impl DesktopState {
             return self.emit_setup_language_choice(true).await;
         }
         let existing = if needs_setup {
-            self.bubbles
-                .lock()
+            crate::bubbles::setup_record(self)
                 .await
-                .record_for_message_kind(SETUP_MESSAGE_KIND)
+                .map_err(RuntimeError::Factory)?
         } else {
             None
         };
@@ -112,12 +111,10 @@ impl DesktopState {
         action: &str,
         value: Option<&str>,
     ) -> Result<(), ConfigCommitError> {
-        if !self
-            .bubbles
-            .lock()
+        let accepts = crate::bubbles::accepts_interaction(self, id, action, value)
             .await
-            .accepts_interaction(id, action, value)
-        {
+            .map_err(|error| ConfigCommitError::Runtime(RuntimeError::Factory(error)))?;
+        if !accepts {
             return Err(ConfigCommitError::Runtime(RuntimeError::Factory(
                 text(
                     TextKey::SetupExpired,
@@ -127,6 +124,11 @@ impl DesktopState {
             )));
         }
         let locale = Locale::from_config(&self.runtime.config().ui.language);
+        if crate::utterance_feedback::is_feedback_action(action) {
+            return self
+                .handle_utterance_feedback_interaction(permit, id, action, value)
+                .await;
+        }
         match action {
             TUTORIAL_SKIP_ACTION => {
                 let step = self.tutorial_current_step().await.ok_or_else(|| {
@@ -704,7 +706,9 @@ impl DesktopState {
         )
         .await
         .map_err(RuntimeError::Factory)?;
-        let conversation_generation = self.bubbles.lock().await.conversation_generation();
+        let conversation_generation = crate::bubbles::conversation_generation(self)
+            .await
+            .map_err(RuntimeError::Factory)?;
         let record = BubbleRecord {
             id: "setup-language".to_owned(),
             created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -808,7 +812,9 @@ impl DesktopState {
         )
         .await
         .map_err(RuntimeError::Factory)?;
-        let conversation_generation = self.bubbles.lock().await.conversation_generation();
+        let conversation_generation = crate::bubbles::conversation_generation(self)
+            .await
+            .map_err(RuntimeError::Factory)?;
         let record = BubbleRecord {
             id: format!("setup-{key}"),
             created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),

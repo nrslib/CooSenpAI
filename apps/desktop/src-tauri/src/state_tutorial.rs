@@ -391,11 +391,15 @@ impl DesktopState {
                     .factory
                     .build_tutorial_agents(config, provider)
                     .map_err(|error| RuntimeError::Factory(error.to_string()))?,
-                None => self
-                    .factory
-                    .build_candidate(config)
-                    .await
-                    .map_err(|error| RuntimeError::Factory(error.to_string()))?,
+                None => {
+                    let factory = self.factory.clone();
+                    let config = config.clone();
+                    // Provider construction is large; keep it off the UI command's call stack.
+                    tokio::spawn(async move { factory.build_candidate(&config).await })
+                        .await
+                        .map_err(|error| RuntimeError::Factory(error.to_string()))?
+                        .map_err(|error| RuntimeError::Factory(error.to_string()))?
+                }
             }
         };
         self.runtime.replace_config(config.clone(), agents).await?;
@@ -543,7 +547,9 @@ impl DesktopState {
     pub(crate) async fn present_pending_tutorial_response(self: &Arc<Self>) {
         let entry = self.pending_tutorial_response_entry().await;
         let config = Box::new(self.runtime.config());
-        let conversation_generation = self.bubbles.lock().await.conversation_generation();
+        let Ok(conversation_generation) = bubbles::conversation_generation(self).await else {
+            return;
+        };
         let _ = self
             .ui
             .query(crate::ui_events::UiView::Application, |reply| {

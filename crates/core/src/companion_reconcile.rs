@@ -75,6 +75,7 @@ impl CompanionStorage {
                             .screen_context
                             .as_ref()
                             .map_or_else(Vec::new, |context| context.observations.clone()),
+                        judge_feedback_targets: Vec::new(),
                         pending_frames: entry
                             .screen_context
                             .as_ref()

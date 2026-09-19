@@ -4,6 +4,12 @@ use serde_json::json;
 #[path = "dataflow.rs"]
 mod dataflow;
 
+pub(super) fn snapshot_revision(snapshot: &Value) -> Result<u64, String> {
+    snapshot["revision"]
+        .as_u64()
+        .ok_or("snapshot の revision がありません".into())
+}
+
 #[derive(Default)]
 pub(super) struct DetailsPresenter {
     snapshot: Option<Value>,
@@ -22,7 +28,6 @@ impl DetailsPresenter {
                 io.command("ready", ());
             }
             PanelEvent::Action { name, value } => match name.as_str() {
-                "snapshot" => self.observe(value)?,
                 "history" => self.flow.history(decode(value)?)?,
                 "tab" => {
                     let tab: String = decode(value)?;
@@ -64,7 +69,7 @@ impl DetailsPresenter {
                         }
                         self.resetting = None;
                         if result.ok {
-                            self.observe(result.value)?;
+                            self.observe_snapshot(result.value)?;
                         } else {
                             self.reset_error = Some(result.message().into());
                         }
@@ -77,7 +82,7 @@ impl DetailsPresenter {
                         self.switching = None;
                     }
                     if result.ok && command.kind == "select" {
-                        self.observe(result.value)?;
+                        self.observe_snapshot(result.value)?;
                     } else if !result.ok {
                         self.error = Some(result.message().into());
                     }
@@ -92,20 +97,18 @@ impl DetailsPresenter {
             io.completed(id);
         }
     }
-    fn observe(&mut self, snapshot: Value) -> Result<(), String> {
-        let revision = snapshot["revision"]
-            .as_u64()
-            .ok_or("snapshot の revision がありません")?;
+    pub(super) fn observe_snapshot(&mut self, snapshot: Value) -> Result<bool, String> {
+        let revision = snapshot_revision(&snapshot)?;
         if self.snapshot.as_ref().is_some_and(|previous| {
-            previous["revision"].as_u64().expect("validated revision") >= revision
+            snapshot_revision(previous).expect("validated revision") >= revision
         }) {
-            return Ok(());
+            return Ok(false);
         }
         self.flow.snapshot(snapshot.clone())?;
         self.snapshot = Some(snapshot);
-        Ok(())
+        Ok(true)
     }
-    fn view(&self) -> Result<Value, String> {
+    pub(super) fn view(&self) -> Result<Value, String> {
         Ok(
             json!({"snapshot":self.snapshot,"activeTab":self.tab.as_deref().unwrap_or("state"),"debugDetail":self.debug,
             "resetting":self.resetting.is_some(),"resetError":self.reset_error,

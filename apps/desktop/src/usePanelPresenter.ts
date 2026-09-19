@@ -10,10 +10,11 @@ export type PanelEvent =
   | { readonly type: "unmount" };
 export interface PanelCommand { readonly id: number; readonly kind: string; readonly payload: unknown }
 interface PanelProjection { readonly revision: number; readonly state: unknown }
-interface PanelUpdate extends PanelProjection { readonly session: string }
+export interface PanelUpdate extends PanelProjection { readonly session: string }
 export interface PanelOutput<S, C> { readonly revision: number; readonly state: S | null; readonly commands: readonly C[]; readonly updates?: readonly PanelUpdate[] }
 const projections = new Map<string, (update: PanelProjection) => void>();
-function deliverUpdates(updates: readonly PanelUpdate[] = []): void {
+// Presenter から push されたパネル更新を、購読中のセッションへ配送する。
+export function deliverPanelUpdates(updates: readonly PanelUpdate[] = []): void {
   for (const update of updates) projections.get(update.session)?.(update);
 }
 
@@ -45,7 +46,7 @@ export function usePanelPresenter<S, C extends PanelCommand>(kind: PanelKind, in
     projections.set(session, project);
     const receive = async (event: PanelEvent): Promise<void> => {
       const result = await desktopApi.panelEvent<S, C>({ session, kind, event });
-      if (result.ok) deliverUpdates(result.value.updates);
+      if (result.ok) deliverPanelUpdates(result.value.updates);
       if (!active) return;
       if (!result.ok) { setError(result.error.message); return; }
       const output = result.value;
@@ -69,7 +70,7 @@ export function usePanelPresenter<S, C extends PanelCommand>(kind: PanelKind, in
       transport.current = undefined;
       void mounted.then(async () => {
         const result = await desktopApi.panelEvent({ session, kind, event: { type: "unmount" } });
-        if (result.ok) deliverUpdates(result.value.updates);
+        if (result.ok) deliverPanelUpdates(result.value.updates);
       });
     };
   }, [kind]);

@@ -159,6 +159,7 @@ pub(super) fn conversation_generation_for_locale(
             0,
             Some(RuntimeLastError {
                 kind: RuntimeErrorKind::Persistence,
+                source: coosenpai_core::runtime::RuntimeErrorSource::Runtime,
                 occurred_at: chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 message: Some(
@@ -168,6 +169,7 @@ pub(super) fn conversation_generation_for_locale(
                 issues: Vec::new(),
                 attachment_ocr: None,
                 user_response: None,
+                user_input_id: None,
             }),
         ),
     }
@@ -272,11 +274,13 @@ pub(super) fn conversation_initialization_error_for_locale(
 pub(super) fn persistence_runtime_error(message: String) -> RuntimeLastError {
     RuntimeLastError {
         kind: RuntimeErrorKind::Persistence,
+        source: coosenpai_core::runtime::RuntimeErrorSource::Runtime,
         occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         message: Some(message),
         issues: Vec::new(),
         attachment_ocr: None,
         user_response: None,
+        user_input_id: None,
     }
 }
 
@@ -299,10 +303,12 @@ fn runtime_error_with_kind(
 ) -> RuntimeLastError {
     RuntimeLastError {
         kind,
+        source: coosenpai_core::runtime::RuntimeErrorSource::Config,
         occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         message: Some(message),
         issues,
         attachment_ocr: None,
         user_response: None,
+        user_input_id: None,
     }
 }

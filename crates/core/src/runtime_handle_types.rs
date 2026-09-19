@@ -22,6 +22,18 @@ pub(super) enum ControlCommand {
         cancellation: CancellationToken,
         response: oneshot::Sender<Result<CompanionResponse, RuntimeError>>,
     },
+    JudgeFeed {
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+        cancelled: bool,
+        response: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+    JudgeCompleted {
+        generation: u64,
+        decision: crate::judge::JudgeDecision,
+    },
     ReplaceCompanion {
         companion: Box<CompanionAgent>,
         config: Option<Box<Config>>,
@@ -135,6 +147,7 @@ pub struct RuntimeHandle {
     pub(super) config_rx: watch::Receiver<Config>,
     pub(super) user_preparer:
         std::sync::Arc<std::sync::RwLock<Option<crate::companion::user::UserMessagePreparer>>>,
+    pub(super) judge_trace_store: crate::judge::JudgeTraceStore,
 }
 
 pub struct ProviderStartGate {

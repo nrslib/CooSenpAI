@@ -30,7 +30,7 @@ impl NoticeWindowPort for DesktopNoticeWindowPort {
 
     async fn show_bubble(&self, message: &str, duration_ms: u64) -> Result<(), String> {
         let config = self.0.runtime_config();
-        let conversation_generation = self.0.bubbles.lock().await.conversation_generation();
+        let conversation_generation = bubbles::conversation_generation(&self.0).await?;
         bubbles::show(
             self.0.clone(),
             BubbleRecord {

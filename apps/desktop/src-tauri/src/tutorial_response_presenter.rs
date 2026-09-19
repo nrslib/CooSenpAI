@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 
 type Reply = oneshot::Sender<()>;
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ResponseEvent {
     Finished,
     PendingLoaded {

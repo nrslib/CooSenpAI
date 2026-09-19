@@ -47,9 +47,6 @@ private final class EarlyFinishProbe {
                     readyCount += 1
                     if mode == "during-start" { analysis.finish(); analysis.finish() }
                 case .completed: complete()
-                case let .completedTranscript(text):
-                    expect(text.isEmpty, "音声を投入していない")
-                    complete()
                 case let .failed(failure): expect(false, "先行 finish が失敗: \(failure.kind)")
                 default: expect(false, "先行 finish で予期しない認識イベント")
                 }

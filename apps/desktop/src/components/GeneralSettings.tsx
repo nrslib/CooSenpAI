@@ -10,7 +10,7 @@ import type { FormState } from "../settings-form.js";
 import { personaOptionLabel } from "./PersonaPicker.js";
 import { SettingsSearchItem } from "../settings-search.js";
 import { SettingsCategoryProps } from "./SettingsCategoryProps.js";
-import { BooleanInput, NumberInput, ReminderEditor, SelectInput, TextInput } from "./SettingsControls.js";
+import { BooleanInput, NumberInput, ReminderEditor, SelectInput } from "./SettingsControls.js";
 
 interface Props extends SettingsCategoryProps {
   readonly personas: readonly PersonaOption[];
@@ -86,15 +86,13 @@ export function GeneralSettings({ form, snapshot, saving, update, errorFor, pers
       <SettingsSearchItem label={t("settings.detail.whileThinking")} path="chat.whileThinking" description={t("settings.detail.whileThinkingHelp")}>
         <label><span>{t("settings.detail.whileThinking")}</span><select id="setting-chat-whileThinking" value={form.whileThinking} onChange={(event) => update("whileThinking", event.target.value as FormState["whileThinking"])}><option value="queue">{t("settings.detail.queue")}</option><option value="append">{t("settings.detail.append")}</option></select><small>{t("settings.detail.whileThinkingHelp")}</small></label>
       </SettingsSearchItem>
-      <h3>{t("settings.detail.language")}</h3>
-      <TextInput label={t("settings.detail.recognitionLocale")} path="speech.locale" value={form.speechLocale} update={(value) => update("speechLocale", value)} />
       <h3>{t("settings.detail.memory")}</h3>
-      <NumberInput label={t("settings.detail.graceMinutes")} path="memory.graceMinutes" value={form.memoryGraceMinutes} update={(value) => update("memoryGraceMinutes", value)} errorFor={errorFor} />
       <NumberInput label={t("settings.detail.dailyRetentionDays")} path="memory.dailyRetentionDays" value={form.memoryDailyRetentionDays} update={(value) => update("memoryDailyRetentionDays", value)} errorFor={errorFor} />
       <NumberInput label={t("settings.detail.weeklyRetentionWeeks")} path="memory.weeklyRetentionWeeks" value={form.memoryWeeklyRetentionWeeks} update={(value) => update("memoryWeeklyRetentionWeeks", value)} errorFor={errorFor} />
-      <NumberInput label={t("settings.detail.contextRefreshCalls")} path="companion.contextRefreshCalls" value={form.contextRefreshCalls} update={(value) => update("contextRefreshCalls", value)} errorFor={errorFor} />
       <NumberInput label={t("settings.detail.factPromptDailyLimit")} path="memory.factPromptDailyLimit" value={form.factPromptDailyLimit} update={(value) => update("factPromptDailyLimit", value)} errorFor={errorFor} />
-      <fieldset id="settings-debug"><legend>{t("settings.detail.debug")}</legend><BooleanInput label={t("settings.detail.debugEnabled")} path="debug.enabled" value={form.debugEnabled} update={(value) => update("debugEnabled", value)} /><p className="field-help">{t("settings.detail.debugHelp")}</p></fieldset>
+      <h3>{t("settings.detail.retention")}</h3>
+      <NumberInput label={t("settings.detail.observationDays")} path="retention.observationDays" value={form.observationDays} update={(value) => update("observationDays", value)} errorFor={errorFor} />
+      <NumberInput label={t("settings.detail.conversationDays")} path="retention.conversationDays" value={form.conversationDays} update={(value) => update("conversationDays", value)} errorFor={errorFor} />
     </fieldset>
   </>;
 }

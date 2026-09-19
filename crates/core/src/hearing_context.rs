@@ -16,6 +16,8 @@ pub struct HearingContext {
     pub sequence: u64,
     pub text: String,
     pub confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<crate::ports::HearingSpeakerMetadata>,
 }
 
 impl HearingContext {
@@ -38,6 +40,16 @@ impl HearingContext {
         let mut bytes = [0; 16];
         bytes.copy_from_slice(&digest[..16]);
         record.id = uuid::Uuid::from_bytes(bytes).to_string();
+        if let Some(speaker) = &self.speaker {
+            record.apply_speaker_identification(
+                &speaker.segment_id,
+                speaker.audio_start_ms,
+                speaker.audio_end_ms,
+                speaker.speaker_id.as_deref(),
+                speaker.speaker_registry_id.as_deref(),
+                speaker.speaker_status,
+            )?;
+        }
         Ok(record)
     }
 }
@@ -124,6 +136,10 @@ pub(crate) fn validate_contexts(contexts: &[HearingContext]) -> Result<(), &'sta
                 || context.generation == 0
                 || context.sequence == 0
                 || context.text.len() > MAX_HEARING_TEXT_BYTES
+                || context
+                    .speaker
+                    .as_ref()
+                    .is_some_and(|speaker| !speaker.is_valid_for(context.source))
                 || contexts[..index]
                     .iter()
                     .any(|previous| previous.source == context.source)

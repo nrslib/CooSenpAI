@@ -1,5 +1,4 @@
 use crate::commands::{authorize_window, CommandOrigin, IpcResult, TauriIpcResult};
-use crate::snapshot::AppSnapshot;
 use crate::state::DesktopState;
 use coosenpai_core::locale::{text, Locale, TextKey};
 use serde::Deserialize;
@@ -26,15 +25,6 @@ pub async fn details_open(
             Err(message) => IpcResult::failure(message),
         },
     )
-}
-
-#[tauri::command]
-pub async fn details_snapshot(
-    window: WebviewWindow,
-    state: State<'_, Arc<DesktopState>>,
-) -> TauriIpcResult<AppSnapshot> {
-    authorize_window(&window, CommandOrigin::Details)?;
-    Ok(IpcResult::success(state.snapshot().await))
 }
 
 const DATAFLOW_LOG_LIMIT: usize = 200;

@@ -687,6 +687,7 @@ fn rollback_application_publication(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_application_debug_batch(
     store: &DebugStore,
     frames: &[coosenpai_core::observer::ObservationFrameInput],
@@ -697,23 +698,23 @@ fn record_application_debug_batch(
     created_at: chrono::DateTime<chrono::Utc>,
     debug_frames: Vec<DebugFrameRecord>,
 ) -> Result<DebugCaptureBatch> {
-    let gates = include_gates
-        .then(|| {
-            frames
-                .iter()
-                .filter_map(|frame| frame.debug_id.as_ref().map(|id| (id, frame)))
-                .map(|(id, frame)| DebugGateRecord {
-                    id: id.clone(),
-                    created_at: created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                    trigger: trigger_name(trigger).to_owned(),
-                    sent,
-                    reason: reason.to_owned(),
-                    image_file: Some(format!("frame-{id}.png")),
-                    ocr_preview: ocr_preview(frame.ocr_text.as_deref()),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let gates = if include_gates {
+        frames
+            .iter()
+            .filter_map(|frame| frame.debug_id.as_ref().map(|id| (id, frame)))
+            .map(|(id, frame)| DebugGateRecord {
+                id: id.clone(),
+                created_at: created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                trigger: trigger_name(trigger).to_owned(),
+                sent,
+                reason: reason.to_owned(),
+                image_file: Some(format!("frame-{id}.png")),
+                ocr_preview: ocr_preview(frame.ocr_text.as_deref()),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     store
         .prepare_capture_batch(debug_frames, gates)
         .map_err(anyhow::Error::from)
@@ -736,6 +737,7 @@ async fn update_foreground(
         .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_target_result(
     state: &Arc<DesktopState>,
     generation: u64,

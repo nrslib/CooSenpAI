@@ -4,6 +4,7 @@ import type {
   AudioObservation,
   AudioLogEvent,
   CompanionDecision,
+  JudgeDecision,
   NoChangeObservation,
   ObservationRecord,
   TranscriptRecord,
@@ -22,7 +23,8 @@ export type DataFlowMarker =
   | "diagnostic"
   | "interruption"
   | "thought"
-  | "speech";
+  | "speech"
+  | "judge";
 
 export interface DataFlowReference {
   readonly type: "frame" | "transcript" | "observation" | "conversation";
@@ -61,6 +63,7 @@ export const DATAFLOW_MARKER_LABELS: Readonly<Record<DataFlowMarker, Translation
   interruption: "details.dataflowMarkerInterruption",
   thought: "details.dataflowMarkerThought",
   speech: "details.dataflowMarkerSpeech",
+  judge: "details.dataflowMarkerJudge",
 };
 
 function preview(text: string, max = 80): string {
@@ -117,18 +120,37 @@ function transcriptText(
   return transcript?.text ?? record.text;
 }
 
+function speakerAnnotation(
+  record: AudioObservation,
+  transcript: string | TranscriptRecord | null | undefined,
+): string {
+  if (record.source !== "speaker") return "";
+  const status = typeof transcript === "string" || transcript == null
+    ? record.speakerStatus
+    : transcript.speakerStatus ?? record.speakerStatus;
+  const speakerID = typeof transcript === "string" || transcript == null
+    ? record.speakerId
+    : transcript.speakerTag ?? record.speakerId;
+  if (status === "identified" && speakerID !== undefined) return ` · ${speakerID}`;
+  return status === undefined ? "" : ` · ${status}`;
+}
+
 function hearingObservationEvent(
   record: AudioObservation,
   transcript: string | TranscriptRecord | null | undefined,
   locale: Locale,
 ): string {
-  return `${audioSourceLabel(record.source, locale)} · ${t(locale, "details.dataflowTranscriptConfirmed")}: ${preview(transcriptText(record, transcript))}`;
+  return `${audioSourceLabel(record.source, locale)}${speakerAnnotation(record, transcript)} · ${t(locale, "details.dataflowTranscriptConfirmed")}: ${preview(transcriptText(record, transcript))}`;
 }
 
 function decisionEvent(decision: CompanionDecision, locale: Locale): string {
   return decision.thought === undefined
     ? t(locale, decision.emit ? "details.dataflowEmit" : "details.dataflowNoEmit", { kind: decision.messageKind })
     : preview(decision.thought);
+}
+
+function judgeScore(score: JudgeDecision["novelty"]): string {
+  return score === null ? "null" : score.toFixed(2);
 }
 
 function referencesOf(record: DataFlowRecord): readonly DataFlowReference[] {
@@ -156,7 +178,8 @@ export interface DataFlowRecord {
     | { readonly type: "decision"; readonly data: CompanionDecision }
     | { readonly type: "session"; readonly data: AppSnapshot["audio"] }
     | { readonly type: "diagnostic"; readonly data: { readonly kind: string; readonly message: string } }
-    | { readonly type: "interruption"; readonly data: null };
+    | { readonly type: "interruption"; readonly data: null }
+    | { readonly type: "judge"; readonly data: JudgeDecision };
 }
 
 export function renderDataFlowRecord(record: DataFlowRecord, locale: Locale): DataFlowEvent {
@@ -224,6 +247,14 @@ export function renderDataFlowRecord(record: DataFlowRecord, locale: Locale): Da
       break;
     case "interruption":
       summary = t(locale, "details.dataflowUserInterrupted");
+      break;
+    case "judge":
+      summary = t(locale, "details.dataflowJudge", {
+        action: content.data.action,
+        novelty: judgeScore(content.data.novelty),
+        relevance: judgeScore(content.data.relevance),
+      });
+      detail = detailJson(content.data);
       break;
   }
   return {

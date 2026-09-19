@@ -222,6 +222,11 @@ struct VoiceActivityDetector {
         return false
     }
 
+    var segmentStartAudioTimeNanoseconds: UInt64? {
+        guard case let .speaking(startedAt, _) = phase else { return nil }
+        return startedAt
+    }
+
     var startRmsThreshold: Double {
         min(
             max(

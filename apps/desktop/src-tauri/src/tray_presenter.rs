@@ -25,7 +25,6 @@ pub(crate) struct TrayView {
 pub(crate) struct TrayPresenter {
     recording: bool,
     mounted: bool,
-    revision: u64,
 }
 
 impl TrayPresenter {
@@ -38,10 +37,9 @@ impl TrayPresenter {
             UiEvent::SnapshotUpdated(snapshot) => snapshot,
             event => return Handling::Bubble(event),
         };
-        if !self.mounted || snapshot.revision < self.revision {
+        if !self.mounted {
             return Handling::Handled(Vec::new());
         }
-        self.revision = snapshot.revision;
         Handling::Handled(vec![UiEffect::TrayRender(Box::new(
             self.present(&snapshot),
         ))])

@@ -458,12 +458,12 @@ pub fn atomic_write_bytes_cancellable(
         Some(gate) => {
             gate.publish_batch_with_directories(vec![staged.parent().to_owned()], |directories| {
                 publication_started = true;
-                publish_and_commit_staged(&mut staged, directories).or_else(|error| {
+                publish_and_commit_staged(&mut staged, directories).map_err(|error| {
                     match staged.restore_locked(directories) {
-                        Ok(()) => Err(error),
-                        Err(rollback) => Err(io::Error::other(format!(
+                        Ok(()) => error,
+                        Err(rollback) => io::Error::other(format!(
                             "{error}; ロールバックにも失敗しました: {rollback}"
-                        ))),
+                        )),
                     }
                 })
             })
@@ -471,12 +471,12 @@ pub fn atomic_write_bytes_cancellable(
         None => {
             let directories = DirectoryLocks::acquire(vec![staged.parent().to_owned()], None)?;
             publication_started = true;
-            publish_and_commit_staged(&mut staged, &directories).or_else(|error| {
+            publish_and_commit_staged(&mut staged, &directories).map_err(|error| {
                 match staged.restore_locked(&directories) {
-                    Ok(()) => Err(error),
-                    Err(rollback) => Err(io::Error::other(format!(
+                    Ok(()) => error,
+                    Err(rollback) => io::Error::other(format!(
                         "{error}; ロールバックにも失敗しました: {rollback}"
-                    ))),
+                    )),
                 }
             })
         }

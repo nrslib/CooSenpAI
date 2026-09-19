@@ -171,6 +171,7 @@ async fn spawn_process(spec: &SourceProcessSpec) -> Result<InteractiveProcess, P
     Ok(process)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn schedule_restart(
     source: AudioObservationSource,
     error: Option<PortError>,
@@ -271,6 +272,25 @@ async fn monitor_process(
         match event {
             Some(Ok(InteractiveProcessEvent::StdoutLine(line))) => {
                 match serde_json::from_slice::<HearingEvent>(&line) {
+                    Ok(event) if !event.is_valid_for_source(source) => {
+                        let error = PortError::Unavailable(
+                            "聴覚観察 helper の話者情報が不正です".to_owned(),
+                        );
+                        return terminate_before_restart(
+                            #[cfg(test)]
+                            source,
+                            process,
+                            &control,
+                            Some(error),
+                            ready_seen,
+                            cancellation,
+                            parent_cancellation,
+                            logger,
+                            #[cfg(test)]
+                            observer,
+                        )
+                        .await;
+                    }
                     Ok(event @ HearingEvent::Ready { .. }) => {
                         let _ = logger.write("INFO", &format!("hearing-start: source={source:?} stage=device-ready phase=end elapsed-ms={}", device_started.elapsed().as_millis()));
                         ready_seen = true;
@@ -389,6 +409,7 @@ async fn monitor_process(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn terminate_before_restart(
     #[cfg(test)] source: AudioObservationSource,
     process: &mut InteractiveProcess,

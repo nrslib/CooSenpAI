@@ -1,6 +1,28 @@
 use super::operation_state::{OperationCancellationCause, OperationCancellationReason};
 use super::*;
 use crate::locale::{text, Locale, TextKey};
+use crate::provider::ProviderErrorKind;
+
+fn judge_feedback_is_negative(message: &str) -> bool {
+    let message = message
+        .trim()
+        .to_lowercase()
+        .trim_matches(|character: char| "。！？!?.,、".contains(character))
+        .to_owned();
+    matches!(
+        message.as_str(),
+        "うるさい"
+            | "静かに"
+            | "静かにして"
+            | "黙って"
+            | "黙っていて"
+            | "やめて"
+            | "too loud"
+            | "be quiet"
+            | "stop talking"
+            | "stop"
+    )
+}
 
 pub fn empty_runtime(config: Config) -> RuntimeHandle {
     RuntimeActor::spawn(config, None, None)
@@ -189,6 +211,10 @@ pub(super) fn drain_closed_commands(
                 let _ = response.send(Err(RuntimeError::Closed));
                 None
             }
+            ControlCommand::JudgeFeed { response, .. } => {
+                let _ = response.send(Err(RuntimeError::Closed));
+                None
+            }
             ControlCommand::ReplaceCompanion { response, .. } => {
                 let _ = response.send(Err(RuntimeError::Closed));
                 None
@@ -201,6 +227,7 @@ pub(super) fn drain_closed_commands(
                 let _ = response.send(Err(RuntimeError::Closed));
                 None
             }
+            ControlCommand::JudgeCompleted { .. } => None,
         };
         if let Some(response) = response {
             let _ = response.send(Err(RuntimeError::Closed));
@@ -357,6 +384,94 @@ impl RuntimeActor {
         self.publish(snapshot_tx);
     }
 
+    pub(super) fn schedule_judge_feed(
+        &self,
+        targets: &[crate::companion_storage::JudgeFeedbackTarget],
+        messages: &[crate::companion::user::JudgeFeedbackMessage],
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        let judge = self.judge.clone();
+        let logger = self.logger.clone();
+        let cancellation = self.operation_cancellation.shutdown_token();
+        let targets = targets.to_vec();
+        let messages = messages
+            .iter()
+            .map(|message| (message.user_input_id.clone(), message.message.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        tokio::spawn(async move {
+            for target in targets {
+                let Some(message) = messages.get(&target.user_input_id) else {
+                    continue;
+                };
+                if message.trim().is_empty() {
+                    continue;
+                }
+                let sign = if judge_feedback_is_negative(message) {
+                    crate::judge::JudgeFeedSign::Negative
+                } else {
+                    crate::judge::JudgeFeedSign::Positive
+                };
+                let feedable = match judge
+                    .wait_for_evaluation(&target.input_id, cancellation.clone())
+                    .await
+                {
+                    Ok(feedable) => feedable,
+                    Err(error) => {
+                        if !matches!(error, crate::judge::JudgeError::Cancelled) {
+                            if let Some(logger) = &logger {
+                                let _ = logger.write(
+                                    "WARN",
+                                    &format!(
+                                        "判断役の評価完了を待てませんでした: input-id={} error={error}",
+                                        target.input_id
+                                    ),
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                };
+                if !feedable {
+                    if let Some(logger) = &logger {
+                        let _ = logger.write(
+                            "INFO",
+                            &format!(
+                                "判断役の成功応答が feed 対象外のため自動 feed を省略しました: input-id={}",
+                                target.input_id
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                let event_id = format!("coosenpai:auto:{}", target.input_id);
+                if let Err(error) = judge
+                    .feed_event(
+                        crate::judge::JudgeFeedEvent {
+                            event_id: &event_id,
+                            input_id: &target.input_id,
+                            event_time: Some(&target.event_time),
+                            sign,
+                            strength: 1.0,
+                            source: crate::judge::JudgeFeedSource::Automatic,
+                            cancelled: false,
+                        },
+                        cancellation.clone(),
+                    )
+                    .await
+                {
+                    if let Some(logger) = &logger {
+                        let _ = logger.write(
+                            "WARN",
+                            &format!("判断役への自動 feed に失敗しました: event-id={event_id} input-id={} error={error}", target.input_id),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     pub(super) fn close_user_waiters(&mut self) {
         for (_, response) in self.user_waiters.drain() {
             let _ = response.send(Err(RuntimeError::Closed));
@@ -446,6 +561,20 @@ pub(super) fn control_uses_observer(command: &ControlCommand) -> bool {
 }
 
 impl RuntimeActor {
+    pub(super) fn apply_judge_decision(
+        &mut self,
+        generation: u64,
+        decision: crate::judge::JudgeDecision,
+        snapshot_tx: &watch::Sender<RuntimeSnapshot>,
+    ) {
+        if generation != self.judge_generation {
+            return;
+        }
+        self.latest_judge_decision = Some(decision);
+        self.revision = self.revision.saturating_add(1);
+        self.publish(snapshot_tx);
+    }
+
     pub(super) fn update_work_config(
         &mut self,
         work: crate::work::WorkConfig,
@@ -579,6 +708,7 @@ impl RuntimeActor {
             preparer.cancel(input_id)?;
             false
         };
+        self.suppressed_terminal_user_failure_ids.remove(input_id);
         self.operation_cancellation.cancel_lane(OperationLane::Coo);
         self.operation_cancellation.renew_lane(OperationLane::Coo);
         if self.last_error.as_ref().is_some_and(|error| {
@@ -714,8 +844,15 @@ impl RuntimeActor {
             .as_ref()
             .ok_or(RuntimeError::CompanionUnavailable)?
             .retry_user_input(&input_id)?;
+        self.suppressed_terminal_user_failure_ids.remove(&input_id);
         self.operation_cancellation.renew();
-        self.last_error = None;
+        if self
+            .last_error
+            .as_ref()
+            .is_some_and(|error| error.belongs_to_user_input(&input_id))
+        {
+            self.last_error = None;
+        }
         self.user_retry_at = None;
         self.user_retry_delay = Duration::from_secs(1);
         self.active_user_message_id = None;
@@ -724,10 +861,26 @@ impl RuntimeActor {
     }
 
     pub(super) fn terminal_user_input_id(&self) -> Option<String> {
-        self.last_error
-            .as_ref()?
-            .terminal_user_input_id()
-            .map(str::to_owned)
+        if let Some(input_id) = self
+            .last_error
+            .as_ref()
+            .and_then(RuntimeLastError::terminal_user_input_id)
+        {
+            return Some(input_id.to_owned());
+        }
+        let companion = self.companion.as_ref()?;
+        companion
+            .first_terminal_attachment_failure()
+            .ok()
+            .flatten()
+            .map(|(input_id, _)| input_id)
+            .or_else(|| {
+                companion
+                    .first_terminal_user_response()
+                    .ok()
+                    .flatten()
+                    .map(|(input_id, _)| input_id)
+            })
     }
 
     pub(super) fn refresh_user_preparer(&mut self) {
@@ -744,7 +897,7 @@ impl RuntimeActor {
             });
         }
     }
-    pub(super) fn replace_companion_config(
+    pub(super) async fn replace_companion_config(
         &mut self,
         companion: CompanionAgent,
         config: Option<Config>,
@@ -754,13 +907,17 @@ impl RuntimeActor {
             .map(|config| self.merge_config_update(config))
             .transpose()?;
         companion.synchronize_emotions()?;
+        self.companion = Some(companion);
         if let Some(config) = config {
+            self.refresh_judge(&config).await;
             self.config = config;
+        } else {
+            let config = self.config.clone();
+            self.refresh_judge(&config).await;
         }
         if let Some(revision) = config_revision {
             self.full_config_revision = revision;
         }
-        self.companion = Some(companion);
         self.refresh_user_preparer();
         self.companion_display_name = self.companion.as_ref().map_or_else(
             || self.config.companion.display_name.clone(),
@@ -805,6 +962,7 @@ impl RuntimeActor {
                 observer.update_observer_config(config.observer.clone());
             }
         }
+        self.refresh_judge(&config).await;
         self.operation_cancellation.renew();
         self.full_config_revision = config_revision;
         self.config = config;
@@ -834,7 +992,7 @@ impl RuntimeActor {
         Ok(())
     }
 
-    pub(super) fn update_config_without_factory(
+    pub(super) async fn update_config_without_factory(
         &mut self,
         config: Config,
     ) -> Result<u64, RuntimeError> {
@@ -851,6 +1009,7 @@ impl RuntimeActor {
                 observer.update_observer_config(config.observer.clone());
             }
         }
+        self.refresh_judge(&config).await;
         self.full_config_revision = config_revision;
         self.config = config;
         self.revision = self.revision.saturating_add(1);
@@ -893,12 +1052,17 @@ impl RuntimeActor {
             self.user_retry_delay = Duration::from_secs(1);
             self.companion_recovery_pending = false;
             self.companion_recovery_at = None;
+            self.suppressed_terminal_user_failure_ids.clear();
+            self.last_error = self
+                .last_error
+                .take()
+                .filter(|error| !error.is_conversation_user_error());
         }
         self.revision = self.revision.saturating_add(1);
         self.revision
     }
 
-    pub(super) fn replace_config(
+    pub(super) async fn replace_config(
         &mut self,
         config: Config,
         mut agents: RuntimeAgents,
@@ -917,6 +1081,7 @@ impl RuntimeActor {
         self.refresh_user_preparer();
         self.memory = agents.memory.take();
         self.memory_run_at = self.memory.as_ref().map(|_| Instant::now());
+        self.refresh_judge(&config).await;
         self.full_config_revision = config_revision;
         self.config = config;
         self.user_commands_blocked = false;
@@ -944,6 +1109,28 @@ impl RuntimeActor {
         }
         validate_config(&config)?;
         Ok(config)
+    }
+
+    pub(super) async fn refresh_judge(&mut self, config: &Config) {
+        let feedback_store = self
+            .companion
+            .as_ref()
+            .and_then(CompanionAgent::judge_feedback_store_path);
+        if self.config.judge == config.judge
+            && self.judge.feedback_store_path() == feedback_store.as_deref()
+        {
+            return;
+        }
+        let previous = self.judge.clone();
+        let start_gate = previous.begin_shutdown();
+        self.judge_generation = self.judge_generation.saturating_add(1);
+        self.judge = std::sync::Arc::new(
+            crate::judge::JudgeAgent::new_with_start_gate(config.judge.clone(), start_gate)
+                .with_feedback_store_if_present(feedback_store)
+                .with_trace_store(self.judge_trace_store.clone())
+                .with_logger(self.logger.clone()),
+        );
+        self.latest_judge_decision = None;
     }
 }
 
@@ -978,6 +1165,9 @@ pub(super) fn linked_cancellation(
 
 pub(super) fn initialization_error_kind(error: &CompanionError) -> RuntimeErrorKind {
     match error {
+        CompanionError::Provider(error) if error.kind == ProviderErrorKind::Timeout => {
+            RuntimeErrorKind::ProviderTimeout
+        }
         CompanionError::Cancelled
         | CompanionError::Provider(_)
         | CompanionError::Output
@@ -1004,6 +1194,7 @@ pub(super) fn config_update_last_error(error: &RuntimeError, locale: Locale) -> 
     };
     RuntimeLastError {
         kind: RuntimeErrorKind::Config,
+        source: RuntimeErrorSource::Config,
         occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         message: Some(
             text(TextKey::ConfigUpdateFailed, locale)
@@ -1012,5 +1203,6 @@ pub(super) fn config_update_last_error(error: &RuntimeError, locale: Locale) -> 
         issues,
         attachment_ocr: None,
         user_response: None,
+        user_input_id: None,
     }
 }

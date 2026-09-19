@@ -113,6 +113,10 @@ impl OperationCancellation {
         })
     }
 
+    pub(super) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
     pub(super) fn cancel_current(&self) {
         self.cancel_current_with_reason(OperationCancellationReason::Other);
     }
@@ -311,12 +315,16 @@ pub(super) enum OperationReply {
     Companion(oneshot::Sender<Result<CompanionResponse, RuntimeError>>),
     User(Vec<String>),
     Revision(oneshot::Sender<Result<u64, RuntimeError>>),
+    JudgeFeed(oneshot::Sender<Result<(), RuntimeError>>),
 }
 
 pub(super) enum OperationOutcome {
     Observe {
         observer: Box<ObserverAgent>,
         result: Result<ObservationRecord, RuntimeError>,
+        judge_generation: u64,
+        judge_decision: Option<crate::judge::JudgeDecision>,
+        companion_delivery: bool,
     },
     CompanionObservations {
         companion: Box<CompanionAgent>,
@@ -343,6 +351,9 @@ pub(super) enum OperationOutcome {
     Consolidate {
         memory: Box<MemoryService>,
         result: Result<(), String>,
+    },
+    JudgeFeed {
+        result: Result<(), RuntimeError>,
     },
 }
 
@@ -573,6 +584,9 @@ impl OperationReply {
             Self::User(_) => {}
             Self::Revision(response) => {
                 let _ = response.send(Err(RuntimeError::Closed));
+            }
+            Self::JudgeFeed(response) => {
+                let _ = response.send(Err(cancellation_error(reason)));
             }
         }
     }

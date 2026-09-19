@@ -38,13 +38,16 @@ impl CompanionAgent {
         &self,
         mode: &str,
         kind: CompanionCallKind,
+        model: &str,
+        effort: &str,
+        selection_reason: &str,
         source_ids: &[String],
     ) -> Result<(), CompanionError> {
         if let Some(logger) = &self.logger {
             logger.write(
                 "INFO",
                 &format!(
-                    "companion 呼び出し開始: provider={} mode={mode} trigger={} source-ids={}",
+                    "companion 呼び出し開始: provider={} model={model} effort={effort} mode={mode} trigger={} selection={selection_reason} source-ids={}",
                     self.provider_label(),
                     match kind {
                         CompanionCallKind::User => "user",

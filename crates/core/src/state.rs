@@ -6,7 +6,8 @@ use thiserror::Error;
 #[path = "audio_observation.rs"]
 mod audio_observation;
 pub use audio_observation::{
-    AudioObservation, AudioObservationSource, TranscriptRecord, AUDIO_TEXT_MAX_CHARS,
+    AudioObservation, AudioObservationSource, SpeakerIdentificationStatus, TranscriptRecord,
+    AUDIO_TEXT_MAX_CHARS,
 };
 #[path = "observation_context.rs"]
 mod observation_context;
@@ -157,6 +158,12 @@ pub struct AudioSegmentReference {
     pub source: AudioObservationSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_registry_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_status: Option<SpeakerIdentificationStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -448,26 +455,19 @@ pub enum ObservationError {
 }
 
 pub const DEFAULT_OBSERVATION_LIMITS: ObservationLimits = ObservationLimits {
-    text_excerpt_max_chars: 600,
-    text_excerpt_max_count: 6,
     text_total_max_chars: 2_000,
     changes_max_count: 8,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct ObservationLimits {
-    pub text_excerpt_max_chars: usize,
-    pub text_excerpt_max_count: usize,
     pub text_total_max_chars: usize,
     pub changes_max_count: usize,
 }
 
 impl ObservationLimits {
     pub fn outline_max_bytes(self) -> usize {
-        self.text_total_max_chars.min(
-            self.text_excerpt_max_chars
-                .saturating_mul(self.text_excerpt_max_count),
-        )
+        self.text_total_max_chars
     }
 }
 

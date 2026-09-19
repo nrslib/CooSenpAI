@@ -81,7 +81,6 @@ impl AvatarState {
 pub(crate) struct AvatarPresenter {
     state: AvatarState,
     scene: crate::avatar_scene_presenter::AvatarScenePresenter,
-    snapshot_revision: Option<u64>,
     presentation: Presentation,
     positioned: bool,
     projection_dirty: bool,
@@ -116,13 +115,6 @@ impl AvatarPresenter {
                 }
             }
             UiEvent::SnapshotUpdated(snapshot) => {
-                if self.snapshot_revision.is_some_and(|revision| {
-                    revision > snapshot.revision
-                        || (revision == snapshot.revision && !self.projection_dirty)
-                }) {
-                    return Handling::Handled(vec![]);
-                }
-                self.snapshot_revision = Some(snapshot.revision);
                 if self.state.project(&snapshot) || self.projection_dirty {
                     vec![self.render()]
                 } else {

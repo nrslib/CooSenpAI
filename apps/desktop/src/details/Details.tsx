@@ -5,7 +5,7 @@ import { CompanionEmotionsPanel } from "../components/CompanionEmotionsPanel.js"
 import { DataFlowPanel } from "../components/DataFlowPanel.js";
 import { renderDataFlowEvents } from "../dataflow-events.js";
 import type { DataFlowRecord } from "../dataflow.js";
-import { usePanelPresenter, type PanelCommand } from "../usePanelPresenter.js";
+import { usePanelPresenter, deliverPanelUpdates, type PanelCommand } from "../usePanelPresenter.js";
 import { NowDetails } from "../components/NowDetails.js";
 import { DebugDrawer } from "../components/DebugDrawer.js";
 import { detailsApi, ipcTransportError, setIpcLocale } from "../ipc.js";
@@ -111,10 +111,10 @@ export function Details(): ReactElement {
   const snapshot = presenter.state?.snapshot;
   const locale: Locale = snapshot?.config.ui.language ?? "ja";
   useEffect(() => {
-    const snapshots = detailsApi.subscribeSnapshots((event) => presenter.send({ type: "action", name: "snapshot", value: event.snapshot }));
+    const updates = detailsApi.subscribePanelUpdates(deliverPanelUpdates);
     const history = detailsApi.subscribeDataFlow((value) => presenter.send({ type: "action", name: "history", value }));
-    listenersReady.current = Promise.all([snapshots.ready, history.ready]).then(() => ({ ok: true as const, value: null }), (cause: unknown) => ({ ok: false as const, error: { message: ipcTransportError(cause) } }));
-    return () => { snapshots.dispose(); history.dispose(); };
+    listenersReady.current = Promise.all([updates.ready, history.ready]).then(() => ({ ok: true as const, value: null }), (cause: unknown) => ({ ok: false as const, error: { message: ipcTransportError(cause) } }));
+    return () => { updates.dispose(); history.dispose(); };
   }, [presenter.send]);
   useEffect(() => {
     setIpcLocale(locale);

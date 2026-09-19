@@ -1,36 +1,38 @@
 import { t } from "./i18n/index.js";
-import { toForm, toPatch, type FormState } from "./settings-form.js";
+import { settingsResetFields, toForm, toPatch, type FormState, type SettingsResetRequest } from "./settings-form.js";
 import type { ConfigPatch, CooSenpaiConfig, IpcResult } from "./types.js";
 
 export type ConfigForm = Omit<FormState, "avatarImage" | "avatarFileName" | "avatarImageLoadFailed">;
 export type FormFields = { readonly [K in keyof ConfigForm]: { readonly value: ConfigForm[K]; readonly patch: ConfigPatch } };
+export type SettingsResetFields = Partial<FormFields>;
 
 // フォーム項目を追加したら、保存先の対応がなければ型チェックを失敗させる。
 const paths = {
   workApprovalMode: "work.approvalMode", workAllowedRoots: "work.allowedRoots",
   emotionsEnabled: "companion.emotionsEnabled", displayName: "companion.displayName",
   avatarColor: "ui.avatarColor", avatarPath: "ui.avatarPath", persona: "companion.persona",
-  watchFullscreen: "watch.fullscreen", watchFocusElement: "watch.focusElement", watchApps: "watch.apps",
+  watchEnabled: "watch.enabled", watchFullscreen: "watch.fullscreen", watchFocusElement: "watch.focusElement", watchApps: "watch.apps",
   voiceOutputEnabled: "voiceOutput.enabled", voiceOutputProvider: "voiceOutput.provider",
   voiceOutputRate: "voiceOutput.rate", voicevoxStyleId: "voiceOutput.voicevoxStyleId",
   audioEnabled: "audio.enabled", audioMic: "audio.mic", audioSpeaker: "audio.speaker",
+  audioSpeakerIdentificationEnabled: "audio.speakerIdentification.enabled", audioDebugDumpDir: "audio.debugDumpDir",
   providerObserver: "observer.vision.provider", providerCompanion: "companion.provider",
   observerModel: "observer.vision.model", companionModel: "companion.model",
   observerEffort: "observer.vision.effort", companionEffort: "companion.effort",
+  proactiveModel: "companion.proactiveModel", proactiveEffort: "companion.proactiveEffort", proactiveIdleMs: "companion.proactiveIdleMs",
   observerExecutable: "observer.vision.executable", observerIntervalMs: "observer.vision.intervalMs",
   companionExecutable: "companion.executable",
   providerHearing: "observer.hearing.provider", hearingModel: "observer.hearing.model",
   hearingEffort: "observer.hearing.effort", hearingExecutable: "observer.hearing.executable",
-  hearingIntervalMs: "observer.hearing.intervalMs", hearingTimeoutMs: "observer.hearing.timeoutMs",
-  hearingLimit: "observer.hearing.dailyCallLimit", hearingTextExcerptMaxChars: "observer.hearing.textExcerptMaxChars",
-  hearingTextExcerptMaxCount: "observer.hearing.textExcerptMaxCount", hearingTextTotalMaxChars: "observer.hearing.textTotalMaxChars",
+  hearingIntervalMs: "observer.hearing.intervalMs", hearingStallTimeoutMs: "observer.hearing.stallTimeoutMs", hearingTimeoutMs: "observer.hearing.timeoutMs",
+  hearingLimit: "observer.hearing.dailyCallLimit", hearingTextTotalMaxChars: "observer.hearing.textTotalMaxChars",
   hearingChangesMaxCount: "observer.hearing.changesMaxCount",
   captureShortcut: "keymap.captureRegion", microphoneShortcut: "keymap.microphone",
   togglePanelShortcut: "keymap.togglePanel", toggleAvatarShortcut: "keymap.toggleAvatar", toggleWatchShortcut: "keymap.toggleWatch",
   sendTextShortcut: "keymap.sendText", copyLastReplyShortcut: "keymap.copyLastReply",
   textQuickActions: "popup.quickActions.text", imageQuickActions: "popup.quickActions.image",
   assertiveness: "companion.assertiveness",
-  sendIntervalMs: "watch.sendIntervalMs", sendDebounceMs: "watch.sendDebounceMs",
+  sendDebounceMs: "watch.sendDebounceMs",
   framesPerSend: "watch.framesPerSend", appWindowLimit: "watch.appWindowLimit", downscaleWidth: "watch.downscaleWidth",
   typingPauseMs: "watch.triggers.typingPauseMs", activeThresholdMs: "watch.triggers.activeThresholdMs",
   appSwitch: "watch.triggers.appSwitch", appSwitchSettleMs: "watch.triggers.appSwitchSettleMs",
@@ -38,9 +40,9 @@ const paths = {
   batteryEnabled: "watch.battery.enabled", batteryMultiplier: "watch.battery.multiplier",
   ocrGateEnabled: "watch.ocrGate.enabled", ocrGateLevel: "watch.ocrGate.level",
   ocrGateTimeoutMs: "watch.ocrGate.timeoutMs", ocrGateExecutable: "watch.ocrGate.executable",
-  observerTimeoutMs: "observer.vision.timeoutMs", companionTimeoutMs: "companion.timeoutMs",
-  observerLimit: "observer.vision.dailyCallLimit", observerTextExcerptMaxChars: "observer.vision.textExcerptMaxChars",
-  observerTextExcerptMaxCount: "observer.vision.textExcerptMaxCount", observerTextTotalMaxChars: "observer.vision.textTotalMaxChars",
+  observerStallTimeoutMs: "observer.vision.stallTimeoutMs", observerTimeoutMs: "observer.vision.timeoutMs",
+  companionStallTimeoutMs: "companion.stallTimeoutMs", companionTimeoutMs: "companion.timeoutMs",
+  observerLimit: "observer.vision.dailyCallLimit", observerTextTotalMaxChars: "observer.vision.textTotalMaxChars",
   observerChangesMaxCount: "observer.vision.changesMaxCount", companionLimit: "companion.dailyProactiveLimit",
   proactiveQuietMinutes: "companion.proactiveQuietMinutes", companionWakeCoalesceMax: "companion.wakeCoalesceMax",
   companionSessionMaxCalls: "companion.sessionMaxCalls", companionStuckAfterMs: "companion.stuckAfterMs",
@@ -55,9 +57,10 @@ const paths = {
   uiTheme: "ui.theme", uiFont: "ui.font", language: "ui.language", thoughtBubble: "ui.thoughtBubble",
   reviewTime: "companion.reviewTime", reminders: "companion.reminders",
   notificationMode: "notification.mode", minPriority: "notification.minPriority",
-  bubbleDurationMs: "notification.bubbleDurationMs", showPriority: "notification.showPriority",
+  bubbleDurationMs: "notification.bubbleDurationMs",
   observationDays: "retention.observationDays", conversationDays: "retention.conversationDays",
   debugEnabled: "debug.enabled", checkForUpdates: "app.checkForUpdates", launchAtLogin: "app.launchAtLogin",
+  judgeFollow: "judge.follow",
 } satisfies Record<keyof ConfigForm, string>;
 
 export function formFields(form: FormState): FormFields {
@@ -69,6 +72,11 @@ export function formFields(form: FormState): FormFields {
     const patch = path.reduceRight<unknown>((leaf, part) => ({ [part]: leaf }), value) as ConfigPatch;
     return [key, { value: form[key], patch }];
   })) as FormFields;
+}
+
+export function resetFields(form: FormState, request: SettingsResetRequest): SettingsResetFields {
+  const fields = formFields(form);
+  return Object.fromEntries(settingsResetFields(request).map((key) => [key, fields[key]])) as SettingsResetFields;
 }
 
 export function fieldValues(fields: FormFields): ConfigForm {

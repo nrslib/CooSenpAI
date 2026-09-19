@@ -10,10 +10,7 @@ use crate::presentation::PresentationEvent;
 use crate::ui_events::{Handling, PresenterId, UiEffect, UiEvent, UiTask, ViewCommand};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -38,7 +35,6 @@ pub(crate) struct BubblePresenter {
     onboarding_disables_edge_recall: bool,
     conversation_generation: u64,
     main_focused: bool,
-    config_revision: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -51,22 +47,14 @@ pub(crate) type BubbleWindowEvent = PresentationEvent<BubbleContent, BubbleConte
 
 impl BubblePresenter {
     pub(crate) fn new(
-        model: Arc<Mutex<BubbleState>>,
         config: coosenpai_core::config::Config,
-    ) -> Self {
-        let config_revision = config.revision;
-        Self::new_with_revision(model, config, Arc::new(AtomicU64::new(config_revision)))
-    }
-
-    pub(crate) fn new_with_revision(
-        model: Arc<Mutex<BubbleState>>,
-        config: coosenpai_core::config::Config,
-        config_revision: Arc<AtomicU64>,
+        conversation_generation: u64,
     ) -> Self {
         Self {
-            model,
+            model: Arc::new(Mutex::new(BubbleState::for_conversation_generation(
+                conversation_generation,
+            ))),
             config,
-            config_revision,
             ..Self::default()
         }
     }
@@ -339,6 +327,38 @@ impl BubblePresenter {
                 let _ = reply.send(crate::commands::IpcResult::success((*snapshot).clone()));
                 Handling::Handled(Vec::new())
             }
+            UiEvent::BubbleQuery(query) => {
+                use crate::ui_events::BubbleQuery;
+                let model = self.model.lock().await;
+                match query {
+                    BubbleQuery::ConversationGeneration(reply) => {
+                        let _ = reply.send(model.conversation_generation());
+                    }
+                    BubbleQuery::AcceptsInteraction {
+                        id,
+                        action,
+                        value,
+                        reply,
+                    } => {
+                        let _ =
+                            reply.send(model.accepts_interaction(&id, &action, value.as_deref()));
+                    }
+                    BubbleQuery::CanPollEdgeRecall(reply) => {
+                        let _ = reply.send(model.can_poll_edge_recall());
+                    }
+                    BubbleQuery::SetupRecord(reply) => {
+                        let _ = reply.send(model.record_for_message_kind("setup"));
+                    }
+                    BubbleQuery::CardCompletion {
+                        id,
+                        milestone,
+                        reply,
+                    } => {
+                        let _ = reply.send(model.card_completion(&id, milestone));
+                    }
+                }
+                Handling::Handled(Vec::new())
+            }
 
             UiEvent::BubbleMutation { mutation, reply } => {
                 use super::BubbleMutation;
@@ -351,6 +371,9 @@ impl BubblePresenter {
                     let changed = match mutation {
                         BubbleMutation::ConversationGeneration(generation) => {
                             model.advance_conversation_generation(generation)
+                        }
+                        BubbleMutation::SwitchConversationGeneration(generation) => {
+                            model.switch_conversation_generation(generation)
                         }
                         BubbleMutation::Preview(preview) => model.set_appearance_preview(preview),
                         BubbleMutation::FastForward(id) => {
@@ -367,10 +390,26 @@ impl BubblePresenter {
                         BubbleMutation::DismissMessageKind(kind) => {
                             model.dismiss_message_kind(&kind)
                         }
+                        BubbleMutation::SetInteraction { id, interaction } => {
+                            model.set_interaction(&id, interaction.map(|value| *value))
+                        }
                         BubbleMutation::Hover { id, hovering } => {
                             model.set_hover(&id, hovering);
                             false
                         }
+                        #[cfg(test)]
+                        BubbleMutation::Seed {
+                            record,
+                            shown_ago,
+                            duration,
+                            replaced_ids,
+                        } => model.show_replacing(
+                            *record,
+                            Instant::now() - shown_ago,
+                            duration,
+                            self.config.bubble.max_stack,
+                            &replaced_ids,
+                        ),
                     };
                     (changed, model.conversation_generation())
                 };
@@ -601,7 +640,14 @@ impl BubblePresenter {
             UiEvent::SnapshotUpdated(snapshot) => {
                 self.initialize(&snapshot);
                 self.sync_latest_coo_speech(&snapshot).await;
-                self.refresh_appearance().await
+                if self.model.lock().await.sync_feedback_interactions(
+                    &snapshot.config,
+                    &snapshot.recorded_utterance_feedback_ids,
+                ) {
+                    self.refresh().await
+                } else {
+                    self.refresh_appearance().await
+                }
             }
             UiEvent::Present(ViewCommand::Hide) => {
                 if main_focused {
@@ -681,9 +727,7 @@ impl BubblePresenter {
         config_revision: u64,
         main_focused: bool,
     ) -> Handling {
-        if config_revision != self.config.revision
-            || config_revision != self.config_revision.load(Ordering::Acquire)
-        {
+        if config_revision != self.config.revision {
             self.reset_edge_recall();
             return Handling::Handled(Vec::new());
         }
@@ -891,8 +935,14 @@ fn latest_coo_speech(snapshot: &crate::snapshot::AppSnapshot) -> Option<BubbleRe
         {
             return None;
         }
-        let message_kind = if entry.is_normal_speech() {
-            entry.message_kind
+        let (message_kind, interaction) = if entry.is_normal_speech() {
+            let message_kind = entry.message_kind?.as_wire().to_owned();
+            let interaction = crate::utterance_feedback::interaction_for_speech(
+                &snapshot.config,
+                &message_kind,
+                snapshot.recorded_utterance_feedback_ids.contains(&entry.id),
+            );
+            (message_kind, interaction)
         } else if entry.role == coosenpai_core::state::ConversationRole::Companion
             && entry.message_kind.is_none()
             && entry.tutorial_response_key.is_none()
@@ -902,15 +952,16 @@ fn latest_coo_speech(snapshot: &crate::snapshot::AppSnapshot) -> Option<BubbleRe
                 .iter()
                 .any(|id| normal_user_input_ids.contains(id))
         {
-            Some(coosenpai_core::state::ConversationMessageKind::Chat)
+            // 旧形式は表示・再表示だけを維持し、評価対象にはしない。
+            ("chat".to_owned(), None)
         } else {
-            None
-        }?;
+            return None;
+        };
         Some(BubbleRecord {
             id: entry.id.clone(),
             created_at: entry.created_at.clone(),
             message: entry.message.clone(),
-            message_kind: message_kind.as_wire().to_owned(),
+            message_kind,
             notification_priority: entry.notification_priority.clone(),
             caused_by: entry.caused_by_ids.last().cloned(),
             display_name: snapshot.companion_display_name.clone(),
@@ -918,7 +969,7 @@ fn latest_coo_speech(snapshot: &crate::snapshot::AppSnapshot) -> Option<BubbleRe
             avatar_color: snapshot.config.ui.avatar_color.clone(),
             conversation_generation: snapshot.selected_conversation_generation,
             persistent: false,
-            interaction: None,
+            interaction,
         })
     })
 }

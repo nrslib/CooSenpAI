@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PROVIDER_CAPABILITIES } from "../provider-capabilities.js";
 import { BridgeError, invalidJsonOutput, safeProviderError } from "../errors.js";
 import { validateImages } from "../images.js";
-import type { ProviderAgent, ProviderCallOptions, ProviderCallResult, ProviderUsage } from "../types.js";
+import type { EffortSelection, ProviderAgent, ProviderCallOptions, ProviderCallResult, ProviderCompactSessionOptions, ProviderUsage } from "../types.js";
 import { codexInput, codexOutputSchema } from "./inputs.js";
 import { observationDirectories } from "./observation-frame-directory.js";
 
@@ -34,11 +34,26 @@ function model(value: string | undefined): string | undefined {
   return value === undefined || value === "default" ? undefined : value;
 }
 
-function effort(value: string | undefined): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
-  if (value === undefined || value === "default") return undefined;
-  if (["minimal", "low", "medium", "high", "xhigh"].includes(value)) {
-    return value as "minimal" | "low" | "medium" | "high" | "xhigh";
+type CodexReasoningEffort = NonNullable<ThreadOptions["modelReasoningEffort"]>;
+
+const CODEX_REASONING_EFFORTS: readonly CodexReasoningEffort[] = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "persistent",
+];
+
+function effort(selection: EffortSelection | undefined): CodexReasoningEffort | undefined {
+  if (selection === undefined || selection.value === "default") return undefined;
+  if (selection.kind !== "candidate") {
+    throw new BridgeError("unsupported", "Codex の reasoning effort が不正です");
   }
+  const candidate = CODEX_REASONING_EFFORTS.find((effort) => effort === selection.value);
+  if (candidate !== undefined) return candidate;
   throw new BridgeError("unsupported", "Codex の reasoning effort が不正です");
 }
 
@@ -113,6 +128,8 @@ export class CodexAgent implements ProviderAgent {
         ...(options.executable === undefined ? {} : { codexPathOverride: options.executable }),
       });
       const readableObservationDirectories = observationDirectories();
+      const reasoningEffort = effort(options.effort);
+      const selectedModel = model(options.model);
       const threadOptions: ThreadOptions = {
         workingDirectory: options.cwd,
         skipGitRepoCheck: true,
@@ -123,16 +140,19 @@ export class CodexAgent implements ProviderAgent {
         ...(readableObservationDirectories.length === 0
           ? {}
           : { additionalDirectories: readableObservationDirectories }),
-        ...(model(options.model) === undefined ? {} : { model: model(options.model) as string }),
-        ...(effort(options.effort) === undefined
+        ...(selectedModel === undefined ? {} : { model: selectedModel }),
+        ...(reasoningEffort === undefined
           ? {}
-          : { modelReasoningEffort: effort(options.effort) as NonNullable<ThreadOptions["modelReasoningEffort"]> }),
+          : { modelReasoningEffort: reasoningEffort }),
       };
-      if (options.session.mode === "resume" && options.session.id === undefined) {
-        throw new BridgeError("protocol", "resume session ID がありません");
-      }
       const thread = options.session.mode === "resume"
-        ? client.resumeThread(options.session.id as string, threadOptions)
+        ? (() => {
+          const sessionId = options.session.id;
+          if (sessionId === undefined) {
+            throw new BridgeError("protocol", "resume session ID がありません");
+          }
+          return client.resumeThread(sessionId, threadOptions);
+        })()
         : client.startThread(threadOptions);
       validateImages(options.images);
       const turn = await thread.runStreamed(codexInput(options.message, options.images), {
@@ -144,6 +164,7 @@ export class CodexAgent implements ProviderAgent {
       let sessionId = options.session.id;
       let usage: ProviderUsage | undefined;
       for await (const event of turn.events) {
+        options.emitProgress();
         if (event.type === "thread.started") sessionId = event.thread_id;
         usage = usageFromEvent(event) ?? usage;
         if (event.type !== "item.updated" && event.type !== "item.completed") continue;
@@ -194,7 +215,7 @@ export class CodexAgent implements ProviderAgent {
     }
   }
 
-  async compactSession(): Promise<void> {
+  async compactSession(_options: ProviderCompactSessionOptions): Promise<void> {
     throw new BridgeError("unsupported", "Codex SDK は明示的な session compact に対応していません");
   }
 

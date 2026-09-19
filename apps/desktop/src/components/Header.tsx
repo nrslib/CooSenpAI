@@ -1,6 +1,5 @@
 import { useEffect, useRef, type ReactElement } from "react";
 
-import type { AppSnapshot } from "../types.js";
 import { avatarColor } from "../view-model.js";
 import { t, useI18n, type Locale } from "../i18n/index.js";
 import { AvatarBlob } from "./AvatarBlob.js";
@@ -67,7 +66,8 @@ interface Props {
   readonly menuOpen: boolean;
   readonly onMenuToggle: () => void;
   readonly onMenuDismiss: () => void;
-  readonly snapshot: AppSnapshot;
+  readonly avatarColor?: string | null;
+  readonly avatarImagePng?: readonly number[];
   readonly watchIntentActive: boolean;
   readonly watchChanging: boolean;
   readonly onToggleWatch: () => void;
@@ -80,7 +80,7 @@ interface Props {
   readonly menuItems: readonly HeaderMenuItem[];
 }
 
-export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, snapshot, watchIntentActive, watchChanging, onToggleWatch, audioEnabled = false, audioChanging = false, onToggleAudio, onOpenSettings, historyOpen, onToggleHistory, menuItems }: Props): ReactElement {
+export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, avatarColor: configuredColor, avatarImagePng, watchIntentActive, watchChanging, onToggleWatch, audioEnabled = false, audioChanging = false, onToggleAudio, onOpenSettings, historyOpen, onToggleHistory, menuItems }: Props): ReactElement {
   const { t } = useI18n();
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -98,12 +98,12 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, snapsh
       document.removeEventListener("keydown", closeOnKeyDown, true);
     };
   }, [menuOpen, onMenuDismiss]);
-  const color = avatarColor(snapshot.config.ui.avatarColor);
+  const color = avatarColor(configuredColor);
   const cooAwake = watchIntentActive || audioEnabled;
   return <header className="presence-header">
     <div className="presence-identity">
       <div className={`presence-avatar presence-${presence.mode}`}>
-        <AvatarBlob color={color} image={snapshot.avatarImagePng} size={40} state={cooAwake ? "open" : "resting"} squashed={!cooAwake} animated />
+        <AvatarBlob color={color} image={avatarImagePng} size={40} state={cooAwake ? "open" : "resting"} squashed={!cooAwake} animated />
       </div>
       <div className="presence-controls">
         <button
@@ -111,8 +111,10 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, snapsh
           type="button"
           role="switch"
           aria-checked={watchIntentActive}
+          aria-busy={watchChanging}
           aria-label={t("header.vision")}
           title={t("header.vision")}
+          disabled={watchChanging}
           onClick={onToggleWatch}
         >
           <span>{t("header.vision")}</span>
@@ -125,6 +127,7 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, snapsh
           aria-busy={audioChanging}
           aria-label={t("header.hearing")}
           title={t("header.hearing")}
+          disabled={audioChanging}
           onClick={onToggleAudio}
         >
           <span>{t("header.hearing")}</span>

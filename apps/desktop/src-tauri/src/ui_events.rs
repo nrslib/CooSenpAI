@@ -25,8 +25,8 @@ impl PresenterId {
     pub(crate) fn parent(self) -> Option<Self> {
         match self {
             Self::Root => None,
-            Self::Tutorial => Some(Self::Chat),
-            Self::Tray
+            Self::Tutorial
+            | Self::Tray
             | Self::Chat
             | Self::Capture
             | Self::Bubble
@@ -101,6 +101,29 @@ pub(crate) enum ChatProjection {
 }
 
 #[derive(Debug)]
+pub(crate) enum BubbleQuery {
+    ConversationGeneration(tokio::sync::oneshot::Sender<u64>),
+    AcceptsInteraction {
+        id: String,
+        action: String,
+        value: Option<String>,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    CanPollEdgeRecall(tokio::sync::oneshot::Sender<bool>),
+    SetupRecord(tokio::sync::oneshot::Sender<Option<crate::bubbles::BubbleRecord>>),
+    CardCompletion {
+        id: String,
+        milestone: crate::bubbles::BubbleMilestone,
+        reply: tokio::sync::oneshot::Sender<
+            Option<(
+                tokio_util::sync::CancellationToken,
+                tokio_util::sync::CancellationToken,
+            )>,
+        >,
+    },
+}
+
+#[derive(Debug)]
 pub(crate) enum UiEvent {
     SettingsPreview {
         preview: Option<crate::bubbles::BubbleAppearancePreview>,
@@ -162,6 +185,7 @@ pub(crate) enum UiEvent {
         reply: crate::ui_commands::Reply<()>,
     },
     BubbleSnapshot(crate::ui_commands::Reply<crate::bubbles::BubbleSnapshot>),
+    BubbleQuery(BubbleQuery),
 
     ThoughtRequested {
         generation: u64,
@@ -373,15 +397,11 @@ pub(crate) enum UiEffect {
     },
     SettingsFocus(&'static str),
     MainFocus(bool),
-    RenderSnapshot {
-        view: PresenterId,
-        snapshot: std::sync::Arc<crate::snapshot::AppSnapshot>,
-    },
     ForceShutdown,
     RejectInput,
     Log(String),
     WorkApprovalRender(Box<crate::work_approval_presenter::WorkApprovalView>),
-    AppRender(Box<crate::app_presenter::AppView>),
+    AppRender(Box<crate::app_presenter::AppFrame>),
     StatusRender(Box<crate::status_presenter::StatusView>),
     PersonasRender(Vec<crate::factory::PersonaOption>),
     AvatarSceneRender(Box<crate::avatar_scene_presenter::AvatarSceneView>),
@@ -391,6 +411,10 @@ pub(crate) enum UiEffect {
     BubbleControls(Box<crate::bubble_controls_presenter::BubbleControlsView>),
     ComposerRender(Box<crate::composer_presenter::ComposerView>),
     ConversationRender(Box<crate::conversation_presenter::ConversationView>),
+    PanelUpdates {
+        view: PresenterId,
+        updates: Vec<crate::panels::PanelUpdate>,
+    },
 }
 
 #[derive(Debug)]
@@ -523,6 +547,7 @@ impl UiEvent {
             Self::UnreadRead => "UnreadRead".into(),
             Self::BubbleAck { generation, .. } => format!("BubbleAck({generation})"),
             Self::BubbleSnapshot(_) => "BubbleSnapshot".into(),
+            Self::BubbleQuery(_) => "BubbleQuery".into(),
             Self::OsNotificationPrepared { .. } => "OsNotificationPrepared".into(),
             Self::NotificationFinished(_) => "NotificationFinished".into(),
             Self::NotificationRequested { .. } => "NotificationRequested".into(),

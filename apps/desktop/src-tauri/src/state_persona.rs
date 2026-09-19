@@ -305,7 +305,6 @@ impl DesktopState {
         F: FnOnce(Config) -> Result<Config, coosenpai_core::config::ConfigError>,
     {
         let _audio = self.config_update.audio.lock().await;
-        let _edge_recall = self.config_update.edge_recall_write().await;
         let recovery = self.runtime.config();
         let (config, stop_session) = coosenpai_core::config::patch_config_before_save_if_revision(
             &self.paths,
@@ -768,11 +767,13 @@ pub(crate) fn config_commit_last_error_for_locale(
 ) -> RuntimeLastError {
     RuntimeLastError {
         kind: RuntimeErrorKind::Config,
+        source: coosenpai_core::runtime::RuntimeErrorSource::Config,
         occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         message: Some(error.format_for_locale(locale)),
         issues: error.issues_for_locale(locale),
         attachment_ocr: None,
         user_response: None,
+        user_input_id: None,
     }
 }
 

@@ -56,6 +56,7 @@ pub(crate) enum DesktopCommand {
     TutorialInteract,
     BubbleFastForward,
     BubbleNavigate,
+    UtteranceFeedback,
     TutorialAdvance,
     TutorialSettingsPresented,
     TutorialFinish,

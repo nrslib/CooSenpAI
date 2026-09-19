@@ -20,7 +20,7 @@ fn load_config_locked(paths: &ConfigPaths) -> Result<Config, ConfigError> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     let raw: Value = serde_json::from_slice(&bytes)?;
-    let config = super::parse_config(raw)?;
+    let config = super::parse_config_file(raw)?;
     validate_config(&config)?;
     Ok(config)
 }
@@ -200,12 +200,14 @@ pub fn ensure_layout(paths: &ConfigPaths) -> Result<(), ConfigError> {
         &paths.state,
         &paths.provider,
         &paths.archive,
+        &paths.utterance_feedback_archive,
         &paths.outbox,
         &outbox_pending,
         &outbox_done,
         &outbox_failed,
         &paths.observations,
         &paths.transcripts,
+        &paths.speakers,
         &paths.frame_buffer,
         &paths.conversation,
         &paths.attachments,
@@ -220,6 +222,9 @@ pub fn ensure_layout(paths: &ConfigPaths) -> Result<(), ConfigError> {
         set_private_directory_mode(directory)?;
         cleanup_stale_temps(directory)?;
     }
+    crate::utterance_feedback::UtteranceFeedbackStore::from_paths(paths)
+        .cleanup_stale_archives()
+        .map_err(|error| ConfigError::Io(std::io::Error::other(error.to_string())))?;
     crate::frame_buffer::FrameBuffer::new(paths.frame_buffer.clone())
         .cleanup_expired(chrono::Utc::now())?;
     crate::conversation_archive::reconcile_conversation_reset(paths)?;
@@ -250,6 +255,14 @@ fn validate_executable_overrides(config: &Config) -> Result<(), ConfigError> {
         let Some(value) = value else { continue };
         if !is_executable(Path::new(value)) {
             issues.push(issue(path, "実行可能なファイルではありません。"));
+        }
+    }
+    for (index, module) in config.judge.modules.iter().enumerate() {
+        if !is_executable(Path::new(&module.executable)) {
+            issues.push(issue(
+                format!("judge.modules[{index}].executable"),
+                "実行可能なファイルではありません。",
+            ));
         }
     }
     if issues.is_empty() {

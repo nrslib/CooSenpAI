@@ -4,11 +4,52 @@ use super::*;
 use crate::attachments::bound_text_attachment;
 use crate::companion_cursor::OWNED_USER_ID_PREFIX;
 use crate::companion_storage::{
-    PendingAttachmentFailure, PendingFrameContextChange, PendingInput, PendingUserMessage,
+    JudgeFeedbackTarget, PendingAttachmentFailure, PendingFrameContextChange, PendingInput,
+    PendingUserMessage,
 };
 use crate::provider::ProviderMidTurnInput;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+fn judge_feedback_targets(
+    observations: &[crate::state::ObservationRecord],
+    user_input_id: &str,
+) -> Vec<JudgeFeedbackTarget> {
+    let mut targets = Vec::new();
+    for observation in observations {
+        match observation {
+            crate::state::ObservationRecord::Visual(value) => {
+                if let Some(input_id) = value.source_frame_ids.first() {
+                    targets.push(JudgeFeedbackTarget {
+                        input_id: input_id.clone(),
+                        event_time: value.created_at.clone(),
+                        user_input_id: user_input_id.to_owned(),
+                    });
+                }
+                if value.source_frame_ids.is_empty() {
+                    if let Some(segment) = value.audio_segments.first() {
+                        targets.push(JudgeFeedbackTarget {
+                            input_id: segment.id.clone(),
+                            event_time: segment.time.clone(),
+                            user_input_id: user_input_id.to_owned(),
+                        });
+                    }
+                }
+            }
+            crate::state::ObservationRecord::Audio(value) => {
+                targets.push(JudgeFeedbackTarget {
+                    input_id: value.id.clone(),
+                    event_time: value.created_at.clone(),
+                    user_input_id: user_input_id.to_owned(),
+                });
+            }
+            crate::state::ObservationRecord::NoChange(_) => {}
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    targets.retain(|target| seen.insert(target.input_id.clone()));
+    targets
+}
 
 impl UserMessagePreparer {
     pub(crate) fn uses_persistent_queue(&self) -> bool {
@@ -195,6 +236,7 @@ impl UserMessagePreparer {
             .transpose()?
             .unwrap_or(0);
         let created_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let judge_feedback_targets = judge_feedback_targets(&observations, &id);
         let attachment_path = match (attachment_source.as_deref(), self.storage.as_ref()) {
             (Some(source), Some(storage)) => {
                 Some(storage.persist_attachment(source, &id, &created_at)?)
@@ -237,6 +279,7 @@ impl UserMessagePreparer {
             attachment_path,
             attachment_text,
             observations,
+            judge_feedback_targets,
             pending_frames,
             hearing_context: Vec::new(),
             pending_audio: Vec::new(),

@@ -30,6 +30,7 @@ pub(super) fn send_request_value(
         "cwd": cwd,
         "toolsDisabled": input.tools_disabled,
         "isolateTools": matches!(input.session, SessionRequest::Isolated),
+        "stallTimeoutMs": u64::try_from(input.stall_timeout.as_millis()).unwrap_or(u64::MAX),
         "timeoutMs": u64::try_from(input.timeout.as_millis()).unwrap_or(u64::MAX),
     });
     remove_null_fields(&mut request);
@@ -64,9 +65,12 @@ pub(super) fn send_request_fits(input: &ProviderCall) -> bool {
             ProviderName::Opencode
         }
     };
-    let Ok((session_mode, session_id)) =
-        session_json(provider, input.model.as_deref(), &input.session)
-    else {
+    let Ok((session_mode, session_id)) = session_json(
+        provider,
+        input.model.as_deref(),
+        &input.session,
+        input.allow_session_model_change,
+    ) else {
         return false;
     };
     let conservative_path = Path::new(
@@ -83,3 +87,4 @@ pub(super) fn send_request_fits(input: &ProviderCall) -> bool {
     );
     serialize_request_line(&request).is_ok()
 }
+

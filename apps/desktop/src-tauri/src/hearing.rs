@@ -7,8 +7,8 @@ use coosenpai_core::config::ConfigPaths;
 use coosenpai_core::hearing_ingestion::{HearingAudioIngestion, HearingAudioRecord};
 use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::ports::{
-    HearingEvent, HearingPort, HelperResolverPort, RuntimeLogger, SpeechPermissionKind,
-    SpeechPermissionPort,
+    HearingEvent, HearingPort, HearingStartOptions, HelperResolverPort, RuntimeLogger,
+    SpeakerIdentificationPreparationStatus, SpeechPermissionKind, SpeechPermissionPort,
 };
 use coosenpai_core::state::{AudioObservation, AudioObservationSource, ObservationRecord};
 use std::sync::Arc;
@@ -22,24 +22,32 @@ fn hearing_context_for_event(
     session_id: &str,
     event: &HearingEvent,
 ) -> Option<coosenpai_core::hearing_context::HearingContext> {
-    let (source, generation, sequence, text, confirmed) = match event {
+    let (source, generation, sequence, text, confirmed, speaker) = match event {
         HearingEvent::Recognizing {
             source,
             generation,
             sequence,
             text,
-        } => (*source, *generation, *sequence, text.clone(), false),
+        } => (*source, *generation, *sequence, text.clone(), false, None),
         HearingEvent::Final {
             source,
             generation,
             sequence,
             text,
-        } => (*source, *generation, *sequence, text.clone(), true),
+            speaker,
+        } => (
+            *source,
+            *generation,
+            *sequence,
+            text.clone(),
+            true,
+            speaker.clone(),
+        ),
         HearingEvent::NoSpeech {
             source,
             generation,
             sequence,
-        } => (*source, *generation, *sequence, String::new(), true),
+        } => (*source, *generation, *sequence, String::new(), true, None),
         _ => return None,
     };
     Some(coosenpai_core::hearing_context::HearingContext {
@@ -49,6 +57,7 @@ fn hearing_context_for_event(
         sequence,
         text,
         confirmed,
+        speaker,
     })
 }
 
@@ -222,7 +231,7 @@ impl HearingController {
         }
         let _projection = self.projection.lock().await;
         let config = state.runtime_config();
-        let settings = hearing_session_settings(&config);
+        let settings = hearing_session_settings_for_state(&config, &state.paths);
         if !config.audio.enabled || !state.is_runtime_active() || state.voice_output.is_active() {
             *self.restart_attempts.lock().await = 0;
             self.stop_locked(&state).await;
@@ -426,11 +435,22 @@ impl HearingController {
         };
         let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=helper-start phase=begin elapsed-ms={}", started.elapsed().as_millis()));
         let session = match port
-            .start(
+            .start_with_options(
                 &settings.locale,
                 &settings.input_device,
                 helper_sources,
                 settings.debug_dump_dir.as_deref(),
+                HearingStartOptions {
+                    speaker_identification_enabled: settings.speaker_identification_enabled,
+                    speaker_model: settings
+                        .speaker_model_path
+                        .as_deref()
+                        .map(std::path::PathBuf::from),
+                    speaker_ledger: settings
+                        .speaker_ledger_path
+                        .as_deref()
+                        .map(std::path::PathBuf::from),
+                },
                 cancellation.clone(),
             )
             .await
@@ -614,6 +634,21 @@ impl HearingController {
                             .await;
                     }
                 }
+                Ok(HearingEvent::SpeakerIdentification { status }) => {
+                    if status == SpeakerIdentificationPreparationStatus::Unavailable
+                        && self.accepts_events(generation).await
+                    {
+                        state
+                            .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
+                                HearingResult::Warning {
+                                    generation,
+                                    kind: "speaker-identification-unavailable".to_owned(),
+                                    message: "話者識別を利用できないため、話者 ID なしで文字起こしを続けます".to_owned(),
+                                },
+                            ))
+                            .await;
+                    }
+                }
                 Ok(HearingEvent::Recognizing {
                     source, sequence, ..
                 }) => {
@@ -641,6 +676,7 @@ impl HearingController {
                     text,
                     generation: recognition_generation,
                     sequence,
+                    speaker,
                 }) => {
                     if !self.accepts_events(generation).await || cancellation.is_cancelled() {
                         let _ = state.logger.write(
@@ -661,6 +697,7 @@ impl HearingController {
                         sequence,
                         text,
                         confirmed: true,
+                        speaker,
                     };
                     if !queue_audio_final(ingestion_sender, &context, &cancellation).await {
                         if !cancellation.is_cancelled() {
@@ -838,7 +875,6 @@ impl HearingController {
                 "確定した音声を観察として保存できませんでした",
             )
             .await;
-            return;
         }
     }
 
@@ -941,7 +977,7 @@ impl HearingController {
                         return;
                     }
                     let config = state.runtime_config();
-                    let current = hearing_session_settings(&config);
+                    let current = hearing_session_settings_for_state(&config, &state.paths);
                     if !config.audio.enabled || current != settings {
                         return;
                     }
@@ -1214,6 +1250,23 @@ pub(crate) fn hearing_session_settings(
         selected_sources(config),
     )
     .with_debug_dump_dir(config.audio.debug_dump_dir.clone())
+}
+
+fn hearing_session_settings_for_state(
+    config: &coosenpai_core::config::Config,
+    paths: &ConfigPaths,
+) -> HearingSessionSettings {
+    hearing_session_settings(config).with_speaker_identification(
+        config.audio.speaker_identification.enabled,
+        std::env::var("COOSENPAI_SPEAKER_MODEL").ok(),
+        Some(
+            paths
+                .speakers
+                .join("registry.enc")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    )
 }
 
 async fn publish_audio_listening(state: &DesktopState, generation: u64) {

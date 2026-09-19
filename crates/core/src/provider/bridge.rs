@@ -1,6 +1,7 @@
 use super::bridge_io::read_line_bounded;
 use super::bridge_validation::{
-    invalid_output, parse_error_kind, remove_null_fields, retryable, session_json, validate_call,
+    invalid_output, parse_error_kind, remove_null_fields, retryable, session_json,
+    timeout as timeout_error, validate_call,
 };
 use super::provider_output::validate_json_shape;
 use super::{
@@ -268,14 +269,15 @@ impl ProviderBridge {
             )
             .await?;
         tokio::select! {
-            result = &mut rx => result.unwrap_or_else(|_| Err(retryable("provider bridge が終了しました。"))),
+            biased;
             () = cancellation.cancelled() => {
                 cancel_request(&self.inner, &id, &mut rx).await;
                 Err(retryable("provider bridge の起動待ちをキャンセルしました。"))
             }
+            result = &mut rx => result.unwrap_or_else(|_| Err(retryable("provider bridge が終了しました。"))),
             () = tokio::time::sleep(timeout) => {
                 cancel_request(&self.inner, &id, &mut rx).await;
-                Err(retryable("provider bridge の起動確認が timeout しました。"))
+                Err(timeout_error("provider bridge の起動確認が timeout しました。"))
             }
         }
     }
@@ -319,14 +321,15 @@ impl ProviderBridge {
             )
             .await?;
         tokio::select! {
-            result = &mut rx => result.unwrap_or_else(|_| Err(retryable("provider bridge が終了しました。"))),
+            biased;
             () = cancellation.cancelled() => {
                 cancel_request(&self.inner, &id, &mut rx).await;
                 Err(retryable("provider の能力確認をキャンセルしました。"))
             }
+            result = &mut rx => result.unwrap_or_else(|_| Err(retryable("provider bridge が終了しました。"))),
             () = tokio::time::sleep(timeout) => {
                 cancel_request(&self.inner, &id, &mut rx).await;
-                Err(retryable("provider の能力確認が timeout しました。"))
+                Err(timeout_error("provider の能力確認が timeout しました。"))
             }
         }
     }
@@ -345,7 +348,7 @@ impl ProviderBridge {
         }
         let deadline = tokio::time::Instant::now()
             .checked_add(input.timeout)
-            .ok_or_else(|| retryable("provider の timeout が範囲外です。"))?;
+            .ok_or_else(|| timeout_error("provider の timeout が範囲外です。"))?;
         let capabilities = self
             .open(provider, cancellation.clone(), input.timeout)
             .await?;
@@ -355,8 +358,12 @@ impl ProviderBridge {
             .tempdir()
             .map_err(|_| retryable("provider の作業ディレクトリを作成できません。"))?;
         let id = uuid::Uuid::new_v4().to_string();
-        let (session_mode, session_id) =
-            session_json(provider, input.model.as_deref(), &input.session)?;
+        let (session_mode, session_id) = session_json(
+            provider,
+            input.model.as_deref(),
+            &input.session,
+            input.allow_session_model_change,
+        )?;
         let request = send_request_value(
             &id,
             provider,
@@ -391,6 +398,10 @@ impl ProviderBridge {
         loop {
             tokio::select! {
                 biased;
+                () = cancellation.cancelled() => {
+                    cancel_request(&self.inner, &id, &mut rx).await;
+                    return Err(retryable("provider の呼び出しをキャンセルしました。"));
+                }
                 additional = receive_additional(&mut additional_inputs), if additions_open => {
                     let Some(additional) = additional else {
                         additions_open = false;
@@ -404,14 +415,15 @@ impl ProviderBridge {
                         });
                     }
                     let appended = tokio::select! {
-                        result = self.inner.append(provider, &id, &additional) => result,
+                        biased;
                         () = cancellation.cancelled() => {
                             cancel_request(&self.inner, &id, &mut rx).await;
                             return Err(retryable("provider の呼び出しをキャンセルしました。"));
                         }
+                        result = self.inner.append(provider, &id, &additional) => result,
                         () = &mut deadline_sleep => {
                             cancel_request(&self.inner, &id, &mut rx).await;
-                            return Err(retryable("provider の呼び出しが timeout しました。"));
+                            return Err(timeout_error("provider の呼び出しが timeout しました。"));
                         }
                     };
                     if let Err(error) = appended {
@@ -423,13 +435,9 @@ impl ProviderBridge {
                 result = &mut rx => {
                     return result.unwrap_or_else(|_| Err(retryable("provider bridge が終了しました。")));
                 }
-                () = cancellation.cancelled() => {
-                    cancel_request(&self.inner, &id, &mut rx).await;
-                    return Err(retryable("provider の呼び出しをキャンセルしました。"));
-                }
                 () = &mut deadline_sleep => {
                     cancel_request(&self.inner, &id, &mut rx).await;
-                    return Err(retryable("provider の呼び出しが timeout しました。"));
+                    return Err(timeout_error("provider の呼び出しが timeout しました。"));
                 }
             }
         }
@@ -807,6 +815,11 @@ impl BridgeInner {
                     } else if let Some(text) = event.text {
                         events.delta(&text);
                     }
+                }
+            }
+            "progress" => {
+                if let PendingKind::Send { events, .. } = &pending.kind {
+                    events.progress();
                 }
             }
             "usage" => {

@@ -2,11 +2,12 @@ use super::operation_state::StartResult;
 use super::*;
 
 impl RuntimeActor {
-    pub(super) fn start_control_operation(
+    pub(super) async fn start_control_operation(
         &mut self,
         command: ControlCommand,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
         config_tx: &watch::Sender<Config>,
+        control_tx: &tokio::sync::mpsc::Sender<ControlCommand>,
     ) -> StartResult {
         match command {
             ControlCommand::CompanionObservations { response, .. }
@@ -21,7 +22,14 @@ impl RuntimeActor {
                 audio,
                 cancellation,
                 response,
-            } => self.start_observe(frames, audio, cancellation, response, snapshot_tx),
+            } => self.start_observe(
+                frames,
+                audio,
+                cancellation,
+                response,
+                snapshot_tx,
+                control_tx,
+            ),
             ControlCommand::Heartbeat {
                 stagnation,
                 cancellation,
@@ -46,12 +54,23 @@ impl RuntimeActor {
                 cancellation,
                 response,
             } => self.start_companion_mailbox(cancellation, response, snapshot_tx),
+            ControlCommand::JudgeFeed {
+                event_id,
+                input_id,
+                sign,
+                strength,
+                cancelled,
+                response,
+            } => self.start_judge_feed(event_id, input_id, sign, strength, cancelled, response),
+            ControlCommand::JudgeCompleted { .. } => StartResult::Completed,
             ControlCommand::ReplaceCompanion {
                 companion,
                 config,
                 response,
             } => {
-                let result = self.replace_companion_config(*companion, config.map(|value| *value));
+                let result = self
+                    .replace_companion_config(*companion, config.map(|value| *value))
+                    .await;
                 if result.is_ok() {
                     self.operation_cancellation
                         .cancel_current_for_config_update();
@@ -67,7 +86,7 @@ impl RuntimeActor {
                 agents,
                 response,
             } => {
-                let result = self.replace_config(*config, *agents);
+                let result = self.replace_config(*config, *agents).await;
                 if result.is_ok() {
                     let _ = config_tx.send(self.config.clone());
                 }

@@ -19,7 +19,7 @@ impl RuntimeActor {
         let delay = self.initialization_retry_delay;
         self.initialization_retry_at = Some(Instant::now() + delay);
         self.initialization_retry_delay = (delay * 2).min(Duration::from_secs(30));
-        self.publish_retry_error(kind, snapshot_tx);
+        self.publish_retry_error(kind, RuntimeErrorSource::Companion, None, snapshot_tx);
     }
 
     pub(super) fn schedule_user_retry(
@@ -30,7 +30,12 @@ impl RuntimeActor {
         let delay = self.user_retry_delay;
         self.user_retry_at = Some(Instant::now() + delay);
         self.user_retry_delay = (delay * 2).min(Duration::from_secs(30));
-        self.publish_retry_error(kind, snapshot_tx);
+        self.publish_retry_error(
+            kind,
+            RuntimeErrorSource::UserResponse,
+            self.active_user_message_id.clone(),
+            snapshot_tx,
+        );
     }
 
     pub(super) fn pending_user_can_start(&self) -> bool {
@@ -67,7 +72,40 @@ impl RuntimeActor {
         self.last_error = self
             .last_error
             .take()
-            .filter(|error| error.attachment_ocr.is_some() || error.user_response.is_some());
+            .filter(|error| error.is_attachment_error() || error.is_user_response_error());
+    }
+
+    pub(super) fn complete_user_response(
+        &mut self,
+        companion: &CompanionAgent,
+        input_ids: &[String],
+    ) {
+        if input_ids.is_empty() {
+            return;
+        }
+        if let Ok(terminal_responses) = companion.terminal_user_responses() {
+            self.suppressed_terminal_user_failure_ids
+                .extend(terminal_responses.into_iter().map(|(input_id, _)| input_id));
+        }
+        if let Some(input_id) = self
+            .last_error
+            .as_ref()
+            .filter(|error| error.is_user_response_error())
+            .and_then(RuntimeLastError::terminal_user_input_id)
+        {
+            self.suppressed_terminal_user_failure_ids
+                .insert(input_id.to_owned());
+        }
+        if self
+            .last_error
+            .as_ref()
+            .is_some_and(RuntimeLastError::is_conversation_user_error)
+        {
+            self.last_error = None;
+            self.user_retry_at = None;
+            self.user_retry_delay = Duration::from_secs(1);
+        }
+        // 永続 cursor の terminal は明示的な取消まで残すが、成功後に画面へ再投影しない。
     }
 
     pub(super) fn companion_recovery_can_start(&self) -> bool {
@@ -103,10 +141,12 @@ impl RuntimeActor {
         let retryable = !failure.terminal;
         let error = RuntimeLastError {
             kind: RuntimeErrorKind::Provider,
+            source: RuntimeErrorSource::AttachmentOcr,
             occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             message: None,
             issues: Vec::new(),
             user_response: None,
+            user_input_id: None,
             attachment_ocr: Some(RuntimeAttachmentOcrFailure {
                 input_id: input_id.to_owned(),
                 reason,
@@ -134,39 +174,71 @@ impl RuntimeActor {
     pub(super) fn restore_terminal_user_failure(
         &mut self,
         companion: &CompanionAgent,
+        kind: RuntimeErrorKind,
     ) -> Result<(), CompanionError> {
-        let Some((input_id, failure)) = companion.first_terminal_attachment_failure()? else {
-            if let Some((input_id, attempts)) = companion.first_terminal_user_response()? {
+        let terminal_attachment = companion.first_terminal_attachment_failure()?;
+        let terminal_user_response = companion
+            .terminal_user_responses()?
+            .into_iter()
+            .find(|(input_id, _)| !self.suppressed_terminal_user_failure_ids.contains(input_id));
+        if let Some(error) = self.last_error.as_ref() {
+            if !error.is_user_response_error() && !error.is_attachment_error() {
+                return Ok(());
+            }
+            if error.is_attachment_error() {
+                // 切替前の添付 OCR エラーは、切替先の cursor にない場合も保持する。
+                let same_attachment = error.attachment_ocr.as_ref().is_some_and(|current| {
+                    terminal_attachment
+                        .as_ref()
+                        .is_some_and(|(input_id, _)| input_id == &current.input_id)
+                });
+                if !same_attachment {
+                    return Ok(());
+                }
+            } else {
+                let current_input_id = error.user_input_id.as_deref().or_else(|| {
+                    error
+                        .user_response
+                        .as_ref()
+                        .map(|failure| failure.input_id.as_str())
+                });
+                let same_user_response = terminal_user_response
+                    .as_ref()
+                    .is_some_and(|(input_id, _)| current_input_id == Some(input_id.as_str()));
+                if !same_user_response {
+                    return Ok(());
+                }
+            }
+        }
+        let Some((input_id, failure)) = terminal_attachment else {
+            if let Some((input_id, attempts)) = terminal_user_response {
                 self.user_retry_at = None;
                 self.user_retry_delay = Duration::from_secs(1);
                 self.last_error = Some(RuntimeLastError {
-                    kind: RuntimeErrorKind::Provider,
+                    kind,
+                    source: RuntimeErrorSource::UserResponse,
                     occurred_at: chrono::Utc::now()
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     message: None,
                     issues: Vec::new(),
                     attachment_ocr: None,
                     user_response: Some(RuntimeUserResponseFailure { input_id, attempts }),
+                    user_input_id: None,
                 });
                 return Ok(());
-            }
-            if self
-                .last_error
-                .as_ref()
-                .is_some_and(|error| error.terminal_user_input_id().is_some())
-            {
-                self.last_error = None;
             }
             return Ok(());
         };
         self.user_retry_at = None;
         self.user_retry_delay = Duration::from_secs(1);
         self.last_error = Some(RuntimeLastError {
-            kind: RuntimeErrorKind::Provider,
+            kind,
+            source: RuntimeErrorSource::AttachmentOcr,
             occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             message: None,
             issues: Vec::new(),
             user_response: None,
+            user_input_id: None,
             attachment_ocr: Some(RuntimeAttachmentOcrFailure {
                 input_id,
                 reason: failure.reason,
@@ -180,15 +252,19 @@ impl RuntimeActor {
     fn publish_retry_error(
         &mut self,
         kind: RuntimeErrorKind,
+        source: RuntimeErrorSource,
+        user_input_id: Option<String>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
     ) {
         self.last_error = Some(RuntimeLastError {
             kind,
+            source,
             occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             message: None,
             issues: Vec::new(),
             attachment_ocr: None,
             user_response: None,
+            user_input_id,
         });
         self.revision = self.revision.saturating_add(1);
         self.publish(snapshot_tx);
@@ -238,6 +314,7 @@ impl RuntimeActor {
             companion_draft: self.companion_draft.clone(),
             latest_companion_thought: self.latest_companion_thought.clone(),
             latest_companion_decision: self.latest_companion_decision.clone(),
+            latest_judge_decision: self.latest_judge_decision.clone(),
             latest_user_interruption: self.latest_user_interruption.clone(),
             latest_companion_thought_generation: self.latest_companion_thought_generation,
             provider_usage: self.provider_usage.clone(),

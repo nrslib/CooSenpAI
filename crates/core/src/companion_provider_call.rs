@@ -118,7 +118,6 @@ impl CompanionAgent {
         self.record_call_attempt(kind, user)?;
         let mode = session_mode(&session);
         let started = Instant::now();
-        self.log_call_start(mode, kind, source_ids)?;
         let debug_call_id = DebugStore::new_id();
         let system_prompt = self.system_prompt();
         if let Some(store) = &self.debug_store {
@@ -142,12 +141,23 @@ impl CompanionAgent {
             session.clone(),
             tutorial_response_key,
         );
+        let model = call.model.as_deref().ok_or(CompanionError::Output)?;
+        let effort = call.effort.as_deref().ok_or(CompanionError::Output)?;
+        self.log_call_start(
+            mode,
+            kind,
+            model,
+            effort,
+            self.model_selection_reason(!user),
+            source_ids,
+        )?;
+        let selected_model = call.model.clone();
         if user
             && work_result.is_none()
             && tutorial_response_key.is_none()
             && self.work_executor.is_some()
         {
-            let proposal_schema = serde_json::json!({"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["investigate","work"]},"cwd":{"type":"string","maxLength":4096},"summary":{"type":"string","maxLength":4096}},"required":["kind","cwd","summary"]}]});
+            let proposal_schema = serde_json::json!({"type":["object","null"],"additionalProperties":false,"properties":{"kind":{"type":"string","enum":["investigate","work"]},"cwd":{"type":"string","maxLength":4096},"summary":{"type":"string","maxLength":4096}},"required":["kind","cwd","summary"]});
             call.output_schema.as_mut().expect("companion schema")["properties"]["workRequest"] =
                 proposal_schema.clone();
             call.output_validation_schema
@@ -260,13 +270,15 @@ impl CompanionAgent {
         {
             return Err(CompanionError::Output);
         }
-        if let Err(error) = self.accept_session(&session, result.session) {
+        if let Err(error) = self.accept_session(&session, result.session, selected_model.as_deref())
+        {
             self.log_session_rejection(mode, &error);
             return Err(error);
         }
         Ok(ProviderCallOutcome {
             response,
             usage: measured_events.measured_usage(),
+            call_id: debug_call_id,
         })
     }
 
@@ -278,6 +290,7 @@ impl CompanionAgent {
         session: SessionRequest,
         tutorial_response_key: Option<&str>,
     ) -> ProviderCall {
+        let (model, effort) = self.resolved_model_and_effort(!user);
         ProviderCall {
             system_prompt: self.system_prompt(),
             prompt: prompt.to_owned(),
@@ -289,10 +302,35 @@ impl CompanionAgent {
             )),
             output_validation_schema: Some(crate::prompts::companion_response_schema(user)),
             session,
-            model: Some(self.config.model.clone()),
-            effort: Some(self.config.effort.clone()),
+            model: Some(model.to_owned()),
+            effort: Some(effort.to_owned()),
+            stall_timeout: Duration::from_millis(self.config.stall_timeout_ms),
             timeout: Duration::from_millis(self.config.timeout_ms),
             tutorial_response_key: tutorial_response_key.map(str::to_owned),
+            allow_session_model_change: true,
+        }
+    }
+
+    pub(super) fn resolved_model_and_effort(&self, proactive: bool) -> (&str, &str) {
+        let use_proactive = proactive && !self.proactive_conversation_is_active();
+        let model = if use_proactive && !self.config.proactive_model.is_empty() {
+            &self.config.proactive_model
+        } else {
+            &self.config.model
+        };
+        let effort = if use_proactive && !self.config.proactive_effort.trim().is_empty() {
+            &self.config.proactive_effort
+        } else {
+            &self.config.effort
+        };
+        (model, effort)
+    }
+
+    pub(super) fn model_selection_reason(&self, proactive: bool) -> &'static str {
+        if proactive && !self.proactive_conversation_is_active() {
+            "idle"
+        } else {
+            "conversation-active"
         }
     }
 }

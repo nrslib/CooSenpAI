@@ -72,6 +72,7 @@ impl DataFlow {
         baseline["observer"]["lastObservation"] = Value::Null;
         baseline["audio"]["recentEvents"] = json!([]);
         baseline["latestCompanionDecision"] = Value::Null;
+        baseline["latestJudgeDecision"] = Value::Null;
         baseline["latestUserInterruption"] = Value::Null;
         events.extend(diff(
             &baseline,
@@ -508,6 +509,18 @@ fn diff(previous: &Value, next: &Value, now: &str) -> Result<Vec<Value>, String>
             string(decision, "occurredAt")?,
             decision.clone(),
             references,
+        ));
+    }
+    let judge = &next["latestJudgeDecision"];
+    if !judge.is_null() && judge["sequence"] != previous["latestJudgeDecision"]["sequence"] {
+        events.push(record(
+            "coo",
+            "judge",
+            "judge",
+            format!("judge:{}", judge["sequence"]),
+            string(judge, "occurredAt")?,
+            judge.clone(),
+            Vec::new(),
         ));
     }
     let previous_conversation = previous["conversation"]

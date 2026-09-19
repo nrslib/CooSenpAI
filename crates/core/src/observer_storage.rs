@@ -271,6 +271,10 @@ pub fn read_audio_by_ids(
     }
     let mut records = HashMap::new();
     for path in jsonl_paths(directory)? {
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
         for value in JsonlStore::new(path).read::<Value>()? {
             if let Ok(ObservationRecord::Audio(record)) =
                 parse_observation(value, crate::state::DEFAULT_OBSERVATION_LIMITS)
@@ -284,6 +288,36 @@ pub fn read_audio_by_ids(
     let mut records = records.into_values().collect::<Vec<_>>();
     records.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
     Ok(records)
+}
+
+/// Load only the observation records named by the caller from the known observation journal.
+///
+/// Callers use this for causal references that are stored directly in a conversation entry
+/// rather than embedded in its screen context.  The directory is supplied by `ConfigPaths`,
+/// not by user input, and only the journal's JSONL files are considered.
+pub fn read_observations_by_ids(
+    directory: &Path,
+    ids: &[String],
+) -> Result<Vec<ObservationRecord>, PersistenceError> {
+    let requested = ids.iter().cloned().collect::<HashSet<_>>();
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut records = HashMap::new();
+    for path in jsonl_paths(directory)? {
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        for value in JsonlStore::new(path).read::<Value>()? {
+            if let Ok(record) = parse_observation(value, crate::state::DEFAULT_OBSERVATION_LIMITS) {
+                if requested.contains(record.id()) {
+                    records.insert(record.id().to_owned(), record);
+                }
+            }
+        }
+    }
+    Ok(records.into_values().collect())
 }
 
 pub fn mark_audio_consumed(paths: &ConfigPaths, ids: &[String]) -> Result<(), PersistenceError> {

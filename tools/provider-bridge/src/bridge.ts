@@ -16,10 +16,11 @@ import {
   type ResolveRequest,
   type SendRequest,
 } from "./protocol.js";
+import { classifyEffort } from "./types.js";
 
 interface BridgeEvent {
   readonly id: string;
-  readonly event: "session" | "delta" | "final" | "usage" | "error" | "closed";
+  readonly event: "session" | "progress" | "delta" | "final" | "usage" | "error" | "closed";
   readonly [key: string]: unknown;
 }
 
@@ -134,13 +135,26 @@ export class BridgeHost {
     this.pending.set(request.id, active);
     let streamBytes = 0;
     const projector = new DeltaProjector(request.schema);
-    const timeout = setTimeout(() => controller.abort(new Error("timeout")), request.timeoutMs);
+    let stallTimeout: ReturnType<typeof setTimeout> | undefined;
+    const resetStallTimeout = (): void => {
+      if (stallTimeout !== undefined) clearTimeout(stallTimeout);
+      if (controller.signal.aborted) return;
+      stallTimeout = setTimeout(
+        () => controller.abort(new BridgeError("timeout", "provider request stalled")),
+        request.stallTimeoutMs,
+      );
+    };
+    resetStallTimeout();
+    const timeout = setTimeout(
+      () => controller.abort(new BridgeError("timeout", "provider request timed out")),
+      request.timeoutMs,
+    );
     try {
       const result = await agent.send({
         requestId: request.id,
         session: request.session,
         ...(request.model === undefined ? {} : { model: request.model }),
-        ...(request.effort === undefined ? {} : { effort: request.effort }),
+        ...(request.effort === undefined ? {} : { effort: classifyEffort(request.effort) }),
         systemPrompt: request.systemPrompt,
         message: request.message,
         images: request.images.map((path) => ({ path })),
@@ -151,6 +165,7 @@ export class BridgeHost {
         isolateTools: request.isolateTools === true,
         signal: controller.signal,
         emitDelta: (text) => {
+          resetStallTimeout();
           const bytes = Buffer.byteLength(text, "utf8");
           streamBytes += bytes;
           if (bytes > DELTA_MAX_BYTES || streamBytes > STREAM_MAX_BYTES) {
@@ -161,20 +176,38 @@ export class BridgeHost {
           if (visible.length > 0) this.emit({ id: request.id, event: "delta", text: visible });
         },
         resetDelta: () => {
+          resetStallTimeout();
           projector.reset();
           this.emit({ id: request.id, event: "delta", text: "", reset: true });
         },
+        emitProgress: () => {
+          resetStallTimeout();
+          this.emit({ id: request.id, event: "progress" });
+        },
       });
+      if (controller.signal.aborted) {
+        const reason = controller.signal.reason;
+        throw reason instanceof BridgeError
+          ? reason
+          : new BridgeError("cancelled", "provider request was cancelled");
+      }
       if (result.sessionId !== undefined) {
+        resetStallTimeout();
         this.emit({ id: request.id, event: "session", session: result.sessionId });
       }
       if (result.usage !== undefined) {
+        resetStallTimeout();
         this.emit({ id: request.id, event: "usage", ...result.usage });
       }
+      resetStallTimeout();
       this.emit({ id: request.id, event: "final", text: result.text, value: result.value });
     } catch (error) {
-      this.emitError(request.id, safeProviderError(error));
+      const classified = controller.signal.reason instanceof BridgeError
+        ? controller.signal.reason
+        : safeProviderError(error);
+      this.emitError(request.id, classified);
     } finally {
+      if (stallTimeout !== undefined) clearTimeout(stallTimeout);
       clearTimeout(timeout);
       this.pending.delete(request.id);
       active.complete();
@@ -187,7 +220,7 @@ export class BridgeHost {
       this.emit({ id, event: "closed", targetId });
       return;
     }
-    active.controller.abort(new Error("cancelled"));
+    active.controller.abort(new BridgeError("cancelled", "provider request cancelled"));
     await active.completion;
     this.emit({ id, event: "closed", targetId });
   }
@@ -221,7 +254,7 @@ export class BridgeHost {
     }
     this.closing = true;
     const completions = [...this.pending.values()].map((active) => {
-      active.controller.abort(new Error("bridge closing"));
+      active.controller.abort(new BridgeError("cancelled", "bridge closing"));
       return active.completion;
     });
     await Promise.all(completions);

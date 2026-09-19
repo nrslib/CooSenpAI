@@ -123,6 +123,7 @@ impl MemoryService {
         let cancellation_must_complete = provider.cancellation_must_complete();
         let model = model_value(&self.companion.model);
         let effort = effort_value(&self.companion.effort);
+        let stall_timeout = Duration::from_millis(self.companion.stall_timeout_ms);
         let timeout = Duration::from_millis(self.companion.timeout_ms);
         let system_prompt_for_call = system_prompt.to_owned();
         let provider_cancellation = cancellation.clone();
@@ -137,6 +138,8 @@ impl MemoryService {
                 session: SessionRequest::Ephemeral,
                 model,
                 effort,
+                allow_session_model_change: false,
+                stall_timeout,
                 timeout,
                 tutorial_response_key: None,
             },

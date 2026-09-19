@@ -131,7 +131,9 @@ impl DesktopState {
         cancellation: CancellationToken,
     ) -> Result<TutorialBubbleOutcome, RuntimeError> {
         let config = self.runtime.config();
-        let conversation_generation = self.bubbles.lock().await.conversation_generation();
+        let conversation_generation = crate::bubbles::conversation_generation(self)
+            .await
+            .map_err(RuntimeError::Factory)?;
         self.ui
             .query(crate::ui_events::UiView::Application, |reply| {
                 crate::ui_events::UiEvent::Tutorial(Box::new(

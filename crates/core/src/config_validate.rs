@@ -75,6 +75,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
         ));
     }
     validate_memory(config, &mut issues);
+    validate_judge(config, &mut issues);
     validate_executables(config, &mut issues);
     validate_watch_targets(config, &mut issues);
     if config.config_version != CONFIG_VERSION {
@@ -440,7 +441,6 @@ fn validate_ui(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
 
 fn validate_positive_fields(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
     for (path, value) in [
-        ("watch.sendIntervalMs", config.watch.send_interval_ms),
         ("watch.sendDebounceMs", config.watch.send_debounce_ms),
         (
             "watch.downscaleWidth",
@@ -468,9 +468,18 @@ fn validate_positive_fields(config: &Config, issues: &mut Vec<ConfigValidationIs
         ),
         ("watch.triggers.pollMs", config.watch.triggers.poll_ms),
         ("watch.ocrGate.timeoutMs", config.watch.ocr_gate.timeout_ms),
+        ("judge.timeoutMs", config.judge.timeout_ms),
+        (
+            "observer.vision.stallTimeoutMs",
+            config.observer.vision.stall_timeout_ms,
+        ),
         (
             "observer.vision.timeoutMs",
             config.observer.vision.timeout_ms,
+        ),
+        (
+            "observer.hearing.stallTimeoutMs",
+            config.observer.hearing.stall_timeout_ms,
         ),
         (
             "observer.hearing.timeoutMs",
@@ -484,11 +493,19 @@ fn validate_positive_fields(config: &Config, issues: &mut Vec<ConfigValidationIs
             "observer.hearing.intervalMs",
             config.observer.hearing.interval_ms,
         ),
+        (
+            "companion.stallTimeoutMs",
+            config.companion.stall_timeout_ms,
+        ),
         ("companion.timeoutMs", config.companion.timeout_ms),
         ("companion.stuckAfterMs", config.companion.stuck_after_ms),
         (
             "companion.proactiveQuietMinutes",
             config.companion.proactive_quiet_minutes,
+        ),
+        (
+            "companion.proactiveIdleMs",
+            config.companion.proactive_idle_ms,
         ),
         (
             "notification.bubbleDurationMs",
@@ -608,18 +625,18 @@ fn validate_providers(config: &Config, issues: &mut Vec<ConfigValidationIssue>) 
             ));
         }
     }
+    if !config.companion.proactive_effort.is_empty()
+        && config.companion.proactive_effort.trim().is_empty()
+    {
+        issues.push(issue(
+            "companion.proactiveEffort",
+            "空白以外の文字列で指定してください。",
+        ));
+    }
 }
 
 fn validate_companion(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
     for (name, value) in [
-        (
-            "observer.vision.textExcerptMaxChars",
-            config.observer.vision.text_excerpt_max_chars,
-        ),
-        (
-            "observer.vision.textExcerptMaxCount",
-            config.observer.vision.text_excerpt_max_count,
-        ),
         (
             "observer.vision.textTotalMaxChars",
             config.observer.vision.text_total_max_chars,
@@ -627,14 +644,6 @@ fn validate_companion(config: &Config, issues: &mut Vec<ConfigValidationIssue>) 
         (
             "observer.vision.changesMaxCount",
             config.observer.vision.changes_max_count,
-        ),
-        (
-            "observer.hearing.textExcerptMaxChars",
-            config.observer.hearing.text_excerpt_max_chars,
-        ),
-        (
-            "observer.hearing.textExcerptMaxCount",
-            config.observer.hearing.text_excerpt_max_count,
         ),
         (
             "observer.hearing.textTotalMaxChars",
@@ -873,6 +882,66 @@ fn validate_executables(config: &Config, issues: &mut Vec<ConfigValidationIssue>
                 name,
                 "実行ファイルは絶対パスまたは null で指定してください。",
             ));
+        }
+    }
+}
+
+fn validate_judge(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
+    if config.judge.modules.len() > 8 {
+        issues.push(issue(
+            "judge.modules",
+            "判断役モジュールは8個以下で指定してください。",
+        ));
+    }
+    match config.judge.composition {
+        super::JudgeComposition::Single if config.judge.modules.len() > 1 => issues.push(issue(
+            "judge.modules",
+            "single では判断役モジュールを1個だけ指定してください。",
+        )),
+        super::JudgeComposition::Ensemble | super::JudgeComposition::Weighted
+            if !config.judge.modules.is_empty() && config.judge.modules.len() < 2 =>
+        {
+            issues.push(issue(
+                "judge.modules",
+                "ensemble または weighted では判断役モジュールを2個以上指定してください。",
+            ));
+        }
+        _ => {}
+    }
+    for (index, module) in config.judge.modules.iter().enumerate() {
+        if module.executable.trim().is_empty() || !Path::new(&module.executable).is_absolute() {
+            issues.push(issue(
+                format!("judge.modules[{index}].executable"),
+                "実行ファイルは空でない絶対パスで指定してください。",
+            ));
+        }
+        if !module.weight.is_finite() || module.weight <= 0.0 {
+            issues.push(issue(
+                format!("judge.modules[{index}].weight"),
+                "重みは正の有限値で指定してください。",
+            ));
+        }
+        for (argument_index, argument) in module.arguments.iter().enumerate() {
+            if argument.contains('\0') {
+                issues.push(issue(
+                    format!("judge.modules[{index}].arguments[{argument_index}]"),
+                    "引数に NUL 文字を含めることはできません。",
+                ));
+            }
+        }
+        for (key, value) in &module.environment {
+            if key.is_empty() || key.contains('=') || key.contains('\0') {
+                issues.push(issue(
+                    format!("judge.modules[{index}].environment"),
+                    "環境変数名は空にできず、= と NUL 文字を含められません。",
+                ));
+            }
+            if value.contains('\0') {
+                issues.push(issue(
+                    format!("judge.modules[{index}].environment"),
+                    "環境変数の値に NUL 文字を含めることはできません。",
+                ));
+            }
         }
     }
 }

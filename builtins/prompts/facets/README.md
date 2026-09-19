@@ -25,7 +25,7 @@ companion（Coo）の system prompt は次の順で連結されます。
 5. `## Output` と `output-contracts/companion.md` の本文
 6. `## Policy` と `policies/` の名前順連結。必ず末尾
 
-observer の system prompt は、動的文脈、`instructions/observer.md`、`output-contracts/observer.md`、`policies/` の順です。persona と knowledge は observer に渡しません。
+observer の system prompt は、動的文脈、`## Knowledge` と `knowledge/observation.md`、`instructions/observer.md`、`output-contracts/observer.md`、`policies/` の順です。companion 固有の `knowledge/coosenpai.md` と persona は observer に渡しません。画面と音声の共通基準は `knowledge/observation.md` に一か所だけ置きます。
 
 各ディレクトリの Markdown は名前順に連結されるだけで、合成側から区切りは挿入されません。ファイルを足すときは名前で順序が決まることと、末尾の改行が連結後の空行になることに注意してください。
 

@@ -1,4 +1,4 @@
-use crate::bubbles::{self, BubbleRecord, BubbleState};
+use crate::bubbles::{self, BubbleRecord};
 pub(crate) use crate::config_update::{
     ConfigCommitError, ConfigUpdateCoordinator, ConfigUpdateTransaction,
 };
@@ -74,7 +74,6 @@ pub(crate) struct DesktopState {
     pub app: AppHandle,
     pub(crate) main_window_focused: AtomicBool,
     bubble_focus: watch::Sender<bool>,
-    pub bubbles: Arc<Mutex<BubbleState>>,
     pub(crate) capture: crate::capture::CaptureHandle,
     pub(crate) ui: crate::ui_root::UiHandle,
     pub(crate) screen_capture_gate: crate::screen_capture_gate::ScreenCaptureGate,
@@ -274,6 +273,7 @@ impl DesktopState {
             conversation_generation,
             ready: startup_ready,
             error: runtime_error,
+            ..
         } = startup;
         factory.work.approvals.set_mode(config.work.approval_mode);
         factory.work.set_roots(config.work.allowed_roots.clone());
@@ -334,9 +334,6 @@ impl DesktopState {
             app,
             main_window_focused: AtomicBool::new(false),
             bubble_focus,
-            bubbles: Arc::new(Mutex::new(BubbleState::for_conversation_generation(
-                conversation_generation,
-            ))),
             capture,
             ui,
             screen_capture_gate,
@@ -372,6 +369,10 @@ impl DesktopState {
                 snapshot.speech.input_devices = speech_input_devices;
                 snapshot.conversation_generations = conversation_generations;
                 snapshot.selected_conversation_generation = conversation_generation;
+                snapshot.recorded_utterance_feedback_ids =
+                    coosenpai_core::utterance_feedback::UtteranceFeedbackStore::from_paths(&paths)
+                        .recorded_utterance_ids()
+                        .unwrap_or_default();
                 snapshot
             })),
             config_update: ConfigUpdateCoordinator::new(config_revision),
@@ -631,8 +632,8 @@ pub(crate) enum NotificationTarget {
 }
 
 impl DesktopState {
-    pub(crate) async fn voice_conversation_generation(&self) -> u64 {
-        self.bubbles.lock().await.conversation_generation()
+    pub(crate) async fn voice_conversation_generation(&self) -> Result<u64, String> {
+        bubbles::conversation_generation(self).await
     }
 }
 

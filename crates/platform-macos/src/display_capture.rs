@@ -504,6 +504,8 @@ fn capture_application_with_screenshot_kit(
                     return;
                 }
             };
+            // Keep the existing shared ownership contract for framework-retained callbacks.
+            #[allow(clippy::arc_with_non_send_sync)]
             let state = Arc::new(Mutex::new(SckApplicationCaptureSequence {
                 _content: content,
                 requests,
@@ -677,6 +679,7 @@ fn application_capture_completion(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_capture(
     content: *mut SCShareableContent,
     error: *mut NSError,

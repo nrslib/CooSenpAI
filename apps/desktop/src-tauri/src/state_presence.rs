@@ -210,7 +210,9 @@ impl DesktopState {
         date: chrono::NaiveDate,
     ) -> anyhow::Result<crate::presence_presenter::FactCandidateLoaded> {
         let config = self.runtime_config();
-        let generation = self.bubbles.lock().await.conversation_generation();
+        let generation = crate::bubbles::conversation_generation(self)
+            .await
+            .map_err(anyhow::Error::msg)?;
         let mut result = crate::presence_presenter::FactCandidateLoaded {
             candidate: None,
             conversation_generation: generation,

@@ -17,8 +17,6 @@ struct SpeechTranscription {
 enum SpeechAnalysisEvent {
     case ready
     case result(SpeechTranscription)
-    case partialTranscript(String)
-    case completedTranscript(String)
     case finalizedThrough(CMTime)
     case completed
     case failed(SpeechAnalysisFailure)

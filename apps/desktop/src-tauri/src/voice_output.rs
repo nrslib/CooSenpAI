@@ -136,7 +136,10 @@ impl VoiceOutputController {
             || !state.is_runtime_active()
             || state.runtime_config().voice_output != request.config
             || state.speech_resource_phase() != crate::command_guard::ResourcePhase::Idle
-            || state.voice_conversation_generation().await != request.generation
+            || !matches!(
+                state.voice_conversation_generation().await,
+                Ok(generation) if generation == request.generation
+            )
         {
             return;
         }

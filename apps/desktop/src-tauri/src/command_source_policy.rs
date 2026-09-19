@@ -9,6 +9,7 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
                 | DesktopCommand::TutorialAdvance
                 | DesktopCommand::BubbleFastForward
                 | DesktopCommand::BubbleNavigate
+                | DesktopCommand::UtteranceFeedback
                 | DesktopCommand::MemoryConfirm
                 | DesktopCommand::MemoryReject
                 | DesktopCommand::ConversationReset
@@ -123,6 +124,7 @@ fn main_allows(command: DesktopCommand) -> bool {
         | DesktopCommand::TutorialInteract
         | DesktopCommand::BubbleFastForward
         | DesktopCommand::BubbleNavigate
+        | DesktopCommand::UtteranceFeedback
         | DesktopCommand::TutorialResume
         | DesktopCommand::WatchPowerSuspend
         | DesktopCommand::WatchPowerResume

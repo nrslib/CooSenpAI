@@ -39,8 +39,6 @@ export function NotificationSettings({ form, snapshot, update, errorFor }: Setti
     <fieldset id="settings-notification-detail"><legend>{t("settings.detail.heading")}</legend>
       <SelectInput label={t("settings.notifications.priority")} path="notification.minPriority" value={form.minPriority} options={["info", "warning", "critical"]} update={(value) => update("minPriority", value as FormState["minPriority"])} />
       <NumberInput label={t("settings.notifications.duration")} path="notification.bubbleDurationMs" value={form.bubbleDurationMs} update={(value) => update("bubbleDurationMs", value)} errorFor={errorFor} />
-      <NumberInput label={t("settings.notifications.maxStack")} path="bubble.maxStack" value={form.bubbleMaxStack} update={(value) => update("bubbleMaxStack", value)} errorFor={errorFor} />
-      <BooleanInput label={t("settings.notifications.showPriority")} path="notification.showPriority" value={form.showPriority} update={(value) => update("showPriority", value)} />
     </fieldset>
   </>;
 }

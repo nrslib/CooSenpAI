@@ -98,6 +98,8 @@ impl ApprovalReviewer for Reviewer {
                     session: SessionRequest::Isolated,
                     model: Some("default".into()),
                     effort: None,
+                    allow_session_model_change: false,
+                    stall_timeout: Duration::from_secs(90),
                     timeout: Duration::from_secs(90),
                     tutorial_response_key: None,
                 },

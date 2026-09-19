@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::mem;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -62,6 +63,7 @@ mod user_retry;
 use prompt_data::{build_observation_prompt_data, observation_value, observation_values};
 pub(crate) use support::silent_response;
 pub(crate) use support::CompanionCallOutcome;
+pub(crate) use support::ProactiveCommitOutcome;
 pub use support::{
     conversation_entry, conversation_store, conversation_store_at, DeliveryOwnership,
 };
@@ -169,6 +171,8 @@ impl CompanionError {
         }
     }
 }
+
+type ProactiveCommitCandidateResult = Result<Option<ProactiveCommitOutcome>, CompanionError>;
 
 pub struct CompanionAgent {
     provider: Arc<dyn ProviderClient>,
@@ -484,6 +488,12 @@ impl CompanionAgent {
         self
     }
 
+    pub(crate) fn judge_feedback_store_path(&self) -> Option<PathBuf> {
+        self.storage
+            .as_ref()
+            .map(|storage| storage.state_directory.join("judge-feedback.json"))
+    }
+
     fn observation_log_directory(&self) -> Result<Option<String>, CompanionError> {
         let Some(storage) = self.storage.as_ref() else {
             return Ok(None);
@@ -628,6 +638,7 @@ impl CompanionAgent {
                 remark_created: false,
                 counted_emit: false,
                 usage: None,
+                call_id: None,
             });
         }
         // The eye records facts; the companion alone decides whether to speak.
@@ -646,6 +657,7 @@ impl CompanionAgent {
                 remark_created: false,
                 counted_emit: false,
                 usage: None,
+                call_id: None,
             });
         }
         let user_pending = self.has_pending_user_inputs()?;
@@ -663,6 +675,7 @@ impl CompanionAgent {
                 remark_created: false,
                 counted_emit: false,
                 usage: None,
+                call_id: None,
             });
         }
         if quiet_deadline.is_some() {
@@ -682,6 +695,7 @@ impl CompanionAgent {
                     remark_created: false,
                     counted_emit: false,
                     usage: None,
+                    call_id: None,
                 });
             }
             observations = critical;
@@ -710,7 +724,7 @@ impl CompanionAgent {
         let observation_frame_paths = self.observation_frame_paths(&observations)?;
         let image_paths = self.observation_image_paths(&observations, &observation_frame_paths);
         let (image_paths, attachment_ocr_text) = match self
-            .prepare_image_attachments(image_paths, cancellation.child_token())
+            .prepare_image_attachments(image_paths, cancellation.child_token(), true)
             .await
         {
             Ok(result) => result,
@@ -756,22 +770,15 @@ impl CompanionAgent {
         &mut self,
         candidate: CompanionCallOutcome,
     ) -> Result<CompanionResponse, CompanionError> {
-        self.commit_proactive_candidate_with_consumed(candidate)
-            .map(|(response, _)| response)
-    }
-
-    pub(crate) fn commit_proactive_candidate_with_consumed(
-        &mut self,
-        candidate: CompanionCallOutcome,
-    ) -> Result<(CompanionResponse, Vec<String>), CompanionError> {
         self.commit_proactive_candidate_with_turn_id(candidate, &Uuid::new_v4().to_string())
+            .map(|outcome| outcome.response)
     }
 
     fn commit_proactive_candidate_with_turn_id(
         &mut self,
         mut candidate: CompanionCallOutcome,
         turn_id: &str,
-    ) -> Result<(CompanionResponse, Vec<String>), CompanionError> {
+    ) -> Result<ProactiveCommitOutcome, CompanionError> {
         let (remark_created, counted_emit) =
             self.persist_proactive_response(&mut candidate.response, &candidate.observations)?;
         self.commit_session_summary(self.pending_session_summary.clone())?;
@@ -800,6 +807,15 @@ impl CompanionAgent {
                 "proactive-no-emit",
             )?;
         }
+        let utterance_observation_ids = if remark_created {
+            candidate
+                .observations
+                .iter()
+                .map(|observation| observation.id().to_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut consumed_ids = candidate
             .consumed_observations
             .iter()
@@ -815,14 +831,19 @@ impl CompanionAgent {
         }
         candidate.remark_created = remark_created;
         candidate.counted_emit = counted_emit;
-        Ok((candidate.response, consumed_ids.into_iter().collect()))
+        Ok(ProactiveCommitOutcome {
+            response: candidate.response,
+            consumed_ids: consumed_ids.into_iter().collect(),
+            call_id: candidate.call_id,
+            utterance_observation_ids,
+        })
     }
 
     pub(crate) fn commit_proactive_candidate_if_current(
         &mut self,
         candidate: CompanionCallOutcome,
         expected_user_epoch: u64,
-    ) -> Result<Option<(CompanionResponse, Vec<String>)>, CompanionError> {
+    ) -> ProactiveCommitCandidateResult {
         let turn_id = Uuid::new_v4().to_string();
         let mut target_ids = Vec::new();
         for observation in candidate
@@ -836,14 +857,19 @@ impl CompanionAgent {
         }
         // 重複除外や保留で対象がなくなった場合、確定する観察はない。
         if target_ids.is_empty() {
-            return Ok(Some((candidate.response, Vec::new())));
+            return Ok(Some(ProactiveCommitOutcome {
+                call_id: candidate.call_id.clone(),
+                response: candidate.response,
+                consumed_ids: Vec::new(),
+                utterance_observation_ids: Vec::new(),
+            }));
         }
         if !self.reserve_proactive_commit(expected_user_epoch, &turn_id, &target_ids)? {
             return Ok(None);
         }
         let Some(storage) = self.storage.clone() else {
             return self
-                .commit_proactive_candidate_with_consumed(candidate)
+                .commit_proactive_candidate_with_turn_id(candidate, &Uuid::new_v4().to_string())
                 .map(Some);
         };
         if let Err(error) = storage.mark_turn_commit_persisting(&turn_id) {
@@ -901,13 +927,38 @@ impl CompanionAgent {
         let latest_user = self
             .conversation
             .iter()
-            .filter(|entry| entry.role == ConversationRole::User)
+            .filter(|entry| entry.is_normal_user_input())
             .filter_map(|entry| chrono::DateTime::parse_from_rfc3339(&entry.created_at).ok())
             .map(|created_at| created_at.with_timezone(&chrono::Utc))
             .chain(self.latest_user_activity_at)
             .max()?;
         let deadline = latest_user + quiet;
         (deadline > self.clock.now()).then_some(deadline)
+    }
+
+    pub(super) fn latest_normal_user_conversation_at(
+        &self,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.conversation
+            .iter()
+            .filter(|entry| entry.is_normal_user_input())
+            .filter_map(|entry| chrono::DateTime::parse_from_rfc3339(&entry.created_at).ok())
+            .map(|created_at| created_at.with_timezone(&chrono::Utc))
+            .max()
+    }
+
+    pub(super) fn proactive_conversation_is_active(&self) -> bool {
+        let Some(latest_user) = self
+            .latest_normal_user_conversation_at()
+            .into_iter()
+            .chain(self.latest_user_activity_at)
+            .max()
+        else {
+            return false;
+        };
+        let idle_ms = i64::try_from(self.config.proactive_idle_ms).unwrap_or(i64::MAX);
+        self.clock.now().signed_duration_since(latest_user)
+            <= chrono::Duration::milliseconds(idle_ms)
     }
 
     fn observation_frame_paths(
@@ -972,6 +1023,7 @@ impl CompanionAgent {
                     remark_created: false,
                     counted_emit: false,
                     usage: None,
+                    call_id: None,
                 });
             }
         }
@@ -1030,6 +1082,7 @@ impl CompanionAgent {
             remark_created: false,
             counted_emit: false,
             usage: provider_outcome.usage,
+            call_id: Some(provider_outcome.call_id),
         })
     }
 
@@ -1128,12 +1181,21 @@ impl CompanionAgent {
             .map_or(SessionRequest::New, SessionRequest::Resume);
         let mode = session_mode(&session);
         let started = Instant::now();
-        self.log_call_start(mode, CompanionCallKind::SessionSummary, &[])?;
+        let (model, effort) = self.resolved_model_and_effort(false);
+        let model = model.to_owned();
+        let effort = effort.to_owned();
+        let selected_model = model.clone();
+        self.log_call_start(
+            mode,
+            CompanionCallKind::SessionSummary,
+            &model,
+            &effort,
+            self.model_selection_reason(false),
+            &[],
+        )?;
         let provider = self.provider.clone();
         let cancellation_must_complete = provider.cancellation_must_complete();
         let system_prompt = self.system_prompt();
-        let model = self.config.model.clone();
-        let effort = self.config.effort.clone();
         let timeout = Duration::from_millis(self.config.timeout_ms);
         let summary_prompt = prompt.to_owned();
         let provider_cancellation = cancellation.clone();
@@ -1152,8 +1214,10 @@ impl CompanionAgent {
                 session: provider_session,
                 model: Some(model),
                 effort: Some(effort),
+                stall_timeout: Duration::from_millis(self.config.stall_timeout_ms),
                 timeout,
                 tutorial_response_key: None,
+                allow_session_model_change: true,
             },
             provider_cancellation,
         ));
@@ -1195,7 +1259,7 @@ impl CompanionAgent {
                 return Err(error);
             }
         };
-        if let Err(error) = self.accept_session(&session, result.session) {
+        if let Err(error) = self.accept_session(&session, result.session, Some(&selected_model)) {
             self.log_session_rejection(mode, &error);
             return Err(error);
         }

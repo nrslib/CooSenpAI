@@ -1,9 +1,10 @@
 use super::defaults::default_observer_daily_limit;
 use super::{
     issue, AgentConfig, AppConfig, AudioConfig, BatteryConfig, BubbleConfig, ChatConfig,
-    CompanionConfig, Config, ConfigError, ConfigValidationIssue, DebugConfig, MemoryConfig,
-    NotificationConfig, ObserverConfig, ObserverProfile, OcrGateConfig, PopupConfig,
-    RetentionConfig, SpeechConfig, TriggerConfig, UiConfig, VoiceOutputConfig, WatchConfig,
+    CompanionConfig, Config, ConfigError, ConfigValidationIssue, DebugConfig, JudgeComposition,
+    JudgeConfig, JudgeModuleConfig, MemoryConfig, NotificationConfig, ObserverConfig,
+    ObserverProfile, OcrGateConfig, PopupConfig, RetentionConfig, SpeechConfig, TriggerConfig,
+    UiConfig, VoiceOutputConfig, WatchConfig,
 };
 #[path = "config_parse_helpers.rs"]
 mod helpers;
@@ -18,17 +19,142 @@ mod presence;
 #[path = "config_parse_watch_apps.rs"]
 mod watch_apps;
 use self::helpers::{
-    app_window_limit, boolean, effort, enum_string, executable, frames_per_send, nonnegative_u32,
-    nonnegative_u64, optional_nonnegative_u32, parse_audio, parse_chat, parse_debug, parse_speech,
-    parse_ui, parse_voice_output, persona, positive_number, positive_u32, positive_u64,
-    positive_usize, provider, string, unknown_keys,
+    app_window_limit, boolean, effort, effort_or_empty, enum_string, executable, frames_per_send,
+    nonnegative_u32, nonnegative_u64, optional_nonnegative_u32, parse_audio, parse_chat,
+    parse_debug, parse_speech, parse_ui, parse_voice_output, persona, positive_number,
+    positive_u32, positive_u64, positive_usize, provider, string, string_or_empty, unknown_keys,
 };
 use keymap::parse_keymap;
 use memory::parse_memory;
 use popup::parse_popup;
 use presence::{parse_app, parse_reminders, review_time};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use watch_apps::parse_watch_apps;
+
+/// 旧形式のファイルを、現行の正規形式へ変換する。
+///
+/// この関数はファイル読み込みからだけ呼び出す。CLI や IPC の入力は
+/// `parse_config` を直接通るため、廃止・統合前のキーを受理しない。
+pub(super) fn normalize_legacy_file(mut value: Value) -> (Value, Vec<ConfigValidationIssue>) {
+    let mut issues = Vec::new();
+    let Some(root) = value.as_object_mut() else {
+        return (value, issues);
+    };
+
+    let send_interval = root
+        .get_mut("watch")
+        .and_then(Value::as_object_mut)
+        .and_then(|watch| watch.remove("sendIntervalMs"))
+        .map(|value| legacy_positive_u64(value, "watch.sendIntervalMs", &mut issues));
+
+    if let Some(notification) = root.get_mut("notification").and_then(Value::as_object_mut) {
+        notification.remove("showPriority");
+    }
+    if let Some(bubble) = root.get_mut("bubble").and_then(Value::as_object_mut) {
+        bubble.remove("alwaysShow");
+    }
+
+    let Some(observer) = root.get_mut("observer") else {
+        if let Some(interval) = send_interval {
+            root.insert(
+                "observer".to_owned(),
+                json!({"vision": {"intervalMs": interval}}),
+            );
+        }
+        return (value, issues);
+    };
+    let Some(observer) = observer.as_object_mut() else {
+        return (value, issues);
+    };
+
+    if observer.contains_key("vision") || observer.contains_key("hearing") {
+        if let Some(vision) = observer.get_mut("vision").and_then(Value::as_object_mut) {
+            normalize_legacy_profile(vision, "observer.vision", &mut issues);
+        }
+        if let Some(hearing) = observer.get_mut("hearing").and_then(Value::as_object_mut) {
+            normalize_legacy_profile(hearing, "observer.hearing", &mut issues);
+        }
+        if let Some(interval) = send_interval {
+            if observer.get("vision").is_none() {
+                observer.insert("vision".to_owned(), json!({"intervalMs": interval}));
+            }
+        }
+    } else {
+        normalize_legacy_profile(observer, "observer", &mut issues);
+        if observer.get("intervalMs").is_none() {
+            if let Some(interval) = send_interval {
+                observer.insert("intervalMs".to_owned(), Value::from(interval));
+            }
+        }
+    }
+
+    (value, issues)
+}
+
+fn normalize_legacy_profile(
+    profile: &mut Map<String, Value>,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) {
+    let old_chars = profile.remove("textExcerptMaxChars");
+    let old_count = profile.remove("textExcerptMaxCount");
+    if old_chars.is_none() && old_count.is_none() {
+        return;
+    }
+
+    let chars = old_chars
+        .map(|value| legacy_positive_usize(value, &format!("{path}.textExcerptMaxChars"), issues))
+        .unwrap_or(600);
+    let count = old_count
+        .map(|value| legacy_positive_usize(value, &format!("{path}.textExcerptMaxCount"), issues))
+        .unwrap_or(6);
+    let legacy_total = chars.saturating_mul(count);
+    match profile.get_mut("textTotalMaxChars") {
+        None => {
+            profile.insert("textTotalMaxChars".to_owned(), Value::from(legacy_total));
+        }
+        Some(value) => {
+            if let Some(total) = positive_usize_value(value) {
+                *value = Value::from(total.min(legacy_total));
+            }
+        }
+    }
+}
+
+fn legacy_positive_u64(value: Value, path: &str, issues: &mut Vec<ConfigValidationIssue>) -> u64 {
+    match value.as_u64() {
+        Some(value) if value > 0 => value,
+        _ => {
+            issues.push(issue(path, "正の整数で指定してください。"));
+            60_000
+        }
+    }
+}
+
+fn legacy_positive_usize(
+    value: Value,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> usize {
+    match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
+        Some(value) if value > 0 => value,
+        _ => {
+            issues.push(issue(path, "正の整数で指定してください。"));
+            if path.ends_with("textExcerptMaxCount") {
+                6
+            } else {
+                600
+            }
+        }
+    }
+}
+
+fn positive_usize_value(value: &Value) -> Option<usize> {
+    value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
 
 pub(super) fn parse_v3(value: Value) -> Result<Config, ConfigError> {
     let (config, issues) = parse_v3_with_issues(value);
@@ -61,6 +187,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
             "retention",
             "memory",
             "debug",
+            "judge",
             "audio",
             "speech",
             "voiceOutput",
@@ -92,24 +219,13 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         parse_watch,
     );
     let revision = nonnegative_u64(object, "revision", 0, "revision", &mut issues);
-    let mut observer = parse_section(
+    let observer = parse_section(
         object.get("observer"),
         ObserverConfig::default(),
         "observer",
         &mut issues,
         parse_observer,
     );
-    if object.get("observer").is_none_or(|observer| {
-        observer.get("vision").is_none() && observer.get("intervalMs").is_none()
-    }) {
-        observer.vision.interval_ms = watch.send_interval_ms;
-        if object
-            .get("observer")
-            .is_none_or(|observer| observer.get("hearing").is_none())
-        {
-            observer.hearing.interval_ms = observer.vision.interval_ms;
-        }
-    }
     let companion = parse_section(
         object.get("companion"),
         CompanionConfig::default(),
@@ -158,6 +274,13 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         "debug",
         &mut issues,
         parse_debug,
+    );
+    let judge = parse_section(
+        object.get("judge"),
+        JudgeConfig::default(),
+        "judge",
+        &mut issues,
+        parse_judge,
     );
     let audio = parse_section(
         object.get("audio"),
@@ -216,6 +339,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
             retention,
             memory,
             debug,
+            judge,
             audio,
             speech,
             voice_output,
@@ -228,6 +352,147 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
     )
 }
 
+fn parse_judge(
+    object: &Map<String, Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> JudgeConfig {
+    issues.extend(unknown_keys(
+        object,
+        &["follow", "composition", "veto", "modules", "timeoutMs"],
+        "judge",
+    ));
+    let composition = match enum_string(
+        object,
+        "composition",
+        "single",
+        &["single", "ensemble", "weighted"],
+        "judge.composition",
+        issues,
+    )
+    .as_str()
+    {
+        "ensemble" => JudgeComposition::Ensemble,
+        "weighted" => JudgeComposition::Weighted,
+        _ => JudgeComposition::Single,
+    };
+    JudgeConfig {
+        follow: boolean(object, "follow", false, "judge.follow", issues),
+        composition,
+        veto: boolean(object, "veto", false, "judge.veto", issues),
+        modules: parse_judge_modules(object.get("modules"), issues),
+        timeout_ms: positive_u64(object, "timeoutMs", 3_000, "judge.timeoutMs", issues),
+    }
+}
+
+fn parse_judge_modules(
+    value: Option<&Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> Vec<JudgeModuleConfig> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let Some(values) = value.as_array() else {
+        issues.push(issue("judge.modules", "配列で指定してください。"));
+        return Vec::new();
+    };
+    let mut modules = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let path = format!("judge.modules[{index}]");
+        let Some(object) = value.as_object() else {
+            issues.push(issue(&path, "オブジェクトで指定してください。"));
+            continue;
+        };
+        issues.extend(unknown_keys(
+            object,
+            &["executable", "arguments", "environment", "weight"],
+            &path,
+        ));
+        let executable = match object.get("executable") {
+            Some(Value::String(value))
+                if !value.is_empty() && std::path::Path::new(value).is_absolute() =>
+            {
+                Some(value.clone())
+            }
+            _ => {
+                issues.push(issue(
+                    format!("{path}.executable"),
+                    "実行ファイルは空でない絶対パスで指定してください。",
+                ));
+                None
+            }
+        };
+        let arguments = parse_judge_arguments(object.get("arguments"), &path, issues);
+        let environment = parse_judge_environment(object.get("environment"), &path, issues);
+        let weight = positive_number(object, "weight", 1.0, &format!("{path}.weight"), issues);
+        if let Some(executable) = executable {
+            modules.push(JudgeModuleConfig {
+                executable,
+                arguments,
+                environment,
+                weight,
+            });
+        }
+    }
+    modules
+}
+
+fn parse_judge_arguments(
+    value: Option<&Value>,
+    module_path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let path = format!("{module_path}.arguments");
+    let Some(values) = value.as_array() else {
+        issues.push(issue(path, "文字列の配列で指定してください。"));
+        return Vec::new();
+    };
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| match value {
+            Value::String(value) => Some(value.clone()),
+            _ => {
+                issues.push(issue(
+                    format!("{path}[{index}]"),
+                    "文字列で指定してください。",
+                ));
+                None
+            }
+        })
+        .collect()
+}
+
+fn parse_judge_environment(
+    value: Option<&Value>,
+    module_path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> std::collections::BTreeMap<String, String> {
+    let Some(value) = value else {
+        return std::collections::BTreeMap::new();
+    };
+    let path = format!("{module_path}.environment");
+    let Some(values) = value.as_object() else {
+        issues.push(issue(
+            path,
+            "文字列値を持つオブジェクトで指定してください。",
+        ));
+        return std::collections::BTreeMap::new();
+    };
+    let mut environment = std::collections::BTreeMap::new();
+    for (key, value) in values {
+        match value {
+            Value::String(value) => {
+                environment.insert(key.clone(), value.clone());
+            }
+            _ => issues.push(issue(&path, "環境変数の値は文字列で指定してください。")),
+        }
+    }
+    environment
+}
+
 fn parse_bubble(
     object: &Map<String, Value>,
     issues: &mut Vec<ConfigValidationIssue>,
@@ -235,7 +500,6 @@ fn parse_bubble(
     issues.extend(unknown_keys(
         object,
         &[
-            "alwaysShow",
             "keepLatest",
             "edgeRecall",
             "maxStack",
@@ -245,7 +509,6 @@ fn parse_bubble(
         "bubble",
     ));
     BubbleConfig {
-        always_show: boolean(object, "alwaysShow", false, "bubble.alwaysShow", issues),
         keep_latest: boolean(object, "keepLatest", false, "bubble.keepLatest", issues),
         edge_recall: boolean(object, "edgeRecall", true, "bubble.edgeRecall", issues),
         max_stack: positive_usize(object, "maxStack", 3, "bubble.maxStack", issues),
@@ -290,7 +553,6 @@ fn parse_watch(
     issues.extend(unknown_keys(
         object,
         &[
-            "sendIntervalMs",
             "sendDebounceMs",
             "framesPerSend",
             "appWindowLimit",
@@ -330,16 +592,9 @@ fn parse_watch(
     );
     let result = WatchConfig {
         enabled: boolean(object, "enabled", false, "watch.enabled", issues),
-        fullscreen: boolean(object, "fullscreen", true, "watch.fullscreen", issues),
+        fullscreen: boolean(object, "fullscreen", false, "watch.fullscreen", issues),
         focus_element: boolean(object, "focusElement", false, "watch.focusElement", issues),
         apps: parse_watch_apps(object.get("apps"), issues),
-        send_interval_ms: positive_u64(
-            object,
-            "sendIntervalMs",
-            60_000,
-            "watch.sendIntervalMs",
-            issues,
-        ),
         send_debounce_ms: positive_u64(
             object,
             "sendDebounceMs",
@@ -556,11 +811,10 @@ fn parse_observer_profile(
             "provider",
             "model",
             "effort",
+            "stallTimeoutMs",
             "timeoutMs",
             "dailyCallLimit",
             "executable",
-            "textExcerptMaxChars",
-            "textExcerptMaxCount",
             "textTotalMaxChars",
             "changesMaxCount",
             "intervalMs",
@@ -574,10 +828,17 @@ fn parse_observer_profile(
             model: string(object, "model", "default", &path_value("model"), issues),
             effort: effort(object, "effort", "default", &path_value("effort"), issues),
             executable: executable(object, "executable", &path_value("executable"), issues),
+            stall_timeout_ms: positive_u64(
+                object,
+                "stallTimeoutMs",
+                120_000,
+                &path_value("stallTimeoutMs"),
+                issues,
+            ),
             timeout_ms: positive_u64(
                 object,
                 "timeoutMs",
-                120_000,
+                600_000,
                 &path_value("timeoutMs"),
                 issues,
             ),
@@ -586,20 +847,6 @@ fn parse_observer_profile(
                 "dailyCallLimit",
                 default_observer_daily_limit(),
                 &path_value("dailyCallLimit"),
-                issues,
-            ),
-            text_excerpt_max_chars: positive_usize(
-                object,
-                "textExcerptMaxChars",
-                600,
-                &path_value("textExcerptMaxChars"),
-                issues,
-            ),
-            text_excerpt_max_count: positive_usize(
-                object,
-                "textExcerptMaxCount",
-                6,
-                &path_value("textExcerptMaxCount"),
                 issues,
             ),
             text_total_max_chars: positive_usize(
@@ -638,9 +885,12 @@ fn parse_companion(
             "provider",
             "model",
             "effort",
+            "proactiveModel",
+            "proactiveEffort",
             "persona",
             "displayName",
             "assertiveness",
+            "stallTimeoutMs",
             "timeoutMs",
             "dailyProactiveLimit",
             "executable",
@@ -654,11 +904,14 @@ fn parse_companion(
             "reminders",
             "quietReportEvery",
             "proactiveQuietMinutes",
+            "proactiveIdleMs",
         ],
         "companion",
     ));
     let provider = provider(object, "provider", "codex", "companion.provider", issues);
     let model = string(object, "model", "default", "companion.model", issues);
+    let proactive_model =
+        string_or_empty(object, "proactiveModel", "companion.proactiveModel", issues);
     CompanionConfig {
         emotions_enabled: boolean(
             object,
@@ -670,6 +923,13 @@ fn parse_companion(
         provider,
         model,
         effort: effort(object, "effort", "default", "companion.effort", issues),
+        proactive_model,
+        proactive_effort: effort_or_empty(
+            object,
+            "proactiveEffort",
+            "companion.proactiveEffort",
+            issues,
+        ),
         executable: executable(object, "executable", "companion.executable", issues),
         persona: persona(object, "persona", "coo-chan", "companion.persona", issues),
         display_name: parse_display_name(object, issues),
@@ -681,7 +941,20 @@ fn parse_companion(
             "companion.assertiveness",
             issues,
         ),
-        timeout_ms: positive_u64(object, "timeoutMs", 120_000, "companion.timeoutMs", issues),
+        stall_timeout_ms: positive_u64(
+            object,
+            "stallTimeoutMs",
+            120_000,
+            "companion.stallTimeoutMs",
+            issues,
+        ),
+        timeout_ms: positive_u64(
+            object,
+            "timeoutMs",
+            1_800_000,
+            "companion.timeoutMs",
+            issues,
+        ),
         daily_proactive_limit: optional_nonnegative_u32(
             object,
             "dailyProactiveLimit",
@@ -734,6 +1007,13 @@ fn parse_companion(
         reminders: parse_reminders(object.get("reminders"), issues),
         quiet_report_every: None,
         proactive_quiet_minutes: proactive_quiet_minutes(object, issues),
+        proactive_idle_ms: positive_u64(
+            object,
+            "proactiveIdleMs",
+            600_000,
+            "companion.proactiveIdleMs",
+            issues,
+        ),
     }
 }
 
@@ -744,7 +1024,7 @@ fn proactive_quiet_minutes(
     let value = positive_u64(
         object,
         "proactiveQuietMinutes",
-        3,
+        1,
         "companion.proactiveQuietMinutes",
         issues,
     );
@@ -753,7 +1033,7 @@ fn proactive_quiet_minutes(
             "companion.proactiveQuietMinutes",
             "1以上1440以下の整数で指定してください。",
         ));
-        3
+        1
     } else {
         value
     }
@@ -786,7 +1066,7 @@ fn parse_notification(
 ) -> NotificationConfig {
     issues.extend(unknown_keys(
         object,
-        &["mode", "minPriority", "bubbleDurationMs", "showPriority"],
+        &["mode", "minPriority", "bubbleDurationMs"],
         "notification",
     ));
     let mode = enum_string(
@@ -813,13 +1093,6 @@ fn parse_notification(
             "bubbleDurationMs",
             30_000,
             "notification.bubbleDurationMs",
-            issues,
-        ),
-        show_priority: boolean(
-            object,
-            "showPriority",
-            false,
-            "notification.showPriority",
             issues,
         ),
     }

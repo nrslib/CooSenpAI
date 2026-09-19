@@ -32,6 +32,7 @@ mod commands_onboarding;
 mod commands_persona;
 mod commands_provider_api_keys;
 mod commands_provider_models;
+mod commands_speaker;
 mod commands_speech;
 mod commands_targets;
 mod commands_ui;
@@ -78,6 +79,7 @@ mod update_format;
 mod update_install;
 mod update_system;
 mod update_transport;
+mod utterance_feedback;
 mod voice_output;
 mod watch;
 mod webview_event;
@@ -298,12 +300,10 @@ pub fn run() -> anyhow::Result<()> {
             commands::config_update,
             commands::model_popup_open,
             commands::model_popup_close,
-            commands::model_popup_snapshot,
             commands::model_popup_config_update,
             commands::model_popup_companion_model_catalog,
             commands::model_popup_opencode_models_reload,
             commands_details::details_open,
-            commands_details::details_snapshot,
             commands_details::details_dataflow_log,
             commands_details::details_dataflow_open_path,
             commands::companion_assertiveness_set,
@@ -369,6 +369,7 @@ pub fn run() -> anyhow::Result<()> {
             commands_speech::speech_start,
             commands_speech::speech_finish,
             commands_speech::speech_cancel,
+            commands_speaker::speaker_management,
             commands_speech::speech_popup_snapshot,
             commands_speech::speech_popup_send,
             commands_speech::speech_popup_edit,

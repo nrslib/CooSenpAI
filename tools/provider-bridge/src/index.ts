@@ -29,4 +29,7 @@ export type {
   ProviderImageAttachment,
   ProviderCompactSessionOptions,
   ProviderToolExecution,
+  EffortSelection,
+  StandardEffort,
 } from "./types.js";
+export { classifyEffort } from "./types.js";

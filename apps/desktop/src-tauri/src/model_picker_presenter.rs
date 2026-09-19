@@ -1,7 +1,7 @@
 use crate::commands::IpcResult;
 use crate::model_catalog::ModelCatalogView;
 use crate::snapshot::AppSnapshot;
-use crate::ui_events::{PresenterId, UiEffect, UiEvent, UiTask};
+use crate::ui_events::{UiEffect, UiEvent, UiTask};
 use coosenpai_core::config::Config;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -60,13 +60,42 @@ pub(crate) struct ModelPickerView {
     pub opencode_failed: bool,
     pub notice: bool,
     pub error: Option<String>,
+    pub language: String,
+    pub theme: String,
+    pub font: String,
+    pub avatar_color: Option<String>,
+    pub avatar_image_png: Option<Vec<u8>>,
+    pub companion_display_name: String,
 }
 
-#[derive(Default)]
+// snapshot からの描画投影。window の外観と companion の表示名だけを持ち、snapshot 自体は保持しない。
+#[derive(Clone, Debug, PartialEq)]
+struct Appearance {
+    language: String,
+    theme: String,
+    font: String,
+    avatar_color: Option<String>,
+    avatar_image_png: Option<Vec<u8>>,
+    companion_display_name: String,
+}
+impl Default for Appearance {
+    fn default() -> Self {
+        let config = Config::default();
+        Self {
+            language: config.ui.language,
+            theme: config.ui.theme,
+            font: config.ui.font,
+            avatar_color: config.ui.avatar_color,
+            avatar_image_png: None,
+            companion_display_name: config.companion.display_name,
+        }
+    }
+}
+
 pub(crate) struct ModelPickerPresenter {
     generation: u64,
     active: bool,
-    snapshot: Option<Arc<AppSnapshot>>,
+    input_disabled: bool,
     catalog: Option<ModelCatalogView>,
     confirmed: (String, String, String),
     draft: (String, String, String),
@@ -74,6 +103,25 @@ pub(crate) struct ModelPickerPresenter {
     reloading: bool,
     notice: bool,
     error: Option<String>,
+    appearance: Appearance,
+}
+
+impl Default for ModelPickerPresenter {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            active: false,
+            input_disabled: true,
+            catalog: None,
+            confirmed: Default::default(),
+            draft: Default::default(),
+            saving: false,
+            reloading: false,
+            notice: false,
+            error: None,
+            appearance: Default::default(),
+        }
+    }
 }
 
 impl ModelPickerPresenter {
@@ -97,19 +145,21 @@ impl ModelPickerPresenter {
         self.invalidate();
         self.active = true;
         self.catalog = Some(catalog);
-        self.observe(snapshot);
+        self.observe(&snapshot);
         self.draft = self.confirmed.clone();
         vec![self.render()]
     }
 
-    pub(crate) fn observe(&mut self, snapshot: Arc<AppSnapshot>) {
-        if self
-            .snapshot
-            .as_ref()
-            .is_some_and(|current| current.revision >= snapshot.revision)
-        {
-            return;
-        }
+    pub(crate) fn observe(&mut self, snapshot: &AppSnapshot) {
+        self.input_disabled = snapshot.onboarding.tutorial_active;
+        self.appearance = Appearance {
+            language: snapshot.config.ui.language.clone(),
+            theme: snapshot.config.ui.theme.clone(),
+            font: snapshot.config.ui.font.clone(),
+            avatar_color: snapshot.config.ui.avatar_color.clone(),
+            avatar_image_png: snapshot.avatar_image_png.clone(),
+            companion_display_name: snapshot.companion_display_name.clone(),
+        };
         let config = &snapshot.config.companion;
         let next = (
             config.provider.clone(),
@@ -120,20 +170,13 @@ impl ModelPickerPresenter {
             self.draft = next.clone();
         }
         self.confirmed = next;
-        self.snapshot = Some(snapshot);
     }
 
     pub(crate) fn handle(&mut self, event: ModelPickerEvent) -> Vec<UiEffect> {
         let mut effects = Vec::new();
         match event {
             ModelPickerEvent::Input(input) => {
-                if !self.active
-                    || self.saving
-                    || self
-                        .snapshot
-                        .as_ref()
-                        .is_none_or(|s| s.onboarding.tutorial_active)
-                {
+                if !self.active || self.saving || self.input_disabled {
                     return effects;
                 }
                 match input {
@@ -208,11 +251,7 @@ impl ModelPickerPresenter {
                 } else {
                     self.catalog = Some(catalog);
                 }
-                self.observe(snapshot.clone());
-                effects.push(UiEffect::RenderSnapshot {
-                    view: PresenterId::ModelPicker,
-                    snapshot,
-                });
+                self.observe(&snapshot);
             }
             ModelPickerEvent::Saved { generation, result } => {
                 if !self.active || generation != self.generation {
@@ -293,11 +332,11 @@ impl ModelPickerPresenter {
         }
         let efforts = provider
             .map(|p| {
-                p.model_efforts
-                    .get(&self.draft.1)
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or(&p.efforts)
-                    .clone()
+                crate::model_catalog::effort_candidates_for_model(
+                    &p.model_efforts,
+                    &self.draft.1,
+                    &p.efforts,
+                )
             })
             .unwrap_or_default();
         UiEffect::ModelPickerRender(Box::new(ModelPickerView {
@@ -307,11 +346,7 @@ impl ModelPickerPresenter {
             providers: ["codex", "claude", "opencode"].map(str::to_owned).to_vec(),
             models,
             efforts,
-            disabled: self.saving
-                || self
-                    .snapshot
-                    .as_ref()
-                    .is_none_or(|s| s.onboarding.tutorial_active),
+            disabled: self.saving || self.input_disabled,
             reloading: self.reloading,
             show_reload: self.draft.0 == "opencode",
             show_claude_help: self.draft.0 == "claude",
@@ -321,6 +356,12 @@ impl ModelPickerPresenter {
                 .is_some_and(|c| c.opencode_error.is_some()),
             notice: self.notice,
             error: self.error.clone(),
+            language: self.appearance.language.clone(),
+            theme: self.appearance.theme.clone(),
+            font: self.appearance.font.clone(),
+            avatar_color: self.appearance.avatar_color.clone(),
+            avatar_image_png: self.appearance.avatar_image_png.clone(),
+            companion_display_name: self.appearance.companion_display_name.clone(),
         }))
     }
 }

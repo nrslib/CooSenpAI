@@ -4,7 +4,8 @@ mod hearing_process;
 use async_trait::async_trait;
 use coosenpai_core::interactive_process::{InteractiveProcess, InteractiveProcessRequest};
 use coosenpai_core::ports::{
-    HearingCommand, HearingEvent, HearingPort, HearingSession, PortError, RuntimeLogger,
+    HearingCommand, HearingEvent, HearingPort, HearingSession, HearingStartOptions, PortError,
+    RuntimeLogger,
 };
 use coosenpai_core::state::AudioObservationSource;
 use hearing_process::{
@@ -49,6 +50,26 @@ impl HearingPort for MacHearing {
         debug_dump_dir: Option<&str>,
         cancellation: CancellationToken,
     ) -> Result<HearingSession, PortError> {
+        self.start_with_options(
+            locale,
+            input_device,
+            sources,
+            debug_dump_dir,
+            HearingStartOptions::default(),
+            cancellation,
+        )
+        .await
+    }
+
+    async fn start_with_options(
+        &self,
+        locale: &str,
+        input_device: &str,
+        sources: Vec<AudioObservationSource>,
+        debug_dump_dir: Option<&str>,
+        options: HearingStartOptions,
+        cancellation: CancellationToken,
+    ) -> Result<HearingSession, PortError> {
         if sources.is_empty() {
             return Err(PortError::Unavailable(
                 "聴覚観察の入力源が選択されていません".to_owned(),
@@ -62,7 +83,13 @@ impl HearingPort for MacHearing {
 
         let mut specs = Vec::with_capacity(sources.len());
         for source in sources {
-            let args = helper_arguments(locale, input_device, source, debug_dump_dir);
+            let args = helper_arguments_with_options(
+                locale,
+                input_device,
+                source,
+                debug_dump_dir,
+                &options,
+            );
             let started = std::time::Instant::now();
             let _ = self.logger.write(
                 "INFO",
@@ -118,6 +145,7 @@ impl HearingPort for MacHearing {
             event_tx,
             cancel_requested.clone(),
             cancellation,
+            options.speaker_identification_enabled,
             #[cfg(test)]
             process_guard,
         ));
@@ -264,6 +292,7 @@ async fn run_session(
     events: mpsc::Sender<HearingEventResult>,
     cancel_requested: CancellationToken,
     parent_cancellation: CancellationToken,
+    speaker_identification_enabled: bool,
     #[cfg(test)] _process_guard: crate::test_support::HelperProcessLock,
 ) {
     let mut terminal_event = match events.clone().reserve_owned().await {
@@ -336,6 +365,29 @@ async fn run_session(
                         }
                         match event {
                         event @ HearingEvent::Ready { .. } => {
+                            if source_event.source == AudioObservationSource::Speaker
+                                && speaker_identification_enabled
+                                && matches!(
+                                    &event,
+                                    HearingEvent::Ready {
+                                        speaker_identification: false,
+                                        ..
+                                    }
+                                )
+                                && !send_hearing_event(
+                                    &events,
+                                    Ok(HearingEvent::Warning {
+                                        kind: "speaker-identification-unavailable".to_owned(),
+                                        message: "話者識別を利用できないため、話者 ID なしで文字起こしを続けます".to_owned(),
+                                    }),
+                                    &cancel_requested,
+                                    &parent_cancellation,
+                                )
+                                .await
+                            {
+                                let _ = stop_workers(&worker_cancellation, workers).await;
+                                return;
+                            }
                             let restored = aggregation.status_mut(source_event.source)
                                 .is_some_and(|status| std::mem::take(&mut status.system_audio_failed));
                             aggregation.mark_ready(source_event.source, event);
@@ -354,6 +406,24 @@ async fn run_session(
                             if !emit_ready_if_possible(
                                 &mut aggregation,
                                 &events,
+                                &cancel_requested,
+                                &parent_cancellation,
+                            )
+                            .await
+                            {
+                                if cancel_requested.is_cancelled()
+                                    || parent_cancellation.is_cancelled()
+                                {
+                                    continue;
+                                }
+                                let _ = stop_workers(&worker_cancellation, workers).await;
+                                return;
+                            }
+                        }
+                        event @ HearingEvent::SpeakerIdentification { .. } => {
+                            if !send_hearing_event(
+                                &events,
+                                Ok(event),
                                 &cancel_requested,
                                 &parent_cancellation,
                             )
@@ -552,11 +622,28 @@ async fn stop_workers(
     result
 }
 
+#[cfg(test)]
 fn helper_arguments(
     locale: &str,
     input_device: &str,
     source: AudioObservationSource,
     debug_dump_dir: Option<&str>,
+) -> Vec<String> {
+    helper_arguments_with_options(
+        locale,
+        input_device,
+        source,
+        debug_dump_dir,
+        &HearingStartOptions::default(),
+    )
+}
+
+fn helper_arguments_with_options(
+    locale: &str,
+    input_device: &str,
+    source: AudioObservationSource,
+    debug_dump_dir: Option<&str>,
+    options: &HearingStartOptions,
 ) -> Vec<String> {
     let mut args = vec![
         "--locale".to_owned(),
@@ -569,6 +656,17 @@ fn helper_arguments(
     if let Some(directory) = debug_dump_dir {
         args.push("--debug-dump-appended".to_owned());
         args.push(directory.to_owned());
+    }
+    if source == AudioObservationSource::Speaker && options.speaker_identification_enabled {
+        args.push("--speaker-identification".to_owned());
+        if let Some(model) = &options.speaker_model {
+            args.push("--speaker-model".to_owned());
+            args.push(model.to_string_lossy().into_owned());
+        }
+        if let Some(ledger) = &options.speaker_ledger {
+            args.push("--speaker-ledger".to_owned());
+            args.push(ledger.to_string_lossy().into_owned());
+        }
     }
     args
 }

@@ -13,20 +13,28 @@ fn main() -> io::Result<()> {
         .ok_or_else(|| io::Error::other("could not locate repository root"))?;
     let facets_root = repository_root.join("builtins/prompts/facets");
 
-    let instructions = read_facet_directory(&facets_root.join("instructions"), &["observer.md"])?;
+    let instructions = read_facet_directory(
+        &facets_root.join("instructions"),
+        &["observer.md", "observer-audio.md"],
+    )?;
     let observer_instructions = read_facet_file(&facets_root.join("instructions/observer.md"))?;
+    let observer_audio_instructions =
+        read_facet_file(&facets_root.join("instructions/observer-audio.md"))?;
     let observer_output_contracts =
         read_facet_file(&facets_root.join("output-contracts/observer.md"))?;
     let companion_output_contracts =
         read_facet_file(&facets_root.join("output-contracts/companion.md"))?;
     let knowledge = read_facet_directory(&facets_root.join("knowledge"), &[])?;
+    let observer_knowledge = read_facet_file(&facets_root.join("knowledge/observation.md"))?;
     let policy = read_facet_directory(&facets_root.join("policies"), &[])?;
     let output = format!(
         "pub const BUILTIN_INSTRUCTIONS: &str = {instructions:?};\n\
 pub const BUILTIN_OBSERVER_INSTRUCTIONS: &str = {observer_instructions:?};\n\
+pub const BUILTIN_OBSERVER_AUDIO_INSTRUCTIONS: &str = {observer_audio_instructions:?};\n\
 pub const BUILTIN_OBSERVER_OUTPUT_CONTRACTS: &str = {observer_output_contracts:?};\n\
 pub const BUILTIN_COMPANION_OUTPUT_CONTRACTS: &str = {companion_output_contracts:?};\n\
 pub const BUILTIN_KNOWLEDGE: &str = {knowledge:?};\n\
+pub const BUILTIN_OBSERVER_KNOWLEDGE: &str = {observer_knowledge:?};\n\
 pub const BUILTIN_POLICY: &str = {policy:?};\n"
     );
 

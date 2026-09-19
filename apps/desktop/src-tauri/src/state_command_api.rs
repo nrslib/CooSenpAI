@@ -249,7 +249,7 @@ impl DesktopState {
             Ok(config)
         })
         .await?;
-        Ok(snapshot)
+        Ok(self.snapshot().await)
     }
 
     pub(crate) async fn command_suspend_for_power(&self, _permit: &CommandContext) {

@@ -32,7 +32,9 @@ pub async fn bubble_interact(
     let locale = Locale::from_config(&state.runtime_config().ui.language);
     validate_id_for_locale(&payload.id, locale)?;
     validate_id_for_locale(&payload.action, locale)?;
-    if payload.value.as_ref().is_some_and(|value| value.is_empty()) {
+    if payload.value.as_ref().is_some_and(|value| value.is_empty())
+        && !crate::utterance_feedback::is_optional_text_action(&payload.action)
+    {
         return Ok(IpcResult::failure(text(
             TextKey::SetupSelectionEmpty,
             locale,

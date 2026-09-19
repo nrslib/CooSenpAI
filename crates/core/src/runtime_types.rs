@@ -35,6 +35,8 @@ pub struct RuntimeSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_companion_decision: Option<CompanionDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_judge_decision: Option<crate::judge::JudgeDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_user_interruption: Option<UserInterruption>,
     pub latest_companion_thought_generation: Option<u64>,
     pub provider_usage: ProviderUsage,
@@ -63,12 +65,20 @@ pub struct CompanionDecision {
     pub thought: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observation_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// 発話を実際に生成した観測の ID。消費済み観測を示す observation_ids とは別に保持し、
+    /// 発言評価が発言と LLM 判断を対応付けるときの正本とする。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub utterance_observation_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeLastError {
     pub kind: RuntimeErrorKind,
+    #[serde(default)]
+    pub source: RuntimeErrorSource,
     pub occurred_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -78,9 +88,43 @@ pub struct RuntimeLastError {
     pub attachment_ocr: Option<RuntimeAttachmentOcrFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_response: Option<RuntimeUserResponseFailure>,
+    /// 応答失敗を所有する、まだ terminal ではない利用者入力。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_id: Option<String>,
 }
 
 impl RuntimeLastError {
+    pub fn is_user_response_error(&self) -> bool {
+        self.attachment_ocr.is_none()
+            && (self.source == RuntimeErrorSource::UserResponse
+                || self.user_response.is_some()
+                || self.user_input_id.is_some())
+    }
+
+    pub fn is_conversation_user_error(&self) -> bool {
+        self.is_user_response_error()
+            && matches!(
+                self.kind,
+                RuntimeErrorKind::Provider | RuntimeErrorKind::ProviderTimeout
+            )
+    }
+
+    pub fn is_attachment_error(&self) -> bool {
+        self.attachment_ocr.is_some() || self.source == RuntimeErrorSource::AttachmentOcr
+    }
+
+    pub fn belongs_to_user_input(&self, input_id: &str) -> bool {
+        self.user_input_id.as_deref() == Some(input_id)
+            || self
+                .user_response
+                .as_ref()
+                .is_some_and(|failure| failure.input_id == input_id)
+            || self
+                .attachment_ocr
+                .as_ref()
+                .is_some_and(|failure| failure.input_id == input_id)
+    }
+
     pub fn terminal_user_input_id(&self) -> Option<&str> {
         self.attachment_ocr
             .as_ref()
@@ -92,6 +136,18 @@ impl RuntimeLastError {
                     .map(|failure| failure.input_id.as_str())
             })
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeErrorSource {
+    #[default]
+    Runtime,
+    UserResponse,
+    AttachmentOcr,
+    Observer,
+    Companion,
+    Config,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +171,7 @@ pub struct RuntimeAttachmentOcrFailure {
 pub enum RuntimeErrorKind {
     Config,
     Provider,
+    ProviderTimeout,
     Persistence,
     Mailbox,
     Outbox,
@@ -127,6 +184,7 @@ impl RuntimeErrorKind {
         match self {
             Self::Config => "config",
             Self::Provider => "provider",
+            Self::ProviderTimeout => "provider-timeout",
             Self::Persistence => "persistence",
             Self::Mailbox => "mailbox",
             Self::Outbox => "outbox",

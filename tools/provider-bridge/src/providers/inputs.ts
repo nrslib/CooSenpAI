@@ -22,7 +22,11 @@ function strictObjectSchema(value: unknown): unknown {
   const mapped = Object.fromEntries(
     Object.entries(value).map(([key, item]) => [key, strictObjectSchema(item)]),
   );
-  if (mapped.type === "object" && mapped.properties !== null && typeof mapped.properties === "object") {
+  if (
+    (mapped.type === "object" || (Array.isArray(mapped.type) && mapped.type.includes("object")))
+    && mapped.properties !== null
+    && typeof mapped.properties === "object"
+  ) {
     mapped.required = Object.keys(mapped.properties);
   }
   return mapped;

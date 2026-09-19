@@ -402,6 +402,7 @@ impl CommandFirewall {
             | DesktopCommand::BubbleDismiss
             | DesktopCommand::BubbleFastForward
             | DesktopCommand::BubbleNavigate
+            | DesktopCommand::UtteranceFeedback
             | DesktopCommand::SettingsAppearancePreview
             | DesktopCommand::TutorialAdvance
             | DesktopCommand::TutorialSettingsPresented

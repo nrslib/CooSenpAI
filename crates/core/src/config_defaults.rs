@@ -3,9 +3,6 @@ use super::PENDING_DELIVERY_ITEM_MAX_BYTES;
 pub(super) fn default_true() -> bool {
     true
 }
-pub(super) fn default_send_interval() -> u64 {
-    60_000
-}
 pub(super) fn default_send_debounce() -> u64 {
     2_000
 }
@@ -54,20 +51,26 @@ pub(super) fn default_model() -> String {
 pub(super) fn default_effort() -> String {
     "default".to_owned()
 }
-pub(super) fn default_agent_timeout() -> u64 {
+pub(super) fn default_stall_timeout() -> u64 {
     120_000
+}
+pub(super) fn default_observer_timeout() -> u64 {
+    600_000
+}
+pub(super) fn default_companion_timeout() -> u64 {
+    1_800_000
+}
+pub(super) fn default_judge_timeout() -> u64 {
+    3_000
+}
+pub(super) fn default_judge_weight() -> f64 {
+    1.0
 }
 pub(super) fn default_observer_interval() -> u64 {
     60_000
 }
 pub(super) fn default_observer_daily_limit() -> u32 {
-    1_000
-}
-pub(super) fn default_excerpt_max_chars() -> usize {
-    600
-}
-pub(super) fn default_excerpt_count() -> usize {
-    6
+    super::DEFAULT_OBSERVER_DAILY_CALL_LIMIT
 }
 pub(super) fn default_total_excerpt_chars() -> usize {
     2_000
@@ -194,6 +197,9 @@ pub(super) fn default_review_time() -> String {
 }
 pub(super) fn default_proactive_quiet_minutes() -> u64 {
     1
+}
+pub(super) fn default_proactive_idle_ms() -> u64 {
+    600_000
 }
 pub(super) fn default_notification_mode() -> String {
     "bubble".to_owned()

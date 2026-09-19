@@ -109,13 +109,26 @@ pub(crate) struct AppView {
     pub audio_changing: bool,
     pub tutorial: Option<crate::tutorial_ui::TutorialUi>,
 }
+// 配信専用の描画フレーム。snapshot は観測値の投影で、Presenter は保持しない。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppFrame {
+    #[serde(flatten)]
+    pub view: AppView,
+    pub snapshot: Option<AppSnapshot>,
+}
+#[derive(Clone, Copy, Default)]
+struct QueuedToggle {
+    target: bool,
+    base_config_revision: u64,
+}
 #[derive(Default)]
 struct ToggleIntent {
-    desired: Option<bool>,
+    desired: Option<QueuedToggle>,
     running: bool,
+    running_target: Option<bool>,
 }
 pub(crate) struct AppPresenter {
-    snapshot: Option<Arc<AppSnapshot>>,
     view: AppView,
     status: StatusPresenter,
     pending_focus: bool,
@@ -131,7 +144,6 @@ pub(crate) struct AppPresenter {
 impl Default for AppPresenter {
     fn default() -> Self {
         Self {
-            snapshot: None,
             view: AppView {
                 screen: "loading",
                 loading: false,
@@ -163,23 +175,15 @@ impl Default for AppPresenter {
     }
 }
 impl AppPresenter {
-    pub(crate) fn observe(&mut self, snapshot: Arc<AppSnapshot>) -> Vec<UiEffect> {
-        if self
-            .snapshot
-            .as_ref()
-            .is_some_and(|s| s.revision >= snapshot.revision)
-        {
-            return vec![];
-        }
-        let highlight_changed = self.snapshot.as_ref().is_none_or(|s| {
-            s.onboarding.current_step != snapshot.onboarding.current_step
-                || s.onboarding.settings_highlight != snapshot.onboarding.settings_highlight
-        });
-        self.snapshot = Some(snapshot);
+    pub(crate) fn observe(
+        &mut self,
+        snapshot: &Arc<AppSnapshot>,
+        highlight_changed: bool,
+    ) -> Vec<UiEffect> {
         if highlight_changed && self.view.settings != "closed" {
             self.view.settings_generation += 1;
         }
-        self.render()
+        self.render(Some(snapshot))
     }
     pub(crate) fn deadline(
         &mut self,
@@ -187,9 +191,14 @@ impl AppPresenter {
     ) -> Vec<UiEffect> {
         self.status.deadline(deadline)
     }
-    pub(crate) fn handle(&mut self, event: AppEvent) -> Vec<UiEffect> {
+    pub(crate) fn handle(
+        &mut self,
+        event: AppEvent,
+        snapshot: Option<&Arc<AppSnapshot>>,
+    ) -> Vec<UiEffect> {
+        let mut completed_snapshot = None;
         let mut effects = match event {
-            AppEvent::Input(input) => self.input(input),
+            AppEvent::Input(input) => self.input(input, snapshot),
             AppEvent::SettingsShown(section) => {
                 self.view.settings = "open";
                 self.view.settings_focus = section;
@@ -230,10 +239,8 @@ impl AppPresenter {
                 match result {
                     Ok(mut content) => {
                         if let WindowContent::Main(main) = &mut content {
-                            if let Some(latest) = self
-                                .snapshot
-                                .as_ref()
-                                .filter(|s| s.revision > main.snapshot.revision)
+                            if let Some(latest) =
+                                snapshot.filter(|s| s.revision > main.snapshot.revision)
                             {
                                 Arc::make_mut(main).snapshot = latest.clone();
                             }
@@ -258,33 +265,59 @@ impl AppPresenter {
                 };
                 let mut effects = vec![];
                 match &result {
-                    Ok(snapshot) => {
+                    Ok(completed) => {
                         self.view.error = None;
-                        effects.extend(self.observe(snapshot.clone()));
-                        effects.push(root(UiEvent::ChatLoaded(snapshot.clone())));
+                        if snapshot.is_none_or(|s| s.revision < completed.revision) {
+                            completed_snapshot = Some(completed.clone());
+                        }
+                        effects.push(root(UiEvent::ChatLoaded(completed.clone())));
                     }
                     Err(error) => self.view.error = Some(error.clone()),
                 }
                 match operation {
                     AppOperation::Watch(_) | AppOperation::Audio(_) => {
                         let watch = matches!(operation, AppOperation::Watch(_));
-                        let confirmed = self.snapshot.as_ref().is_some_and(|s| {
-                            if watch {
-                                s.watch_intent_active
+                        let desired = {
+                            let lane = if watch {
+                                &mut self.watch
                             } else {
-                                s.config.audio.enabled
-                            }
-                        });
-                        let lane = if watch {
-                            &mut self.watch
-                        } else {
-                            &mut self.audio
+                                &mut self.audio
+                            };
+                            lane.running = false;
+                            lane.running_target = None;
+                            lane.desired.take()
                         };
-                        lane.running = false;
-                        let desired = lane.desired.take();
-                        if result.is_ok() {
-                            if let Some(target) = desired.filter(|target| *target != confirmed) {
-                                effects.push(self.start_toggle(watch, target));
+                        if let Some(next) = desired {
+                            match &result {
+                                Ok(completed) => {
+                                    let latest: &AppSnapshot = match snapshot {
+                                        Some(current) if current.revision > completed.revision => {
+                                            current.as_ref()
+                                        }
+                                        _ => completed.as_ref(),
+                                    };
+                                    match can_start_queued_toggle(watch, next, latest) {
+                                        Ok(()) => effects.push(self.start_toggle(
+                                            watch,
+                                            next.target,
+                                            next.base_config_revision,
+                                        )),
+                                        Err(reason) => effects.push(toggle_drop_log(
+                                            watch,
+                                            reason,
+                                            Some(next),
+                                            Some(latest),
+                                        )),
+                                    }
+                                }
+                                Err(_) => {
+                                    effects.push(toggle_drop_log(
+                                        watch,
+                                        "operation-failed",
+                                        Some(next),
+                                        snapshot.map(|s| s.as_ref()),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -294,7 +327,7 @@ impl AppPresenter {
                 effects
             }
             AppEvent::SelectPersona { persona, reply } => {
-                let Some(snapshot) = &self.snapshot else {
+                let Some(snapshot) = snapshot else {
                     let _ = reply.send(IpcResult::failure("画面の読込が完了していません"));
                     return vec![];
                 };
@@ -326,11 +359,11 @@ impl AppPresenter {
                 }
             }
         };
-        let mut render = self.render();
+        let mut render = self.render(latest_snapshot(completed_snapshot.as_ref(), snapshot));
         render.append(&mut effects);
         render
     }
-    fn input(&mut self, input: AppInput) -> Vec<UiEffect> {
+    fn input(&mut self, input: AppInput, snapshot: Option<&Arc<AppSnapshot>>) -> Vec<UiEffect> {
         use AppInput::*;
         match input {
             Report { error } => {
@@ -390,7 +423,7 @@ impl AppPresenter {
             ResetConfirm if self.view.can_reset && self.view.reset_confirm_open => {
                 self.view.reset_confirm_open = false;
                 self.focus();
-                vec![self.operation(AppOperation::Reset)]
+                vec![self.operation(AppOperation::Reset, config_revision(snapshot))]
             }
             MenuToggle => {
                 self.view.menu_open = !self.view.menu_open;
@@ -404,56 +437,36 @@ impl AppPresenter {
                 self.view.menu_open = false;
                 vec![root(UiEvent::OpenModelPicker)]
             }
-            ToggleWatch | ToggleAudio => {
-                let watch = matches!(input, ToggleWatch);
-                let Some(snapshot) = &self.snapshot else {
-                    return vec![];
-                };
-                let confirmed = if watch {
-                    snapshot.watch_intent_active
-                } else {
-                    snapshot.config.audio.enabled
-                };
-                let lane = if watch {
-                    &mut self.watch
-                } else {
-                    &mut self.audio
-                };
-                let target = !lane.desired.unwrap_or(confirmed);
-                lane.desired = Some(target);
-                if lane.running {
-                    vec![]
-                } else {
-                    vec![self.start_toggle(watch, target)]
-                }
-            }
+            ToggleWatch => self.toggle(true, snapshot),
+            ToggleAudio => self.toggle(false, snapshot),
             TutorialNext => match self.view.tutorial.as_ref().and_then(|t| t.next) {
-                Some("retry") => vec![self.operation(AppOperation::RetryChat)],
-                Some("next") => vec![self.operation(AppOperation::Next)],
+                Some("retry") => {
+                    vec![self.operation(AppOperation::RetryChat, config_revision(snapshot))]
+                }
+                Some("next") => vec![self.operation(AppOperation::Next, config_revision(snapshot))],
                 _ => vec![],
             },
             TutorialFinish if self.view.tutorial.is_some() && !self.view.finish_busy => {
                 self.view.finish_busy = true;
-                vec![self.operation(AppOperation::Finish)]
+                vec![self.operation(AppOperation::Finish, config_revision(snapshot))]
             }
             SettingsPresented { generation }
                 if self.view.settings != "closed"
                     && generation == self.view.settings_generation
                     && self.acked_generation != Some(generation)
-                    && self
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|s| crate::tutorial_ui::settings_ack(s)) =>
+                    && snapshot.is_some_and(|s| crate::tutorial_ui::settings_ack(s)) =>
             {
                 self.acked_generation = Some(generation);
-                vec![self.operation(AppOperation::SettingsAck)]
+                vec![self.operation(AppOperation::SettingsAck, config_revision(snapshot))]
             }
             Recover => match self.status.recovery() {
                 Some(RecoveryAction::Settings) => vec![root(UiEvent::OpenSettings)],
                 Some(RecoveryAction::Relaunch) => vec![root(UiEvent::NativeShutdown(
                     crate::shutdown::ExitKind::Restart,
                 ))],
-                Some(action) => vec![self.operation(AppOperation::Recover(action))],
+                Some(action) => {
+                    vec![self.operation(AppOperation::Recover(action), config_revision(snapshot))]
+                }
                 None => vec![],
             },
             _ => vec![],
@@ -476,41 +489,75 @@ impl AppPresenter {
         self.personas_generation += 1;
         vec![spawn(AppTask::Personas(self.personas_generation))]
     }
-    fn start_toggle(&mut self, watch: bool, target: bool) -> UiEffect {
+    fn toggle(&mut self, watch: bool, snapshot: Option<&Arc<AppSnapshot>>) -> Vec<UiEffect> {
+        let Some(snapshot) = snapshot else {
+            return vec![toggle_drop_log(watch, "no-snapshot", None, None)];
+        };
+        let target = !confirmed_toggle_target(snapshot, watch);
+        let base_config_revision = snapshot.config_revision;
+        let lane = if watch {
+            &mut self.watch
+        } else {
+            &mut self.audio
+        };
+        if lane.running {
+            if lane.running_target == Some(target) {
+                lane.desired = None;
+                return vec![toggle_drop_log(
+                    watch,
+                    "same-target-running",
+                    Some(QueuedToggle {
+                        target,
+                        base_config_revision,
+                    }),
+                    Some(snapshot),
+                )];
+            }
+            lane.desired = Some(QueuedToggle {
+                target,
+                base_config_revision,
+            });
+            return vec![];
+        }
+        vec![self.start_toggle(watch, target, base_config_revision)]
+    }
+    fn start_toggle(&mut self, watch: bool, target: bool, config_revision: u64) -> UiEffect {
         let lane = if watch {
             &mut self.watch
         } else {
             &mut self.audio
         };
         lane.running = true;
-        lane.desired = Some(target);
-        self.operation(if watch {
-            AppOperation::Watch(target)
-        } else {
-            AppOperation::Audio(target)
-        })
+        lane.running_target = Some(target);
+        lane.desired = None;
+        self.operation(
+            if watch {
+                AppOperation::Watch(target)
+            } else {
+                AppOperation::Audio(target)
+            },
+            config_revision,
+        )
     }
-    fn operation(&mut self, operation: AppOperation) -> UiEffect {
+    fn operation(&mut self, operation: AppOperation, config_revision: u64) -> UiEffect {
         self.next_token += 1;
         self.operations.insert(self.next_token, operation);
         spawn(AppTask::Operation {
             token: self.next_token,
             operation,
-            config_revision: self.snapshot.as_ref().map_or(0, |s| s.config_revision),
+            config_revision,
         })
     }
-    fn render(&mut self) -> Vec<UiEffect> {
+    fn render(&mut self, snapshot: Option<&Arc<AppSnapshot>>) -> Vec<UiEffect> {
         if !self.mounted {
             return vec![];
         }
         self.view.watch_changing = self.watch.running;
         self.view.audio_changing = self.audio.running
-            || self
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.audio.phase == "starting");
+            || snapshot.is_some_and(|snapshot| snapshot.audio.phase == "starting");
         let mut effects = vec![];
-        if let Some(snapshot) = &self.snapshot {
+        if let Some(snapshot) = snapshot {
+            let snapshot = snapshot.as_ref();
             self.view.screen = if snapshot.onboarding.finish_pending {
                 "finish"
             } else if snapshot.onboarding.setup_required {
@@ -540,7 +587,13 @@ impl AppPresenter {
             };
         }
         if self.mounted {
-            effects.insert(0, UiEffect::AppRender(Box::new(self.view_copy())));
+            effects.insert(
+                0,
+                UiEffect::AppRender(Box::new(AppFrame {
+                    view: self.view_copy(),
+                    snapshot: snapshot.map(|snapshot| snapshot.as_ref().clone()),
+                })),
+            );
         }
         effects
     }
@@ -567,6 +620,55 @@ impl AppPresenter {
             tutorial: self.view.tutorial.clone(),
         }
     }
+}
+fn config_revision(snapshot: Option<&Arc<AppSnapshot>>) -> u64 {
+    snapshot.map_or(0, |s| s.config_revision)
+}
+fn confirmed_toggle_target(snapshot: &AppSnapshot, watch: bool) -> bool {
+    if watch {
+        snapshot.watch_intent_active
+    } else {
+        snapshot.config.audio.enabled
+    }
+}
+fn can_start_queued_toggle(
+    watch: bool,
+    request: QueuedToggle,
+    snapshot: &AppSnapshot,
+) -> Result<(), &'static str> {
+    if snapshot.config_revision != request.base_config_revision {
+        return Err("stale-config-revision");
+    }
+    if confirmed_toggle_target(snapshot, watch) == request.target {
+        return Err("already-confirmed");
+    }
+    Ok(())
+}
+fn latest_snapshot<'a>(
+    completed: Option<&'a Arc<AppSnapshot>>,
+    current: Option<&'a Arc<AppSnapshot>>,
+) -> Option<&'a Arc<AppSnapshot>> {
+    completed.or(current)
+}
+fn toggle_drop_log(
+    watch: bool,
+    reason: &'static str,
+    request: Option<QueuedToggle>,
+    snapshot: Option<&AppSnapshot>,
+) -> UiEffect {
+    let lane = if watch { "watch" } else { "audio" };
+    let request = request.map_or(String::new(), |request| {
+        format!(
+            " target={} base-config-revision={}",
+            request.target, request.base_config_revision
+        )
+    });
+    let current = snapshot.map_or(String::new(), |snapshot| {
+        format!(" current-config-revision={}", snapshot.config_revision)
+    });
+    UiEffect::Log(format!(
+        "ui: presenter=App event=toggle lane={lane} outcome=dropped reason={reason}{request}{current}"
+    ))
 }
 fn spawn(task: AppTask) -> UiEffect {
     UiEffect::Spawn(UiTask::App(task))

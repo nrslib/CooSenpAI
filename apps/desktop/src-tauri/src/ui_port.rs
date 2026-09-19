@@ -277,21 +277,16 @@ impl UiPort for NativeUiPort {
             UiEffect::View { view, command } => {
                 result = view_applied(view, command, self.apply_view(view, command).await)?;
             }
-            UiEffect::RenderSnapshot { view, snapshot } => {
+            UiEffect::PanelUpdates { view, updates } => {
                 let label = match view {
-                    PresenterId::Chat => "main",
                     PresenterId::Details => "details",
-                    PresenterId::ModelPicker => "model-popup",
-                    _ => return Err(format!("未対応のsnapshot受信者: {view:?}")),
+                    _ => return Err(format!("未対応のパネル更新の宛先: {view:?}")),
                 };
                 crate::webview_event::emit_to(
                     &state.app,
                     label,
-                    "coosenpai:snapshot:updated",
-                    &crate::snapshot::SnapshotEvent {
-                        revision: snapshot.revision,
-                        snapshot: (*snapshot).clone(),
-                    },
+                    "coosenpai:panel:updates",
+                    &updates,
                 )
                 .map_err(|error| error.to_string())?;
             }
@@ -771,16 +766,13 @@ impl NativeUiPort {
         use crate::ui_load::WindowContent;
         let app = &self.state.app;
         match content {
-            WindowContent::Main(content) => {
-                crate::webview_event::emit_to(
-                    app,
-                    "main",
-                    "coosenpai:personas:load",
-                    &content.personas,
-                )
-                .map_err(|error| error.to_string())?;
-                self.render_window_snapshot("main", &content.snapshot)
-            }
+            WindowContent::Main(content) => crate::webview_event::emit_to(
+                app,
+                "main",
+                "coosenpai:personas:load",
+                &content.personas,
+            )
+            .map_err(|error| error.to_string()),
             WindowContent::Settings { resources, .. } => crate::webview_event::emit_to(
                 app,
                 "main",
@@ -788,39 +780,18 @@ impl NativeUiPort {
                 &resources,
             )
             .map_err(|error| error.to_string()),
-            WindowContent::Details { snapshot, history } => {
+            WindowContent::Details { history, .. } => {
                 crate::webview_event::emit_to(app, "details", "coosenpai:dataflow:load", &history)
-                    .map_err(|error| error.to_string())?;
-                self.render_window_snapshot("details", &snapshot)
+                    .map_err(|error| error.to_string())
             }
-            WindowContent::ModelPicker { snapshot, catalog } => {
-                crate::webview_event::emit_to(
-                    app,
-                    "model-popup",
-                    "coosenpai:model-catalog:load",
-                    &catalog,
-                )
-                .map_err(|error| error.to_string())?;
-                self.render_window_snapshot("model-popup", &snapshot)
-            }
+            WindowContent::ModelPicker { catalog, .. } => crate::webview_event::emit_to(
+                app,
+                "model-popup",
+                "coosenpai:model-catalog:load",
+                &catalog,
+            )
+            .map_err(|error| error.to_string()),
         }
-    }
-
-    fn render_window_snapshot(
-        &self,
-        label: &str,
-        snapshot: &crate::snapshot::AppSnapshot,
-    ) -> Result<(), String> {
-        crate::webview_event::emit_to(
-            &self.state.app,
-            label,
-            "coosenpai:snapshot:updated",
-            &crate::snapshot::SnapshotEvent {
-                revision: snapshot.revision,
-                snapshot: snapshot.clone(),
-            },
-        )
-        .map_err(|error| error.to_string())
     }
 
     async fn apply_view(&self, view: PresenterId, command: ViewCommand) -> Result<(), String> {

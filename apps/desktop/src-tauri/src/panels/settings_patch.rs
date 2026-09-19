@@ -66,18 +66,26 @@ pub(super) fn category_for_issue(path: &str) -> &'static str {
                 .is_some_and(|tail| tail.starts_with('.') || tail.starts_with('['))
     }
     let belongs = |prefix: &str| family(path, prefix);
-    if belongs("work") {
+    if matches!(
+        path,
+        "watch.ocrGate.executable"
+            | "observer.vision.executable"
+            | "observer.hearing.executable"
+            | "companion.executable"
+            | "debug.enabled"
+            | "audio.debugDumpDir"
+    ) {
+        "developer"
+    } else if belongs("work") {
         "work"
-    } else if belongs("watch") || belongs("retention") {
+    } else if belongs("watch") {
         "vision"
     } else if belongs("audio") {
         "hearing"
-    } else if belongs("voiceOutput") {
-        "beta"
-    } else if path == "speech.locale" {
-        "general"
-    } else if belongs("speech") {
+    } else if belongs("voiceOutput") || belongs("speech") {
         "speech"
+    } else if belongs("retention") {
+        "general"
     } else if belongs("notification")
         || belongs("bubble")
         || belongs("popup")
@@ -89,14 +97,7 @@ pub(super) fn category_for_issue(path: &str) -> &'static str {
     } else if belongs("observer.hearing") {
         "providers"
     } else if belongs("observer") {
-        let provider_fields = [
-            "provider",
-            "model",
-            "effort",
-            "executable",
-            "timeoutMs",
-            "dailyCallLimit",
-        ];
+        let provider_fields = ["provider", "model", "dailyCallLimit"];
         if path == "observer"
             || provider_fields
                 .iter()
@@ -116,9 +117,12 @@ pub(super) fn category_for_issue(path: &str) -> &'static str {
             "provider",
             "model",
             "effort",
-            "executable",
-            "timeoutMs",
             "dailyProactiveLimit",
+            "proactiveModel",
+            "proactiveEffort",
+            "proactiveIdleMs",
+            "stallTimeoutMs",
+            "timeoutMs",
         ]
         .iter()
         .any(|field| belongs(&format!("companion.{field}")))

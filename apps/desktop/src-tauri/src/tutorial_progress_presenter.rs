@@ -1,4 +1,5 @@
 use crate::bubbles::reading_delay;
+use crate::presentation::PresentationEvent;
 use crate::tutorial_events::{TutorialEvent, TutorialTask};
 use crate::ui_events::{PresenterId, UiEffect, UiEvent, UiTask};
 use coosenpai_core::onboarding::TutorialStep;
@@ -344,8 +345,11 @@ impl TutorialProgressPresenter {
         let mut effects = Vec::new();
         if presentation.hide_main {
             effects.push(UiEffect::Deliver {
-                child: PresenterId::Chat,
-                event: UiEvent::Close,
+                child: PresenterId::Root,
+                event: UiEvent::Window {
+                    view: PresenterId::Chat,
+                    event: PresentationEvent::Hide,
+                },
             });
         }
         if let Some(key) = presentation.next_intro {

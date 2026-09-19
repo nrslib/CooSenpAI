@@ -53,7 +53,10 @@ impl UpdateNoticeSink for DesktopUpdateNoticeSink {
     async fn show_update(&self, version: &Version) -> bool {
         let config = self.state.runtime_config();
         let locale = Locale::from_config(&config.ui.language);
-        let conversation_generation = self.state.bubbles.lock().await.conversation_generation();
+        let Ok(conversation_generation) = bubbles::conversation_generation(&self.state).await
+        else {
+            return false;
+        };
         let record = BubbleRecord {
             id: format!("update-available-{version}"),
             created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),

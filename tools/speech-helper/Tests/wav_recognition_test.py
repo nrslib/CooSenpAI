@@ -17,8 +17,10 @@ import traceback
 import unicodedata
 
 
-EXPECTED = "最初の文をここで話しますそして続きの文をここで話します"
-SF_EXPECTED_FRAGMENT = "続きの文"
+EXPECTED_PARTS = {
+    "analyzer": ("テステスマイクテス", "テステスマイクテス"),
+    "sf": ("テステスマイクテス", "テステスマイクテス"),
+}
 
 
 def normalize(text):
@@ -121,14 +123,18 @@ def recognize(helper, wav, directory, duration, expected_frames, engine):
         if len(finals) != 1:
             raise AssertionError(f"final は一度だけ必要です: {finals!r}")
         recognized = normalize(finals[0])
-        if engine == "analyzer" and recognized != EXPECTED:
-            raise AssertionError(f"全文が一致しません: final={finals!r}, PCM={appended_frames}/{expected_frames} frames")
-        if engine == "sf" and SF_EXPECTED_FRAGMENT not in recognized:
-            raise AssertionError(f"SFSpeechRecognizer が後半の発話を認識していません: {finals!r}")
+        expected_parts = EXPECTED_PARTS[engine]
+        expected = "".join(expected_parts)
+        if recognized != expected:
+            raise AssertionError(
+                f"A+B の全文が一致しません: expected={expected_parts!r}, final={finals!r}, "
+                f"PCM={appended_frames}/{expected_frames} frames"
+            )
         if final_time - finish_time > 30:
             raise AssertionError("final が finish から30秒を超えました")
         return {
-            "engine": engine, "prefix_lost": "最初の文" not in recognized,
+            "engine": engine,
+            "expected_parts": list(expected_parts),
             "final": finals[0], "input_seconds": round(finish_time - ready_time, 3),
             "finish_to_final_ms": round((final_time - finish_time) * 1000, 1),
             "appended_frames": appended_frames,
@@ -169,7 +175,8 @@ def main(arguments):
         "frames": round(duration * sample_rate), "sample_rate": sample_rate,
         "channels": probe["channels"], "codec": probe["codec_name"], "duration_seconds": duration,
         "sha256": hashlib.sha256(arguments.wav.read_bytes()).hexdigest(),
-        "expected": EXPECTED if arguments.engine == "analyzer" else SF_EXPECTED_FRAGMENT,
+        "expected_parts": list(EXPECTED_PARTS[arguments.engine]),
+        "expected": "".join(EXPECTED_PARTS[arguments.engine]),
         "runs": arguments.runs, "engine": arguments.engine,
     }
     (arguments.output / "input.json").write_text(

@@ -183,7 +183,10 @@ impl DesktopState {
     }
 
     async fn show_watch_fullscreen_consent(self: &Arc<Self>, config: &Config) {
-        let conversation_generation = self.bubbles.lock().await.conversation_generation();
+        let Ok(conversation_generation) = crate::bubbles::conversation_generation(self).await
+        else {
+            return;
+        };
         crate::bubbles::show_best_effort(
             self.clone(),
             watch_fullscreen_consent_record(config, conversation_generation),
@@ -198,11 +201,15 @@ impl DesktopState {
         bubble_id: &str,
     ) -> Result<Option<WatchStartIntent>, ConfigCommitError> {
         let _watch_intent = self.watch_intent_lock.lock().await;
-        if !self.bubbles.lock().await.accepts_interaction(
+        let accepts = crate::bubbles::accepts_interaction(
+            self,
             bubble_id,
             WATCH_FULLSCREEN_CONFIRM_ACTION,
             None,
-        ) {
+        )
+        .await
+        .map_err(|error| ConfigCommitError::Runtime(RuntimeError::Factory(error)))?;
+        if !accepts {
             return Err(ConfigCommitError::Runtime(RuntimeError::Factory(
                 text(
                     TextKey::SetupExpired,
@@ -619,7 +626,10 @@ impl DesktopState {
 
     pub(crate) async fn show_watch_start_rejection(self: &Arc<Self>, message: &str) {
         let config = self.runtime_config();
-        let conversation_generation = self.bubbles.lock().await.conversation_generation();
+        let Ok(conversation_generation) = crate::bubbles::conversation_generation(self).await
+        else {
+            return;
+        };
         crate::bubbles::show_best_effort(
             self.clone(),
             BubbleRecord {

@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import type { AppSnapshot, ConfigIssue, ConfigPatch, CooSenpaiConfig, IpcResult, PersonaDocument } from "./types.js";
 import type { SettingsCategory } from "./settings-categories.js";
+import type { SettingsResetRequest } from "./settings-form.js";
+import type { SettingsResetFields } from "./settings-form-fields.js";
 import type { SettingsDraft, SettingsReflection } from "./settings-form-sync.js";
 import { configFields, configResult } from "./settings-form-fields.js";
 import { usePanelPresenter, type PanelCommand } from "./usePanelPresenter.js";
@@ -14,7 +16,11 @@ export interface SettingsView {
   readonly issues: readonly ConfigIssue[];
   readonly externalChanges: readonly string[] | null;
   readonly discardConfirmOpen: boolean;
-  readonly confirmation: "tuning" | "conversation-reset" | null;
+  readonly confirmation: "conversation-reset" | "settings-reset" | null;
+  readonly resetScope: "page" | "all" | null;
+  readonly resetCategory: SettingsCategory | null;
+  readonly canUndoReset: boolean;
+  readonly defaultConfig?: CooSenpaiConfig;
   readonly activeCategory: SettingsCategory;
   readonly recordingShortcut: string | null;
   readonly personaDocument: PersonaDocument | null;
@@ -28,7 +34,9 @@ type SettingsCommand = PanelCommand & (
   | { kind: "selectPersona" | "loadPersona" | "focusIssue"; payload: string }
   | { kind: "reflect"; payload: SettingsReflection }
   | { kind: "savedDelay"; payload: number }
-  | { kind: "focusFirst" | "resetTuning" | "resetConversation" | "reloadConflict" | "clearPreview" | "close"; payload: null }
+  | { kind: "resetDraft"; payload: { readonly fields: SettingsResetFields; readonly scope: SettingsResetRequest["scope"]; readonly category: SettingsCategory | null; readonly defaults: CooSenpaiConfig } }
+  | { kind: "restoreReset"; payload: { readonly fields: SettingsResetFields; readonly scope: SettingsResetRequest["scope"]; readonly category: SettingsCategory | null; readonly defaults: CooSenpaiConfig } }
+  | { kind: "focusFirst" | "resetConversation" | "reloadConflict" | "clearPreview" | "close"; payload: null }
 );
 interface SettingsPort {
   readonly save: (patch: ConfigPatch, image: readonly number[] | undefined, revision: number) => Promise<IpcResult<CooSenpaiConfig>>;
@@ -39,7 +47,8 @@ interface SettingsPort {
   readonly clearPreview: () => Promise<IpcResult<null>>;
   readonly close: () => void;
   readonly reflect: (value: SettingsReflection) => void;
-  readonly resetTuning: () => void;
+  readonly resetDraft: (payload: Extract<SettingsCommand, { kind: "resetDraft" }>['payload']) => void;
+  readonly restoreReset: (payload: Extract<SettingsCommand, { kind: "restoreReset" }>['payload']) => void;
   readonly focusIssue: (path: string) => void;
   readonly focusFirst: () => void;
 }
@@ -57,7 +66,8 @@ export function useSettingsPresenter(snapshot: AppSnapshot, focusSection: "watch
       case "resetConversation": return port.resetConversation();
       case "clearPreview": return port.clearPreview();
       case "reflect": port.reflect(command.payload); break;
-      case "resetTuning": port.resetTuning(); break;
+      case "resetDraft": port.resetDraft(command.payload); break;
+      case "restoreReset": port.restoreReset(command.payload); break;
       case "focusIssue": port.focusIssue(command.payload); break;
       case "focusFirst": port.focusFirst(); break;
       case "close": port.close(); break;

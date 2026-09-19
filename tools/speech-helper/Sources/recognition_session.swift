@@ -143,11 +143,6 @@ final class SpeechRecognitionSession: @unchecked Sendable {
             } catch {
                 failOnQueue("recognition", "音声認識が不正な確定時刻を返しました")
             }
-        case let .partialTranscript(text):
-            guard phase == .recording || phase == .finishing else { return }
-            publishPartial(text)
-        case let .completedTranscript(text):
-            complete(text)
         case .completed:
             guard phase == .finishing else {
                 if phase != .closing { failOnQueue("recognition", "音声認識が入力終了前に停止しました") }

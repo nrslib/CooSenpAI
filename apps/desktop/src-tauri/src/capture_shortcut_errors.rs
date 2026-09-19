@@ -79,7 +79,10 @@ pub(crate) async fn publish_tutorial_shortcut_error(state: Arc<DesktopState>, me
     publish_transient_shortcut_error(state.clone(), message.clone()).await;
     if show_tutorial_bubble {
         let config = state.runtime_config();
-        let conversation_generation = state.bubbles.lock().await.conversation_generation();
+        let Ok(conversation_generation) = crate::bubbles::conversation_generation(&state).await
+        else {
+            return;
+        };
         crate::bubbles::show_best_effort(
             state,
             tutorial_shortcut_error_bubble_record(&config, conversation_generation, message),

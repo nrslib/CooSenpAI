@@ -5,6 +5,7 @@ export type BridgeErrorKind =
   | "invalid-output"
   | "protocol"
   | "retryable"
+  | "timeout"
   | "unsupported";
 
 export class BridgeError extends Error {
@@ -31,6 +32,9 @@ export function safeProviderError(error: unknown): BridgeError {
     });
   }
   const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("timeout") || message.includes("timed out")) {
+    return classifiedError("timeout", "provider の呼び出しが timeout しました", error);
+  }
   if (message.includes("abort") || message.includes("cancel") || message.includes("interrupt")) {
     return classifiedError("cancelled", "provider 呼び出しがキャンセルされました", error);
   }

@@ -4,7 +4,7 @@ export interface WorkConfigPatch { readonly approvalMode?: "manual" | "auto"; re
 export type LicenseDocument = "license" | "eula" | "eula-en";
 export type NotificationPriority = "none" | "info" | "warning" | "critical";
 export interface PersonaOption { readonly id: string; readonly displayName: string; readonly builtin: boolean }
-export interface ProviderModelOptions { readonly provider: ProviderName; readonly defaultModel: string; readonly candidates: readonly string[] }
+export interface ProviderModelOptions { readonly provider: ProviderName; readonly defaultModel: string; readonly candidates: readonly string[]; readonly efforts: readonly string[]; readonly modelEfforts: Readonly<Record<string, readonly string[]>> }
 export interface ModelCatalogProvider {
   readonly provider: ProviderName;
   readonly defaultModel: string;
@@ -19,6 +19,19 @@ export interface CompanionModelCatalog {
 }
 export interface ProviderApiKeyStatus { readonly codex: boolean; readonly claude: boolean; readonly opencode: boolean }
 
+export interface JudgeDecision {
+  readonly sequence: number;
+  readonly occurredAt: string;
+  readonly inputId: string;
+  readonly novelty: number | null;
+  readonly relevance: number | null;
+  readonly action: "notify" | "hold" | "silence";
+  readonly readiness: string;
+  readonly mode: "shadow" | "follow" | "pass-through";
+  readonly holdReason?: string;
+  readonly fallbackReason?: string;
+}
+
 export interface CooSenpaiConfig {
   readonly work: { readonly approvalMode: "manual" | "auto"; readonly allowedRoots: readonly WorkAllowedRoot[] };
   readonly configVersion: number;
@@ -29,7 +42,6 @@ export interface CooSenpaiConfig {
     readonly fullscreen: boolean;
     readonly focusElement: boolean;
     readonly apps: readonly WatchAppConfig[];
-    readonly sendIntervalMs: number;
     readonly sendDebounceMs: number;
     readonly framesPerSend: number;
     readonly appWindowLimit: number;
@@ -46,7 +58,13 @@ export interface CooSenpaiConfig {
     readonly battery: { readonly enabled: boolean; readonly multiplier: number };
     readonly ocrGate: { readonly enabled: boolean; readonly level: "fast" | "accurate"; readonly timeoutMs: number; readonly executable?: string | null };
   };
-  readonly audio: { readonly enabled: boolean; readonly mic: boolean; readonly speaker: boolean };
+  readonly audio: {
+    readonly enabled: boolean;
+    readonly mic: boolean;
+    readonly speaker: boolean;
+    readonly speakerIdentification: { readonly enabled: boolean };
+    readonly debugDumpDir?: string | null;
+  };
   readonly voiceOutput: { readonly enabled: boolean; readonly provider: "system" | "voicevox"; readonly rate: number; readonly voicevoxStyleId: number | null };
   readonly speech: {
     readonly locale: string;
@@ -79,7 +97,6 @@ export interface CooSenpaiConfig {
     };
   };
   readonly bubble: {
-    readonly alwaysShow: boolean;
     readonly keepLatest: boolean;
     readonly edgeRecall: boolean;
     readonly maxStack: number;
@@ -88,6 +105,18 @@ export interface CooSenpaiConfig {
   };
   readonly observer: ObserverConfig;
   readonly companion: CompanionConfig;
+  readonly judge?: {
+    readonly follow: boolean;
+    readonly composition?: "single" | "ensemble" | "weighted";
+    readonly veto?: boolean;
+    readonly modules?: readonly {
+      readonly executable: string;
+      readonly arguments: readonly string[];
+      readonly environment: Readonly<Record<string, string>>;
+      readonly weight: number;
+    }[];
+    readonly timeoutMs: number;
+  };
   readonly chat: { readonly whileThinking: "queue" | "append" };
   readonly memory: MemoryConfig;
   readonly debug: { readonly enabled: boolean };
@@ -95,7 +124,6 @@ export interface CooSenpaiConfig {
     readonly mode: "bubble" | "os" | "both";
     readonly minPriority: "info" | "warning" | "critical";
     readonly bubbleDurationMs: number;
-    readonly showPriority: boolean;
   };
   readonly retention: { readonly observationDays: number; readonly conversationDays: number };
 }
@@ -117,10 +145,9 @@ export interface AgentConfig {
   readonly model: string;
   readonly effort: string;
   readonly executable?: string | null;
+  readonly stallTimeoutMs: number;
   readonly timeoutMs: number;
   readonly dailyCallLimit: number;
-  readonly textExcerptMaxChars: number;
-  readonly textExcerptMaxCount: number;
   readonly textTotalMaxChars: number;
   readonly changesMaxCount: number;
 }
@@ -139,10 +166,14 @@ export interface CompanionConfig {
   readonly provider: ProviderName;
   readonly model: string;
   readonly effort: string;
+  readonly proactiveModel: string;
+  readonly proactiveEffort: string;
+  readonly proactiveIdleMs: number;
   readonly executable?: string | null;
   readonly persona: string;
   readonly displayName: string;
   readonly assertiveness: "low" | "normal" | "high";
+  readonly stallTimeoutMs: number;
   readonly timeoutMs: number;
   readonly dailyProactiveLimit: number | null;
   readonly wakeCoalesceMax: number;
@@ -233,6 +264,9 @@ export interface VisualObservation {
     readonly time: string;
     readonly source: "microphone" | "speaker";
     readonly transcriptPath?: string;
+    readonly speakerTag?: string;
+    readonly speakerRegistryId?: string;
+    readonly speakerStatus?: SpeakerIdentificationStatus;
   }[];
   readonly activity: string;
   readonly outline: string;
@@ -271,6 +305,12 @@ export interface AudioObservation {
   readonly windowEnd: string;
   readonly source: "microphone" | "speaker";
   readonly text: string;
+  readonly segmentId?: string;
+  readonly audioStartMs?: number;
+  readonly audioEndMs?: number;
+  readonly speakerId?: string;
+  readonly speakerRegistryId?: string;
+  readonly speakerStatus?: SpeakerIdentificationStatus;
 }
 
 export type ObservationRecord = VisualObservation | NoChangeObservation | AudioObservation;
@@ -281,8 +321,12 @@ export interface TranscriptRecord {
   readonly source: string;
   readonly text: string;
   readonly speakerTag?: string;
+  readonly speakerRegistryId?: string;
+  readonly speakerStatus?: SpeakerIdentificationStatus;
   readonly transcriptPath?: string;
 }
+
+export type SpeakerIdentificationStatus = "identified" | "unknown" | "mixed" | "unavailable";
 
 export interface DataFlowLog {
   readonly observations: readonly ObservationRecord[];
@@ -300,7 +344,9 @@ export interface CompanionDecision {
 }
 
 export interface RuntimeLastError {
+  readonly source?: "runtime" | "user-response" | "attachment-ocr" | "observer" | "companion" | "config";
   readonly userResponse?: { readonly inputId: string; readonly attempts: number };
+  readonly userInputId?: string;
   readonly kind: string;
   readonly occurredAt: string;
   readonly message?: string;
@@ -376,6 +422,7 @@ export interface AppSnapshot {
   readonly companionDraft?: string;
   readonly latestCompanionThought?: string;
   readonly latestCompanionDecision?: CompanionDecision;
+  readonly latestJudgeDecision?: JudgeDecision;
   readonly latestUserInterruption?: { readonly sequence: number; readonly occurredAt: string; readonly observer: boolean; readonly proactive: boolean };
   readonly avatarImagePng?: readonly number[];
   readonly avatarImageLoadFailed: boolean;
@@ -628,9 +675,15 @@ export interface SettingsAppearancePreviewPayload {
   readonly bubbleDisplay: "main" | "cursor" | "front";
 }
 
-export interface SnapshotEvent { readonly revision: number; readonly snapshot: AppSnapshot }
 export interface ConfigIssue { readonly path: string; readonly message: string }
 export type IpcResult<T> =
   | { readonly ok: true; readonly value: T; readonly issues?: readonly ConfigIssue[] }
   | { readonly ok: false; readonly error: { readonly message: string; readonly issues?: readonly ConfigIssue[] } };
 export type ConfigPatch = Record<string, unknown>;
+
+export interface SpeakerManagementPayload {
+  readonly operation: "merge" | "undoMerge" | "reregister" | "delete" | "deleteAll";
+  readonly sourceId?: string;
+  readonly targetId?: string;
+  readonly speakerId?: string;
+}

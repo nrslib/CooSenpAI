@@ -88,10 +88,10 @@ impl UiHandle {
 pub(crate) struct UiModel {
     active_operation: Option<ActiveOperation>,
     main_focused: bool,
-    speech_phase: String,
     completed_generation: u64,
     shutdown_signals: u32,
     protected_popup: Option<u64>,
+    snapshot_revision: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,11 +152,7 @@ pub(crate) fn channel() -> (
                 state.shortcut_coordinator.clone(),
             ));
             root.capture = capture;
-            root.bubble = BubblePresenter::new_with_revision(
-                state.bubbles.clone(),
-                config,
-                state.config_update.config_revision_handle(),
-            );
+            root.bubble = BubblePresenter::new(config, initial.selected_conversation_generation);
             root.bubble.tutorial = Some(state.tutorial.clone());
             root.bubble.initialize(&initial);
             root.avatar = crate::avatar_presenter::AvatarPresenter::new(avatar);
@@ -171,16 +167,14 @@ pub(crate) fn channel() -> (
 #[cfg(test)]
 pub(crate) fn test_channel_with_bubbles<P: UiPort>(
     port: P,
-    model: Arc<tokio::sync::Mutex<crate::bubbles::BubbleState>>,
     config: coosenpai_core::config::Config,
 ) -> (UiHandle, tokio::task::JoinHandle<()>) {
-    test_channel_with_bubble_tutorial(port, model, config, None)
+    test_channel_with_bubble_tutorial(port, config, None)
 }
 
 #[cfg(test)]
 pub(crate) fn test_channel_with_bubble_tutorial<P: UiPort>(
     port: P,
-    model: Arc<tokio::sync::Mutex<crate::bubbles::BubbleState>>,
     config: coosenpai_core::config::Config,
     tutorial: Option<Arc<tokio::sync::Mutex<crate::tutorial::TutorialController>>>,
 ) -> (UiHandle, tokio::task::JoinHandle<()>) {
@@ -202,7 +196,7 @@ pub(crate) fn test_channel_with_bubble_tutorial<P: UiPort>(
         )),
         Arc::new(crate::capture::ShortcutCoordinator::default()),
     ));
-    root.bubble = BubblePresenter::new(model, config);
+    root.bubble = BubblePresenter::new(config, 0);
     root.bubble.tutorial = tutorial;
     (UiHandle { sender }, tokio::spawn(root.run()))
 }
@@ -398,20 +392,36 @@ impl<P: UiPort> UiRoot<P> {
         while let Some(next) = pipeline.pending.pop_front() {
             self.log_diagnostics_if_due().await;
             let (mut presenter, mut event) = match next {
-                Pending::Effect(UiEffect::Deliver { child, event }) => {
-                    pipeline.pending.push_front(Pending::Event(child, event));
-                    continue;
-                }
-                Pending::Effect(UiEffect::Activation(input)) => {
-                    for effect in self.activation.transition(input).into_iter().rev() {
-                        pipeline.pending.push_front(Pending::Effect(effect));
+                Pending::Effect {
+                    origin,
+                    effect: UiEffect::Deliver { child, event },
+                } => {
+                    match inspect_deliver(origin, child, &event) {
+                        Ok(()) => pipeline.pending.push_front(Pending::Event(child, event)),
+                        Err(reason) => reject_deliver(&mut pipeline, reason),
                     }
                     continue;
                 }
-                Pending::Effect(UiEffect::View {
-                    view: PresenterId::Chat,
-                    command: command @ (ViewCommand::Show | ViewCommand::Front),
-                }) => {
+                Pending::Effect {
+                    effect: UiEffect::Activation(input),
+                    ..
+                } => {
+                    for effect in self.activation.transition(input).into_iter().rev() {
+                        pipeline.pending.push_front(Pending::Effect {
+                            origin: PresenterId::Root,
+                            effect,
+                        });
+                    }
+                    continue;
+                }
+                Pending::Effect {
+                    effect:
+                        UiEffect::View {
+                            view: PresenterId::Chat,
+                            command: command @ (ViewCommand::Show | ViewCommand::Front),
+                        },
+                    ..
+                } => {
                     for effect in self
                         .activation
                         .transition(crate::activation_policy::ActivationInput::MainWindow(
@@ -420,11 +430,17 @@ impl<P: UiPort> UiRoot<P> {
                         .into_iter()
                         .rev()
                     {
-                        pipeline.pending.push_front(Pending::Effect(effect));
+                        pipeline.pending.push_front(Pending::Effect {
+                            origin: PresenterId::Root,
+                            effect,
+                        });
                     }
                     continue;
                 }
-                Pending::Effect(UiEffect::Spawn(task)) => {
+                Pending::Effect {
+                    effect: UiEffect::Spawn(task),
+                    ..
+                } => {
                     let port = self.port.clone();
                     let ui = UiHandle {
                         sender: pipeline.completion.clone(),
@@ -435,7 +451,10 @@ impl<P: UiPort> UiRoot<P> {
                     });
                     continue;
                 }
-                Pending::Effect(UiEffect::Run(task)) => {
+                Pending::Effect {
+                    effect: UiEffect::Run(task),
+                    ..
+                } => {
                     let port = self.port.clone();
                     let sender = pipeline.completion.clone();
                     jobs.spawn(async move {
@@ -444,7 +463,10 @@ impl<P: UiPort> UiRoot<P> {
                     });
                     return None;
                 }
-                Pending::Effect(UiEffect::Complete(result)) => {
+                Pending::Effect {
+                    effect: UiEffect::Complete(result),
+                    ..
+                } => {
                     match result {
                         Ok(result) => {
                             for event in result.events.into_iter().rev() {
@@ -460,8 +482,11 @@ impl<P: UiPort> UiRoot<P> {
                     }
                     continue;
                 }
-                Pending::Effect(UiEffect::Fail(error)) => return Some((pipeline, Err(error))),
-                Pending::Effect(effect) => {
+                Pending::Effect {
+                    effect: UiEffect::Fail(error),
+                    ..
+                } => return Some((pipeline, Err(error))),
+                Pending::Effect { effect, .. } => {
                     let avatar_revision = match &effect {
                         UiEffect::AvatarRender(state) => Some(state.revision),
                         _ => None,
@@ -528,7 +553,10 @@ impl<P: UiPort> UiRoot<P> {
                                         error.clone(),
                                     ),
                                 ) {
-                                    pipeline.pending.push_back(Pending::Effect(effect));
+                                    pipeline.pending.push_back(Pending::Effect {
+                                        origin: PresenterId::Root,
+                                        effect,
+                                    });
                                 }
                                 pipeline.pending.push_back(Pending::Event(
                                     view,
@@ -547,9 +575,10 @@ impl<P: UiPort> UiRoot<P> {
                                         }
                                     },
                                 ));
-                                pipeline
-                                    .pending
-                                    .push_back(Pending::Effect(UiEffect::Fail(error)));
+                                pipeline.pending.push_back(Pending::Effect {
+                                    origin: PresenterId::Root,
+                                    effect: UiEffect::Fail(error),
+                                });
                             } else {
                                 return Some((pipeline, Err(error)));
                             }
@@ -639,7 +668,10 @@ impl<P: UiPort> UiRoot<P> {
                 .into_iter()
                 .rev()
             {
-                pipeline.pending.push_front(Pending::Effect(effect));
+                pipeline.pending.push_front(Pending::Effect {
+                    origin: presenter,
+                    effect,
+                });
             }
         }
         let value = pipeline.value.take();
@@ -751,7 +783,9 @@ impl<P: UiPort> UiRoot<P> {
                     event,
                 }]
             }
-            event @ (UiEvent::BubbleAck { .. } | UiEvent::BubbleSnapshot(_)) => {
+            event @ (UiEvent::BubbleAck { .. }
+            | UiEvent::BubbleSnapshot(_)
+            | UiEvent::BubbleQuery(_)) => {
                 vec![UiEffect::Deliver {
                     child: PresenterId::Bubble,
                     event,
@@ -857,7 +891,11 @@ impl<P: UiPort> UiRoot<P> {
                     }
                     Some(ShortcutAction::TogglePanel) if pressed => UiEvent::ToggleMain,
                     Some(ShortcutAction::Microphone) if pressed => {
-                        if voice_mode == "toggle" && self.model.speech_phase == "recording" {
+                        let recording = self
+                            .snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.speech_phase() == "recording");
+                        if voice_mode == "toggle" && recording {
                             UiEvent::Voice(VoiceAction::Finish)
                         } else {
                             UiEvent::Shortcut(CaptureKind::Voice)
@@ -1076,6 +1114,9 @@ impl<P: UiPort> UiRoot<P> {
                 PresenterId::Chat,
                 PresentationEvent::Open(WindowRequest::Main),
             )],
+            UiEvent::Present(ViewCommand::Hide) => {
+                vec![deliver(PresenterId::Bubble, ViewCommand::Hide)]
+            }
             UiEvent::ToggleMain => {
                 if self.chat.presentation() == PresentationState::Hidden {
                     vec![window(
@@ -1101,9 +1142,13 @@ impl<P: UiPort> UiRoot<P> {
                 effects
             }
             UiEvent::SnapshotUpdated(snapshot) => {
-                let focus_after_speech =
-                    self.model.speech_phase == "sending" && snapshot.speech.phase == "idle";
-                self.model.speech_phase = snapshot.speech.phase.clone();
+                if snapshot.revision < self.model.snapshot_revision {
+                    return Handling::Handled(vec![UiEffect::Log(format!(
+                        "ui: presenter=Root event=SnapshotUpdated(revision={}) ignored=true reason=stale-revision current={}",
+                        snapshot.revision, self.model.snapshot_revision
+                    ))]);
+                }
+                self.model.snapshot_revision = snapshot.revision;
                 let mut effects: Vec<_> = [
                     PresenterId::Chat,
                     PresenterId::Capture,
@@ -1125,9 +1170,6 @@ impl<P: UiPort> UiRoot<P> {
                         event: UiEvent::SnapshotUpdated(snapshot.clone()),
                     },
                 );
-                if focus_after_speech {
-                    effects.push(deliver(PresenterId::Chat, ViewCommand::FocusInput));
-                }
                 effects
             }
             UiEvent::OpenSettings => vec![window(
@@ -1215,6 +1257,44 @@ fn deliver(child: PresenterId, command: ViewCommand) -> UiEffect {
     }
 }
 
+fn is_ancestor(ancestor: PresenterId, id: PresenterId) -> bool {
+    let mut current = id.parent();
+    while let Some(parent) = current {
+        if parent == ancestor {
+            return true;
+        }
+        current = parent.parent();
+    }
+    false
+}
+
+fn inspect_deliver(origin: PresenterId, child: PresenterId, event: &UiEvent) -> Result<(), String> {
+    let permitted = origin == PresenterId::Root
+        || child == origin
+        || is_ancestor(child, origin)
+        || is_ancestor(origin, child);
+    if permitted {
+        return Ok(());
+    }
+    Err(format!(
+        "ui: deliver rejected origin={origin:?} target={child:?} event={} reason=out-of-hierarchy",
+        event.label()
+    ))
+}
+
+fn reject_deliver(pipeline: &mut Pipeline, reason: String) {
+    #[cfg(debug_assertions)]
+    {
+        let _ = &pipeline;
+        panic!("{reason}");
+    }
+    #[cfg(not(debug_assertions))]
+    pipeline.pending.push_front(Pending::Effect {
+        origin: PresenterId::Root,
+        effect: UiEffect::Log(reason),
+    });
+}
+
 fn window(view: PresenterId, event: crate::ui_load::WindowEvent) -> UiEffect {
     UiEffect::Deliver {
         child: PresenterId::Root,
@@ -1246,7 +1326,10 @@ pub(crate) fn hide_navigation() -> Vec<UiEffect> {
 
 enum Pending {
     Event(PresenterId, UiEvent),
-    Effect(UiEffect),
+    Effect {
+        origin: PresenterId,
+        effect: UiEffect,
+    },
 }
 
 struct Pipeline {

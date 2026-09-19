@@ -1,4 +1,5 @@
 import type { TranslationKey } from "./i18n/index.js";
+import type { AppSnapshot } from "./types.js";
 export type UiText = { readonly kind: "literal"; readonly text: string } | { readonly kind: "message"; readonly key: TranslationKey; readonly args: Readonly<Record<string, UiText>> } | { readonly kind: "join"; readonly parts: readonly UiText[] };
 export function renderUiText(text: UiText, t: (key: TranslationKey, params?: Readonly<Record<string, string | number>>) => string): string {
   switch (text.kind) {
@@ -13,6 +14,8 @@ export interface AppView {
   readonly settings: "closed" | "open" | "locked"; readonly settingsFocus: "watch" | null; readonly settingsGeneration: number;
   readonly focusRequest: number; readonly historyOpen: boolean; readonly resetConfirmOpen: boolean; readonly menuOpen: boolean; readonly canReset: boolean;
   readonly watchChanging: boolean; readonly audioChanging: boolean; readonly tutorial: TutorialUi | null;
+  // AppPresenter が観測した最新 snapshot の投影。View はこの値だけを描画・送信に使う。
+  readonly snapshot: AppSnapshot | null;
 }
 export type AppInput = { readonly type: "mounted" | "retry" | "startupSettings" | "openSettings" | "closeSettings" | "toggleHistory" | "resetOpen" | "resetCancel" | "resetConfirm" | "menuToggle" | "menuDismiss" | "menuModel" | "menuReset" | "toggleWatch" | "toggleAudio" | "tutorialNext" | "tutorialFinish" | "recover" }
   | { readonly type: "settingsPresented"; readonly generation: number }

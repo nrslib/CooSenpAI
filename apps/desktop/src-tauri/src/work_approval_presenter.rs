@@ -1,11 +1,9 @@
 use crate::commands::IpcResult;
 use crate::snapshot::AppSnapshot;
-use crate::ui_events::{UiEffect, UiEvent, UiTask};
+use crate::ui_events::{PresenterId, UiEffect, UiEvent, UiTask};
 use crate::work::WorkSnapshot;
 use coosenpai_core::config::Config;
-use coosenpai_core::work::{
-    AllowedRoot, ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalStatus, WorkConfig,
-};
+use coosenpai_core::work::{ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalStatus};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -45,9 +43,21 @@ pub(crate) enum WorkApprovalEvent {
         generation: u64,
         result: Box<IpcResult<()>>,
     },
+    ConfigureRequested {
+        generation: u64,
+        request: WorkConfigureRequest,
+    },
     Configured {
         generation: u64,
         result: Box<IpcResult<Config>>,
+    },
+}
+#[derive(Debug)]
+pub(crate) enum WorkConfigureRequest {
+    ToggleMode,
+    AddRootAndAllow {
+        target: String,
+        requires_write: bool,
     },
 }
 #[derive(Debug)]
@@ -80,15 +90,11 @@ pub(crate) struct WorkApprovalPresenter {
     view: WorkApprovalView,
     generation: u64,
     snapshot: WorkSnapshot,
-    config: WorkConfig,
-    config_revision: u64,
     allow_after_save: Option<String>,
 }
 impl WorkApprovalPresenter {
     pub(crate) fn observe(&mut self, snapshot: &AppSnapshot) -> Vec<UiEffect> {
-        self.config = snapshot.config.work.clone();
-        self.config_revision = snapshot.config_revision;
-        let manual = self.config.approval_mode == ApprovalMode::Manual;
+        let manual = snapshot.config.work.approval_mode == ApprovalMode::Manual;
         let changed = self.view.manual != manual;
         self.view.manual = manual;
         if changed && self.view.input_id.is_some() {
@@ -106,7 +112,7 @@ impl WorkApprovalPresenter {
                 self.generation += 1;
                 self.view = WorkApprovalView {
                     input_id: Some(input_id),
-                    manual: self.config.approval_mode == ApprovalMode::Manual,
+                    manual: self.view.manual,
                     ..Default::default()
                 };
                 self.allow_after_save = None;
@@ -151,8 +157,8 @@ impl WorkApprovalPresenter {
                 self.generation += 1;
                 self.view.busy = true;
                 self.view.error = None;
-                let task = match action {
-                    WorkAction::Allow | WorkAction::Deny => WorkApprovalTask::Decide {
+                match action {
+                    WorkAction::Allow | WorkAction::Deny => vec![spawn(WorkApprovalTask::Decide {
                         generation: self.generation,
                         id: approval.id,
                         decision: if matches!(action, WorkAction::Allow) {
@@ -160,37 +166,21 @@ impl WorkApprovalPresenter {
                         } else {
                             ApprovalDecision::Deny
                         },
-                    },
-                    WorkAction::ToggleMode => WorkApprovalTask::Configure {
-                        generation: self.generation,
-                        revision: self.config_revision,
-                        patch: serde_json::json!({"work":{"approvalMode":if self.view.manual {"auto"} else {"manual"}}}),
-                    },
+                    })],
+                    WorkAction::ToggleMode => {
+                        vec![self.configure_request(WorkConfigureRequest::ToggleMode)]
+                    }
                     WorkAction::AddRootAndAllow => {
-                        let mut roots = self.config.allowed_roots.clone();
-                        if let Some(root) = roots
-                            .iter_mut()
-                            .find(|root| root.path == std::path::Path::new(&approval.target))
-                        {
-                            root.read = true;
-                            root.write |= approval.kind.requires_write();
-                        } else {
-                            roots.push(AllowedRoot {
-                                path: approval.target.into(),
-                                read: true,
-                                write: approval.kind.requires_write(),
-                            });
-                        }
                         self.allow_after_save = Some(approval.id);
-                        WorkApprovalTask::Configure {
-                            generation: self.generation,
-                            revision: self.config_revision,
-                            patch: serde_json::json!({"work":{"allowedRoots":roots}}),
-                        }
+                        vec![
+                            self.configure_request(WorkConfigureRequest::AddRootAndAllow {
+                                target: approval.target,
+                                requires_write: approval.kind.requires_write(),
+                            }),
+                        ]
                     }
                     WorkAction::Cancel => unreachable!(),
-                };
-                vec![spawn(task)]
+                }
             }
             WorkApprovalEvent::Changed(snapshot) => {
                 if self.snapshot == *snapshot {
@@ -214,14 +204,16 @@ impl WorkApprovalPresenter {
                 }
                 vec![]
             }
+            WorkApprovalEvent::ConfigureRequested { .. } => {
+                unreachable!("Chat が現行の work config から patch を組む")
+            }
             WorkApprovalEvent::Configured { generation, result } => {
                 if generation != self.generation || self.view.input_id.is_none() {
                     return vec![];
                 }
                 match *result {
                     IpcResult::Success { value, .. } => {
-                        self.config = value.work;
-                        self.view.manual = self.config.approval_mode == ApprovalMode::Manual;
+                        self.view.manual = value.work.approval_mode == ApprovalMode::Manual;
                         if let Some(id) = self.allow_after_save.take() {
                             vec![spawn(WorkApprovalTask::Decide {
                                 generation,
@@ -267,6 +259,16 @@ impl WorkApprovalPresenter {
                 ApprovalStatus::AwaitingUser | ApprovalStatus::Reviewing
             )
         });
+    }
+
+    fn configure_request(&self, request: WorkConfigureRequest) -> UiEffect {
+        UiEffect::Deliver {
+            child: PresenterId::Chat,
+            event: UiEvent::WorkApproval(WorkApprovalEvent::ConfigureRequested {
+                generation: self.generation,
+                request,
+            }),
+        }
     }
 
     fn render(&self) -> UiEffect {

@@ -9,11 +9,9 @@ async fn run_card(state: Arc<DesktopState>, task: CardTask) -> CardEvent {
             notice_id,
             milestone,
         } => {
-            let signals = state
-                .bubbles
-                .lock()
+            let signals = crate::bubbles::card_completion(&state, &notice_id, milestone)
                 .await
-                .card_completion(&notice_id, milestone);
+                .unwrap_or(None);
             CardEvent::CardLoaded { id, signals }
         }
         CardTask::ObserveCard {

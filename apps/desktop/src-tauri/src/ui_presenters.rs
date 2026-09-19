@@ -40,15 +40,19 @@ impl ChatPresenter {
 
     pub(crate) fn handle(&mut self, event: UiEvent) -> Handling {
         match event {
-            UiEvent::App(event) => Handling::Handled(self.app.handle(event)),
+            UiEvent::App(event) => {
+                Handling::Handled(self.app.handle(event, self.snapshot.as_ref()))
+            }
             UiEvent::StatusDeadline(deadline) => Handling::Handled(self.app.deadline(deadline)),
             UiEvent::Mounted(_) => Handling::Handled(self.app.handle(
                 crate::app_presenter::AppEvent::Input(crate::app_presenter::AppInput::Mounted),
+                self.snapshot.as_ref(),
             )),
             UiEvent::Present(ViewCommand::FocusInput) => {
-                let mut effects = self
-                    .app
-                    .handle(crate::app_presenter::AppEvent::FocusComposer);
+                let mut effects = self.app.handle(
+                    crate::app_presenter::AppEvent::FocusComposer,
+                    self.snapshot.as_ref(),
+                );
                 if let Handling::Handled(window) = self
                     .window
                     .handle(UiEvent::Present(ViewCommand::FocusInput))
@@ -57,6 +61,12 @@ impl ChatPresenter {
                 }
                 Handling::Handled(effects)
             }
+            UiEvent::WorkApproval(
+                crate::work_approval_presenter::WorkApprovalEvent::ConfigureRequested {
+                    generation,
+                    request,
+                },
+            ) => Handling::Handled(self.configure_work_approval(generation, request)),
             UiEvent::WorkApproval(event) => Handling::Handled(self.work_approval.handle(event)),
             UiEvent::Composer(event) => {
                 let mut effects = self.composer.handle(event);
@@ -73,8 +83,10 @@ impl ChatPresenter {
                     &event,
                     crate::conversation_presenter::ConversationEvent::Selected(_)
                 ) {
-                    self.app
-                        .handle(crate::app_presenter::AppEvent::ConversationSelected)
+                    self.app.handle(
+                        crate::app_presenter::AppEvent::ConversationSelected,
+                        self.snapshot.as_ref(),
+                    )
                 } else {
                     vec![]
                 };
@@ -84,17 +96,17 @@ impl ChatPresenter {
                         crate::conversation_presenter::ConversationInput::Mounted
                     )
                 );
-                effects.extend(self.conversation.handle(event));
+                effects.extend(self.conversation.handle(event, self.snapshot.as_ref()));
                 self.composer
                     .set_operation_busy(self.conversation.is_busy());
                 effects.push(self.composer.render());
                 if mounted {
-                    effects.extend(
-                        self.app
-                            .handle(crate::app_presenter::AppEvent::ComposerReady),
-                    );
+                    effects.extend(self.app.handle(
+                        crate::app_presenter::AppEvent::ComposerReady,
+                        self.snapshot.as_ref(),
+                    ));
                 }
-                Handling::Handled(effects)
+                Handling::Handled(self.route_loaded_snapshot(effects))
             }
             UiEvent::ChatLoaded(snapshot) => Handling::Handled(self.observe(snapshot.clone())),
             UiEvent::SnapshotUpdated(snapshot) => {
@@ -148,12 +160,91 @@ impl ChatPresenter {
             UiEvent::SubmitChat(message) => {
                 Handling::Handled(vec![UiEffect::Run(UiTask::SubmitChat(message))])
             }
-            event => self.window.handle(event),
+            event => match self.window.handle(event) {
+                Handling::Handled(effects) => {
+                    Handling::Handled(self.route_loaded_snapshot(effects))
+                }
+                handling => handling,
+            },
         }
     }
 }
 
 impl ChatPresenter {
+    fn configure_work_approval(
+        &self,
+        generation: u64,
+        request: crate::work_approval_presenter::WorkConfigureRequest,
+    ) -> Vec<UiEffect> {
+        use crate::work_approval_presenter::{WorkApprovalTask, WorkConfigureRequest};
+        let Some(snapshot) = &self.snapshot else {
+            return vec![UiEffect::Deliver {
+                child: PresenterId::Chat,
+                event: UiEvent::WorkApproval(
+                    crate::work_approval_presenter::WorkApprovalEvent::Configured {
+                        generation,
+                        result: Box::new(crate::commands::IpcResult::failure(
+                            "設定がまだ読み込まれていません",
+                        )),
+                    },
+                ),
+            }];
+        };
+        let work = &snapshot.config.work;
+        let patch = match request {
+            WorkConfigureRequest::ToggleMode => serde_json::json!({
+                "work": {
+                    "approvalMode": if work.approval_mode == coosenpai_core::work::ApprovalMode::Manual {
+                        "auto"
+                    } else {
+                        "manual"
+                    }
+                }
+            }),
+            WorkConfigureRequest::AddRootAndAllow {
+                target,
+                requires_write,
+            } => {
+                let mut roots = work.allowed_roots.clone();
+                if let Some(root) = roots
+                    .iter_mut()
+                    .find(|root| root.path == std::path::Path::new(&target))
+                {
+                    root.read = true;
+                    root.write |= requires_write;
+                } else {
+                    roots.push(coosenpai_core::work::AllowedRoot {
+                        path: target.into(),
+                        read: true,
+                        write: requires_write,
+                    });
+                }
+                serde_json::json!({ "work": { "allowedRoots": roots } })
+            }
+        };
+        vec![UiEffect::Spawn(UiTask::WorkApproval(
+            WorkApprovalTask::Configure {
+                generation,
+                patch,
+                revision: snapshot.config_revision,
+            },
+        ))]
+    }
+
+    fn route_loaded_snapshot(&mut self, effects: Vec<UiEffect>) -> Vec<UiEffect> {
+        let mut routed = Vec::with_capacity(effects.len());
+        for effect in effects {
+            match effect {
+                UiEffect::Deliver {
+                    child: PresenterId::Chat,
+                    event: UiEvent::ChatLoaded(snapshot),
+                } => routed.extend(self.observe(snapshot)),
+                effect => routed.push(effect),
+            }
+        }
+        routed
+    }
+
     fn observe(&mut self, snapshot: std::sync::Arc<crate::snapshot::AppSnapshot>) -> Vec<UiEffect> {
         if self
             .snapshot
@@ -162,6 +253,10 @@ impl ChatPresenter {
         {
             return vec![];
         }
+        let highlight_changed = self.snapshot.as_ref().is_none_or(|current| {
+            current.onboarding.current_step != snapshot.onboarding.current_step
+                || current.onboarding.settings_highlight != snapshot.onboarding.settings_highlight
+        });
         self.snapshot = Some(snapshot.clone());
         let mut effects = self.work_approval.observe(&snapshot);
         effects.extend(
@@ -172,7 +267,7 @@ impl ChatPresenter {
             self.conversation
                 .observe(snapshot.clone(), self.composer.pending_sends()),
         );
-        effects.extend(self.app.observe(snapshot));
+        effects.extend(self.app.observe(&snapshot, highlight_changed));
         effects
     }
 }
@@ -281,6 +376,9 @@ impl WindowPresenter {
                             event: UiEvent::ChatLoaded(main.snapshot.clone()),
                         });
                     }
+                    if let WindowContent::Details { snapshot, .. } = &content {
+                        effects.extend(self.observe_details_snapshot(snapshot));
+                    }
                     effects.push(UiEffect::RenderWindow(content));
                     effects
                 }
@@ -297,13 +395,12 @@ impl WindowPresenter {
             UiEvent::SnapshotUpdated(snapshot) => {
                 let mut effects = Vec::new();
                 if let Some(model) = &mut self.model_picker {
-                    model.observe(snapshot.clone());
+                    model.observe(&snapshot);
                     effects.push(model.render());
                 }
-                effects.push(UiEffect::RenderSnapshot {
-                    view: self.id,
-                    snapshot,
-                });
+                if self.id == PresenterId::Details {
+                    effects.extend(self.observe_details_snapshot(&snapshot));
+                }
                 effects
             }
             UiEvent::Mounted(_) if self.presentation.state() == PresentationState::Shown => {
@@ -322,6 +419,26 @@ impl WindowPresenter {
         UiEffect::View {
             view: self.id,
             command,
+        }
+    }
+
+    fn observe_details_snapshot(
+        &mut self,
+        snapshot: &std::sync::Arc<crate::snapshot::AppSnapshot>,
+    ) -> Vec<UiEffect> {
+        match serde_json::to_value(snapshot.as_ref())
+            .map_err(|error| format!("snapshot の JSON 化に失敗しました: {error}"))
+            .and_then(|value| self.panels.observe_details_snapshot(value))
+        {
+            Ok(updates) if updates.is_empty() => vec![],
+            Ok(updates) => vec![UiEffect::PanelUpdates {
+                view: self.id,
+                updates,
+            }],
+            Err(error) => vec![UiEffect::Log(format!(
+                "ui: presenter={:?} event=SnapshotUpdated accepted=false reason={error}",
+                self.id
+            ))],
         }
     }
 
@@ -363,7 +480,7 @@ impl WindowPresenter {
                         advance = main.advance_tutorial;
                         bubble_click = main.bubble_click.clone();
                         effects.push(UiEffect::Deliver {
-                            child: PresenterId::Bubble,
+                            child: PresenterId::Root,
                             event: if bubble_click.is_some() {
                                 UiEvent::BubbleWindow(PresentationEvent::Hide)
                             } else {
@@ -382,26 +499,28 @@ impl WindowPresenter {
                     WindowContent::ModelPicker { snapshot, catalog } => {
                         effects.extend(self.model_picker.as_mut().unwrap().loaded(snapshot.clone(), catalog.clone()));
                     }
-                    WindowContent::Details { .. } => {}
+                    WindowContent::Details { snapshot, .. } => {
+                        effects.extend(self.observe_details_snapshot(snapshot));
+                    }
                 }
                 effects.push(UiEffect::RenderWindow(content));
                 effects.push(self.command(ViewCommand::Show));
                 if let Some(target) = bubble_click {
                     effects.push(UiEffect::Deliver {
-                        child: PresenterId::Bubble,
+                        child: PresenterId::Root,
                         event: UiEvent::BubbleClickCompleted(target),
                     });
                 } else if self.id == PresenterId::Chat {
                     effects.push(self.command(ViewCommand::FocusInput));
                 }
                 if let Some(section) = section { effects.push(UiEffect::SettingsFocus(section)); }
-                if self.id == PresenterId::Settings { effects.push(UiEffect::Deliver { child: PresenterId::Chat, event: UiEvent::App(crate::app_presenter::AppEvent::SettingsShown(section)) }); }
+                if self.id == PresenterId::Settings { effects.push(UiEffect::Deliver { child: PresenterId::Root, event: UiEvent::App(crate::app_presenter::AppEvent::SettingsShown(section)) }); }
                 if advance { effects.push(UiEffect::Run(UiTask::MainOpened)); }
                 effects
             }
             PresentationAction::Hide => {
                 let mut effects = vec![self.command(ViewCommand::Hide)];
-                if self.id == PresenterId::Settings { effects.push(UiEffect::Deliver { child: PresenterId::Chat, event: UiEvent::App(crate::app_presenter::AppEvent::SettingsClosed) }); }
+                if self.id == PresenterId::Settings { effects.push(UiEffect::Deliver { child: PresenterId::Root, event: UiEvent::App(crate::app_presenter::AppEvent::SettingsClosed) }); }
                 effects
             },
             PresentationAction::Unavailable => vec![self.command(ViewCommand::Hide), UiEffect::Run(UiTask::AnnounceSetup)],

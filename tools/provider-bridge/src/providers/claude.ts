@@ -12,7 +12,7 @@ import {
 import { PROVIDER_CAPABILITIES } from "../provider-capabilities.js";
 import { BridgeError, safeProviderError } from "../errors.js";
 import { readImage, validateImages } from "../images.js";
-import type { ProviderAgent, ProviderAppendInput, ProviderCallOptions, ProviderCallResult, ProviderImageAttachment, ProviderUsage } from "../types.js";
+import type { EffortSelection, ProviderAgent, ProviderAppendInput, ProviderCallOptions, ProviderCallResult, ProviderImageAttachment, ProviderUsage } from "../types.js";
 import { AsyncInput } from "./async-input.js";
 import { claudeContent } from "./inputs.js";
 import { resolveStructuredOutput } from "../structured-output.js";
@@ -55,6 +55,20 @@ function assistantText(message: SDKAssistantMessage): string {
     .filter((block): block is Extract<typeof block, { type: "text" }> => block.type === "text")
     .map((block) => block.text)
     .join("");
+}
+
+type ClaudeEffort = NonNullable<Options["effort"]>;
+
+const CLAUDE_EFFORTS: readonly ClaudeEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
+function effort(selection: EffortSelection | undefined): ClaudeEffort | undefined {
+  if (selection === undefined || selection.value === "default") return undefined;
+  if (selection.kind !== "candidate") {
+    throw new BridgeError("unsupported", "Claude の reasoning effort が不正です");
+  }
+  const candidate = CLAUDE_EFFORTS.find((effort) => effort === selection.value);
+  if (candidate !== undefined) return candidate;
+  throw new BridgeError("unsupported", "Claude の reasoning effort が不正です");
 }
 
 function usage(message: SDKResultMessage): ProviderUsage | undefined {
@@ -116,6 +130,7 @@ export class ClaudeAgent implements ProviderAgent {
     if (options.signal.aborted) abort();
     else options.signal.addEventListener("abort", abort, { once: true });
     const selectedModel = model(options.model);
+    const selectedEffort = effort(options.effort);
     const readableObservationDirectories = options.isolateTools === true ? [] : observationDirectories();
     const readTools = readableObservationDirectories.length === 0 ? [] : ["Read"];
     const sdkOptions: Options = {
@@ -139,9 +154,9 @@ export class ClaudeAgent implements ProviderAgent {
       persistSession: options.session.mode !== "ephemeral",
       extraArgs: { "replay-user-messages": null },
       ...(selectedModel === undefined ? {} : { model: selectedModel }),
-      ...(options.effort === undefined || options.effort === "default"
+      ...(selectedEffort === undefined
         ? {}
-        : { effort: options.effort as NonNullable<Options["effort"]> }),
+        : { effort: selectedEffort }),
       ...(options.schema === undefined
         ? {}
         : { outputFormat: { type: "json_schema", schema: options.schema } }),
@@ -164,6 +179,7 @@ export class ClaudeAgent implements ProviderAgent {
       const active: ActiveClaudeQuery = { stream, input };
       this.activeQueries.set(options.requestId, active);
       for await (const message of stream as AsyncIterable<SDKMessage>) {
+        options.emitProgress();
         if ("session_id" in message && typeof message.session_id === "string") sessionId = message.session_id;
         if (message.type === "user") {
           const echoed = message as SDKUserMessage;
