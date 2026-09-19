@@ -40,13 +40,15 @@ const OBSERVER_SESSION_MAX_CALLS: usize = 60;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SpeakerAliasIndex {
     schema_version: u8,
+    // v0.4.0 が書き出した registryID キーの索引も受け付ける。
+    #[serde(alias = "registryID")]
     registry_id: String,
     aliases: BTreeMap<String, String>,
 }
 
 fn load_speaker_aliases(paths: &ConfigPaths) -> Result<SpeakerAliasIndex, ObserverError> {
     let path = paths.speakers.join("aliases.json");
-    let data = match fs::read(path) {
+    let data = match fs::read(&path) {
         Ok(data) => data,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(SpeakerAliasIndex {
@@ -55,24 +57,39 @@ fn load_speaker_aliases(paths: &ConfigPaths) -> Result<SpeakerAliasIndex, Observ
                 aliases: BTreeMap::new(),
             });
         }
-        Err(_) => return Err(ObserverError::Output),
+        Err(error) => {
+            return Err(ObserverError::SpeakerAliasIndex(format!(
+                "{}: {error}",
+                path.display()
+            )));
+        }
     };
-    let index: SpeakerAliasIndex =
-        serde_json::from_slice(&data).map_err(|_| ObserverError::Output)?;
+    let index: SpeakerAliasIndex = serde_json::from_slice(&data).map_err(|error| {
+        ObserverError::SpeakerAliasIndex(format!("{}: {error}", path.display()))
+    })?;
     if index.schema_version != 1 || uuid::Uuid::parse_str(&index.registry_id).is_err() {
-        return Err(ObserverError::Output);
+        return Err(ObserverError::SpeakerAliasIndex(format!(
+            "{}: schemaVersion または registryId が不正です",
+            path.display()
+        )));
     }
     if index.aliases.iter().any(|(source, target)| {
         !valid_prompt_speaker_id(source) || !valid_prompt_speaker_id(target) || source == target
     }) {
-        return Err(ObserverError::Output);
+        return Err(ObserverError::SpeakerAliasIndex(format!(
+            "{}: 別名の話者 ID が不正です",
+            path.display()
+        )));
     }
     for source in index.aliases.keys() {
         let mut current = source.as_str();
         let mut visited = HashSet::new();
         while let Some(next) = index.aliases.get(current) {
             if !visited.insert(current) {
-                return Err(ObserverError::Output);
+                return Err(ObserverError::SpeakerAliasIndex(format!(
+                    "{}: 別名が循環しています",
+                    path.display()
+                )));
             }
             current = next;
         }
@@ -255,6 +272,14 @@ pub enum ObserverError {
     Provider(#[from] crate::provider::ProviderError),
     #[error("observer の構造化出力が不正です")]
     Output,
+    #[error("observer の話者別名索引を読み込めません: {0}")]
+    SpeakerAliasIndex(String),
+    #[error("observer の観察保持日数が設定されていません")]
+    RetentionNotConfigured,
+    #[error("observer の観察入力がありません")]
+    EmptyInput,
+    #[error("observer の音声時刻が不正です: {0}")]
+    AudioTimestamp(String),
     #[error("observer の当日呼び出し上限に達しました")]
     LimitReached,
     #[error("observer の使用量を保存できませんでした: {0}")]
@@ -538,13 +563,13 @@ impl ObserverAgent {
         if let Some(paths) = &self.observation_paths {
             let retention_days = self
                 .observation_retention_days
-                .ok_or(ObserverError::Output)?;
+                .ok_or(ObserverError::RetentionNotConfigured)?;
             for record in &audio {
                 record_audio_observation(paths, retention_days, record, self.clock.now())?;
             }
         }
         if frames.is_empty() && audio.is_empty() {
-            return Err(ObserverError::Output);
+            return Err(ObserverError::EmptyInput);
         }
         let speaker_aliases = match &self.observation_paths {
             Some(paths) if !audio.is_empty() || self.previous.is_some() => {
@@ -602,7 +627,7 @@ impl ObserverAgent {
             .iter()
             .map(|record| {
                 let time = DateTime::parse_from_rfc3339(&record.created_at)
-                    .map_err(|_| ObserverError::Output)?
+                    .map_err(|_| ObserverError::AudioTimestamp(record.created_at.clone()))?
                     .with_timezone(&Utc);
                 Ok(crate::state::AudioSegmentReference {
                     id: record.id.clone(),

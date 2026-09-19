@@ -859,10 +859,36 @@ private struct SpeakerRegistryEnvelope: Codable {
     let combined: String
 }
 
-private struct SpeakerAliasIndex: Codable {
+struct SpeakerAliasIndex: Codable {
     let schemaVersion: Int
     let registryID: String
     let aliases: [String: String]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case registryID = "registryId"
+        case aliases
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case registryID
+    }
+}
+
+extension SpeakerAliasIndex {
+    // v0.4.0 は registryID キーで書き出していたため、既存の別名索引も読めるようにする。
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        if let registryID = try container.decodeIfPresent(String.self, forKey: .registryID) {
+            self.registryID = registryID
+        } else {
+            registryID = try decoder
+                .container(keyedBy: LegacyCodingKeys.self)
+                .decode(String.self, forKey: .registryID)
+        }
+        aliases = try container.decode([String: String].self, forKey: .aliases)
+    }
 }
 
 protocol SpeakerKeyStore: AnyObject {

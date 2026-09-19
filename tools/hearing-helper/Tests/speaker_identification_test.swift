@@ -1182,6 +1182,30 @@ private func testCentroidAutoUpdateDisabledUntilCalibration() {
     )
 }
 
+private func testSpeakerAliasIndexRegistryIdCoding() {
+    let index = SpeakerAliasIndex(
+        schemaVersion: 1,
+        registryID: "registry-1",
+        aliases: ["speaker-1": "speaker-2"]
+    )
+    let data = try! JSONEncoder().encode(index)
+    let object = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+    assert(object["registryId"] as? String == "registry-1")
+    assert(object["registryID"] == nil)
+
+    let decoded = try! JSONDecoder().decode(SpeakerAliasIndex.self, from: data)
+    assert(decoded.schemaVersion == 1)
+    assert(decoded.registryID == "registry-1")
+    assert(decoded.aliases == ["speaker-1": "speaker-2"])
+
+    let legacy = Data(
+        #"{"schemaVersion":1,"registryID":"registry-1","aliases":{"speaker-1":"speaker-2"}}"#.utf8
+    )
+    let decodedLegacy = try! JSONDecoder().decode(SpeakerAliasIndex.self, from: legacy)
+    assert(decodedLegacy.registryID == "registry-1")
+    assert(decodedLegacy.aliases == ["speaker-1": "speaker-2"])
+}
+
 func testSpeakerIdentification() {
     let identifiedFields = speakerEventFields(
         SpeakerIdentificationResult(
@@ -1396,6 +1420,8 @@ func testSpeakerIdentification() {
     let rebuiltAliasObject = try! JSONSerialization.jsonObject(with: rebuiltAliasData) as! [String: Any]
     let rebuiltAliases = rebuiltAliasObject["aliases"] as! [String: String]
     assert(rebuiltAliases["speaker-1"] == "speaker-2")
+    assert(rebuiltAliasObject["registryId"] is String)
+    assert(rebuiltAliasObject["registryID"] == nil)
     try? FileManager.default.removeItem(at: aliasRoot)
 
     let missingPath = root.appendingPathComponent("missing-registry.enc")
@@ -1524,6 +1550,7 @@ func testSpeakerIdentification() {
     testCoordinatorSingleWindowDoesNotRegister()
     testCoordinatorShutdownWaitsForStartedPersistence()
     testPreparingSegmentIsNotReprocessed()
+    testSpeakerAliasIndexRegistryIdCoding()
     try! candidateLedger.deleteAll()
     try! FileManager.default.removeItem(at: root)
 }
