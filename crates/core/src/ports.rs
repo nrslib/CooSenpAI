@@ -2,6 +2,7 @@ use crate::state::{AudioObservationSource, SpeakerIdentificationStatus};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -14,6 +15,10 @@ pub enum PortError {
     Io(#[from] std::io::Error),
     #[error("platform adapter が利用できません: {0}")]
     Unavailable(String),
+    #[error("platform adapter のプロトコルが不正です: {0}")]
+    Protocol(String),
+    #[error("platform adapter の話者プロトコルが不正です: {0}")]
+    SpeakerProtocol(String),
     #[error("画面収録の権限がありません: {0}")]
     ScreenCapturePermission(String),
     #[error("platform adapter が timeout しました")]
@@ -456,6 +461,108 @@ fn default_hearing_protocol_version() -> u8 {
     1
 }
 
+const HEARING_SPEAKER_METADATA_KEYS: &[&str] = &[
+    "segmentId",
+    "audioStartMs",
+    "audioEndMs",
+    "speakerId",
+    "speakerRegistryId",
+    "speakerStatus",
+    "speakerSegments",
+    "speakerCorrections",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedHearingEvent {
+    event: HearingEvent,
+    speaker_metadata_reason: Option<&'static str>,
+}
+
+impl DecodedHearingEvent {
+    pub fn into_parts(self) -> (HearingEvent, Option<&'static str>) {
+        (self.event, self.speaker_metadata_reason)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HearingEventDecodeError {
+    InvalidJson,
+    InvalidEnvelope,
+}
+
+pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, HearingEventDecodeError> {
+    let value =
+        serde_json::from_slice::<Value>(bytes).map_err(|_| HearingEventDecodeError::InvalidJson)?;
+    let Some(object) = value.as_object() else {
+        return Err(HearingEventDecodeError::InvalidEnvelope);
+    };
+    if object.get("event").and_then(Value::as_str) != Some("final") {
+        let event =
+            serde_json::from_value(value).map_err(|_| HearingEventDecodeError::InvalidEnvelope)?;
+        return Ok(DecodedHearingEvent {
+            event,
+            speaker_metadata_reason: None,
+        });
+    }
+
+    let mut required = object.clone();
+    let mut speaker_metadata = serde_json::Map::new();
+    for key in HEARING_SPEAKER_METADATA_KEYS {
+        if let Some(value) = required.remove(*key) {
+            speaker_metadata.insert((*key).to_owned(), value);
+        }
+    }
+    let required_event = serde_json::from_value::<HearingEvent>(Value::Object(required))
+        .map_err(|_| HearingEventDecodeError::InvalidEnvelope)?;
+    let HearingEvent::Final {
+        source,
+        generation,
+        sequence,
+        text,
+        speaker: _,
+    } = required_event
+    else {
+        return Err(HearingEventDecodeError::InvalidEnvelope);
+    };
+
+    if speaker_metadata.is_empty() {
+        return Ok(DecodedHearingEvent {
+            event: HearingEvent::Final {
+                source,
+                generation,
+                sequence,
+                text,
+                speaker: None,
+            },
+            speaker_metadata_reason: None,
+        });
+    }
+
+    match serde_json::from_value::<HearingSpeakerMetadata>(Value::Object(speaker_metadata)) {
+        Ok(metadata) => Ok(DecodedHearingEvent {
+            event: HearingEvent::Final {
+                source,
+                generation,
+                sequence,
+                text,
+                speaker: Some(metadata),
+            },
+            speaker_metadata_reason: None,
+        }),
+        // serde error には metadata の値を含み得るため、wire 境界では固定理由だけを返す。
+        Err(_) => Ok(DecodedHearingEvent {
+            event: HearingEvent::Final {
+                source,
+                generation,
+                sequence,
+                text,
+                speaker: None,
+            },
+            speaker_metadata_reason: Some("metadata.decode"),
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SpeakerIdentificationPreparationStatus {
@@ -475,61 +582,322 @@ pub struct HearingSpeakerMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_registry_id: Option<String>,
     pub speaker_status: SpeakerIdentificationStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speaker_segments: Vec<HearingSpeakerSegment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speaker_corrections: Vec<HearingSpeakerCorrection>,
 }
 
 impl HearingSpeakerMetadata {
-    pub fn is_valid_for(&self, source: AudioObservationSource) -> bool {
-        if source != AudioObservationSource::Speaker
-            || self.segment_id.is_empty()
-            || uuid::Uuid::parse_str(&self.segment_id).is_err()
-            || self.audio_end_ms <= self.audio_start_ms
-            || self
-                .speaker_registry_id
-                .as_deref()
-                .is_some_and(|value| uuid::Uuid::parse_str(value).is_err())
+    pub fn validation_reason_for(&self, source: AudioObservationSource) -> Option<String> {
+        if source != AudioObservationSource::Speaker {
+            return Some("metadata.source".to_owned());
+        }
+        if self.segment_id.is_empty() || uuid::Uuid::parse_str(&self.segment_id).is_err() {
+            return Some("metadata.segment-id".to_owned());
+        }
+        if self.audio_end_ms <= self.audio_start_ms {
+            return Some("metadata.period-bounds".to_owned());
+        }
+        if self
+            .speaker_registry_id
+            .as_deref()
+            .is_some_and(|value| uuid::Uuid::parse_str(value).is_err())
         {
-            return false;
+            return Some("metadata.registry-id".to_owned());
+        }
+        for (index, segment) in self.speaker_segments.iter().enumerate() {
+            if let Some(reason) = segment.validation_reason_for_segment(&self.segment_id) {
+                return Some(format!("metadata.speakerSegments[{index}].{reason}"));
+            }
+        }
+        if self.speaker_corrections.len() > 512 {
+            return Some("metadata.correction-count".to_owned());
+        }
+        for (index, correction) in self.speaker_corrections.iter().enumerate() {
+            if let Some(reason) = correction.validation_reason() {
+                return Some(format!("metadata.speakerCorrections[{index}].{reason}"));
+            }
+        }
+        if self.speaker_corrections.windows(2).any(|pair| {
+            pair[0].speaker_registry_id != pair[1].speaker_registry_id
+                || pair[0].model_package_digest != pair[1].model_package_digest
+        }) {
+            return Some("metadata.correction-consistency".to_owned());
+        }
+        if self
+            .speaker_registry_id
+            .as_ref()
+            .is_some_and(|registry_id| {
+                self.speaker_corrections
+                    .iter()
+                    .any(|correction| &correction.speaker_registry_id != registry_id)
+            })
+        {
+            return Some("metadata.correction-registry".to_owned());
         }
         match self.speaker_status {
             SpeakerIdentificationStatus::Identified => {
-                self.speaker_id
+                if !self
+                    .speaker_id
                     .as_deref()
-                    .is_some_and(valid_hearing_speaker_id)
-                    && self.speaker_registry_id.is_some()
+                    .is_some_and(crate::speaker_id::is_valid_speaker_id)
+                {
+                    return Some("metadata.speaker-id".to_owned());
+                }
+                if self.speaker_registry_id.is_none() {
+                    return Some("metadata.identified-registry".to_owned());
+                }
             }
             SpeakerIdentificationStatus::Unknown
             | SpeakerIdentificationStatus::Mixed
             | SpeakerIdentificationStatus::Unavailable => {
-                self.speaker_id.is_none() && self.speaker_registry_id.is_none()
+                if self.speaker_id.is_some() || self.speaker_registry_id.is_some() {
+                    return Some("metadata.status-identifiers".to_owned());
+                }
             }
         }
+        None
+    }
+
+    pub fn is_valid_for(&self, source: AudioObservationSource) -> bool {
+        self.validation_reason_for(source).is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HearingSpeakerCorrection {
+    pub segment_id: String,
+    pub audio_start_ms: u64,
+    pub audio_end_ms: u64,
+    pub speaker_id: String,
+    pub speaker_registry_id: String,
+    pub model_package_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_details: Option<crate::speaker_decision::SpeakerDecisionDetails>,
+}
+
+impl HearingSpeakerCorrection {
+    pub fn validation_reason(&self) -> Option<String> {
+        if self.segment_id.is_empty() || uuid::Uuid::parse_str(&self.segment_id).is_err() {
+            return Some("correction.segment-id".to_owned());
+        }
+        if self.audio_end_ms <= self.audio_start_ms {
+            return Some("correction.period-bounds".to_owned());
+        }
+        if !crate::speaker_id::is_valid_speaker_id(&self.speaker_id) {
+            return Some("correction.speaker-id".to_owned());
+        }
+        if uuid::Uuid::parse_str(&self.speaker_registry_id).is_err() {
+            return Some("correction.registry-id".to_owned());
+        }
+        if !is_valid_sha256_hex(&self.model_package_digest) {
+            return Some("correction.model-digest".to_owned());
+        }
+        let details = self.decision_details.as_ref()?;
+        if let Some(reason) = details.validation_reason_for_segment(&self.segment_id) {
+            return Some(format!("correction.decisionDetails.{reason}"));
+        }
+        if details.start_ms != self.audio_start_ms || details.end_ms != self.audio_end_ms {
+            return Some("correction.decision-period".to_owned());
+        }
+        if details.registry_id.as_deref() != Some(self.speaker_registry_id.as_str()) {
+            return Some("correction.decision-registry".to_owned());
+        }
+        if details.model_package_digest != self.model_package_digest {
+            return Some("correction.decision-digest".to_owned());
+        }
+        let valid_phase = match details.phase {
+            crate::speaker_decision::SpeakerDecisionPhase::BackfillAnchor
+            | crate::speaker_decision::SpeakerDecisionPhase::BackfillSamples => {
+                // 再送時のspeakerIdは手動aliasを解決するが、当時の候補IDは書き換えない。
+                !details.candidates.is_empty()
+            }
+            crate::speaker_decision::SpeakerDecisionPhase::InitialRecent => {
+                details.reason == "recent-consensus"
+                    && details.candidates.is_empty()
+                    && details.candidate_count == 0
+            }
+            crate::speaker_decision::SpeakerDecisionPhase::Initial => false,
+        };
+        if !valid_phase {
+            return Some("correction.phase".to_owned());
+        }
+        None
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.validation_reason().is_none()
+    }
+}
+
+fn is_valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+/// 話者の交代で区切られた区間内の連続時間。話者 ID は期間ごとに付く。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HearingSpeakerSegment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_registry_id: Option<String>,
+    pub status: SpeakerIdentificationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_details: Vec<crate::speaker_decision::SpeakerDecisionDetails>,
+}
+
+impl HearingSpeakerSegment {
+    fn common_validation_reason(&self) -> Option<&'static str> {
+        if self.end_ms <= self.start_ms {
+            return Some("segment.period-bounds");
+        }
+        if self.decision_details.len() > 65 {
+            return Some("segment.decision-count");
+        }
+        if self
+            .speaker_registry_id
+            .as_deref()
+            .is_some_and(|value| uuid::Uuid::parse_str(value).is_err())
+        {
+            return Some("segment.registry-id");
+        }
+        None
+    }
+
+    fn status_validation_reason(&self) -> Option<&'static str> {
+        match self.status {
+            SpeakerIdentificationStatus::Identified => {
+                if !self
+                    .speaker_id
+                    .as_deref()
+                    .is_some_and(crate::speaker_id::is_valid_speaker_id)
+                {
+                    return Some("segment.speaker-id");
+                }
+                if self.speaker_registry_id.is_none() {
+                    return Some("segment.identified-registry");
+                }
+            }
+            // unavailable は区間レベルの状態であり、期間には出ない。
+            SpeakerIdentificationStatus::Unknown | SpeakerIdentificationStatus::Mixed => {
+                if self.speaker_id.is_some() || self.speaker_registry_id.is_some() {
+                    return Some("segment.status-identifiers");
+                }
+            }
+            SpeakerIdentificationStatus::Unavailable => return Some("segment.status"),
+        }
+        None
+    }
+
+    fn validation_reason(&self) -> Option<&'static str> {
+        if let Some(reason) = self.common_validation_reason() {
+            return Some(reason);
+        }
+        if self.decision_details.iter().any(|details| {
+            !details.is_valid() || details.start_ms < self.start_ms || details.end_ms > self.end_ms
+        }) {
+            return Some("segment.decision-details");
+        }
+        self.status_validation_reason()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.validation_reason().is_none()
+    }
+
+    pub(crate) fn validation_reason_for_segment(&self, parent_segment_id: &str) -> Option<String> {
+        if let Some(reason) = self.common_validation_reason() {
+            return Some(reason.to_owned());
+        }
+        for (index, details) in self.decision_details.iter().enumerate() {
+            if let Some(reason) = details.validation_reason_for_segment(parent_segment_id) {
+                return Some(format!("segment.decisionDetails[{index}].{reason}"));
+            }
+            if details.start_ms < self.start_ms || details.end_ms > self.end_ms {
+                return Some(format!("segment.decisionDetails[{index}].period-bounds"));
+            }
+        }
+        self.status_validation_reason().map(str::to_owned)
+    }
+
+    pub(crate) fn is_valid_for_segment(&self, parent_segment_id: &str) -> bool {
+        self.validation_reason_for_segment(parent_segment_id)
+            .is_none()
     }
 }
 
 impl HearingEvent {
-    pub fn is_valid_for_source(&self, source: AudioObservationSource) -> bool {
+    pub fn is_valid_required_final_for_source(&self, source: AudioObservationSource) -> bool {
         match self {
             HearingEvent::Final {
                 source: event_source,
-                speaker,
+                generation,
+                sequence,
+                text,
                 ..
             } => {
                 event_source == &source
-                    && speaker
-                        .as_ref()
-                        .is_none_or(|metadata| metadata.is_valid_for(source))
+                    && *generation > 0
+                    && *sequence > 0
+                    && !text.trim().is_empty()
             }
+            _ => true,
+        }
+    }
+
+    pub fn is_valid_for_source(&self, source: AudioObservationSource) -> bool {
+        if !self.is_valid_required_final_for_source(source) {
+            return false;
+        }
+        match self {
+            HearingEvent::Final { speaker, .. } => speaker
+                .as_ref()
+                .is_none_or(|metadata| metadata.validation_reason_for(source).is_none()),
             HearingEvent::SpeakerIdentification { .. } => source == AudioObservationSource::Speaker,
             _ => true,
         }
     }
-}
 
-fn valid_hearing_speaker_id(value: &str) -> bool {
-    let Some(number) = value.strip_prefix("speaker-") else {
-        return false;
-    };
-    !number.is_empty() && number.parse::<u64>().is_ok_and(|value| value > 0)
+    pub fn detach_invalid_speaker_metadata(
+        self,
+        source: AudioObservationSource,
+    ) -> Option<(Self, String)> {
+        if !self.is_valid_required_final_for_source(source) {
+            return None;
+        }
+        let HearingEvent::Final {
+            source: event_source,
+            generation,
+            sequence,
+            text,
+            speaker: Some(metadata),
+        } = self
+        else {
+            return None;
+        };
+        let reason = metadata.validation_reason_for(source)?;
+        Some((
+            HearingEvent::Final {
+                source: event_source,
+                generation,
+                sequence,
+                text,
+                speaker: None,
+            },
+            reason,
+        ))
+    }
 }
 
 pub enum HearingCommand {

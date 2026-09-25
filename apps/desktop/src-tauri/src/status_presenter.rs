@@ -63,6 +63,7 @@ pub(crate) struct BannerView {
     pub message: UiText,
     pub action: Option<RecoveryAction>,
     pub action_label: Option<UiText>,
+    pub dismissible: bool,
 }
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct StatusView {
@@ -81,6 +82,8 @@ pub(crate) struct StatusPresenter {
     candidate: Option<PresenceView>,
     presence_generation: u64,
     thought_generation: u64,
+    dismissed_banner: Option<BannerView>,
+    banner_error_at: Option<String>,
 }
 impl Default for StatusPresenter {
     fn default() -> Self {
@@ -97,6 +100,8 @@ impl Default for StatusPresenter {
             candidate: None,
             presence_generation: 0,
             thought_generation: 0,
+            dismissed_banner: None,
+            banner_error_at: None,
         }
     }
 }
@@ -149,9 +154,23 @@ impl StatusPresenter {
                 }
             }
         }
-        self.view.banner = error
+        let error_at = snapshot
+            .last_error
+            .as_ref()
+            .map(|error| error.occurred_at.clone());
+        if self.banner_error_at != error_at {
+            self.dismissed_banner = None;
+            self.banner_error_at = error_at;
+        }
+        let next_banner = error
             .map(|error| banner("error", UiText::literal(error), None))
             .or_else(|| status_banner(snapshot));
+        if next_banner != self.dismissed_banner {
+            self.dismissed_banner = None;
+            self.view.banner = next_banner;
+        } else {
+            self.view.banner = None;
+        }
         effects.insert(0, self.render());
         effects
     }
@@ -176,6 +195,19 @@ impl StatusPresenter {
     }
     pub(crate) fn recovery(&self) -> Option<RecoveryAction> {
         self.view.banner.as_ref().and_then(|view| view.action)
+    }
+    pub(crate) fn dismiss_banner(&mut self) -> Vec<UiEffect> {
+        if self
+            .view
+            .banner
+            .as_ref()
+            .is_some_and(|banner| banner.dismissible)
+        {
+            self.dismissed_banner = self.view.banner.take();
+            vec![self.render()]
+        } else {
+            vec![]
+        }
     }
     pub(crate) fn render(&self) -> UiEffect {
         UiEffect::StatusRender(Box::new(self.view.clone()))
@@ -210,7 +242,12 @@ fn presence(s: &AppSnapshot, changing: bool) -> PresenceView {
         )
     } else if response_in_progress(s) {
         ("thinking", UiText::message("view.thinking"))
-    } else if s.last_error.is_some() || s.delivery_outbox_blocked {
+    } else if s
+        .last_error
+        .as_ref()
+        .is_some_and(|error| !error.is_user_response_error())
+        || s.delivery_outbox_blocked
+    {
         ("attention", UiText::message("view.needsAttention"))
     } else if s.observer_running {
         ("watching", UiText::message("view.watching"))
@@ -220,21 +257,13 @@ fn presence(s: &AppSnapshot, changing: bool) -> PresenceView {
     PresenceView { mode, text }
 }
 fn thought(s: &AppSnapshot) -> Option<UiText> {
-    if !s.config.ui.thought_bubble || !response_in_progress(s) {
+    if !s.config.ui.thought_bubble {
         return None;
     }
-    let Some(raw) = &s.companion_draft else {
-        return Some(UiText::message("view.draft"));
-    };
-    let lines: Vec<_> = raw.lines().filter(|line| !line.trim().is_empty()).collect();
-    let tail = if lines.is_empty() {
-        raw.clone()
-    } else {
-        lines[lines.len().saturating_sub(3)..].join("\n")
-    };
-    let chars: Vec<_> = tail.chars().collect();
+    let raw = s.latest_companion_thought.as_deref()?;
+    let chars: Vec<_> = raw.chars().collect();
     Some(UiText::literal(if chars.len() <= 240 {
-        tail
+        raw.to_owned()
     } else {
         format!("…{}", chars[chars.len() - 239..].iter().collect::<String>())
     }))
@@ -253,6 +282,7 @@ fn banner(tone: &'static str, message: UiText, action: Option<RecoveryAction>) -
         message,
         action,
         action_label,
+        dismissible: matches!(tone, "error" | "warning"),
     }
 }
 fn audio_action(s: &AppSnapshot) -> Option<RecoveryAction> {
@@ -267,6 +297,7 @@ fn audio_action(s: &AppSnapshot) -> Option<RecoveryAction> {
         Some("system-audio-device" | "system-audio-format" | "system-audio-overflow") => {
             return None
         }
+        Some("speaker-protocol" | "hearing-protocol") => return None,
         _ => {}
     }
     if s.config.audio.speaker
@@ -335,20 +366,6 @@ fn status_banner(s: &AppSnapshot) -> Option<BannerView> {
             Text::message("view.observerFailed").arg("message", error),
             Some(Settings),
         ));
-    }
-    if s.last_error.as_ref().is_some_and(|error| {
-        error.attachment_ocr.is_none()
-            && error.user_response.is_some()
-            && s.companion_retry_in_seconds.is_none()
-    }) {
-        let key = if s.last_error.as_ref().is_some_and(|error| {
-            error.kind == coosenpai_core::runtime::RuntimeErrorKind::ProviderTimeout
-        }) {
-            "view.userResponseStoppedTimeout"
-        } else {
-            "view.userResponseStopped"
-        };
-        return Some(banner("error", Text::message(key), None));
     }
     if let Some(failure) = s
         .last_error
@@ -419,21 +436,24 @@ fn status_banner(s: &AppSnapshot) -> Option<BannerView> {
             None,
         ));
     }
-    s.last_error.as_ref().map(|error| {
-        let key = if error.kind == coosenpai_core::runtime::RuntimeErrorKind::ProviderTimeout {
-            "view.companionFailedTimeout"
-        } else {
-            "view.companionFailed"
-        };
-        banner(
-            "info",
-            Text::message(key)
-                .arg("name", Text::literal(&s.companion_display_name))
-                .arg("kind", Text::literal(error.kind.as_str()))
-                .arg("retry", retry(s.companion_retry_in_seconds)),
-            None,
-        )
-    })
+    s.last_error
+        .as_ref()
+        .filter(|error| !error.is_user_response_error())
+        .map(|error| {
+            let key = if error.kind == coosenpai_core::runtime::RuntimeErrorKind::ProviderTimeout {
+                "view.companionFailedTimeout"
+            } else {
+                "view.companionFailed"
+            };
+            banner(
+                "info",
+                Text::message(key)
+                    .arg("name", Text::literal(&s.companion_display_name))
+                    .arg("kind", Text::literal(error.kind.as_str()))
+                    .arg("retry", retry(s.companion_retry_in_seconds)),
+                None,
+            )
+        })
 }
 pub(crate) async fn wait(deadline: StatusDeadline) -> UiEvent {
     let millis = match deadline {
@@ -442,5 +462,43 @@ pub(crate) async fn wait(deadline: StatusDeadline) -> UiEvent {
     };
     tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
     UiEvent::StatusDeadline(deadline)
+}
+
+pub(crate) fn user_response_failure_text(
+    failure: &coosenpai_core::runtime::RuntimeUserResponseFailure,
+    kind: coosenpai_core::runtime::RuntimeErrorKind,
+) -> UiText {
+    let key = if kind == coosenpai_core::runtime::RuntimeErrorKind::ProviderTimeout {
+        "view.userResponseStoppedTimeout"
+    } else {
+        "view.userResponseStopped"
+    };
+    let stopped = UiText::message(key).arg("attempts", UiText::literal(failure.attempts));
+    let Some(provider) = &failure.provider else {
+        return stopped;
+    };
+    use coosenpai_core::provider::ProviderErrorKind;
+    let key = match provider.kind {
+        ProviderErrorKind::Retryable => "view.providerFailure.retryable",
+        ProviderErrorKind::Timeout => "view.providerFailure.timeout",
+        ProviderErrorKind::Auth => "view.providerFailure.auth",
+        ProviderErrorKind::Unsupported => "view.providerFailure.unsupported",
+        ProviderErrorKind::InvalidModel => "view.providerFailure.invalid-model",
+        ProviderErrorKind::InvalidRequest => "view.providerFailure.invalid-request",
+        ProviderErrorKind::Permission => "view.providerFailure.permission",
+        ProviderErrorKind::Quota => "view.providerFailure.quota",
+        ProviderErrorKind::RateLimit => "view.providerFailure.rate-limit",
+        ProviderErrorKind::InvalidOutput => "view.providerFailure.invalid-output",
+    };
+    let reason = UiText::message(key);
+    let reason = match &provider.model {
+        Some(model) => UiText::message("view.providerFailureModel")
+            .arg("model", UiText::literal(model))
+            .arg("reason", reason),
+        None => reason,
+    };
+    UiText::Join {
+        parts: vec![reason, UiText::literal(" "), stopped],
+    }
 }
 

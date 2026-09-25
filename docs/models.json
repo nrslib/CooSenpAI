@@ -3,6 +3,9 @@
   "codex": {
     "models": [
       "default",
+      "gpt-6-sol",
+      "gpt-6-astra",
+      "gpt-6-luna",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna"
@@ -12,7 +15,8 @@
       "low",
       "medium",
       "high",
-      "xhigh"
+      "xhigh",
+      "max"
     ],
     "modelEfforts": {
       "gpt-5.6-luna": [
@@ -20,7 +24,8 @@
         "low",
         "medium",
         "high",
-        "xhigh"
+        "xhigh",
+        "max"
       ]
     }
   },
@@ -29,14 +34,16 @@
       "default",
       "opus",
       "sonnet",
-      "haiku"
+      "haiku",
+      "claude-opus-5-5"
     ],
     "efforts": [
       "default",
       "low",
       "medium",
       "high",
-      "xhigh"
+      "xhigh",
+      "max"
     ],
     "modelEfforts": {}
   },
@@ -46,7 +53,8 @@
       "low",
       "medium",
       "high",
-      "xhigh"
+      "xhigh",
+      "max"
     ],
     "modelEfforts": {}
   }

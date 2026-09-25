@@ -7,15 +7,16 @@ pub use crate::companion_cursor::{
 use crate::config::ConfigPaths;
 use crate::frame_buffer::FrameBuffer;
 use crate::logging::FileLogger;
-use crate::outbox::DurableOutbox;
+use crate::mailbox::{Mailbox, MailboxDeletionReceipt, MailboxError};
+use crate::outbox::{DurableOutbox, OutboxDeletionReceipt, OutboxError};
 use crate::persistence::{
-    atomic_write_json, DirectoryLocks, PersistenceError, SiblingLock, StagedFile,
+    atomic_write_json, DirectoryLocks, FileSnapshot, PersistenceError, SiblingLock, StagedFile,
 };
 use crate::ports::RuntimeLogger;
 use crate::provider::ProviderSession;
 use crate::state::{
-    parse_observation, ConversationEntry, ConversationMessageKind, ConversationRole,
-    ObservationRecord, PendingFrameContext, DEFAULT_OBSERVATION_LIMITS,
+    parse_observation, ConversationEntry, ConversationMessageKind, ObservationRecord,
+    PendingFrameContext, DEFAULT_OBSERVATION_LIMITS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,11 +25,22 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
-const MAX_CURSOR_IDS: usize = 500;
+pub(crate) const MAX_CURSOR_IDS: usize = 500;
 const MAX_CONVERSATION_ENTRIES: usize = 200;
 const CURSOR_SCHEMA_VERSION: u64 = 2;
 pub(super) const OVERSIZED_DELIVERY_REASON: &str = "pending-delivery-payload-too-large";
+
+#[derive(Debug, Error)]
+pub(crate) enum CompanionStorageDeletionError {
+    #[error("companion storage の永続化に失敗しました: {0}")]
+    Persistence(#[from] PersistenceError),
+    #[error("companion storage mailbox に失敗しました: {0}")]
+    Mailbox(#[from] MailboxError),
+    #[error("companion storage outbox に失敗しました: {0}")]
+    Outbox(#[from] OutboxError),
+}
 
 #[path = "companion_storage_quarantine.rs"]
 mod quarantine;
@@ -37,6 +49,8 @@ use quarantine::delivery_quarantine_record;
 mod attachments;
 #[path = "companion_storage_audio.rs"]
 mod audio_migration;
+#[path = "companion_transcript_index.rs"]
+mod transcript_index;
 #[path = "companion_storage_usage.rs"]
 mod usage_recovery;
 
@@ -69,6 +83,7 @@ fn log_provider_retention(
 pub struct CompanionStorage {
     pub state_directory: PathBuf,
     pub observation_directory: PathBuf,
+    transcript_directory: PathBuf,
     pub mailbox_directory: PathBuf,
     pub outbox_directory: PathBuf,
     pub usage_path: PathBuf,
@@ -85,6 +100,39 @@ pub struct CompanionStorage {
     frame_buffer: FrameBuffer,
     pub retention_days: u64,
     pinned_conversation_generation: Option<u64>,
+}
+
+pub(crate) struct CompanionStorageDeletionReceipt {
+    cursor_snapshot: FileSnapshot,
+    mailbox_receipts: Vec<MailboxDeletionReceipt>,
+    outbox_receipt: Option<OutboxDeletionReceipt>,
+}
+
+impl CompanionStorageDeletionReceipt {
+    pub(crate) fn rollback(&self) -> Result<(), PersistenceError> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.cursor_snapshot.restore() {
+            errors.push(error.to_string());
+        }
+        for receipt in self.mailbox_receipts.iter().rev() {
+            if let Err(error) = receipt.rollback() {
+                errors.push(error.to_string());
+            }
+        }
+        if let Some(receipt) = &self.outbox_receipt {
+            if let Err(error) = receipt.rollback() {
+                errors.push(error.to_string());
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(PersistenceError::Invalid(format!(
+                "companion storage の日次削除変更の復元に失敗しました: {}",
+                errors.join(", ")
+            )))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -197,6 +245,7 @@ impl CompanionStorage {
         Self {
             state_directory: paths.state.clone(),
             observation_directory: paths.observations.clone(),
+            transcript_directory: paths.transcripts.clone(),
             mailbox_directory: paths.mailbox.clone(),
             outbox_directory: paths.outbox.clone(),
             usage_path: paths.companion_usage.clone(),
@@ -240,6 +289,76 @@ impl CompanionStorage {
 
     pub fn outbox(&self) -> DurableOutbox {
         DurableOutbox::new(self.outbox_directory.clone()).with_log_path(self.log_path.clone())
+    }
+
+    /// Agent の有無に依存せず、削除対象の音声観察を永続配達経路から取り除く。
+    ///
+    /// outbox、既存 recipient の mailbox、cursor を一つの receipt で扱う。
+    /// mailbox は `open` のみを使い、processing を recover してから削除することはない。
+    pub(crate) fn discard_conversation_log_day(
+        &self,
+        scope: &crate::conversation_log::ConversationLogDeletionScope,
+    ) -> Result<CompanionStorageDeletionReceipt, CompanionStorageDeletionError> {
+        let cursor_snapshot = FileSnapshot::capture(&self.cursor_path)?;
+        let staged_cursor = sanitize_deletion_cursor(self.load_cursor()?, scope)?;
+        let mailboxes = self.existing_mailboxes()?;
+        let mut receipt = CompanionStorageDeletionReceipt {
+            cursor_snapshot,
+            mailbox_receipts: Vec::new(),
+            outbox_receipt: None,
+        };
+
+        let result = (|| -> Result<(), CompanionStorageDeletionError> {
+            receipt.outbox_receipt = Some(self.outbox().discard_observations(scope)?);
+            for mailbox in mailboxes {
+                receipt
+                    .mailbox_receipts
+                    .push(mailbox.discard_observations(scope)?);
+            }
+            self.update_cursor(|cursor| {
+                *cursor = staged_cursor.clone();
+                Ok(())
+            })?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => Ok(receipt),
+            Err(error) => match receipt.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(CompanionStorageDeletionError::Persistence(
+                    PersistenceError::Invalid(format!(
+                        "companion storage の日次削除に失敗し、変更の復元にも失敗しました: error={error}; rollback={rollback}"
+                    )),
+                )),
+            },
+        }
+    }
+
+    fn existing_mailboxes(&self) -> Result<Vec<Mailbox>, CompanionStorageDeletionError> {
+        let entries = match fs::read_dir(&self.mailbox_directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(PersistenceError::Io(error).into()),
+        };
+        let mut recipients = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(PersistenceError::Io)?;
+            if !entry.file_type().map_err(PersistenceError::Io)?.is_dir() {
+                continue;
+            }
+            let recipient = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| MailboxError::InvalidRecipient)?;
+            recipients.push(recipient);
+        }
+        recipients.sort();
+        recipients
+            .into_iter()
+            .map(|recipient| {
+                Mailbox::open(self.mailbox_directory.clone(), recipient).map_err(Into::into)
+            })
+            .collect()
     }
 
     pub(crate) fn record_stagnation_reaction_at(&self, reacted_at: chrono::DateTime<chrono::Utc>) {
@@ -340,7 +459,7 @@ impl CompanionStorage {
             .into_iter()
             .rev()
             .find(|entry| {
-                entry.role == ConversationRole::Companion
+                entry.completes_user_response()
                     && entry.caused_by_ids.iter().any(|cause| cause == input_id)
             }))
     }
@@ -618,8 +737,6 @@ impl CompanionStorage {
         } else {
             cursor = scoped_cursor;
         }
-        #[cfg(test)]
-        failpoints::before_cursor_write(&self.cursor_path)?;
         write_cursor_locked_cancellable(&self.cursor_path, &cursor, publication)?;
         Ok(result)
     }
@@ -786,8 +903,6 @@ impl CompanionStorage {
         } else {
             cursor = scoped_cursor;
         }
-        #[cfg(test)]
-        failpoints::before_cursor_write(&self.cursor_path)?;
         let bytes = cursor_document_bytes(&cursor)?;
         let staged = StagedFile::prepare(&self.cursor_path, &bytes, None)?;
         Ok(Some(PendingFrameContextChange {
@@ -1151,6 +1266,11 @@ impl CompanionStorage {
             cursor.pending_inputs.retain(|input| input.id() != input_id);
             if !cursor.cancelled_input_ids.iter().any(|id| id == input_id) {
                 cursor.cancelled_input_ids.push(input_id.to_owned());
+                if cursor.cancelled_input_ids.len() > MAX_CURSOR_IDS {
+                    cursor
+                        .cancelled_input_ids
+                        .drain(..cursor.cancelled_input_ids.len() - MAX_CURSOR_IDS);
+                }
             }
             if let Some(lease) = cursor.user_dispatch.as_mut() {
                 lease.input_ids.retain(|id| id != input_id);
@@ -1395,6 +1515,38 @@ fn read_cursor(
     )
 }
 
+fn sanitize_deletion_cursor(
+    mut cursor: CursorSnapshot,
+    scope: &crate::conversation_log::ConversationLogDeletionScope,
+) -> Result<CursorSnapshot, PersistenceError> {
+    cursor.pending = cursor
+        .pending
+        .into_iter()
+        .map(|pending| {
+            crate::conversation_log::sanitize_observation_record(&pending.observation, scope).map(
+                |observation| {
+                    observation.map(|observation| {
+                        PendingObservation::new(pending.conversation_generation, observation)
+                    })
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    cursor.pending_inputs = cursor
+        .pending_inputs
+        .into_iter()
+        .map(|pending| match pending {
+            PendingInput::UserMessage(input) => Ok(PendingInput::UserMessage(
+                crate::conversation_log::sanitize_pending_user_message(&input, scope)?,
+            )),
+        })
+        .collect::<Result<Vec<_>, PersistenceError>>()?;
+    Ok(cursor)
+}
+
 fn read_cursor_locked(
     path: &Path,
     quarantine_path: &Path,
@@ -1497,7 +1649,7 @@ fn read_cursor_locked(
     }
     let ids = retain_ids(raw_ids);
     let failed = retain_ids(raw_failed);
-    let cancelled_input_ids = raw_cancelled_input_ids;
+    let cancelled_input_ids = retain_ids(raw_cancelled_input_ids);
     let consumed_frame_context_ids = retain_ids(raw_consumed_frame_context_ids);
     validate_pending_inputs(&pending_inputs, next_user_seq)?;
     validate_user_dispatch(&user_dispatch, next_dispatch_seq, &pending_inputs)?;
@@ -1566,10 +1718,6 @@ fn read_cursor_locked(
                     &reason,
                 );
             }
-        }
-        #[cfg(test)]
-        if has_quarantined_deliveries {
-            failpoints::after_delivery_quarantine(path)?;
         }
         // cursor を先に書き戻すと隔離先の書き込み失敗時に payload を失うため、
         // 隔離が durable になった後で有効な record だけを正本へ残す。
@@ -1715,7 +1863,7 @@ fn cursor_document_bytes(cursor: &CursorSnapshot) -> Result<Vec<u8>, Persistence
     let failed = retain_ids(cursor.failed.clone());
     let observation_attempts = cursor.observation_attempts.clone();
     let consumed_frame_context_ids = retain_ids(cursor.consumed_frame_context_ids.clone());
-    let cancelled_input_ids = cursor.cancelled_input_ids.clone();
+    let cancelled_input_ids = retain_ids(cursor.cancelled_input_ids.clone());
     validate_pending_inputs(&cursor.pending_inputs, cursor.next_user_seq)?;
     validate_user_dispatch(
         &cursor.user_dispatch,
@@ -1835,12 +1983,16 @@ pub(crate) fn conversation_entry_with_generation_from_storage_value(
         .and_then(Value::as_u64)
         .unwrap_or(0);
     value.as_object_mut()?.remove("conversationGeneration");
-    if let Some(context) = value.get_mut("screenContext") {
-        audio_migration::migrate_stripped_audio_context(context);
-    }
+    normalize_conversation_audio_context(&mut value);
     let entry = serde_json::from_value::<ConversationEntry>(value).ok()?;
     validate_conversation_entry(&entry).ok()?;
     Some((stored_generation, entry))
+}
+
+pub(crate) fn normalize_conversation_audio_context(value: &mut Value) {
+    if let Some(context) = value.get_mut("screenContext") {
+        audio_migration::migrate_stripped_audio_context(context);
+    }
 }
 
 fn conversation_storage_value(
@@ -2353,4 +2505,3 @@ fn retain_ids(mut ids: Vec<String>) -> Vec<String> {
     }
     ids
 }
-

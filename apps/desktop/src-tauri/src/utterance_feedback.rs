@@ -1,29 +1,74 @@
-use crate::bubbles::{
-    self, BubbleAction, BubbleInteraction, BubbleOption, BubbleSecretInput, BubbleSelect,
-};
+use crate::bubbles::{self, BubbleAction, BubbleInteraction, BubbleSecretInput};
 use crate::command_guard::CommandContext;
 use crate::state::{ConfigCommitError, DesktopState};
 use coosenpai_core::config::Config;
+use coosenpai_core::judge::{JudgeFeedApplyResult, JudgeFeedSign};
 use coosenpai_core::locale::{text, Locale, TextKey};
 use coosenpai_core::observer::read_observations_by_ids;
 use coosenpai_core::runtime::{CompanionDecision, RuntimeError};
 use coosenpai_core::state::{ConversationEntry, ConversationMessageKind, ObservationRecord};
 use coosenpai_core::utterance_feedback::{
-    FeedbackReasonCode, UtteranceFeedbackInput, UtteranceFeedbackResult, UtteranceFeedbackStore,
+    FeedbackFeedStatus, FeedbackReasonCode, UtteranceFeedbackInput, UtteranceFeedbackRecord,
+    UtteranceFeedbackResult, UtteranceFeedbackStore,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-pub(crate) const OPEN_ACTION: &str = "utterance-feedback-open";
+#[path = "utterance_feedback_bundle.rs"]
+mod bundle;
+
+pub(crate) const POSITIVE_ACTION: &str = "utterance-feedback-positive";
+pub(crate) const NEGATIVE_ACTION: &str = "utterance-feedback-negative";
 pub(crate) const REASON_ACTION: &str = "utterance-feedback-reason";
 pub(crate) const OTHER_ACTION: &str = "utterance-feedback-other";
 pub(crate) const CANCEL_ACTION: &str = "utterance-feedback-cancel";
 pub(crate) const TOGGLE_ACTION: &str = "utterance-feedback-toggle";
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackSummary {
+    pub revision: u64,
+    pub sign: Option<JudgeFeedSign>,
+    pub comment: Option<String>,
+    pub feed_status: Option<FeedbackFeedStatus>,
+}
+
+impl From<&UtteranceFeedbackRecord> for FeedbackSummary {
+    fn from(record: &UtteranceFeedbackRecord) -> Self {
+        Self {
+            revision: record.revision,
+            sign: (!record.cancelled).then_some(record.sign),
+            comment: (!record.cancelled)
+                .then(|| record.free_text.clone())
+                .flatten(),
+            feed_status: record.feed.as_ref().map(|feed| feed.status.clone()),
+        }
+    }
+}
+
+pub(crate) fn load_feedback_summaries(
+    paths: &coosenpai_core::config::ConfigPaths,
+) -> Result<
+    std::collections::BTreeMap<String, FeedbackSummary>,
+    coosenpai_core::persistence::PersistenceError,
+> {
+    let records = coosenpai_core::persistence::JsonlStore::new(paths.utterance_feedback.clone())
+        .read::<UtteranceFeedbackRecord>()?;
+    Ok(records
+        .into_iter()
+        .map(|record| (record.utterance.id.clone(), FeedbackSummary::from(&record)))
+        .collect())
+}
+
 pub(crate) fn is_feedback_action(action: &str) -> bool {
     matches!(
         action,
-        OPEN_ACTION | REASON_ACTION | OTHER_ACTION | CANCEL_ACTION | TOGGLE_ACTION
+        POSITIVE_ACTION
+            | NEGATIVE_ACTION
+            | REASON_ACTION
+            | OTHER_ACTION
+            | CANCEL_ACTION
+            | TOGGLE_ACTION
     )
 }
 
@@ -34,101 +79,109 @@ pub(crate) fn is_optional_text_action(action: &str) -> bool {
 pub(crate) fn interaction_for_speech(
     config: &Config,
     message_kind: &str,
-    recorded: bool,
+    feedback: Option<&FeedbackSummary>,
 ) -> Option<BubbleInteraction> {
-    let kind = ConversationMessageKind::from_wire(message_kind)?;
-    if !config.debug.enabled || !kind.is_normal_speech() {
+    if !config.debug.feedback_enabled
+        || !ConversationMessageKind::from_wire(message_kind)?.is_normal_speech()
+    {
         return None;
     }
     let locale = Locale::from_config(&config.ui.language);
-    if recorded {
-        Some(BubbleInteraction {
-            select: None,
-            secret_input: None,
-            actions: vec![BubbleAction {
-                id: TOGGLE_ACTION.to_owned(),
-                label: text(TextKey::UtteranceFeedbackRecorded, locale).to_owned(),
-            }],
-            detail: None,
-            technical_detail: None,
-        })
-    } else {
-        Some(BubbleInteraction {
-            select: None,
-            secret_input: None,
-            actions: vec![BubbleAction {
-                id: OPEN_ACTION.to_owned(),
-                label: text(TextKey::UtteranceFeedbackOpen, locale).to_owned(),
-            }],
-            detail: None,
-            technical_detail: None,
-        })
+    let sign = feedback.and_then(|feedback| feedback.sign);
+    let mut actions = vec![
+        BubbleAction {
+            id: POSITIVE_ACTION.into(),
+            label: if sign == Some(JudgeFeedSign::Positive) {
+                "Good ✓"
+            } else {
+                "Good"
+            }
+            .into(),
+        },
+        BubbleAction {
+            id: NEGATIVE_ACTION.into(),
+            label: if sign == Some(JudgeFeedSign::Negative) {
+                "Bad ✓"
+            } else {
+                "Bad"
+            }
+            .into(),
+        },
+    ];
+    if sign.is_some() {
+        actions.push(BubbleAction {
+            id: REASON_ACTION.into(),
+            label: text(TextKey::UtteranceFeedbackAddReason, locale).into(),
+        });
+        actions.push(BubbleAction {
+            id: TOGGLE_ACTION.into(),
+            label: if locale == Locale::Ja {
+                "評価を取り消す"
+            } else {
+                "Cancel rating"
+            }
+            .into(),
+        });
     }
-}
-
-fn reason_interaction(locale: Locale) -> BubbleInteraction {
-    BubbleInteraction {
-        select: Some(BubbleSelect {
-            options: vec![
-                reason_option(
-                    "no-activity",
-                    TextKey::UtteranceFeedbackReasonNoActivity,
-                    locale,
-                ),
-                reason_option("repeated", TextKey::UtteranceFeedbackReasonRepeated, locale),
-                reason_option(
-                    "misunderstood",
-                    TextKey::UtteranceFeedbackReasonMisunderstood,
-                    locale,
-                ),
-                reason_option(
-                    "bad-timing",
-                    TextKey::UtteranceFeedbackReasonBadTiming,
-                    locale,
-                ),
-                reason_option("other", TextKey::UtteranceFeedbackReasonOther, locale),
-            ],
-            selected: "no-activity".to_owned(),
-            action: REASON_ACTION.to_owned(),
-            confirm_label: text(TextKey::UtteranceFeedbackSubmit, locale).to_owned(),
-        }),
+    Some(BubbleInteraction {
+        select: None,
         secret_input: None,
-        actions: vec![cancel_action(locale)],
-        detail: None,
+        actions,
+        detail: feedback.map(|feedback| feedback_status_text(feedback, locale)),
         technical_detail: None,
-    }
+    })
 }
 
-fn other_interaction(locale: Locale) -> BubbleInteraction {
+pub(crate) fn feedback_status_text(feedback: &FeedbackSummary, locale: Locale) -> String {
+    let saved = text(
+        if feedback.sign.is_none() {
+            TextKey::UtteranceFeedbackCancelled
+        } else {
+            TextKey::UtteranceFeedbackSaved
+        },
+        locale,
+    );
+    let key = match feedback.feed_status {
+        Some(FeedbackFeedStatus::Applied) => Some(TextKey::UtteranceFeedbackFeedApplied),
+        Some(FeedbackFeedStatus::NotApplied) => Some(TextKey::UtteranceFeedbackFeedNotApplied),
+        Some(FeedbackFeedStatus::Unknown) => Some(TextKey::UtteranceFeedbackFeedUnknown),
+        _ => None,
+    };
+    key.map(|key| format!("{}（{}）", saved, text(key, locale)))
+        .unwrap_or_else(|| saved.to_owned())
+}
+
+fn comment_interaction(locale: Locale, comment: Option<String>) -> BubbleInteraction {
     BubbleInteraction {
         select: None,
         secret_input: Some(BubbleSecretInput {
-            label: text(TextKey::UtteranceFeedbackFreeTextLabel, locale).to_owned(),
-            placeholder: text(TextKey::UtteranceFeedbackFreeTextPlaceholder, locale).to_owned(),
-            action: OTHER_ACTION.to_owned(),
-            submit_label: text(TextKey::UtteranceFeedbackSubmit, locale).to_owned(),
+            label: text(TextKey::UtteranceFeedbackFreeTextLabel, locale).into(),
+            placeholder: text(TextKey::UtteranceFeedbackFreeTextPlaceholder, locale).into(),
+            action: OTHER_ACTION.into(),
+            submit_label: text(TextKey::UtteranceFeedbackSubmit, locale).into(),
+            value: comment,
         }),
-        actions: vec![cancel_action(locale)],
+        actions: vec![BubbleAction {
+            id: CANCEL_ACTION.into(),
+            label: text(TextKey::UtteranceFeedbackCancel, locale).into(),
+        }],
         detail: None,
         technical_detail: None,
-    }
-}
-
-fn cancel_action(locale: Locale) -> BubbleAction {
-    BubbleAction {
-        id: CANCEL_ACTION.to_owned(),
-        label: text(TextKey::UtteranceFeedbackCancel, locale).to_owned(),
-    }
-}
-
-fn reason_option(value: &str, key: TextKey, locale: Locale) -> BubbleOption {
-    BubbleOption {
-        value: value.to_owned(),
-        label: text(key, locale).to_owned(),
     }
 }
 
 impl DesktopState {
+    pub(crate) async fn export_utterance_feedback(&self) -> Result<String, ConfigCommitError> {
+        let relative = tokio::task::spawn_blocking({
+            let paths = self.paths.clone();
+            move || bundle::export_feedback_bundle(&paths)
+        })
+        .await
+        .map_err(|error| feedback_runtime_error(error.to_string()))?
+        .map_err(feedback_runtime_error)?;
+        Ok(self.paths.root.join(relative).display().to_string())
+    }
+
     pub(crate) async fn handle_utterance_feedback_interaction(
         self: &Arc<Self>,
         _permit: &CommandContext,
@@ -137,71 +190,134 @@ impl DesktopState {
         value: Option<&str>,
     ) -> Result<(), ConfigCommitError> {
         let config = self.runtime_config();
-        if !config.debug.enabled {
+        if !config.debug.feedback_enabled {
             return Err(feedback_error(
                 TextKey::UtteranceFeedbackUnavailable,
                 &config,
             ));
         }
         let locale = Locale::from_config(&config.ui.language);
+        // チャット履歴は吹き出しの保持期間に依存しない。
+        let kind = self.message_kind(id).await?;
+        let previous = self.latest_feedback(id).await?;
+        let active = previous.as_ref().filter(|record| !record.cancelled);
         match action {
-            OPEN_ACTION => {
-                self.set_feedback_interaction(id, reason_interaction(locale))
-                    .await
+            POSITIVE_ACTION | NEGATIVE_ACTION => {
+                let sign = if action == POSITIVE_ACTION {
+                    JudgeFeedSign::Positive
+                } else {
+                    JudgeFeedSign::Negative
+                };
+                if active.is_some_and(|record| record.sign == sign) {
+                    return self.cancel_feedback(id, &config).await;
+                }
+                self.record_feedback(
+                    id,
+                    sign,
+                    active
+                        .map(|record| record.reason_code)
+                        .unwrap_or(FeedbackReasonCode::None),
+                    active.and_then(|record| record.free_text.as_deref()),
+                    active.is_some(),
+                    &config,
+                )
+                .await
             }
             REASON_ACTION => {
-                let reason = value
-                    .and_then(FeedbackReasonCode::parse)
-                    .ok_or_else(|| feedback_error(TextKey::InvalidBubbleAction, &config))?;
-                if reason == FeedbackReasonCode::Other {
-                    self.set_feedback_interaction(id, other_interaction(locale))
-                        .await
-                } else {
-                    self.record_feedback(id, reason, None, &config).await
-                }
+                let record = active.ok_or_else(|| {
+                    feedback_error(TextKey::UtteranceFeedbackUnavailable, &config)
+                })?;
+                self.set_feedback_interaction(
+                    id,
+                    comment_interaction(locale, record.free_text.clone()),
+                )
+                .await
             }
             OTHER_ACTION => {
-                self.record_feedback(id, FeedbackReasonCode::Other, value, &config)
-                    .await
+                let record = active.ok_or_else(|| {
+                    feedback_error(TextKey::UtteranceFeedbackUnavailable, &config)
+                })?;
+                let comment = value.filter(|value| !value.trim().is_empty());
+                self.record_feedback(
+                    id,
+                    record.sign,
+                    if comment.is_some() {
+                        FeedbackReasonCode::Other
+                    } else {
+                        FeedbackReasonCode::None
+                    },
+                    comment,
+                    true,
+                    &config,
+                )
+                .await?;
+                let snapshot = self.snapshot().await;
+                bubbles::mutate_checked(
+                    &self.ui,
+                    bubbles::BubbleMutation::SetInteraction {
+                        id: id.to_owned(),
+                        interaction: interaction_for_speech(
+                            &config,
+                            &kind,
+                            snapshot.utterance_feedback.get(id),
+                        )
+                        .map(Box::new),
+                    },
+                )
+                .await
+                .map_err(feedback_runtime_error)?;
+                Ok(())
             }
             CANCEL_ACTION => {
                 self.set_feedback_interaction(
                     id,
-                    interaction_for_speech(&config, &self.message_kind(id).await?, false)
-                        .ok_or_else(|| {
-                            feedback_error(TextKey::UtteranceFeedbackUnavailable, &config)
-                        })?,
+                    interaction_for_speech(
+                        &config,
+                        &kind,
+                        previous.as_ref().map(FeedbackSummary::from).as_ref(),
+                    )
+                    .ok_or_else(|| {
+                        feedback_error(TextKey::UtteranceFeedbackUnavailable, &config)
+                    })?,
                 )
                 .await
             }
-            TOGGLE_ACTION => {
-                let store = UtteranceFeedbackStore::from_paths(&self.paths);
-                let utterance_id = id.to_owned();
-                tokio::task::spawn_blocking(move || {
-                    store.cancel(&utterance_id, chrono::Utc::now())
-                })
+            TOGGLE_ACTION => self.cancel_feedback(id, &config).await,
+            _ => Err(feedback_error(TextKey::InvalidBubbleAction, &config)),
+        }
+    }
+
+    async fn cancel_feedback(&self, id: &str, config: &Config) -> Result<(), ConfigCommitError> {
+        let store = UtteranceFeedbackStore::from_paths(&self.paths);
+        let utterance_id = id.to_owned();
+        let result =
+            tokio::task::spawn_blocking(move || store.cancel(&utterance_id, chrono::Utc::now()))
                 .await
                 .map_err(|error| feedback_runtime_error(error.to_string()))?
                 .map_err(|error| feedback_runtime_error(error.to_string()))?;
-                self.set_feedback_recorded_state(id, false);
-                self.set_feedback_interaction(
-                    id,
-                    interaction_for_speech(&config, &self.message_kind(id).await?, false)
-                        .ok_or_else(|| {
-                            feedback_error(TextKey::UtteranceFeedbackUnavailable, &config)
-                        })?,
-                )
-                .await
-            }
-            _ => Err(feedback_error(TextKey::InvalidBubbleAction, &config)),
-        }
+        let UtteranceFeedbackResult::Cancelled(record) = result else {
+            return Err(feedback_error(
+                TextKey::UtteranceFeedbackUnavailable,
+                config,
+            ));
+        };
+        self.publish_feedback(&record).await;
+        let (status, reason) = self.cancel_feed(&record).await;
+        let record = self
+            .persist_feed_status(&record, status, reason)
+            .await
+            .map_err(|_| feedback_feed_state_error(config))?;
+        self.publish_feedback(&record).await;
+        Ok(())
     }
 
     async fn record_feedback(
         self: &Arc<Self>,
         id: &str,
+        sign: JudgeFeedSign,
         reason_code: FeedbackReasonCode,
         free_text: Option<&str>,
+        revise: bool,
         config: &Config,
     ) -> Result<(), ConfigCommitError> {
         let snapshot = self.snapshot().await;
@@ -226,26 +342,19 @@ impl DesktopState {
             &embedded_observations,
             persisted_observations,
         );
-        let primary_observation = observations.first();
-        let primary_judge_input_ids = primary_observation.map(judge_input_ids).unwrap_or_default();
-        let judge_trace = primary_observation.and_then(|observation| {
+        let judge_trace = observations.iter().find_map(|observation| {
+            let input_id = primary_judge_input_id(observation)?;
             self.core_runtime()
-                .judge_trace_for_observation(observation.id())
-                .or_else(|| {
-                    primary_judge_input_ids
-                        .iter()
-                        .find_map(|input_id| self.core_runtime().judge_trace_for_input(input_id))
-                })
+                .judge_trace_for_input(&input_id)
+                .filter(|trace| trace.input_id == input_id)
         });
+        let judge_feedable_input_id = judge_trace
+            .as_ref()
+            .filter(|trace| trace.feedable)
+            .map(|trace| trace.input_id.clone());
         let judge_decision = judge_trace
             .as_ref()
-            .and_then(|trace| trace.decision.clone())
-            .or_else(|| {
-                snapshot
-                    .latest_judge_decision
-                    .clone()
-                    .filter(|decision| primary_judge_input_ids.contains(&decision.input_id))
-            });
+            .and_then(|trace| trace.decision.clone());
         let llm = snapshot
             .latest_companion_decision
             .as_ref()
@@ -260,6 +369,7 @@ impl DesktopState {
                 )
             });
         let input = UtteranceFeedbackInput {
+            trigger: feedback_trigger(&utterance, &snapshot.conversation, &observations),
             utterance,
             observation_ids,
             observations,
@@ -271,26 +381,189 @@ impl DesktopState {
             free_text: free_text.map(str::to_owned),
         };
         let store = UtteranceFeedbackStore::from_paths(&self.paths);
-        let result = tokio::task::spawn_blocking(move || store.record(input))
+        let result = tokio::task::spawn_blocking(move || {
+            if revise {
+                store.revise_with_sign(input, sign)
+            } else {
+                store.record_with_sign(input, sign)
+            }
+        })
+        .await
+        .map_err(|error| feedback_runtime_error(error.to_string()))?
+        .map_err(|error| feedback_runtime_error(error.to_string()))?;
+        let (record, should_apply) = match result {
+            UtteranceFeedbackResult::Recorded(record) => (record, true),
+            UtteranceFeedbackResult::AlreadyRecorded(record) => {
+                let should_retry = record.feed.as_ref().is_some_and(|feed| {
+                    !matches!(feed.status, FeedbackFeedStatus::Applied) && feed.input_id.is_some()
+                });
+                (record, should_retry)
+            }
+            UtteranceFeedbackResult::Cancelled(_) => {
+                return Err(feedback_error(
+                    TextKey::UtteranceFeedbackUnavailable,
+                    config,
+                ));
+            }
+        };
+        self.publish_feedback(&record).await;
+        let (status, reason) = if should_apply {
+            self.apply_feed(&record, revise, judge_feedable_input_id.as_deref())
+                .await
+        } else {
+            record
+                .feed
+                .as_ref()
+                .map(|feed| (feed.status.clone(), feed.reason.clone()))
+                .unwrap_or((
+                    FeedbackFeedStatus::NotApplied,
+                    Some("feed-event-missing".to_owned()),
+                ))
+        };
+        let status_record = if should_apply {
+            self.persist_feed_status(&record, status, reason)
+                .await
+                .map_err(|_| feedback_feed_state_error(config))?
+        } else {
+            record
+        };
+        self.publish_feedback(&status_record).await;
+        Ok(())
+    }
+
+    async fn latest_feedback(
+        &self,
+        id: &str,
+    ) -> Result<Option<UtteranceFeedbackRecord>, ConfigCommitError> {
+        let store = UtteranceFeedbackStore::from_paths(&self.paths);
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || store.latest_for_utterance(&id))
             .await
             .map_err(|error| feedback_runtime_error(error.to_string()))?
-            .map_err(|error| feedback_runtime_error(error.to_string()))?;
-        if !matches!(
-            result,
-            UtteranceFeedbackResult::Recorded(_) | UtteranceFeedbackResult::AlreadyRecorded(_)
-        ) {
-            return Err(feedback_error(
-                TextKey::UtteranceFeedbackUnavailable,
-                config,
-            ));
-        }
-        self.set_feedback_recorded_state(id, true);
-        self.set_feedback_interaction(
-            id,
-            interaction_for_speech(config, &self.message_kind(id).await?, true)
-                .ok_or_else(|| feedback_error(TextKey::UtteranceFeedbackUnavailable, config))?,
+            .map_err(|error| feedback_runtime_error(error.to_string()))
+    }
+
+    async fn publish_feedback(&self, record: &UtteranceFeedbackRecord) {
+        self.publish_event(
+            crate::snapshot_presenter::SnapshotEvent::UtteranceFeedbackChanged {
+                id: record.utterance.id.clone(),
+                feedback: FeedbackSummary::from(record),
+            },
         )
-        .await
+        .await;
+    }
+
+    async fn apply_feed(
+        &self,
+        record: &UtteranceFeedbackRecord,
+        revise: bool,
+        judge_feedable_input_id: Option<&str>,
+    ) -> (FeedbackFeedStatus, Option<String>) {
+        let Some(feed) = record.feed.as_ref() else {
+            return (
+                FeedbackFeedStatus::NotApplied,
+                Some("feed-event-missing".to_owned()),
+            );
+        };
+        let Some(input_id) = feed.input_id.clone() else {
+            return (
+                FeedbackFeedStatus::NotApplied,
+                Some("judge-input-unavailable".to_owned()),
+            );
+        };
+        if !self.core_runtime().judge_feed_available() {
+            return (
+                FeedbackFeedStatus::NotApplied,
+                Some("judge-unavailable".to_owned()),
+            );
+        }
+        if judge_feedable_input_id != Some(input_id.as_str()) {
+            return (
+                FeedbackFeedStatus::NotApplied,
+                Some("judge-not-feedable".to_owned()),
+            );
+        }
+        let result = if revise {
+            self.core_runtime()
+                .correct_judge_feed(feed.event_id.clone(), input_id, feed.sign, feed.strength)
+                .await
+        } else {
+            self.core_runtime()
+                .feed_judge_with_event_id(feed.event_id.clone(), input_id, feed.sign, feed.strength)
+                .await
+        };
+        match result {
+            Ok(JudgeFeedApplyResult::Applied) => (FeedbackFeedStatus::Applied, None),
+            Ok(JudgeFeedApplyResult::NotApplied) => (
+                FeedbackFeedStatus::NotApplied,
+                Some("judge-feed-not-applied".to_owned()),
+            ),
+            Ok(JudgeFeedApplyResult::Unknown) => (
+                FeedbackFeedStatus::Unknown,
+                Some("judge-feed-unknown".to_owned()),
+            ),
+            Err(_) => (
+                FeedbackFeedStatus::Unknown,
+                Some("judge-feed-failed".to_owned()),
+            ),
+        }
+    }
+
+    async fn cancel_feed(
+        &self,
+        record: &UtteranceFeedbackRecord,
+    ) -> (FeedbackFeedStatus, Option<String>) {
+        let Some(feed) = record.feed.as_ref() else {
+            return (
+                FeedbackFeedStatus::NotApplied,
+                Some("feed-event-missing".to_owned()),
+            );
+        };
+        let Some(input_id) = feed.input_id.clone() else {
+            return (
+                FeedbackFeedStatus::NotApplied,
+                Some("judge-input-unavailable".to_owned()),
+            );
+        };
+        if !self.core_runtime().judge_feed_available() {
+            return (
+                FeedbackFeedStatus::NotApplied,
+                Some("judge-unavailable".to_owned()),
+            );
+        }
+        match self
+            .core_runtime()
+            .cancel_judge_feed(feed.event_id.clone(), input_id, feed.sign, feed.strength)
+            .await
+        {
+            Ok(JudgeFeedApplyResult::Applied) => (FeedbackFeedStatus::Applied, None),
+            Ok(JudgeFeedApplyResult::NotApplied) => (
+                FeedbackFeedStatus::NotApplied,
+                Some("judge-feed-cancel-not-applied".to_owned()),
+            ),
+            Ok(JudgeFeedApplyResult::Unknown) => (
+                FeedbackFeedStatus::Unknown,
+                Some("judge-feed-cancel-unknown".to_owned()),
+            ),
+            Err(_) => (
+                FeedbackFeedStatus::Unknown,
+                Some("judge-feed-cancel-failed".to_owned()),
+            ),
+        }
+    }
+
+    async fn persist_feed_status(
+        &self,
+        record: &UtteranceFeedbackRecord,
+        status: FeedbackFeedStatus,
+        reason: Option<String>,
+    ) -> Result<UtteranceFeedbackRecord, ConfigCommitError> {
+        let store = UtteranceFeedbackStore::from_paths(&self.paths);
+        let record_id = record.record_id.clone();
+        tokio::task::spawn_blocking(move || store.update_feed(&record_id, None, status, reason))
+            .await
+            .map_err(|error| feedback_runtime_error(error.to_string()))?
+            .map_err(|error| feedback_runtime_error(error.to_string()))
     }
 
     async fn message_kind(&self, id: &str) -> Result<String, ConfigCommitError> {
@@ -298,7 +571,7 @@ impl DesktopState {
             .await
             .conversation
             .into_iter()
-            .find(|entry| entry.id == id)
+            .find(|entry| entry.id == id && !id.trim().is_empty() && entry.is_normal_speech())
             .and_then(|entry| entry.message_kind)
             .map(|kind| kind.as_wire().to_owned())
             .ok_or_else(|| {
@@ -332,18 +605,6 @@ impl DesktopState {
             ))
         }
     }
-
-    fn set_feedback_recorded_state(&self, id: &str, recorded: bool) {
-        if let Ok(mut snapshot) = self.snapshot.lock() {
-            if recorded {
-                snapshot
-                    .recorded_utterance_feedback_ids
-                    .insert(id.to_owned());
-            } else {
-                snapshot.recorded_utterance_feedback_ids.remove(id);
-            }
-        }
-    }
 }
 
 fn feedback_error(key: TextKey, config: &Config) -> ConfigCommitError {
@@ -354,6 +615,10 @@ fn feedback_error(key: TextKey, config: &Config) -> ConfigCommitError {
 
 fn feedback_runtime_error(message: String) -> ConfigCommitError {
     ConfigCommitError::Runtime(RuntimeError::Factory(message))
+}
+
+fn feedback_feed_state_error(config: &Config) -> ConfigCommitError {
+    feedback_error(TextKey::UtteranceFeedbackFeedStatusSaveFailed, config)
 }
 
 fn companion_decision_matches(
@@ -390,22 +655,20 @@ fn companion_decision_matches(
     })
 }
 
-fn judge_input_ids(observation: &coosenpai_core::state::ObservationRecord) -> Vec<String> {
+fn primary_judge_input_id(
+    observation: &coosenpai_core::state::ObservationRecord,
+) -> Option<String> {
     match observation {
-        coosenpai_core::state::ObservationRecord::Visual(value) => value
-            .source_frame_ids
-            .iter()
-            .cloned()
-            .chain(value.source_frame_paths.keys().cloned())
-            .chain(
+        coosenpai_core::state::ObservationRecord::Visual(value) => {
+            value.source_frame_ids.first().cloned().or_else(|| {
                 value
                     .audio_segments
-                    .iter()
-                    .map(|segment| segment.id.clone()),
-            )
-            .collect(),
-        coosenpai_core::state::ObservationRecord::Audio(value) => vec![value.id.clone()],
-        coosenpai_core::state::ObservationRecord::NoChange(_) => Vec::new(),
+                    .first()
+                    .map(|segment| segment.id.clone())
+            })
+        }
+        coosenpai_core::state::ObservationRecord::Audio(value) => Some(value.id.clone()),
+        coosenpai_core::state::ObservationRecord::NoChange(_) => None,
     }
 }
 
@@ -467,6 +730,32 @@ fn observation_ids_for_utterance(
         }
     }
     observations
+}
+
+fn feedback_trigger(
+    utterance: &ConversationEntry,
+    conversation: &[ConversationEntry],
+    observations: &[ObservationRecord],
+) -> coosenpai_core::utterance_feedback::FeedbackTrigger {
+    use coosenpai_core::state::ConversationRole;
+    use coosenpai_core::utterance_feedback::FeedbackTrigger;
+    if utterance.caused_by_ids.iter().any(|id| {
+        conversation
+            .iter()
+            .any(|entry| &entry.id == id && entry.role == ConversationRole::User)
+    }) {
+        FeedbackTrigger::UserReply
+    } else if !utterance.caused_by_ids.is_empty()
+        && utterance.caused_by_ids.iter().all(|id| {
+            observations
+                .iter()
+                .any(|observation| observation.id() == id)
+        })
+    {
+        FeedbackTrigger::Proactive
+    } else {
+        FeedbackTrigger::Unknown
+    }
 }
 
 fn observations_for_utterance(

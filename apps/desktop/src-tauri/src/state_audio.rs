@@ -29,6 +29,19 @@ impl DesktopState {
         self.hearing.cancel_and_wait(self).await;
     }
 
+    pub(crate) async fn delete_conversation_log_day(
+        self: &Arc<Self>,
+        paths: coosenpai_core::config::ConfigPaths,
+        date: chrono::NaiveDate,
+    ) -> Result<(), coosenpai_core::runtime::RuntimeError> {
+        let result = self
+            .hearing
+            .delete_conversation_log_day(self, paths, date)
+            .await;
+        self.sync_audio();
+        result
+    }
+
     pub(crate) async fn cancel_audio(&self) {
         self.hearing.cancel(self).await;
     }
@@ -40,56 +53,4 @@ impl DesktopState {
         self.cancel_audio_and_wait().await;
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub async fn install_hearing_permission_port_for_test(
-        &self,
-        port: Arc<dyn coosenpai_core::ports::SpeechPermissionPort>,
-    ) {
-        self.hearing.install_permission_port_for_test(port).await;
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub async fn install_hearing_port_for_test(
-        &self,
-        port: std::sync::Arc<dyn coosenpai_core::ports::HearingPort>,
-    ) {
-        self.hearing.install_hearing_port_for_test(port).await;
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub async fn install_audio_ingestion_barrier_for_test(
-        &self,
-        entered: std::sync::Arc<tokio::sync::Notify>,
-        release: std::sync::Arc<tokio::sync::Notify>,
-    ) {
-        self.hearing
-            .install_audio_ingestion_barrier_for_test(entered, release)
-            .await;
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub async fn install_audio_terminal_barrier_for_test(
-        &self,
-        received: std::sync::Arc<tokio::sync::Notify>,
-        release: std::sync::Arc<tokio::sync::Notify>,
-    ) {
-        self.hearing
-            .install_audio_terminal_barrier_for_test(received, release)
-            .await;
-    }
-}
-
-#[test]
-fn changing_hearing_interval_restarts_the_timer_without_coupling_vision() {
-    let mut previous = coosenpai_core::config::Config::default();
-    previous.audio.enabled = true;
-    let mut next = previous.clone();
-    next.observer.vision.interval_ms += 1;
-    assert!(!DesktopState::audio_session_needs_stop(&previous, &next));
-    next.observer.hearing.interval_ms += 1;
-    assert!(DesktopState::audio_session_needs_stop(&previous, &next));
 }

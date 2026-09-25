@@ -17,10 +17,9 @@ pub(crate) fn response_failed(s: &AppSnapshot) -> bool {
         && s.active_user_message_id.is_none()
         && s.conversation.iter().any(|entry| {
             entry.role == coosenpai_core::state::ConversationRole::User
-                && !s
-                    .conversation
-                    .iter()
-                    .any(|answer| answer.caused_by_ids.contains(&entry.id))
+                && !s.conversation.iter().any(|answer| {
+                    !answer.is_response_failure() && answer.caused_by_ids.contains(&entry.id)
+                })
         })
 }
 pub(crate) fn settings_available(s: &AppSnapshot) -> bool {

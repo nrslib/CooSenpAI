@@ -10,12 +10,19 @@ export type PanelEvent =
   | { readonly type: "unmount" };
 export interface PanelCommand { readonly id: number; readonly kind: string; readonly payload: unknown }
 interface PanelProjection { readonly revision: number; readonly state: unknown }
-export interface PanelUpdate extends PanelProjection { readonly session: string }
+export interface PanelUpdate extends PanelProjection { readonly session: string; readonly commands?: readonly PanelCommand[] }
 export interface PanelOutput<S, C> { readonly revision: number; readonly state: S | null; readonly commands: readonly C[]; readonly updates?: readonly PanelUpdate[] }
 const projections = new Map<string, (update: PanelProjection) => void>();
+const commandRunners = new Map<string, (commands: readonly PanelCommand[]) => void>();
 // Presenter から push されたパネル更新を、購読中のセッションへ配送する。
+// 更新に含まれる I/O 指示は当該セッションが実行し、完了を通常の Panel イベントで戻す。
 export function deliverPanelUpdates(updates: readonly PanelUpdate[] = []): void {
-  for (const update of updates) projections.get(update.session)?.(update);
+  for (const update of updates) {
+    projections.get(update.session)?.(update);
+    if (update.commands !== undefined && update.commands.length > 0) {
+      commandRunners.get(update.session)?.(update.commands);
+    }
+  }
 }
 
 // この境界は配送と I/O のみを担当し、完了の採否は Rust に戻す。
@@ -51,7 +58,10 @@ export function usePanelPresenter<S, C extends PanelCommand>(kind: PanelKind, in
       if (!result.ok) { setError(result.error.message); return; }
       const output = result.value;
       project(output);
-      for (const command of output.commands) {
+      runCommands(output.commands);
+    };
+    const runCommands = (commands: readonly C[]): void => {
+      for (const command of commands) {
         void Promise.resolve().then(async () => {
           if (!active) return;
           let completion: IpcResult<unknown>;
@@ -61,12 +71,14 @@ export function usePanelPresenter<S, C extends PanelCommand>(kind: PanelKind, in
         });
       }
     };
+    commandRunners.set(session, (commands) => runCommands(commands as readonly C[]));
     const mounted = receive({ type: "mount", value: initialRef.current });
     transport.current = (event) => { void mounted.then(() => { if (active) return receive(event); }); };
     for (const event of waiting.current.splice(0)) transport.current(event);
     return () => {
       active = false;
       projections.delete(session);
+      commandRunners.delete(session);
       transport.current = undefined;
       void mounted.then(async () => {
         const result = await desktopApi.panelEvent({ session, kind, event: { type: "unmount" } });

@@ -235,35 +235,8 @@ pub(crate) fn create_bubble_window(app: &App) -> tauri::Result<tauri::WebviewWin
         .build()
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SendOutcome {
-    Accepted,
-    Failed,
-    #[cfg(test)]
-    Rejected,
-}
-
 /// ポップアップからの送信が受理・失敗・拒否のどれで終わっても、
 /// 結果と理由を読めるようメイン画面を表示して前面に出す。
-#[cfg(test)]
-pub(crate) fn present_main_after_send(
-    logger: &dyn RuntimeLogger,
-    outcome: SendOutcome,
-    present_main: impl FnOnce(),
-) {
-    let label = match outcome {
-        SendOutcome::Accepted => "受理",
-        SendOutcome::Failed => "失敗",
-        #[cfg(test)]
-        SendOutcome::Rejected => "拒否",
-    };
-    let _ = logger.write(
-        "INFO",
-        &format!("送信の{label}にあわせてメイン画面を前面に出します"),
-    );
-    present_main();
-}
 
 pub(crate) fn apply_main_hide<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let window = app
@@ -291,13 +264,6 @@ pub(crate) async fn apply_main_show(app: &AppHandle) -> Result<(), String> {
         text(TextKey::MainWindowFocusFailed, locale).replace("{error}", &error.to_string())
     })?;
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
-enum MainOpenAction {
-    SetupPrompt,
-    ShowMain,
 }
 
 fn restore_main_window(window: &tauri::WebviewWindow, path: &PathBuf) {
@@ -592,4 +558,3 @@ pub(crate) fn tray_ui_event(id: &str) -> Option<crate::ui_events::UiEvent> {
         _ => None,
     }
 }
-

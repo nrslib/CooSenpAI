@@ -1,14 +1,62 @@
+use super::mailbox_processing::PendingMailboxAckPlan;
 use super::support::conversation_entry_with_kind_and_causes_at;
 use super::user::common_prepared_response;
 use super::*;
 use crate::companion_storage::{
     ActiveTurnCommit, ObservationAttempt, ObservationConsumption, PendingDelivery, PendingInput,
-    PendingObservation, TurnCommitKind,
+    PendingObservation, PendingUserMessage, TurnCommitKind,
 };
+use crate::persistence::PersistenceError;
 use crate::prompts::{companion_system_prompt_for_locale, ordered_json_string};
 use crate::state::{ConversationMessageKind, ConversationRole};
 
+pub(crate) struct CompanionDeletionPlan {
+    pending_observations: Vec<ObservationRecord>,
+    pending_user_messages: std::collections::VecDeque<PendingUserMessage>,
+    conversation: Vec<ConversationEntry>,
+    pending_mailbox_ack: PendingMailboxAckPlan,
+}
+
 impl CompanionAgent {
+    pub(crate) fn prepare_conversation_log_day(
+        &self,
+        scope: &crate::conversation_log::ConversationLogDeletionScope,
+    ) -> Result<CompanionDeletionPlan, CompanionError> {
+        let pending_observations = self
+            .pending_observations
+            .iter()
+            .map(|observation| {
+                crate::conversation_log::sanitize_observation_record(observation, scope)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let pending_user_messages = self
+            .pending_user_messages
+            .iter()
+            .map(|input| crate::conversation_log::sanitize_pending_user_message(input, scope))
+            .collect::<Result<std::collections::VecDeque<_>, _>>()?;
+        let conversation = self
+            .conversation
+            .iter()
+            .map(|entry| crate::conversation_log::sanitize_conversation_entry(entry, scope))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CompanionDeletionPlan {
+            pending_observations,
+            pending_user_messages,
+            conversation,
+            pending_mailbox_ack: self.prepare_pending_mailbox_ack(scope)?,
+        })
+    }
+
+    pub(crate) fn apply_conversation_log_day(&mut self, plan: CompanionDeletionPlan) {
+        self.pending_observations = plan.pending_observations;
+        self.pending_user_messages = plan.pending_user_messages;
+        self.conversation = plan.conversation;
+        self.apply_pending_mailbox_ack_plan(plan.pending_mailbox_ack);
+    }
+
     pub(super) fn exclude_user_claimed_observations(
         &mut self,
         observations: Vec<ObservationRecord>,
@@ -29,7 +77,7 @@ impl CompanionAgent {
     }
 
     pub(crate) fn has_pending_proactive_after_user(&self) -> bool {
-        self.pending_user_messages.is_empty() && self.has_pending_proactive_observations()
+        !self.has_pending_user_inputs().unwrap_or(true) && self.has_pending_proactive_observations()
     }
 
     pub(crate) fn has_pending_proactive_observations(&self) -> bool {
@@ -699,8 +747,7 @@ impl CompanionAgent {
         error: &CompanionError,
     ) -> Result<(), CompanionError> {
         let mut failed = HashSet::new();
-        let deterministic =
-            error.observation_failure_kind() == ObservationFailureKind::DeterministicObservation;
+        let retryable = error.observation_failure_kind() != ObservationFailureKind::Ignored;
         let mut next_attempts = HashMap::new();
         for observation in observations {
             let id = observation.id().to_owned();
@@ -709,7 +756,7 @@ impl CompanionAgent {
             {
                 continue;
             }
-            if deterministic {
+            if retryable {
                 let attempts = self
                     .observation_attempts
                     .get(&id)
@@ -859,7 +906,7 @@ impl CompanionAgent {
             .conversation
             .iter()
             .rev()
-            .filter(|entry| !excluded_ids.contains(&entry.id))
+            .filter(|entry| !excluded_ids.contains(&entry.id) && !entry.is_response_failure())
             .take(20)
             .collect::<Vec<_>>();
         entries.reverse();

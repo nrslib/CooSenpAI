@@ -57,6 +57,7 @@ pub(crate) enum DesktopCommand {
     BubbleFastForward,
     BubbleNavigate,
     UtteranceFeedback,
+    DebugWake,
     TutorialAdvance,
     TutorialSettingsPresented,
     TutorialFinish,
@@ -330,17 +331,4 @@ pub(crate) struct PendingEvent {
 }
 
 impl PendingEvent {
-    #[cfg(test)]
-    pub(crate) fn expires_after(
-        replacement_key: impl Into<String>,
-        fence: GenerationStamp,
-        duration: std::time::Duration,
-    ) -> Self {
-        Self {
-            replacement_key: replacement_key.into(),
-            wait_for: fence.resource,
-            fence,
-            deadline: Instant::now() + duration,
-        }
-    }
 }

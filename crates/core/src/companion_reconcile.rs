@@ -98,6 +98,7 @@ impl CompanionStorage {
                         attachment_failure: None,
                         response_attempts: 0,
                         response_terminal: false,
+                        response_failure: None,
                         tutorial_response_key: entry.tutorial_response_key.clone(),
                     }));
             }
@@ -124,6 +125,9 @@ fn unanswered_user_entries(conversation: &[ConversationEntry]) -> Vec<&Conversat
             }
             ConversationRole::User => {}
             ConversationRole::Companion => {
+                if !entry.completes_user_response() && !entry.is_response_failure() {
+                    continue;
+                }
                 let causes = entry.observation_ids().collect::<Vec<_>>();
                 let explicit = causes
                     .iter()

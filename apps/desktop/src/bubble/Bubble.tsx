@@ -20,7 +20,7 @@ interface Props {
 
 export function Bubble({ record, revealed, avatarColor, avatarImage, exiting, reading, onHover, controls, onEvent }: Props): ReactElement {
   const [selected, setSelected] = useState(record.interaction?.select?.selected ?? "");
-  const [secretDraft, setSecretDraft] = useState("");
+  const [secretDraft, setSecretDraft] = useState(record.interaction?.secretInput?.value ?? "");
   const article = useRef<HTMLElement>(null);
   const lastFocus = useRef(controls.focusRequest);
   const sending = controls.busy;
@@ -28,7 +28,7 @@ export function Bubble({ record, revealed, avatarColor, avatarImage, exiting, re
     if (controls.focusRequest !== lastFocus.current) article.current?.focus({ preventScroll: true });
     lastFocus.current = controls.focusRequest;
   }, [controls.focusRequest]);
-  useEffect(() => setSecretDraft(""), [controls.clearSecret]);
+  useEffect(() => setSecretDraft(record.interaction?.secretInput?.value ?? ""), [record.id, record.interaction?.secretInput?.action, record.interaction?.secretInput?.value, controls.clearSecret]);
   const hovered = useRef(false);
   const hoverCallback = useRef(onHover);
   hoverCallback.current = onHover;
@@ -38,7 +38,7 @@ export function Bubble({ record, revealed, avatarColor, avatarImage, exiting, re
   const { locale, t } = useI18n();
   useEffect(() => {
     setSelected(record.interaction?.select?.selected ?? "");
-    setSecretDraft("");
+    setSecretDraft(record.interaction?.secretInput?.value ?? "");
   }, [record.id, record.interaction?.select?.selected, record.interaction?.secretInput?.action]);
   const interactive = record.interaction !== undefined;
   const dismissible = controls.dismissible;

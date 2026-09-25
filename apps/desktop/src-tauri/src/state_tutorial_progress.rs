@@ -104,28 +104,6 @@ impl DesktopState {
             .await;
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) async fn test_present_current_tutorial_response(
-        self: &Arc<Self>,
-        entry_id: &str,
-    ) -> anyhow::Result<()> {
-        let message = self
-            .tutorial
-            .lock()
-            .await
-            .expected_response_message()
-            .ok_or_else(|| anyhow::anyhow!("current tutorial step has no response"))?;
-        // 保存後の runtime 通知が既に表示を開始していても、ここでは renderer の完了を模擬する。
-        self.advance_after_tutorial_response(entry_id, &message)
-            .await;
-        anyhow::ensure!(
-            self.tutorial.lock().await.step_response_presented(),
-            "tutorial response presentation was not accepted"
-        );
-        Ok(())
-    }
-
     pub(super) async fn tutorial_settings_opened(self: &Arc<Self>) -> Result<bool, RuntimeError> {
         let highlight_requested = self.tutorial.lock().await.request_settings_highlight();
         if highlight_requested.is_some() {
@@ -195,4 +173,3 @@ impl DesktopState {
             .map_err(RuntimeError::Factory)?
     }
 }
-

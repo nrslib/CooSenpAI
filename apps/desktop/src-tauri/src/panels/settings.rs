@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands_speaker::SpeakerDirectory;
 use coosenpai_core::locale::{text, Locale, TextKey};
 use serde_json::json;
 
@@ -29,6 +30,8 @@ struct FormBasis {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Observation {
+    #[serde(default)]
+    speaker_directory_revision: u64,
     config: Value,
     fields: Fields,
     config_revision: u64,
@@ -36,6 +39,7 @@ struct Observation {
     issues: Vec<Value>,
     onboarding: Value,
     focus_section: Option<String>,
+    focus_generation: u64,
 }
 #[derive(Deserialize)]
 struct ConfigResult {
@@ -82,6 +86,132 @@ const SETTINGS_CATEGORIES: &[&str] = &[
     "developer",
 ];
 
+// 話者管理の動作状態。統合・取消・再登録・削除・表示名の可否判断と
+// busy・成功失敗・確認の遷移はここに置き、View は候補の描画と操作イベントだけを持つ。
+#[derive(Default)]
+struct SpeakerManagement {
+    revision: u64,
+    visible: bool,
+    directory: Option<SpeakerDirectory>,
+    directory_loading: Option<u64>,
+    directory_error: Option<String>,
+    busy: Option<u64>,
+    succeeded: bool,
+    error: Option<String>,
+    delete_target: Option<String>,
+    draft: BTreeMap<String, String>,
+}
+
+impl SpeakerManagement {
+    fn field(&self, key: &str) -> &str {
+        self.draft.get(key).map(String::as_str).unwrap_or("")
+    }
+    fn selected(&self, key: &str) -> bool {
+        self.directory
+            .as_ref()
+            .is_some_and(|d| d.has_speaker(self.field(key)))
+    }
+    fn controls(&self) -> Value {
+        let idle = self.busy.is_none();
+        let rename = self.field("renameID");
+        let existing = self
+            .directory
+            .as_ref()
+            .and_then(|d| d.speakers.iter().find(|s| s.id == rename))
+            .and_then(|s| s.name.as_deref());
+        let name = self.field("nameDraft").trim();
+        json!({
+            "draft": self.draft,
+            "mergeAvailable": self.directory.as_ref().is_some_and(|d| d.speakers.len() >= 2),
+            "undoAvailable": self.directory.as_ref().is_some_and(|d| !d.merged.is_empty()),
+            "canMerge": idle && self.selected("mergeFrom") && self.selected("mergeTo") && self.field("mergeFrom") != self.field("mergeTo"),
+            "canUndo": idle && self.directory.as_ref().is_some_and(|d| d.has_merged_source(self.field("undoSource"))),
+            "canRename": idle && self.selected("renameID") && !name.is_empty() && Some(name) != existing && coosenpai_core::speaker_names::validate_speaker_name(name).is_ok(),
+            "canClear": idle && self.selected("renameID") && existing.is_some(),
+            "canEditName": idle && self.selected("renameID"),
+            "canReregister": idle && self.selected("reregisterID"),
+            "canDelete": idle && self.selected("deleteID"),
+        })
+    }
+    fn directory_of(&self) -> Result<&SpeakerDirectory, String> {
+        self.directory
+            .as_ref()
+            .ok_or("話者一覧をまだ読み込めていません".into())
+    }
+    fn run(&mut self, io: &mut PanelIo, kind: &str, payload: Value) -> Result<(), String> {
+        if self.busy.is_some() {
+            return Err("話者の変更処理が進行中です".into());
+        }
+        {
+            self.error = None;
+            self.succeeded = false;
+            self.busy = Some(io.command(kind, payload));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DebugWakeSelection {
+    name: String,
+    image: Vec<u8>,
+}
+
+#[derive(Default)]
+struct DebugWake {
+    selection: Option<DebugWakeSelection>,
+    context: String,
+    loading: bool,
+    command: Option<u64>,
+    result: Option<Value>,
+    error: Option<String>,
+}
+
+impl DebugWake {
+    fn phase(&self) -> &'static str {
+        if self.loading {
+            return "loading";
+        }
+        if self.command.is_some() {
+            return "processing";
+        }
+        if self.error.is_some() {
+            return "error";
+        }
+        if let Some(status) = self
+            .result
+            .as_ref()
+            .and_then(|result| result["status"].as_str())
+        {
+            if status == "emitted" {
+                return "emitted";
+            }
+            if status == "silent" {
+                return "silent";
+            }
+            if status == "deferred" {
+                return "deferred";
+            }
+        }
+        if self.selection.is_some() {
+            "ready"
+        } else {
+            "idle"
+        }
+    }
+
+    fn view(&self) -> Value {
+        json!({
+            "phase": self.phase(),
+            "selectedName": self.selection.as_ref().map(|selection| &selection.name),
+            "context": self.context,
+            "result": self.result,
+            "error": self.error,
+        })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct SettingsPresenter {
     base: Value,
@@ -99,6 +229,7 @@ pub(super) struct SettingsPresenter {
     saved_timer: Option<u64>,
     category: Option<String>,
     highlight: Option<String>,
+    focus_generation: Option<u64>,
     tutorial_persona: bool,
     picker_allowed: bool,
     picker_open: bool,
@@ -114,6 +245,11 @@ pub(super) struct SettingsPresenter {
     closing: Option<u64>,
     closed: bool,
     activity: ChildActivity,
+    speaker: SpeakerManagement,
+    feedback_export: Option<u64>,
+    feedback_export_path: Option<String>,
+    feedback_export_error: Option<String>,
+    debug_wake: DebugWake,
 }
 
 impl SettingsPresenter {
@@ -129,7 +265,10 @@ impl SettingsPresenter {
             }
     }
     pub(super) fn blocks_close(&self) -> bool {
-        self.saving.is_some() || self.closing.is_some()
+        self.saving.is_some()
+            || self.closing.is_some()
+            || self.speaker.busy.is_some()
+            || self.debug_wake.command.is_some()
     }
     fn escape_enabled(&self) -> bool {
         if self.closed {
@@ -185,13 +324,26 @@ impl SettingsPresenter {
     }
     fn view(&self) -> Value {
         json!({"dirty":self.dirty(),"saving":self.saving.is_some(),"saved":self.saved,
-            "issues":self.issues,"externalChanges":self.external,"discardConfirmOpen":self.discard,
-            "confirmation":self.confirmation,"activeCategory":self.category.as_deref().unwrap_or("general"),
-            "resetScope":self.reset_scope,"resetCategory":self.reset_category,"canUndoReset":self.reset_undo.is_some(),
-            "defaultConfig":default_config_value(),
-            "recordingShortcut":self.recording,"personaDocument":self.persona,"personaPickerOpen":self.picker_open && self.picker_allowed,
-            "personaPickerAllowed":self.picker_allowed,"showTutorialPersonaSettings":self.tutorial_persona,
-            "vrmControlsOpen":self.vrm_open,"closing":self.closing.is_some(),"escapeEnabled":self.escape_enabled()})
+        "issues":self.issues,"externalChanges":self.external,"discardConfirmOpen":self.discard,
+        "confirmation":self.confirmation,"activeCategory":self.category.as_deref().unwrap_or("general"),
+        "resetScope":self.reset_scope,"resetCategory":self.reset_category,"canUndoReset":self.reset_undo.is_some(),
+        "defaultConfig":default_config_value(),
+        "recordingShortcut":self.recording,"personaDocument":self.persona,"personaPickerOpen":self.picker_open && self.picker_allowed,
+        "personaPickerAllowed":self.picker_allowed,"showTutorialPersonaSettings":self.tutorial_persona,
+        "vrmControlsOpen":self.vrm_open,"closing":self.closing.is_some(),"escapeEnabled":self.escape_enabled(),
+        "feedbackExport":{"busy":self.feedback_export.is_some(),"path":self.feedback_export_path,"error":self.feedback_export_error},
+        "debugWake":self.debug_wake.view(),
+        "speakerManagement":{
+            "loading":self.speaker.directory_loading.is_some(),
+            "directoryError":self.speaker.directory_error,
+            "speakers":self.speaker.directory.as_ref().map(|directory| &directory.speakers),
+            "merged":self.speaker.directory.as_ref().map(|directory| &directory.merged),
+            "busy":self.speaker.busy.is_some(),
+            "succeeded":self.speaker.succeeded,
+            "error":self.speaker.error,
+            "deleteTarget":self.speaker.delete_target,
+            "controls":self.speaker.controls(),
+        }})
     }
     fn accept_draft(&mut self, input: Draft, io: &mut PanelIo) -> Result<(), String> {
         if input.revision <= self.last_input.revision {
@@ -250,15 +402,26 @@ impl SettingsPresenter {
         initial: bool,
     ) -> Result<(), String> {
         fields::check_shape(&observation.fields, &self.draft.fields)?;
+        if observation.speaker_directory_revision > self.speaker.revision {
+            self.speaker.revision = observation.speaker_directory_revision;
+            self.speaker.directory = None;
+            self.speaker.directory_loading = None;
+            if self.speaker.visible || self.category.as_deref() == Some("hearing") {
+                self.ensure_speaker_directory(io);
+            }
+        }
+        let focus_changed = self.focus_generation != Some(observation.focus_generation);
+        self.focus_generation = Some(observation.focus_generation);
         let highlight = observation.focus_section.or_else(|| {
             observation.onboarding["settingsHighlight"]
                 .as_str()
                 .map(String::from)
         });
-        if initial || highlight != self.highlight {
+        if initial || focus_changed || highlight != self.highlight {
             match highlight.as_deref() {
                 Some("watch") => self.category = Some("vision".into()),
                 Some("persona") => self.category = Some("general".into()),
+                Some("providers") => self.category = Some("providers".into()),
                 _ => {}
             }
             self.highlight = highlight;
@@ -293,6 +456,23 @@ impl SettingsPresenter {
     fn action(&mut self, name: &str, value: Value, io: &mut PanelIo) -> Result<(), String> {
         if self.closing.is_some() {
             return Ok(());
+        }
+        if self.speaker.busy.is_some()
+            && (matches!(
+                name,
+                "speakerMerge"
+                    | "speakerUndoMerge"
+                    | "speakerReregister"
+                    | "speakerDelete"
+                    | "speakerDeleteAll"
+                    | "speakerRename"
+            ) || name == "acceptConfirmation"
+                && matches!(
+                    self.confirmation.as_deref(),
+                    Some("speaker-delete" | "speaker-delete-all")
+                ))
+        {
+            return Err("話者の変更処理が進行中です".into());
         }
         if matches!(name, "save" | "close") && !value.is_null() {
             self.accept_draft(decode(value.clone())?, io)?;
@@ -354,8 +534,211 @@ impl SettingsPresenter {
                 if !SETTINGS_CATEGORIES.contains(&category.as_str()) {
                     return Err(action_error(&category));
                 }
-                self.category = Some(category);
+                self.category = Some(category.clone());
+                if category == "hearing" {
+                    self.speaker.directory = None;
+                    self.ensure_speaker_directory(io);
+                }
             }
+            "feedbackExport" => {
+                if self.feedback_export.is_none() {
+                    self.feedback_export_path = None;
+                    self.feedback_export_error = None;
+                    self.feedback_export = Some(io.command("feedbackExport", ()));
+                }
+            }
+            "speakerViewMounted" => {
+                self.speaker.visible = true;
+                self.ensure_speaker_directory(io);
+            }
+            "speakerViewUnmounted" => self.speaker.visible = false,
+            "speakerDirectory" => self.ensure_speaker_directory(io),
+            "speakerField" => {
+                let field = value["field"]
+                    .as_str()
+                    .ok_or("話者編集フィールドがありません")?;
+                let input = value["value"].as_str().ok_or("話者編集値がありません")?;
+                if ![
+                    "mergeFrom",
+                    "mergeTo",
+                    "undoSource",
+                    "renameID",
+                    "nameDraft",
+                    "reregisterID",
+                    "deleteID",
+                ]
+                .contains(&field)
+                {
+                    return Err(action_error(field));
+                }
+                if self.speaker.busy.is_none() {
+                    self.speaker
+                        .draft
+                        .insert(field.to_owned(), input.to_owned());
+                    if field == "renameID" {
+                        let name = self
+                            .speaker
+                            .directory
+                            .as_ref()
+                            .and_then(|d| d.speakers.iter().find(|s| s.id == input))
+                            .and_then(|s| s.name.clone())
+                            .unwrap_or_default();
+                        self.speaker.draft.insert("nameDraft".into(), name);
+                    }
+                }
+            }
+            "speakerMerge" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct Merge {
+                    source_id: String,
+                    target_id: String,
+                }
+                let request: Merge = decode(value)?;
+                let valid = crate::commands_speaker::valid_speaker_id;
+                if !valid(&request.source_id)
+                    || !valid(&request.target_id)
+                    || request.source_id == request.target_id
+                {
+                    return Err("統合する話者 ID が不正です".into());
+                }
+                let directory = self.speaker.directory_of()?;
+                if !directory.has_speaker(&request.source_id)
+                    || !directory.has_speaker(&request.target_id)
+                {
+                    return Err("統合する話者 ID が候補にありません".into());
+                }
+                self.speaker.run(
+                    io,
+                    "speakerManagement",
+                    json!({"operation":"merge","sourceId":request.source_id,"targetId":request.target_id}),
+                )?;
+            }
+            "speakerUndoMerge" => {
+                let source_id: String = decode(value)?;
+                if !crate::commands_speaker::valid_speaker_id(&source_id) {
+                    return Err("取り消す話者 ID が不正です".into());
+                }
+                if !self.speaker.directory_of()?.has_merged_source(&source_id) {
+                    return Err("取り消す統合が候補にありません".into());
+                }
+                self.speaker.run(
+                    io,
+                    "speakerManagement",
+                    json!({"operation":"undoMerge","sourceId":source_id}),
+                )?;
+            }
+            "speakerReregister" => {
+                let speaker_id: String = decode(value)?;
+                if !crate::commands_speaker::valid_speaker_id(&speaker_id) {
+                    return Err("再登録する話者 ID が不正です".into());
+                }
+                if !self.speaker.directory_of()?.has_speaker(&speaker_id) {
+                    return Err("再登録する話者 ID が候補にありません".into());
+                }
+                self.speaker.run(
+                    io,
+                    "speakerManagement",
+                    json!({"operation":"reregister","speakerId":speaker_id}),
+                )?;
+            }
+            "speakerDelete" => {
+                let speaker_id: String = decode(value)?;
+                if !crate::commands_speaker::valid_speaker_id(&speaker_id) {
+                    return Err("削除する話者 ID が不正です".into());
+                }
+                if !self.speaker.directory_of()?.has_speaker(&speaker_id) {
+                    return Err("削除する話者 ID が候補にありません".into());
+                }
+                self.clear_confirmation();
+                self.confirmation = Some("speaker-delete".into());
+                self.speaker.delete_target = Some(speaker_id);
+            }
+            "speakerDeleteAll" => {
+                self.clear_confirmation();
+                self.confirmation = Some("speaker-delete-all".into());
+            }
+            "speakerRename" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct Rename {
+                    speaker_id: String,
+                    name: Option<String>,
+                }
+                let request: Rename = decode(value)?;
+                if !crate::commands_speaker::valid_speaker_id(&request.speaker_id) {
+                    return Err("名前を付ける話者 ID が不正です".into());
+                }
+                if request
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.trim().is_empty())
+                {
+                    return Err("話者の表示名が空です".into());
+                }
+                if !self
+                    .speaker
+                    .directory_of()?
+                    .has_speaker(&request.speaker_id)
+                {
+                    return Err("名前を付ける話者 ID が候補にありません".into());
+                }
+                self.speaker.run(
+                    io,
+                    "speakerRename",
+                    json!({"speakerId":request.speaker_id,"name":request.name}),
+                )?;
+            }
+            "debugWakeLoading" if self.debug_wake.command.is_none() => {
+                self.debug_wake.loading = true;
+                self.debug_wake.selection = None;
+                self.debug_wake.result = None;
+                self.debug_wake.error = None;
+            }
+            "debugWakeLoading" => {}
+            "debugWakeSelect" if self.debug_wake.command.is_none() => {
+                self.debug_wake.loading = false;
+                let selection: DebugWakeSelection = decode(value)?;
+                if selection.name.trim().is_empty() {
+                    return Err("観測 Wake の画像名がありません".into());
+                }
+                if selection.image.is_empty() {
+                    return Err("観測 Wake の画像が空です".into());
+                }
+                if selection.image.len() > coosenpai_core::attachments::MAX_ATTACHMENT_BYTES {
+                    return Err("観測 Wake の画像が大きすぎます".into());
+                }
+                self.debug_wake.selection = Some(selection);
+                self.debug_wake.result = None;
+                self.debug_wake.error = None;
+            }
+            "debugWakeSelect" => {}
+            "debugWakeSelectionError" if self.debug_wake.command.is_none() => {
+                let error: String = decode(value)?;
+                self.debug_wake.loading = false;
+                self.debug_wake.selection = None;
+                self.debug_wake.result = None;
+                self.debug_wake.error = Some(error);
+            }
+            "debugWakeContext" if self.debug_wake.command.is_none() => {
+                self.debug_wake.context = decode(value)?;
+                self.debug_wake.result = None;
+                self.debug_wake.error = None;
+            }
+            "debugWakeContext" => {}
+            "debugWakeSend" if self.debug_wake.command.is_none() => {
+                let Some(selection) = self.debug_wake.selection.as_ref() else {
+                    self.debug_wake.error = Some("観測 Wake の画像を先に選択してください".into());
+                    return Ok(());
+                };
+                let image = selection.image.clone();
+                let context = self.debug_wake.context.clone();
+                self.debug_wake.error = None;
+                self.debug_wake.result = None;
+                self.debug_wake.command =
+                    Some(io.command("debugWake", json!({"image":image,"context":context})));
+            }
+            "debugWakeSend" => {}
             "focusIssue" => {
                 let path: String = decode(value)?;
                 self.category = Some(patch::category_for_issue(&path).into());
@@ -431,6 +814,25 @@ impl SettingsPresenter {
                     Some("conversation-reset") => {
                         io.command("resetConversation", ());
                     }
+                    Some("speaker-delete") => {
+                        let target = self
+                            .speaker
+                            .delete_target
+                            .take()
+                            .ok_or("削除する話者 ID がありません")?;
+                        self.speaker.run(
+                            io,
+                            "speakerManagement",
+                            json!({"operation":"delete","speakerId":target}),
+                        )?;
+                    }
+                    Some("speaker-delete-all") => {
+                        self.speaker.run(
+                            io,
+                            "speakerManagement",
+                            json!({"operation":"deleteAll"}),
+                        )?;
+                    }
                     Some("settings-reset") => {
                         let scope = self
                             .reset_scope
@@ -473,6 +875,12 @@ impl SettingsPresenter {
         self.confirmation = None;
         self.reset_scope = None;
         self.reset_category = None;
+        self.speaker.delete_target = None;
+    }
+    fn ensure_speaker_directory(&mut self, io: &mut PanelIo) {
+        if self.speaker.directory.is_none() && self.speaker.directory_loading.is_none() {
+            self.speaker.directory_loading = Some(io.command("speakerDirectory", ()));
+        }
     }
     fn reflect(&mut self, io: &mut PanelIo) {
         self.reflection_generation += 1;
@@ -491,6 +899,14 @@ impl SettingsPresenter {
             return Ok(());
         }
         match command.kind.as_str() {
+            "feedbackExport" if self.feedback_export == Some(command.id) => {
+                self.feedback_export = None;
+                if result.ok {
+                    self.feedback_export_path = Some(decode(result.value)?);
+                } else {
+                    self.feedback_export_error = Some(result.message().into());
+                }
+            }
             "save" | "selectPersona" if self.saving == Some(command.id) => {
                 if result.ok {
                     let submitted = self.submitted.take().expect("saving has a draft");
@@ -585,6 +1001,55 @@ impl SettingsPresenter {
                 }
             }
             "resetConversation" if !result.ok => self.set_failure(&result, "config"),
+            "speakerDirectory" if self.speaker.directory_loading == Some(command.id) => {
+                self.speaker.directory_loading = None;
+                if result.ok {
+                    let directory: SpeakerDirectory = decode(result.value)?;
+                    directory.validate()?;
+                    self.speaker.directory = Some(directory);
+                    self.speaker.directory_error = None;
+                } else {
+                    self.speaker.directory_error = Some(result.message().into());
+                }
+            }
+            "speakerManagement" | "speakerRename" if self.speaker.busy == Some(command.id) => {
+                self.speaker.busy = None;
+                if result.ok {
+                    self.speaker.error = None;
+                    self.speaker.succeeded = true;
+                    if command.kind == "speakerRename" {
+                        let directory: SpeakerDirectory = decode(result.value)?;
+                        directory.validate()?;
+                        let name = directory
+                            .speakers
+                            .iter()
+                            .find(|speaker| speaker.id == self.speaker.field("renameID"))
+                            .and_then(|speaker| speaker.name.clone())
+                            .unwrap_or_default();
+                        self.speaker.draft.insert("nameDraft".into(), name);
+                        self.speaker.directory = Some(directory);
+                    } else {
+                        // 台帳が変わる操作のあとは候補を読み直す
+                        self.speaker.directory = None;
+                        self.speaker.directory_loading = None;
+                        self.ensure_speaker_directory(io);
+                    }
+                } else {
+                    self.speaker.succeeded = false;
+                    self.speaker.error = Some(result.message().into());
+                }
+            }
+            "debugWake" if self.debug_wake.command == Some(command.id) => {
+                self.debug_wake.command = None;
+                self.debug_wake.loading = false;
+                if result.ok {
+                    self.debug_wake.error = None;
+                    self.debug_wake.result = Some(result.value);
+                } else {
+                    self.debug_wake.result = None;
+                    self.debug_wake.error = Some(result.message().into());
+                }
+            }
             _ => {}
         }
         Ok(())

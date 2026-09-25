@@ -886,17 +886,6 @@ impl DesktopState {
         }
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) async fn test_emit_setup_stage(
-        self: &Arc<Self>,
-        key: &str,
-        connecting: bool,
-    ) -> Result<(), RuntimeError> {
-        let providers = (key != "setup-none").then(|| vec!["codex".to_owned()]);
-        self.emit_setup_status(key, None, connecting, providers, false)
-            .await
-    }
 }
 
 fn setup_choice_key<'a>(requested: &'a str, providers: &[String]) -> &'a str {
@@ -965,6 +954,7 @@ fn setup_interaction(
                 confirm_label: text(TextKey::SetupConnectionConfirm, locale).to_owned(),
             }),
             secret_input: (*method == SetupConnectionMethod::ApiKey).then(|| BubbleSecretInput {
+                value: None,
                 label: text(TextKey::SetupApiKeyLabel, locale).to_owned(),
                 placeholder: text(TextKey::SetupApiKeyPlaceholder, locale).to_owned(),
                 action: "setup-api-key-submit".to_owned(),
@@ -1087,4 +1077,3 @@ fn redact_setup_error_detail(detail: &str, secret: Option<&str>) -> String {
         preview
     }
 }
-

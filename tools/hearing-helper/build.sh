@@ -18,11 +18,7 @@ if [ -n "$target_triple" ]; then
 else
   output_path="$output_dir/coosenpai-hearing"
 fi
-entrypoint="$script_dir/Sources/entrypoint.swift"
-if [ "${2:-}" = "--test-speaker-failure" ]; then
-  entrypoint="$script_dir/Tests/speaker_failure_entrypoint.swift"
-  output_path="$output_path-failure-test"
-elif [ -n "${2:-}" ]; then
+if [ -n "${2:-}" ]; then
   printf 'Unknown build option: %s\n' "$2" >&2
   exit 2
 fi
@@ -67,7 +63,7 @@ swiftc -target "$swift_target" -O -parse-as-library -module-cache-path "$module_
   "$script_dir/Sources/wav_input.swift" \
   "$script_dir/Sources/appended_audio_dump.swift" \
   "$script_dir/Sources/main.swift" \
-  "$entrypoint" \
+  "$script_dir/Sources/entrypoint.swift" \
   "$temporary_object_path" "$temporary_ring_object_path" \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$script_dir/Info.plist" \
   -o "$temporary_path"

@@ -40,12 +40,21 @@ pub struct WorkResult {
     pub stderr_summary: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChatWorkError {
+    #[error("{0}")]
+    Failed(String),
+    #[error("{0}")]
+    Stopped(String),
+}
+
 #[async_trait]
 pub trait ChatWorkExecutor: Send + Sync {
     async fn execute(
         &self,
         input_id: &str,
+        operation_id: &str,
         request: WorkRequest,
         cancellation: CancellationToken,
-    ) -> Result<WorkResult, String>;
+    ) -> Result<WorkResult, ChatWorkError>;
 }

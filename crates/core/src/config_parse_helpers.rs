@@ -277,6 +277,7 @@ pub(super) fn parse_audio(
         &[
             "enabled",
             "mic",
+            "microphoneCommandsEnabled",
             "speaker",
             "speakerIdentification",
             "debugDumpDir",
@@ -297,6 +298,13 @@ pub(super) fn parse_audio(
     AudioConfig {
         enabled: boolean(object, "enabled", false, "audio.enabled", issues),
         mic: boolean(object, "mic", true, "audio.mic", issues),
+        microphone_commands_enabled: boolean(
+            object,
+            "microphoneCommandsEnabled",
+            false,
+            "audio.microphoneCommandsEnabled",
+            issues,
+        ),
         speaker: boolean(object, "speaker", true, "audio.speaker", issues),
         speaker_identification,
         debug_dump_dir: optional_string(object, "debugDumpDir", "audio.debugDumpDir", issues),
@@ -316,7 +324,7 @@ fn parse_speaker_identification(
         enabled: boolean(
             object,
             "enabled",
-            false,
+            true,
             "audio.speakerIdentification.enabled",
             issues,
         ),
@@ -440,9 +448,20 @@ pub(super) fn parse_debug(
     object: &Map<String, Value>,
     issues: &mut Vec<ConfigValidationIssue>,
 ) -> DebugConfig {
-    issues.extend(unknown_keys(object, &["enabled"], "debug"));
+    issues.extend(unknown_keys(
+        object,
+        &["enabled", "feedbackEnabled"],
+        "debug",
+    ));
     DebugConfig {
         enabled: boolean(object, "enabled", false, "debug.enabled", issues),
+        feedback_enabled: boolean(
+            object,
+            "feedbackEnabled",
+            true,
+            "debug.feedbackEnabled",
+            issues,
+        ),
     }
 }
 

@@ -108,14 +108,6 @@ pub(crate) struct CommandFirewall {
     audio_permit: RwLock<()>,
     transition: Mutex<Option<TransitionOperation>>,
     generations: ResourceGenerations,
-    #[cfg(test)]
-    watch_stop_before_permit: Mutex<Option<WatchStopTestBarrier>>,
-}
-
-#[cfg(test)]
-struct WatchStopTestBarrier {
-    reached: std::sync::Arc<Notify>,
-    release: std::sync::Arc<Notify>,
 }
 
 impl Default for CommandFirewall {
@@ -125,8 +117,6 @@ impl Default for CommandFirewall {
             audio_permit: RwLock::new(()),
             transition: Mutex::new(None),
             generations: ResourceGenerations::default(),
-            #[cfg(test)]
-            watch_stop_before_permit: Mutex::new(None),
         }
     }
 }
@@ -138,19 +128,6 @@ impl CommandFirewall {
 
     pub(crate) fn generation_is_current(&self, stamp: GenerationStamp) -> bool {
         self.generations.is_current(stamp)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_pause_watch_stop_before_permit(
-        &self,
-    ) -> (std::sync::Arc<Notify>, std::sync::Arc<Notify>) {
-        let reached = std::sync::Arc::new(Notify::new());
-        let release = std::sync::Arc::new(Notify::new());
-        *lock(&self.watch_stop_before_permit) = Some(WatchStopTestBarrier {
-            reached: reached.clone(),
-            release: release.clone(),
-        });
-        (reached, release)
     }
 
     pub(crate) async fn execute<T, F, Fut>(
@@ -176,8 +153,6 @@ impl CommandFirewall {
         } else {
             None
         };
-        #[cfg(test)]
-        self.pause_watch_stop_before_permit(watch_stop_target).await;
         DISPATCH_ACTIVE
             .scope((), async {
                 match permit_class(envelope.command) {
@@ -403,6 +378,7 @@ impl CommandFirewall {
             | DesktopCommand::BubbleFastForward
             | DesktopCommand::BubbleNavigate
             | DesktopCommand::UtteranceFeedback
+            | DesktopCommand::DebugWake
             | DesktopCommand::SettingsAppearancePreview
             | DesktopCommand::TutorialAdvance
             | DesktopCommand::TutorialSettingsPresented
@@ -466,4 +442,3 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-

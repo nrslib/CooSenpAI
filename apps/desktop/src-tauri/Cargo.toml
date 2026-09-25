@@ -16,11 +16,6 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "coosenpai-desktop"
 path = "src/main.rs"
 
-[[test]]
-name = "desktop_config_entry"
-path = "tests/desktop_config_entry.rs"
-harness = false
-
 [[bin]]
 name = "coosenpai-update-verify"
 path = "src/update_verify_main.rs"

@@ -259,8 +259,6 @@ impl StagedFile {
         fs::rename(temporary, &self.path)?;
         self.temporary = None;
         self.published = true;
-        #[cfg(test)]
-        failpoints::after_rename(&self.path)?;
         directory.file.sync_all()?;
         set_private_path_mode(&self.path)?;
         Ok(())
@@ -624,6 +622,69 @@ pub struct JsonlStore {
     lock_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FileSnapshot {
+    path: PathBuf,
+    bytes: Option<Vec<u8>>,
+}
+
+impl FileSnapshot {
+    pub(crate) fn capture(path: &Path) -> Result<Self, PersistenceError> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self {
+            path: path.to_owned(),
+            bytes,
+        })
+    }
+
+    pub(crate) fn restore(&self) -> Result<(), PersistenceError> {
+        match &self.bytes {
+            Some(bytes) => atomic_write_bytes(&self.path, bytes)?,
+            None => match fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            },
+        }
+        Ok(())
+    }
+
+    pub(crate) fn matches_current(&self) -> Result<bool, PersistenceError> {
+        match (&self.bytes, fs::read(&self.path)) {
+            (Some(expected), Ok(actual)) => Ok(expected == &actual),
+            (None, Err(error)) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            (Some(_), Err(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            (None, Ok(_)) => Ok(false),
+            (_, Err(error)) => Err(error.into()),
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub(crate) fn restore_file_snapshots(snapshots: &[FileSnapshot]) -> Result<(), PersistenceError> {
+    let mut errors = Vec::new();
+    for snapshot in snapshots.iter().rev() {
+        if let Err(error) = snapshot.restore() {
+            errors.push(format!("{}: {error}", snapshot.path.display()));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(PersistenceError::Invalid(format!(
+            "削除前のファイル復元に失敗しました: {}",
+            errors.join(", ")
+        )))
+    }
+}
+
 impl JsonlStore {
     pub fn new(path: PathBuf) -> Self {
         let lock_path = jsonl_lock_path(&path);
@@ -728,6 +789,25 @@ impl JsonlStore {
         Ok(records)
     }
 
+    pub(crate) fn read_strict<T: DeserializeOwned>(&self) -> Result<Vec<T>, PersistenceError> {
+        let _lock = SiblingLock::acquire(&self.lock_path)?;
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = File::open(&self.path)?;
+        set_private_file_mode(&file)?;
+        let reader = BufReader::new(file);
+        let mut records = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            records.push(serde_json::from_str(&line)?);
+        }
+        Ok(records)
+    }
+
     pub(crate) fn rewrite<T, F>(&self, update: F) -> Result<bool, PersistenceError>
     where
         T: Serialize + DeserializeOwned,
@@ -760,6 +840,22 @@ impl JsonlStore {
             bytes.push(b'\n');
         }
         atomic_write_bytes(&self.path, &bytes)?;
+        Ok(true)
+    }
+
+    pub(crate) fn remove(&self) -> Result<bool, PersistenceError> {
+        let parent = self.path.parent().ok_or_else(|| {
+            PersistenceError::Invalid("JSONL の親ディレクトリがありません".to_owned())
+        })?;
+        let _directory_lock = SiblingLock::acquire(&parent.join(".retention.lock"))?;
+        let _lock = SiblingLock::acquire(&self.lock_path)?;
+        if !self.path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(&self.path)?;
+        if parent.is_dir() {
+            File::open(parent)?.sync_all()?;
+        }
         Ok(true)
     }
 
@@ -912,4 +1008,3 @@ fn set_private_path_mode(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
-

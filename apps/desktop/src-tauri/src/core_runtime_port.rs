@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use coosenpai_core::companion::CompanionResponse;
 use coosenpai_core::config::Config;
 use coosenpai_core::observer::ObservationFrameInput;
-use coosenpai_core::runtime::{RuntimeError, RuntimeHandle, RuntimeSnapshot};
+use coosenpai_core::runtime::{
+    CompanionObservationResult, RuntimeError, RuntimeHandle, RuntimeSnapshot,
+};
 use coosenpai_core::state::{
     AudioObservation, ObservationRecord, PendingFrameContext, StagnationObservation,
 };
@@ -11,12 +13,36 @@ use tokio_util::sync::CancellationToken;
 #[async_trait]
 pub(crate) trait CoreRuntimePort: Send + Sync {
     fn config(&self) -> Config;
+    fn judge_feed_available(&self) -> bool;
     fn snapshot(&self) -> RuntimeSnapshot;
     fn judge_trace_for_input(&self, input_id: &str) -> Option<coosenpai_core::judge::JudgeTrace>;
+    // 観察単位の trace を扱うポート契約として保持するが、現行 UI からは未参照。
+    #[allow(dead_code)]
     fn judge_trace_for_observation(
         &self,
         observation_id: &str,
     ) -> Option<coosenpai_core::judge::JudgeTrace>;
+    async fn feed_judge_with_event_id(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: coosenpai_core::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<coosenpai_core::judge::JudgeFeedApplyResult, RuntimeError>;
+    async fn correct_judge_feed(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: coosenpai_core::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<coosenpai_core::judge::JudgeFeedApplyResult, RuntimeError>;
+    async fn cancel_judge_feed(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: coosenpai_core::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<coosenpai_core::judge::JudgeFeedApplyResult, RuntimeError>;
     #[allow(dead_code)]
     fn install_fixture_judge_trace(
         &self,
@@ -28,17 +54,28 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
         &self,
         observations: Vec<ObservationRecord>,
     ) -> Result<CompanionResponse, RuntimeError>;
+    async fn companion_observations_with_result(
+        &self,
+        observations: Vec<ObservationRecord>,
+    ) -> Result<CompanionObservationResult, RuntimeError>;
     fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot>;
     fn watch_scope_generation(&self) -> u64;
-    fn begin_hearing_context(
+    async fn begin_hearing_session(
         &self,
         generation: u64,
         cancellation: CancellationToken,
-    ) -> Result<String, RuntimeError>;
-    fn hearing_audio_ingestion(
+    ) -> Result<
+        (
+            String,
+            coosenpai_core::hearing_ingestion::HearingAudioIngestion,
+        ),
+        RuntimeError,
+    >;
+    async fn delete_conversation_log_day(
         &self,
-        session_id: String,
-    ) -> Result<coosenpai_core::hearing_ingestion::HearingAudioIngestion, RuntimeError>;
+        paths: coosenpai_core::config::ConfigPaths,
+        date: chrono::NaiveDate,
+    ) -> Result<(), RuntimeError>;
     fn update_hearing_context(
         &self,
         context: coosenpai_core::hearing_context::HearingContext,
@@ -57,6 +94,11 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError>;
+    async fn observe_without_companion_delivery(
+        &self,
+        frames: Vec<ObservationFrameInput>,
+        cancellation: CancellationToken,
+    ) -> Result<ObservationRecord, RuntimeError>;
     async fn process_mailbox(
         &self,
         cancellation: CancellationToken,
@@ -66,7 +108,12 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
         observation: ObservationRecord,
         context_notice: String,
         cancellation: CancellationToken,
-    ) -> Result<(), RuntimeError>;
+    ) -> Result<CompanionResponse, RuntimeError>;
+    async fn companion_nudge_with_result(
+        &self,
+        observation: ObservationRecord,
+        context_notice: String,
+    ) -> Result<CompanionObservationResult, RuntimeError>;
     async fn heartbeat(
         &self,
         stagnation: Option<StagnationObservation>,
@@ -87,19 +134,26 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
 
 #[async_trait]
 impl CoreRuntimePort for RuntimeHandle {
-    fn hearing_audio_ingestion(
+    async fn delete_conversation_log_day(
         &self,
-        session_id: String,
-    ) -> Result<coosenpai_core::hearing_ingestion::HearingAudioIngestion, RuntimeError> {
-        RuntimeHandle::hearing_audio_ingestion(self, session_id)
+        paths: coosenpai_core::config::ConfigPaths,
+        date: chrono::NaiveDate,
+    ) -> Result<(), RuntimeError> {
+        RuntimeHandle::delete_conversation_log_day(self, paths, date).await
     }
 
-    fn begin_hearing_context(
+    async fn begin_hearing_session(
         &self,
         generation: u64,
         cancellation: CancellationToken,
-    ) -> Result<String, RuntimeError> {
-        RuntimeHandle::begin_hearing_context(self, generation, cancellation)
+    ) -> Result<
+        (
+            String,
+            coosenpai_core::hearing_ingestion::HearingAudioIngestion,
+        ),
+        RuntimeError,
+    > {
+        RuntimeHandle::begin_hearing_session(self, generation, cancellation).await
     }
 
     fn update_hearing_context(
@@ -111,6 +165,10 @@ impl CoreRuntimePort for RuntimeHandle {
 
     fn config(&self) -> Config {
         RuntimeHandle::config(self)
+    }
+
+    fn judge_feed_available(&self) -> bool {
+        !RuntimeHandle::config(self).judge.modules.is_empty()
     }
 
     fn snapshot(&self) -> RuntimeSnapshot {
@@ -128,6 +186,37 @@ impl CoreRuntimePort for RuntimeHandle {
         RuntimeHandle::judge_trace_for_observation(self, observation_id)
     }
 
+    async fn feed_judge_with_event_id(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: coosenpai_core::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<coosenpai_core::judge::JudgeFeedApplyResult, RuntimeError> {
+        RuntimeHandle::feed_judge_with_event_id_result(self, event_id, input_id, sign, strength)
+            .await
+    }
+
+    async fn correct_judge_feed(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: coosenpai_core::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<coosenpai_core::judge::JudgeFeedApplyResult, RuntimeError> {
+        RuntimeHandle::correct_judge_feed_result(self, event_id, input_id, sign, strength).await
+    }
+
+    async fn cancel_judge_feed(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: coosenpai_core::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<coosenpai_core::judge::JudgeFeedApplyResult, RuntimeError> {
+        RuntimeHandle::cancel_judge_feed_result(self, event_id, input_id, sign, strength).await
+    }
+
     fn install_fixture_judge_trace(
         &self,
         observation: &ObservationRecord,
@@ -141,6 +230,13 @@ impl CoreRuntimePort for RuntimeHandle {
         observations: Vec<ObservationRecord>,
     ) -> Result<CompanionResponse, RuntimeError> {
         RuntimeHandle::companion_observations(self, observations).await
+    }
+
+    async fn companion_observations_with_result(
+        &self,
+        observations: Vec<ObservationRecord>,
+    ) -> Result<CompanionObservationResult, RuntimeError> {
+        RuntimeHandle::companion_observations_with_result(self, observations).await
     }
 
     fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot> {
@@ -175,6 +271,14 @@ impl CoreRuntimePort for RuntimeHandle {
         self.observe_cancellable(frames, cancellation).await
     }
 
+    async fn observe_without_companion_delivery(
+        &self,
+        frames: Vec<ObservationFrameInput>,
+        cancellation: CancellationToken,
+    ) -> Result<ObservationRecord, RuntimeError> {
+        RuntimeHandle::observe_without_companion_delivery(self, frames, cancellation).await
+    }
+
     async fn process_mailbox(
         &self,
         cancellation: CancellationToken,
@@ -188,10 +292,17 @@ impl CoreRuntimePort for RuntimeHandle {
         observation: ObservationRecord,
         context_notice: String,
         cancellation: CancellationToken,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<CompanionResponse, RuntimeError> {
         RuntimeHandle::companion_nudge_cancellable(self, observation, context_notice, cancellation)
             .await
-            .map(|_| ())
+    }
+
+    async fn companion_nudge_with_result(
+        &self,
+        observation: ObservationRecord,
+        context_notice: String,
+    ) -> Result<CompanionObservationResult, RuntimeError> {
+        RuntimeHandle::companion_nudge_with_result(self, observation, context_notice).await
     }
 
     async fn heartbeat(

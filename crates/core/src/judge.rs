@@ -56,6 +56,13 @@ pub enum JudgeFeedSign {
     Negative,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JudgeFeedApplyResult {
+    Applied,
+    NotApplied,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum JudgeFeedSource {
@@ -213,6 +220,8 @@ pub struct JudgeTrace {
     pub request: Value,
     pub responses: Vec<JudgeModuleTrace>,
     pub decision: Option<JudgeDecision>,
+    #[serde(default)]
+    pub feedable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -886,16 +895,7 @@ pub struct JudgeAgent {
     feedback_send_lock: Arc<tokio::sync::Mutex<()>>,
     feedback_store: Option<PathBuf>,
     feedback_store_load_error: Option<String>,
-    evaluation_status: Arc<Mutex<HashMap<String, EvaluationStatus>>>,
-    evaluation_order: Arc<Mutex<VecDeque<String>>>,
-    evaluation_notify: Arc<Notify>,
     trace_store: JudgeTraceStore,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum EvaluationStatus {
-    Pending,
-    Completed { feedable: bool },
 }
 
 impl JudgeAgent {
@@ -925,9 +925,6 @@ impl JudgeAgent {
             feedback_send_lock: Arc::new(tokio::sync::Mutex::new(())),
             feedback_store: None,
             feedback_store_load_error: None,
-            evaluation_status: Arc::new(Mutex::new(HashMap::new())),
-            evaluation_order: Arc::new(Mutex::new(VecDeque::new())),
-            evaluation_notify: Arc::new(Notify::new()),
             trace_store: JudgeTraceStore::default(),
         }
     }
@@ -955,28 +952,6 @@ impl JudgeAgent {
             .collect();
         self.transports = Arc::new(transports);
         self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_transports(
-        config: JudgeConfig,
-        transports: Vec<Arc<dyn JudgeTransport>>,
-    ) -> Self {
-        Self {
-            config,
-            transports: Arc::new(transports),
-            logger: None,
-            session: "test-session".to_owned(),
-            sequence: Arc::new(AtomicU64::new(0)),
-            feedback_ledger: Arc::new(Mutex::new(FeedbackLedger::default())),
-            feedback_send_lock: Arc::new(tokio::sync::Mutex::new(())),
-            feedback_store: None,
-            feedback_store_load_error: None,
-            evaluation_status: Arc::new(Mutex::new(HashMap::new())),
-            evaluation_order: Arc::new(Mutex::new(VecDeque::new())),
-            evaluation_notify: Arc::new(Notify::new()),
-            trace_store: JudgeTraceStore::default(),
-        }
     }
 
     pub fn with_logger(mut self, logger: Option<Arc<dyn RuntimeLogger>>) -> Self {
@@ -1070,89 +1045,6 @@ impl JudgeAgent {
         gate
     }
 
-    pub(crate) fn register_evaluation(
-        &self,
-        frames: &[ObservationFrameInput],
-        audio: &[AudioObservation],
-    ) {
-        if let Some(input_id) = primary_input_id(frames, audio) {
-            self.begin_evaluation(&input_id);
-        }
-    }
-
-    pub(crate) async fn wait_for_evaluation(
-        &self,
-        input_id: &str,
-        cancellation: CancellationToken,
-    ) -> Result<bool, JudgeError> {
-        if self.transports.is_empty() {
-            return Ok(false);
-        }
-        loop {
-            let notified = self.evaluation_notify.notified();
-            let status = self
-                .evaluation_status
-                .lock()
-                .map_err(|_| JudgeError::Input("評価状態のロックが壊れています".to_owned()))?
-                .get(input_id)
-                .copied();
-            match status {
-                None => {
-                    return Err(JudgeError::Input(
-                        "評価状態が整理済みか、登録されていません".to_owned(),
-                    ))
-                }
-                Some(EvaluationStatus::Completed { feedable }) => return Ok(feedable),
-                Some(EvaluationStatus::Pending) => {
-                    tokio::select! {
-                        _ = cancellation.cancelled() => return Err(JudgeError::Cancelled),
-                        _ = notified => {}
-                    }
-                }
-            }
-        }
-    }
-
-    fn begin_evaluation(&self, input_id: &str) {
-        if let (Ok(mut status), Ok(mut order)) =
-            (self.evaluation_status.lock(), self.evaluation_order.lock())
-        {
-            if status.contains_key(input_id) {
-                order.retain(|value| value != input_id);
-            }
-            while status.len() >= 1_024 {
-                let Some(oldest) = order.pop_front() else {
-                    break;
-                };
-                if matches!(
-                    status.get(&oldest),
-                    Some(EvaluationStatus::Completed { .. })
-                ) {
-                    status.remove(&oldest);
-                } else {
-                    order.push_front(oldest);
-                    break;
-                }
-            }
-            if status.len() < 1_024 {
-                status.insert(input_id.to_owned(), EvaluationStatus::Pending);
-                order.push_back(input_id.to_owned());
-            }
-        }
-    }
-
-    fn finish_evaluation(&self, input_id: &str, feedable: bool) {
-        if let Ok(mut status) = self.evaluation_status.lock() {
-            if status.contains_key(input_id) {
-                status.insert(
-                    input_id.to_owned(),
-                    EvaluationStatus::Completed { feedable },
-                );
-            }
-        }
-        self.evaluation_notify.notify_waiters();
-    }
-
     fn remember_trace(
         &self,
         input_id: &str,
@@ -1163,6 +1055,7 @@ impl JudgeAgent {
         self.trace_store.insert(JudgeTrace {
             input_id: input_id.to_owned(),
             request: request.clone(),
+            feedable: !responses.is_empty() && responses.iter().all(module_trace_feedable),
             responses,
             decision,
         });
@@ -1192,12 +1085,10 @@ impl JudgeAgent {
         if self.transports.is_empty() {
             return JudgeEvaluation::pass_through();
         }
-        self.begin_evaluation(&input_id);
         if let Some(reason) = input_insufficiency(frames, audio) {
             let evaluation = self.input_hold(&input_id, reason);
             let request = self.unavailable_request(&input_id, reason);
             self.remember_trace(&input_id, &request, Vec::new(), evaluation.decision.clone());
-            self.finish_evaluation(&input_id, false);
             return evaluation;
         }
         let request_id = Uuid::new_v4().to_string();
@@ -1207,7 +1098,6 @@ impl JudgeAgent {
                 let evaluation = self.fallback(&input_id, error.to_string());
                 let request = self.unavailable_request(&input_id, "request-build-failed");
                 self.remember_trace(&input_id, &request, Vec::new(), evaluation.decision.clone());
-                self.finish_evaluation(&input_id, false);
                 return evaluation;
             }
         };
@@ -1229,7 +1119,6 @@ impl JudgeAgent {
                     Vec::new(),
                     evaluation.decision.clone(),
                 );
-                self.finish_evaluation(&input_id, false);
                 return evaluation;
             }
         };
@@ -1270,7 +1159,6 @@ impl JudgeAgent {
                 transport.reset().await;
             }
             self.remember_trace(&input_id, &request_value, Vec::new(), None);
-            self.finish_evaluation(&input_id, false);
             return JudgeEvaluation::pass_through();
         }
         let mut evaluations = Vec::new();
@@ -1319,7 +1207,6 @@ impl JudgeAgent {
                         transport.reset().await;
                     }
                     self.remember_trace(&input_id, &request_value, traces, None);
-                    self.finish_evaluation(&input_id, false);
                     return JudgeEvaluation::pass_through();
                 }
                 Err(error) => {
@@ -1338,7 +1225,6 @@ impl JudgeAgent {
             }
         }
         if evaluations.is_empty() || !module_errors.is_empty() {
-            self.finish_evaluation(&input_id, false);
             let reason = if module_errors.is_empty() {
                 "すべての判断役モジュールが利用できません".to_owned()
             } else {
@@ -1350,9 +1236,6 @@ impl JudgeAgent {
             self.remember_trace(&input_id, &request_value, traces, None);
             return self.fallback(&input_id, reason);
         }
-        let feedable = evaluations
-            .iter()
-            .all(|(_, evaluation)| evaluation.feedable == Some(true));
         self.log_feed_metadata(&input_id, &evaluations);
         let evaluation = match self.compose(&input_id, evaluations, module_errors.is_empty()) {
             Ok(mut decision) => {
@@ -1377,7 +1260,6 @@ impl JudgeAgent {
             traces,
             evaluation.decision.clone(),
         );
-        self.finish_evaluation(&input_id, feedable);
         evaluation
     }
 
@@ -1450,7 +1332,7 @@ impl JudgeAgent {
         cancelled: bool,
         cancellation: CancellationToken,
     ) -> Result<(), JudgeError> {
-        self.feed_event(
+        self.feed_event_with_result(
             JudgeFeedEvent {
                 event_id: &event_id,
                 input_id: &input_id,
@@ -1463,6 +1345,7 @@ impl JudgeAgent {
             cancellation,
         )
         .await
+        .map(|_| ())
     }
 
     pub(crate) async fn feed_event(
@@ -1470,6 +1353,16 @@ impl JudgeAgent {
         event: JudgeFeedEvent<'_>,
         cancellation: CancellationToken,
     ) -> Result<(), JudgeError> {
+        self.feed_event_with_result(event, cancellation)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn feed_event_with_result(
+        &self,
+        event: JudgeFeedEvent<'_>,
+        cancellation: CancellationToken,
+    ) -> Result<JudgeFeedApplyResult, JudgeError> {
         if event.input_id.trim().is_empty() {
             return Err(JudgeError::Input("input_id が空です".to_owned()));
         }
@@ -1490,7 +1383,7 @@ impl JudgeAgent {
             ));
         }
         if self.transports.is_empty() {
-            return Ok(());
+            return Ok(JudgeFeedApplyResult::NotApplied);
         }
         let _send_guard = self.feedback_send_lock.lock().await;
         let JudgeFeedEvent {
@@ -1637,7 +1530,7 @@ impl JudgeAgent {
         event: JudgeFeedEvent<'_>,
         reservation: FeedbackReservation,
         cancellation: CancellationToken,
-    ) -> Result<(), JudgeError> {
+    ) -> Result<JudgeFeedApplyResult, JudgeError> {
         let event_time_s = event
             .event_time
             .and_then(timestamp_seconds)
@@ -1719,6 +1612,15 @@ impl JudgeAgent {
             }
         }
         let first_error = uncertain_error.or(first_error);
+        let apply_result = if first_error.is_some() {
+            None
+        } else if applied_results.is_empty() {
+            Some(JudgeFeedApplyResult::Unknown)
+        } else if applied_results.iter().all(|applied| *applied) {
+            Some(JudgeFeedApplyResult::Applied)
+        } else {
+            Some(JudgeFeedApplyResult::NotApplied)
+        };
         let status = match &first_error {
             Some(error) => FeedbackDeliveryStatus::Failed {
                 reason: error.to_string(),
@@ -1728,7 +1630,10 @@ impl JudgeAgent {
             },
         };
         self.record_feedback_delivery(event.event_id, reservation, status, first_error.as_ref())?;
-        first_error.map_or(Ok(()), Err)
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(apply_result.unwrap_or(JudgeFeedApplyResult::Unknown)),
+        }
     }
 
     fn record_feedback_delivery(
@@ -1902,7 +1807,6 @@ impl JudgeAgent {
             readiness,
             hold_reason,
             update_token: output.update_token,
-            feedable: output.feedable,
             feed_target: output.feed_target,
             feed_rejection_code: output.feed_rejection_code,
         })
@@ -2274,6 +2178,7 @@ struct PluginEvaluation {
     hold_reason: Option<String>,
     #[serde(default)]
     update_token: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     feedable: Option<bool>,
     #[serde(default)]
@@ -2290,7 +2195,6 @@ struct ModuleEvaluation {
     readiness: String,
     hold_reason: Option<String>,
     update_token: Option<String>,
-    feedable: Option<bool>,
     feed_target: Option<String>,
     feed_rejection_code: Option<String>,
 }
@@ -2304,6 +2208,17 @@ impl ModuleEvaluation {
             readiness: self.readiness.clone(),
         }
     }
+}
+
+fn module_trace_feedable(trace: &JudgeModuleTrace) -> bool {
+    trace.error.is_none()
+        && trace
+            .response
+            .as_ref()
+            .and_then(|response| response.get("result"))
+            .and_then(|result| result.get("feedable"))
+            .and_then(Value::as_bool)
+            == Some(true)
 }
 
 fn first_json_value(stdout: &[u8]) -> Option<Value> {
@@ -2508,4 +2423,3 @@ fn load_feedback_ledger(path: &Path) -> Result<LoadedFeedbackLedger, String> {
         migrated: ledger.schema_version == 1,
     })
 }
-

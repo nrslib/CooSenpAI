@@ -21,7 +21,6 @@ pub enum DeliveryOwnership {
 }
 
 pub(super) struct ProviderInvocation<'a> {
-    pub work_result: Option<&'a str>,
     pub prompt: &'a str,
     pub source_ids: &'a [String],
     pub user: bool,
@@ -46,6 +45,7 @@ pub(super) struct CompanionTurn {
 
 pub(crate) struct CompanionCallOutcome {
     pub(crate) decision_produced: bool,
+    pub(crate) deferred: bool,
     pub(crate) response: CompanionResponse,
     pub(crate) data: crate::prompts::CompanionPromptData,
     pub(crate) observations: Vec<ObservationRecord>,
@@ -130,6 +130,12 @@ impl ProviderEventSink for MeasuredProviderEvents {
     fn mid_turn_accepted(&self, source_id: &str) {
         if let Some(downstream) = &self.downstream {
             downstream.mid_turn_accepted(source_id);
+        }
+    }
+
+    fn message_committed(&self) {
+        if let Some(downstream) = &self.downstream {
+            downstream.message_committed();
         }
     }
 }

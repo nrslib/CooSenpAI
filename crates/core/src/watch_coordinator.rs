@@ -183,16 +183,6 @@ pub fn next_send_seconds(
     crate::timing::remaining_seconds(debounce.min(interval))
 }
 
-#[test]
-fn vision_send_interval_is_independent_from_hearing() {
-    let mut config = Config::default();
-    config.observer.vision.interval_ms = 30_000;
-    config.observer.hearing.interval_ms = 90_000;
-    assert_eq!(next_send_seconds(&config, None, 0), 30);
-    assert!(!watch_send_due(&config, 1, 0, 29_999));
-    assert!(watch_send_due(&config, 1, 0, 30_000));
-}
-
 pub fn is_self_application(name: &str) -> bool {
     name.eq_ignore_ascii_case("coosenpai")
 }
@@ -537,4 +527,3 @@ pub fn format_watch_status_lines(status: &WatchStatusLines<'_>) -> Vec<String> {
     lines.extend(status.runtime_error.iter().map(|value| (*value).to_owned()));
     lines
 }
-

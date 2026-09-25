@@ -1,7 +1,7 @@
 use crate::companion::{
     AttachmentOcrFailureKind, CompanionAgent, CompanionError, CompanionResponse,
 };
-use crate::config::{validate_config, Config};
+use crate::config::{validate_config, Config, ConfigPaths};
 use crate::judge::JudgeAgent;
 use crate::locale::{text, Locale, TextKey};
 use crate::memory::{MemoryService, MemoryStatus};
@@ -26,6 +26,8 @@ use support::{
 mod control_operation;
 #[path = "runtime_initialization.rs"]
 mod initialization;
+#[path = "runtime_microphone_commands.rs"]
+mod microphone_commands;
 #[path = "runtime_observation_handle.rs"]
 mod observation_handle;
 #[path = "runtime_operation.rs"]
@@ -39,21 +41,22 @@ use operation_state::{
 #[path = "runtime_types.rs"]
 mod types;
 pub use crate::judge::JudgeDecision;
+pub use crate::judge::JudgeFeedApplyResult;
 pub use types::{
-    CompanionDecision, ObservationDelivery, RuntimeAgents, RuntimeAttachmentOcrFailure,
-    RuntimeError, RuntimeErrorKind, RuntimeErrorSource, RuntimeFactory, RuntimeLastError,
-    RuntimePhase, RuntimeSnapshot, RuntimeUserResponseFailure, UserInterruption,
+    CompanionDecision, CompanionObservationResult, ObservationDelivery, RuntimeAgents,
+    RuntimeAttachmentOcrFailure, RuntimeError, RuntimeErrorKind, RuntimeErrorSource,
+    RuntimeFactory, RuntimeLastError, RuntimePhase, RuntimeSnapshot, RuntimeUserResponseFailure,
+    UserInterruption,
 };
 #[path = "runtime_handle_types.rs"]
 mod handle_types;
-use handle_types::{ControlCommand, PriorityCommand, UserCommand, UserQueueCommand};
+use handle_types::{
+    ControlCommand, ObserveRequest, PriorityCommand, UserCommand, UserQueueCommand,
+};
 pub use handle_types::{ProviderStartGate, RuntimeHandle};
 #[path = "runtime_stream.rs"]
 mod stream;
 use stream::{ProviderStreamUpdate, RuntimeProviderEvents};
-#[cfg(test)]
-#[path = "runtime_test_barrier.rs"]
-pub(crate) mod test_barrier;
 #[path = "runtime_thought.rs"]
 mod thought;
 #[path = "runtime_user_handle.rs"]
@@ -66,6 +69,24 @@ const MAX_QUEUED_USER_COMMANDS_PER_TURN: usize = COMMAND_CAPACITY;
 const MAX_QUEUED_CONTROL_COMMANDS_PER_TURN: usize = 8;
 
 impl RuntimeHandle {
+    pub async fn delete_conversation_log_day(
+        &self,
+        paths: ConfigPaths,
+        date: chrono::NaiveDate,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        let (response, result) = oneshot::channel();
+        self.priority_tx
+            .send(PriorityCommand::DeleteConversationLogDay {
+                paths: Box::new(paths),
+                date,
+                response,
+            })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
+
     pub async fn reset_companion_emotions(&self) -> Result<(), RuntimeError> {
         self.ensure_open()?;
         let (response, result) = oneshot::channel();
@@ -152,9 +173,32 @@ impl RuntimeHandle {
     ) -> Result<String, RuntimeError> {
         self.ensure_open()?;
         let event_id = format!("coosenpai:explicit:{}", uuid::Uuid::new_v4());
-        self.send_judge_feed(event_id.clone(), input_id, sign, strength, false)
+        self.feed_judge_with_event_id(event_id.clone(), input_id, sign, strength)
             .await?;
         Ok(event_id)
+    }
+
+    pub async fn feed_judge_with_event_id(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<(), RuntimeError> {
+        self.feed_judge_with_event_id_result(event_id, input_id, sign, strength)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn feed_judge_with_event_id_result(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<JudgeFeedApplyResult, RuntimeError> {
+        self.send_judge_feed(event_id, input_id, sign, strength, false)
+            .await
     }
 
     pub async fn correct_judge_feed(
@@ -164,6 +208,18 @@ impl RuntimeHandle {
         sign: crate::judge::JudgeFeedSign,
         strength: f64,
     ) -> Result<(), RuntimeError> {
+        self.correct_judge_feed_result(event_id, input_id, sign, strength)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn correct_judge_feed_result(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<JudgeFeedApplyResult, RuntimeError> {
         self.send_judge_feed(event_id, input_id, sign, strength, false)
             .await
     }
@@ -175,6 +231,18 @@ impl RuntimeHandle {
         sign: crate::judge::JudgeFeedSign,
         strength: f64,
     ) -> Result<(), RuntimeError> {
+        self.cancel_judge_feed_result(event_id, input_id, sign, strength)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn cancel_judge_feed_result(
+        &self,
+        event_id: String,
+        input_id: String,
+        sign: crate::judge::JudgeFeedSign,
+        strength: f64,
+    ) -> Result<JudgeFeedApplyResult, RuntimeError> {
         self.send_judge_feed(event_id, input_id, sign, strength, true)
             .await
     }
@@ -186,7 +254,7 @@ impl RuntimeHandle {
         sign: crate::judge::JudgeFeedSign,
         strength: f64,
         cancelled: bool,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<JudgeFeedApplyResult, RuntimeError> {
         self.ensure_open()?;
         let (response, result) = oneshot::channel();
         self.control_tx
@@ -307,12 +375,14 @@ pub struct RuntimeActor {
     companion_display_name: String,
     runtime_user_queue:
         std::sync::Arc<std::sync::Mutex<VecDeque<crate::companion_storage::PendingUserMessage>>>,
+    user_command_tx: mpsc::Sender<UserCommand>,
     hearing_context: std::sync::Arc<std::sync::Mutex<crate::hearing_context::HearingContextBuffer>>,
     user_preparer:
         std::sync::Arc<std::sync::RwLock<Option<crate::companion::user::UserMessagePreparer>>>,
     active_user_message_id: Option<String>,
     cancelled_user_message_ids: Vec<String>,
     companion_draft: Option<String>,
+    conversation_revision: u64,
     latest_companion_thought: Option<String>,
     latest_companion_decision: Option<CompanionDecision>,
     judge_generation: u64,
@@ -398,27 +468,6 @@ impl RuntimeActor {
             Some(logger),
             cancellation,
             Some(error),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn spawn_with_judge_for_test(
-        config: Config,
-        observer: Option<ObserverAgent>,
-        companion: Option<CompanionAgent>,
-        judge: std::sync::Arc<JudgeAgent>,
-    ) -> RuntimeHandle {
-        Self::spawn_internal_with_memory_and_judge(
-            config,
-            observer,
-            companion,
-            None,
-            ObservationDelivery::Companion,
-            None,
-            None,
-            CancellationToken::new(),
-            None,
-            Some(judge),
         )
     }
 
@@ -574,6 +623,7 @@ impl RuntimeActor {
             user_work_pending: false,
             cancelled_user_message_ids: Vec::new(),
             companion_draft: None,
+            conversation_revision: 0,
             latest_companion_thought: None,
             latest_companion_decision: None,
             latest_judge_decision: None,
@@ -593,6 +643,7 @@ impl RuntimeActor {
         let actor_watch_scope_commit_lock = watch_scope_commit_lock.clone();
         let actor_turn_commit_lock = turn_commit_lock.clone();
         let actor_user_preparer = user_preparer.clone();
+        let actor_user_command_tx = user_tx.clone();
         let actor_control_tx = control_tx.clone();
         tokio::spawn(async move {
             let initialization_retry_at = if initial_error.is_none()
@@ -633,11 +684,13 @@ impl RuntimeActor {
                 turn_commit_lock: actor_turn_commit_lock,
                 companion_display_name,
                 runtime_user_queue,
+                user_command_tx: actor_user_command_tx,
                 hearing_context,
                 user_preparer: actor_user_preparer,
                 active_user_message_id: None,
                 cancelled_user_message_ids: Vec::new(),
                 companion_draft: None,
+                conversation_revision: 0,
                 latest_companion_thought: None,
                 latest_companion_decision: None,
                 judge_generation: 0,
@@ -658,6 +711,7 @@ impl RuntimeActor {
                 agent_rebuild_pending: false,
             };
             let mut running_observer: Option<RunningOperation> = None;
+            actor.sync_microphone_command_policy();
             let mut running_coo: Option<RunningOperation> = None;
             let mut volatile_users = VecDeque::new();
             let mut control_queue = VecDeque::new();
@@ -753,6 +807,28 @@ impl RuntimeActor {
                         actor.apply_judge_decision(generation, decision, &snapshot_tx);
                         continue;
                     }
+                    let hearing_command = if let ControlCommand::BeginHearingSession {
+                        cancellation,
+                        response,
+                        ..
+                    } = &command
+                    {
+                        if response.is_closed() {
+                            continue;
+                        }
+                        if !cancellation.is_cancelled()
+                            && (!priority_rx.is_empty()
+                                || actor.operation_cancellation.provider_starts_blocked()
+                                || (!actor.hearing_session_provider_build_failed()
+                                    && actor.hearing_session_initialization_pending()))
+                        {
+                            control_queue.push_back(command);
+                            continue;
+                        }
+                        true
+                    } else {
+                        false
+                    };
                     let observer_command = control_uses_observer(&command);
                     if matches!(&command, ControlCommand::CompanionObservations { .. })
                         && actor.observation_delivery == ObservationDelivery::Companion
@@ -772,7 +848,9 @@ impl RuntimeActor {
                         }
                         continue;
                     }
-                    let lane_free = if observer_command {
+                    let lane_free = if hearing_command {
+                        true
+                    } else if observer_command {
                         !observer_started && running_observer.is_none()
                     } else {
                         !coo_started
@@ -1059,7 +1137,18 @@ impl RuntimeActor {
                                     actor.user_commands_blocked = true;
                                 }
                                 actor.operation_cancellation.cancel_current();
-                                if actor.handle_priority(command, interrupted_operation, &snapshot_tx, &config_tx).await { break; }
+                                if actor
+                                    .handle_priority(
+                                        command,
+                                        interrupted_operation,
+                                        &mut volatile_users,
+                                        &snapshot_tx,
+                                        &config_tx,
+                                    )
+                                    .await
+                                {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1073,6 +1162,7 @@ impl RuntimeActor {
                         let input_id = match &update {
                             ProviderStreamUpdate::Delta { input_id, .. }
                             | ProviderStreamUpdate::Reset { input_id }
+                            | ProviderStreamUpdate::Committed { input_id }
                             | ProviderStreamUpdate::Usage { input_id, .. } => input_id,
                         };
                         if actor.active_user_message_id.as_ref() == Some(input_id) {
@@ -1081,6 +1171,10 @@ impl RuntimeActor {
                                     actor.companion_draft.get_or_insert_with(String::new).push_str(&text);
                                 }
                                 ProviderStreamUpdate::Reset { .. } => actor.companion_draft = None,
+                                ProviderStreamUpdate::Committed { .. } => {
+                                    actor.companion_draft = None;
+                                    actor.conversation_revision = actor.conversation_revision.saturating_add(1);
+                                }
                                 ProviderStreamUpdate::Usage { usage, .. } => actor.provider_usage = usage,
                             }
                             actor.revision = actor.revision.saturating_add(1);
@@ -1160,6 +1254,7 @@ impl RuntimeActor {
         &mut self,
         command: PriorityCommand,
         interrupted_operation: bool,
+        volatile_users: &mut VecDeque<crate::companion_storage::PendingUserMessage>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
         config_tx: &watch::Sender<Config>,
     ) -> bool {
@@ -1279,8 +1374,17 @@ impl RuntimeActor {
                 let _ = response.send(Ok(revision));
                 self.publish(snapshot_tx);
             }
+            PriorityCommand::DeleteConversationLogDay {
+                paths,
+                date,
+                response,
+            } => {
+                let result = self.delete_conversation_log_day(paths.as_ref(), date, volatile_users);
+                self.operation_cancellation.renew();
+                let _ = response.send(result);
+                self.publish(snapshot_tx);
+            }
         }
         false
     }
 }
-

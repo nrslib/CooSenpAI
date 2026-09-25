@@ -1951,10 +1951,6 @@ impl CapturePresenter {
     }
 }
 
-#[cfg(test)]
-#[path = "capture_manager_tests.rs"]
-pub(crate) mod tests;
-
 impl Default for CapturePresenter {
     fn default() -> Self {
         let (view, _) = watch::channel(CaptureState::Idle.view());

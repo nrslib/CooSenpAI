@@ -35,6 +35,7 @@ pub(super) fn build_observation_prompt_data(
             .collect::<Result<Vec<_>, _>>()?,
         observation_frame_paths: std::collections::HashMap::new(),
         observation_log_directory,
+        audio_log_index: None,
         omitted_observations: Some(
             omitted
                 .iter()

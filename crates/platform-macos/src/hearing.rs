@@ -24,8 +24,6 @@ type TerminalEventPermit = mpsc::OwnedPermit<HearingEventResult>;
 pub struct MacHearing {
     helper: PathBuf,
     logger: Arc<dyn RuntimeLogger>,
-    #[cfg(test)]
-    test_process_observer: Option<TestProcessObserver>,
 }
 
 impl MacHearing {
@@ -33,8 +31,6 @@ impl MacHearing {
         Self {
             helper,
             logger,
-            #[cfg(test)]
-            test_process_observer: None,
         }
     }
 
@@ -76,11 +72,6 @@ impl HearingPort for MacHearing {
             ));
         }
 
-        #[cfg(test)]
-        let process_guard = crate::test_support::acquire_helper_process_lock().await;
-        #[cfg(test)]
-        let test_process_observer = self.test_process_observer.clone();
-
         let mut specs = Vec::with_capacity(sources.len());
         for source in sources {
             let args = helper_arguments_with_options(
@@ -109,12 +100,6 @@ impl HearingPort for MacHearing {
                 Ok(process) => (Some(process), None),
                 Err(error) => (None, Some(process_error(error))),
             };
-            #[cfg(test)]
-            if initial_process.is_some() {
-                if let Some(observer) = test_process_observer.as_ref() {
-                    observer(source, TestProcessEvent::Spawned);
-                }
-            }
             let _ = self.logger.write("INFO", &format!("hearing-start: source={source:?} stage=spawn phase=end elapsed-ms={} success={}", started.elapsed().as_millis(), initial_process.is_some()));
             specs.push(SourceProcessSpec {
                 source,
@@ -124,8 +109,6 @@ impl HearingPort for MacHearing {
                 initial_error,
                 parent_cancellation: cancellation.clone(),
                 logger: self.logger.clone(),
-                #[cfg(test)]
-                test_process_observer: test_process_observer.clone(),
             });
         }
         if specs.iter().all(|spec| spec.initial_process.is_none()) {
@@ -146,8 +129,6 @@ impl HearingPort for MacHearing {
             cancel_requested.clone(),
             cancellation,
             options.speaker_identification_enabled,
-            #[cfg(test)]
-            process_guard,
         ));
         Ok(HearingSession::from_channels_with_cancellation(
             command_tx,
@@ -227,9 +208,7 @@ impl HearingAggregation {
             _ => return Ok(()),
         };
         if *event_source != source || *generation == 0 || *sequence == 0 {
-            return Err(PortError::Unavailable(
-                "聴覚イベントの音源・世代・更新順序が不正です".to_owned(),
-            ));
+            return Err(invalid_event_protocol_error(source));
         }
         let status = self.status_mut(source).ok_or_else(|| {
             PortError::Unavailable("聴覚イベントの音源が登録されていません".to_owned())
@@ -248,14 +227,40 @@ impl HearingAggregation {
         if let Some(status) = self.status_mut(source) {
             status.required = true;
             status.ready = Some(event);
-            status.last_error = None;
         }
     }
 
-    fn mark_unavailable(&mut self, source: AudioObservationSource) {
+    fn mark_recovered(&mut self, source: AudioObservationSource, event: &HearingEvent) {
+        let is_recovery_event = matches!(
+            event,
+            HearingEvent::Recognizing { .. }
+                | HearingEvent::NoSpeech { .. }
+                | HearingEvent::Final { .. }
+        );
+        if !is_recovery_event {
+            return;
+        }
+        if let Some(status) = self.status_mut(source) {
+            let protocol_error = status.last_error.as_ref().is_some_and(is_protocol_error);
+            if !protocol_error || matches!(event, HearingEvent::Final { .. }) {
+                status.last_error = None;
+            }
+        }
+    }
+
+    fn mark_unavailable(&mut self, source: AudioObservationSource, error: Option<PortError>) {
+        if let Some(error) = error {
+            self.record_error(source, error);
+        }
         if let Some(status) = self.status_mut(source) {
             status.required = false;
             status.ready = None;
+        }
+    }
+
+    fn record_error(&mut self, source: AudioObservationSource, error: PortError) {
+        if let Some(status) = self.status_mut(source) {
+            prefer_error(&mut status.last_error, Some(error));
         }
     }
 
@@ -286,6 +291,26 @@ impl HearingAggregation {
     }
 }
 
+fn is_protocol_error(error: &PortError) -> bool {
+    matches!(
+        error,
+        PortError::Protocol(_) | PortError::SpeakerProtocol(_)
+    )
+}
+
+fn prefer_error(current: &mut Option<PortError>, candidate: Option<PortError>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if current
+        .as_ref()
+        .is_some_and(|existing| is_protocol_error(existing) && !is_protocol_error(&candidate))
+    {
+        return;
+    }
+    *current = Some(candidate);
+}
+
 async fn run_session(
     specs: Vec<SourceProcessSpec>,
     mut commands: mpsc::Receiver<HearingCommand>,
@@ -293,7 +318,6 @@ async fn run_session(
     cancel_requested: CancellationToken,
     parent_cancellation: CancellationToken,
     speaker_identification_enabled: bool,
-    #[cfg(test)] _process_guard: crate::test_support::HelperProcessLock,
 ) {
     let mut terminal_event = match events.clone().reserve_owned().await {
         Ok(permit) => Some(permit),
@@ -363,6 +387,7 @@ async fn run_session(
                             send_terminal_event(&mut terminal_event, Err(error));
                             return;
                         }
+                        aggregation.mark_recovered(source_event.source, &event);
                         match event {
                         event @ HearingEvent::Ready { .. } => {
                             if source_event.source == AudioObservationSource::Speaker
@@ -466,11 +491,13 @@ async fn run_session(
                         event @ HearingEvent::Warning { .. }
                         | event @ HearingEvent::Error { .. } => {
                             if let HearingEvent::Error { ref kind, ref message } = event {
-                                if let Some(status) = aggregation.status_mut(source_event.source) {
-                                    status.last_error = Some(PortError::Unavailable(format!(
-                                        "source={} kind={kind}: {message}", source_name(source_event.source)
-                                    )));
-                                }
+                                aggregation.record_error(
+                                    source_event.source,
+                                    PortError::Unavailable(format!(
+                                        "source={} kind={kind}: {message}",
+                                        source_name(source_event.source)
+                                    )),
+                                );
                                 if source_event.source == AudioObservationSource::Speaker
                                     && (kind == "system-audio" || kind.starts_with("system-audio-"))
                                 {
@@ -498,8 +525,29 @@ async fn run_session(
                         }
                         HearingEvent::Closed => {}
                     }},
-                    SourceProcessEventKind::Unavailable => {
-                        aggregation.mark_unavailable(source_event.source);
+                    SourceProcessEventKind::Unavailable { error } => {
+                        let protocol_warning = error
+                            .as_ref()
+                            .and_then(protocol_warning_for_error);
+                        aggregation.mark_unavailable(source_event.source, error);
+                        if let Some((kind, message)) = protocol_warning {
+                            if !send_hearing_event(
+                                &events,
+                                Ok(HearingEvent::Warning { kind, message }),
+                                &cancel_requested,
+                                &parent_cancellation,
+                            )
+                            .await
+                            {
+                                if cancel_requested.is_cancelled()
+                                    || parent_cancellation.is_cancelled()
+                                {
+                                    continue;
+                                }
+                                let _ = stop_workers(&worker_cancellation, workers).await;
+                                return;
+                            }
+                        }
                         if !emit_ready_if_possible(
                             &mut aggregation,
                             &events,
@@ -517,17 +565,22 @@ async fn run_session(
                                 return;
                             }
                     }
-                    SourceProcessEventKind::Exhausted { error } => {
-                        let error = aggregation.status_mut(source_event.source)
-                            .and_then(|status| status.last_error.take()).or(error);
-                        aggregation.mark_unavailable(source_event.source);
-                        if terminal_error.is_none() {
-                            terminal_error = error;
-                        }
+                    SourceProcessEventKind::Exhausted {
+                        error: process_error,
+                    } => {
+                        let source_error = aggregation
+                            .status_mut(source_event.source)
+                            .and_then(|status| status.last_error.take());
+                        let mut error = source_error;
+                        prefer_error(&mut error, process_error);
+                        aggregation.mark_unavailable(source_event.source, None);
+                        prefer_error(&mut terminal_error, error);
                         if aggregation.no_required_sources() {
-                            let event = terminal_error
-                                .take()
-                                .or_else(|| aggregation.sources.iter_mut().find_map(|status| status.last_error.take()))
+                            let mut error = terminal_error.take();
+                            for status in &mut aggregation.sources {
+                                prefer_error(&mut error, status.last_error.take());
+                            }
+                            let event = error
                                 .map(Err)
                                 .unwrap_or_else(|| Ok(HearingEvent::Closed));
                             let _ = stop_workers(&worker_cancellation, workers).await;
@@ -554,6 +607,26 @@ async fn run_session(
                 }
             }
         }
+    }
+}
+
+fn protocol_warning_for_error(error: &PortError) -> Option<(String, String)> {
+    match error {
+        PortError::SpeakerProtocol(message) => {
+            Some(("speaker-protocol".to_owned(), message.clone()))
+        }
+        PortError::Protocol(message) => Some(("hearing-protocol".to_owned(), message.clone())),
+        _ => None,
+    }
+}
+
+fn invalid_event_protocol_error(source: AudioObservationSource) -> PortError {
+    if source == AudioObservationSource::Speaker {
+        PortError::SpeakerProtocol(
+            "聴覚観察 helper の話者イベントの音源・世代・更新順序が不正です".to_owned(),
+        )
+    } else {
+        PortError::Protocol("聴覚観察 helper のイベントの音源・世代・更新順序が不正です".to_owned())
     }
 }
 
@@ -622,22 +695,6 @@ async fn stop_workers(
     result
 }
 
-#[cfg(test)]
-fn helper_arguments(
-    locale: &str,
-    input_device: &str,
-    source: AudioObservationSource,
-    debug_dump_dir: Option<&str>,
-) -> Vec<String> {
-    helper_arguments_with_options(
-        locale,
-        input_device,
-        source,
-        debug_dump_dir,
-        &HearingStartOptions::default(),
-    )
-}
-
 fn helper_arguments_with_options(
     locale: &str,
     input_device: &str,
@@ -677,4 +734,3 @@ fn source_name(source: AudioObservationSource) -> &'static str {
         AudioObservationSource::Speaker => "speaker",
     }
 }
-

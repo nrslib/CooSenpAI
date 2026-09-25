@@ -22,7 +22,7 @@ struct MainQueueSpeechDeadlineScheduler: SpeechDeadlineScheduler {
 
 enum SpeechOutput: Equatable {
     case partial(String)
-    case final(String)
+    case final(String, words: [SpeechWordTiming])
     case error(kind: String, message: String)
     case closed
 }
@@ -44,6 +44,7 @@ final class SpeechRecognitionSession: @unchecked Sendable {
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
     private var transcript: SpeechTranscript
+    private var wordTimeline: [SpeechWordTiming] = []
     private var phase = Phase.preparing
     private var deadline: SpeechDeadline?
     private var inputEnded = false
@@ -131,6 +132,7 @@ final class SpeechRecognitionSession: @unchecked Sendable {
             diagnostic("event=analysis-result isFinal=\(result.isFinal) finishRequested=\(phase == .finishing) chars=\(result.text.count) audioStart=\(result.audioRange.start.seconds) audioEnd=\(result.audioRange.end.seconds) resultsFinalizationTime=\(result.resultsFinalizationTime.seconds)")
             do {
                 try transcript.record(result)
+                mergeWordTimings(result)
                 publishPartial(transcript.text)
             } catch {
                 failOnQueue("recognition", "音声認識が不正な区間の結果を返しました")
@@ -167,6 +169,16 @@ final class SpeechRecognitionSession: @unchecked Sendable {
         emit(.partial(text))
     }
 
+    private func mergeWordTimings(_ result: SpeechTranscription) {
+        guard !result.words.isEmpty else { return }
+        wordTimeline.removeAll {
+            CMTimeCompare($0.start, result.audioRange.end) < 0
+                && CMTimeCompare(result.audioRange.start, $0.end) < 0
+        }
+        wordTimeline.append(contentsOf: result.words)
+        wordTimeline.sort { CMTimeCompare($0.start, $1.start) < 0 }
+    }
+
     private func complete(_ text: String) {
         guard phase == .finishing else {
             if phase != .closing { failOnQueue("recognition", "音声認識が入力終了前に停止しました") }
@@ -178,7 +190,7 @@ final class SpeechRecognitionSession: @unchecked Sendable {
         }
         diagnostic("event=session-final chars=\(text.count)")
         phase = .closing
-        emit(.final(text))
+        emit(.final(text, words: wordTimeline))
         closeOnQueue()
     }
 

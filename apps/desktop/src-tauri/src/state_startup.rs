@@ -108,16 +108,6 @@ pub(super) async fn startup_runtime(
     })
 }
 
-#[cfg(test)]
-pub(super) fn startup_tutorial(
-    store: OnboardingStore,
-) -> (
-    crate::tutorial::TutorialController,
-    Option<RuntimeLastError>,
-) {
-    startup_tutorial_for_locale(store, Locale::Ja)
-}
-
 pub(super) fn startup_tutorial_for_locale(
     store: OnboardingStore,
     locale: Locale,

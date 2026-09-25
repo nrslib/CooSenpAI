@@ -1,7 +1,7 @@
 use super::{register_replacing_for_surface, BubblePresenter};
 use crate::bubbles::{BubblePresentation, BubbleRecord};
 use crate::ui_events::UiEffect;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -20,7 +20,7 @@ pub(crate) struct NotificationContext {
     pub tutorial_active: bool,
     pub latest_thought: Option<String>,
     pub latest_thought_generation: Option<u64>,
-    pub recorded_feedback_ids: HashSet<String>,
+    pub utterance_feedback: BTreeMap<String, crate::utterance_feedback::FeedbackSummary>,
 }
 
 impl BubblePresenter {
@@ -74,7 +74,7 @@ impl BubblePresenter {
                         let interaction = crate::utterance_feedback::interaction_for_speech(
                             &config,
                             &record.message_kind,
-                            context.recorded_feedback_ids.contains(&record.id),
+                            context.utterance_feedback.get(&record.id),
                         );
                         let bubble = BubbleRecord {
                             id: record.id,

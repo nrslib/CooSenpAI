@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 #[path = "audio_observation.rs"]
@@ -164,6 +164,22 @@ pub struct AudioSegmentReference {
     pub speaker_registry_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_status: Option<SpeakerIdentificationStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_end_ms: Option<u64>,
+}
+
+/// 期間参照の id は観察 id に期間開始時刻を付けて一意にする。
+/// `parse_visual_observation` は参照 id の重複を拒否するため、
+/// 1観察が複数の期間参照を持つ場合もこの形で書き分ける。
+pub fn audio_segment_period_id(observation_id: &str, audio_start_ms: u64) -> String {
+    format!("{observation_id}:p{audio_start_ms}")
+}
+
+/// 期間参照の id から観察 id を取り出す。期間でない参照の id はそのまま返す。
+pub fn audio_segment_observation_id(segment_id: &str) -> &str {
+    segment_id.split_once(":p").map_or(segment_id, |(id, _)| id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,6 +332,8 @@ pub struct UserScreenContext {
     pub pending_audio_ids: Vec<String>,
 }
 
+pub(crate) const RESPONSE_FAILURE_HISTORY_PREFIX: &str = "response-failure;";
+
 impl UserScreenContext {
     pub fn is_empty(&self) -> bool {
         self.observations.is_empty()
@@ -331,6 +349,7 @@ impl UserScreenContext {
 pub enum ConversationMessageKind {
     #[default]
     Chat,
+    Progress,
     Advice,
     Encouragement,
     Nudge,
@@ -348,6 +367,7 @@ impl ConversationMessageKind {
     pub fn from_wire(value: &str) -> Option<Self> {
         Some(match value {
             "chat" => Self::Chat,
+            "progress" => Self::Progress,
             "advice" => Self::Advice,
             "encouragement" => Self::Encouragement,
             "nudge" => Self::Nudge,
@@ -366,6 +386,7 @@ impl ConversationMessageKind {
     pub fn as_wire(self) -> &'static str {
         match self {
             Self::Chat => "chat",
+            Self::Progress => "progress",
             Self::Advice => "advice",
             Self::Encouragement => "encouragement",
             Self::Nudge => "nudge",
@@ -384,6 +405,7 @@ impl ConversationMessageKind {
         matches!(
             self,
             Self::Chat
+                | Self::Progress
                 | Self::Advice
                 | Self::Encouragement
                 | Self::Nudge
@@ -417,6 +439,49 @@ pub struct ConversationEntry {
 }
 
 impl ConversationEntry {
+    pub fn completes_user_response(&self) -> bool {
+        self.role == ConversationRole::Companion
+            && !matches!(
+                self.message_kind,
+                Some(ConversationMessageKind::Progress | ConversationMessageKind::System)
+            )
+    }
+
+    fn has_response_failure_history_shape(&self) -> bool {
+        self.role == ConversationRole::Companion
+            && self.message_kind == Some(ConversationMessageKind::System)
+            && self.message.starts_with(RESPONSE_FAILURE_HISTORY_PREFIX)
+    }
+
+    pub fn is_response_failure(&self) -> bool {
+        self.has_response_failure_history_shape()
+    }
+
+    pub fn response_failure(
+        &self,
+    ) -> Option<(u8, Option<crate::provider::ProviderFailureSummary>)> {
+        if !self.has_response_failure_history_shape() {
+            return None;
+        }
+        let fields = self
+            .message
+            .strip_prefix(RESPONSE_FAILURE_HISTORY_PREFIX)?
+            .split(';')
+            .filter_map(|field| field.split_once('='))
+            .collect::<HashMap<_, _>>();
+        let attempts = fields.get("attempts")?.parse().ok()?;
+        let provider = fields
+            .get("kind")
+            .and_then(|kind| crate::provider::ProviderErrorKind::from_wire(kind))
+            .map(|kind| crate::provider::ProviderFailureSummary {
+                kind,
+                model: fields
+                    .get("model")
+                    .and_then(|model| crate::provider::safe_provider_model(model)),
+            });
+        Some((attempts, provider))
+    }
+
     pub fn is_normal_speech(&self) -> bool {
         self.role == ConversationRole::Companion
             && self

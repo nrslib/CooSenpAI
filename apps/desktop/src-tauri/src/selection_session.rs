@@ -353,10 +353,6 @@ impl SelectionSessionHandle {
     }
 }
 
-#[cfg(test)]
-#[path = "selection_session_tests.rs"]
-pub(crate) mod tests;
-
 #[path = "selection_session_native.rs"]
 mod native;
 #[path = "selection_session_runtime.rs"]

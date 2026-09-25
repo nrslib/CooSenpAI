@@ -82,6 +82,7 @@ pub(crate) struct DesktopState {
     pub(crate) clipboard_writer: Arc<dyn coosenpai_core::ports::ClipboardWriter>,
     pub(crate) speech: Arc<crate::speech::SpeechController>,
     hearing: Arc<crate::hearing::HearingController>,
+    pub(crate) speaker_queue: crate::commands_speaker::SpeakerManagementQueue,
     pub(crate) voice_output: Arc<crate::voice_output::VoiceOutputController>,
     pub(crate) tutorial: Arc<Mutex<crate::tutorial::TutorialController>>,
     pub shortcut_coordinator: Arc<crate::capture::ShortcutCoordinator>,
@@ -311,6 +312,8 @@ impl DesktopState {
             &paths,
             logger.clone(),
         ));
+        let (speaker_queue, speaker_queue_run) =
+            crate::commands_speaker::SpeakerManagementQueue::channel();
         let speech_input_devices = speech.input_devices();
         let initial_avatar =
             crate::avatar::load_with_status(&paths, config.ui.avatar_path.as_deref());
@@ -342,6 +345,7 @@ impl DesktopState {
             clipboard_writer,
             speech,
             hearing,
+            speaker_queue,
             voice_output: Arc::new(crate::voice_output::VoiceOutputController::new(
                 voice_output_provider,
             )),
@@ -369,10 +373,8 @@ impl DesktopState {
                 snapshot.speech.input_devices = speech_input_devices;
                 snapshot.conversation_generations = conversation_generations;
                 snapshot.selected_conversation_generation = conversation_generation;
-                snapshot.recorded_utterance_feedback_ids =
-                    coosenpai_core::utterance_feedback::UtteranceFeedbackStore::from_paths(&paths)
-                        .recorded_utterance_ids()
-                        .unwrap_or_default();
+                snapshot.utterance_feedback =
+                    crate::utterance_feedback::load_feedback_summaries(&paths)?;
                 snapshot
             })),
             config_update: ConfigUpdateCoordinator::new(config_revision),
@@ -380,8 +382,6 @@ impl DesktopState {
                 lifecycle: WatchLifecycle::Stopped,
                 generation: 0,
                 resume_after_power: false,
-                #[cfg(test)]
-                start_commit_barrier: None,
             }),
             watch_intent_lock: Mutex::new(()),
             runtime_active: AtomicBool::new(runtime_active),
@@ -400,6 +400,7 @@ impl DesktopState {
         });
         state.app.manage(state.ui.clone());
         start_ui_root(state.clone(), state.snapshot().await, capture_presenter);
+        tauri::async_runtime::spawn(speaker_queue_run);
         Self::spawn_runtime_monitor(state.clone());
         tauri::async_runtime::spawn(
             state

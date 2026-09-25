@@ -7,7 +7,7 @@
 | ディレクトリ | 責務 | 位置づけ |
 |---|---|---|
 | `personas/` | 話し方と振る舞いだけ。口調、反応の順序と温度。判断規則や製品知識は書かない | ユーザーが切り替える層。設定で選び、`~/.coosenpai/personas/<id>.md` に custom persona を置ける |
-| `knowledge/` | 製品コンセプトと判断の前提。CooSenpAI の名前の意味（See / Encourage / Nudge / Pleasure）、音声の出どころの意味づけなど | 全ペルソナ共通の層。アプリに同梱し、ユーザー領域からは読まない。開発側で編集する |
+| `knowledge/` | 製品コンセプトと判断の前提。CooSenpAI の名前の意味（Cooperate / See / Encourage / Nudge / Pleasure）、音声の出どころの意味づけなど | 全ペルソナ共通の層。アプリに同梱し、ユーザー領域からは読まない。開発側で編集する |
 | `instructions/` | 手順と役割宣言。観察を読む、話すかを決める、種類を選ぶ、本文を組む、最後に文体を点検する、という手続きだけ。`observer.md` は観察エージェント専用 | 同上 |
 | `output-contracts/` | 出力フィールドの意味と書式の契約（雛形を含む）。companion と observer の役割別 | 同上 |
 | `policies/` | 振る舞いの戒め。宣言的な規範を条文として書く。ファイル名の昇順で連結される | 同上 |

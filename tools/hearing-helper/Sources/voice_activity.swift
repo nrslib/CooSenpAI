@@ -197,6 +197,9 @@ struct VoiceActivityDetector {
     private(set) var phase: VoiceActivityPhase = .waiting
     private(set) var noiseFloorRms: Double = 0
     private(set) var audioTimeNanoseconds: UInt64 = 0
+    // 音声認識へ渡す trailing は保持したまま、話者特徴抽出から除外する
+    // VAD 上の最後の有声バッファ終端。
+    private(set) var lastSpeechEndAudioTimeNanoseconds: UInt64?
     private var movingRmsWindow: MovingRmsWindow
     private var steadyRmsWindow: MovingRmsWindow
     private var steadyNoiseDurationNanoseconds: UInt64 = 0
@@ -215,6 +218,7 @@ struct VoiceActivityDetector {
         startCandidateSince = nil
         rearmNoiseReferenceRms = nil
         noiseReferenceForRearmingRms = nil
+        lastSpeechEndAudioTimeNanoseconds = nil
     }
 
     var isSpeaking: Bool {
@@ -311,6 +315,7 @@ struct VoiceActivityDetector {
                 return .appendAndFinish(.steadyNoise)
             }
             if movingRmsWindow.rms >= sustainRmsThreshold {
+                lastSpeechEndAudioTimeNanoseconds = timestamp &+ durationNanoseconds
                 phase = .speaking(startedAt: startedAt, lastSpeechAt: timestamp)
                 return .append
             }
@@ -344,6 +349,7 @@ struct VoiceActivityDetector {
         steadyRmsWindow.reset()
         steadyNoiseDurationNanoseconds = 0
         startCandidateSince = nil
+        lastSpeechEndAudioTimeNanoseconds = nil
     }
 
     mutating func resetToWaiting() {
@@ -354,6 +360,7 @@ struct VoiceActivityDetector {
         startCandidateSince = nil
         rearmNoiseReferenceRms = nil
         noiseReferenceForRearmingRms = nil
+        lastSpeechEndAudioTimeNanoseconds = nil
     }
 
     mutating func forceFinish() -> Bool {
@@ -413,6 +420,7 @@ struct VoiceActivityDetector {
         phase = .speaking(startedAt: candidateSince, lastSpeechAt: timestamp)
         startCandidateSince = nil
         rearmNoiseReferenceRms = nil
+        lastSpeechEndAudioTimeNanoseconds = timestamp &+ durationNanoseconds
         return .start
     }
 
@@ -515,6 +523,7 @@ struct VoiceActivityDetector {
         }
         phase = .speaking(startedAt: candidateSince, lastSpeechAt: timestamp)
         startCandidateSince = nil
+        lastSpeechEndAudioTimeNanoseconds = timestamp &+ durationNanoseconds
         return .start
     }
 

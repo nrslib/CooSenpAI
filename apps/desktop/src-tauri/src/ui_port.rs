@@ -26,13 +26,6 @@ impl DesktopUiPort {
     }
 }
 
-#[cfg(test)]
-impl<P: UiPort> DesktopUiPort<P> {
-    pub(crate) fn with_native(native: P) -> Self {
-        Self { native }
-    }
-}
-
 #[async_trait::async_trait]
 impl<P: UiPort> UiPort for DesktopUiPort<P> {
     async fn execute(&self, effect: UiEffect) -> Result<EffectResult, String> {
@@ -377,6 +370,9 @@ impl UiPort for NativeUiPort {
             UiTask::ModelPicker(task) => result
                 .events
                 .push(crate::model_picker_presenter::run(state.clone(), task).await),
+            UiTask::ConversationFeedback(task) => result
+                .events
+                .push(crate::conversation_feedback::run(state.clone(), task).await),
             UiTask::Conversation(task) => result
                 .events
                 .push(crate::conversation_presenter::run(state.clone(), task).await),

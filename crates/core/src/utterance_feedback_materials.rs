@@ -184,7 +184,8 @@ impl MaterialContext {
                         self.collect_audio_segment(
                             transcript_directory,
                             segment,
-                            audio_by_id.get(&segment.id),
+                            audio_by_id
+                                .get(crate::state::audio_segment_observation_id(&segment.id)),
                         );
                     }
                 }
@@ -236,20 +237,17 @@ impl MaterialContext {
         segment: &crate::state::AudioSegmentReference,
         audio: Option<&crate::state::AudioObservation>,
     ) {
-        let id = segment.id.as_str();
-        let transcript = if segment.transcript_path.is_some() {
+        // 期間参照は観察 id に戻して扱う。判断役の材料の本文は観察単位の全文を正本とし、
+        // 期間ごとの分割はこの経路では使わない。観察が欠けた場合だけ期間行の連結へ落ちる。
+        let id = crate::state::audio_segment_observation_id(segment.id.as_str());
+        let transcript = audio.map(|audio| audio.text.clone()).or_else(|| {
             archive::load_transcript(
                 transcript_directory,
                 segment.transcript_path.as_deref(),
                 id,
                 &mut self.issues,
             )
-            .or_else(|| audio.map(|audio| audio.text.clone()))
-        } else {
-            audio.map(|audio| audio.text.clone()).or_else(|| {
-                archive::load_transcript(transcript_directory, None, id, &mut self.issues)
-            })
-        };
+        });
         if let Some(audio) = audio {
             self.add_json(&format!("audio-segments/{}.json", digest(id)), audio);
         } else {

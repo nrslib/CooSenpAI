@@ -59,7 +59,7 @@ final class OnDeviceSpeechAnalyzer: SpeechAnalysis, @unchecked Sendable {
             locale: supportedLocale,
             transcriptionOptions: [],
             reportingOptions: [.volatileResults, .fastResults],
-            attributeOptions: []
+            attributeOptions: [.audioTimeRange]
         )
         if await AssetInventory.status(forModules: [transcriber]) != .installed {
             diagnostic("event=analysis-model-preparing locale=\(supportedLocale.identifier)")
@@ -89,7 +89,8 @@ final class OnDeviceSpeechAnalyzer: SpeechAnalysis, @unchecked Sendable {
                     guard !cancelled, !failed else { continue }
                     let transcription = SpeechTranscription(
                         text: String(result.text.characters), audioRange: result.range,
-                        resultsFinalizationTime: result.resultsFinalizationTime
+                        resultsFinalizationTime: result.resultsFinalizationTime,
+                        words: Self.wordTimings(from: result.text)
                     )
                     trace(transcription)
                     receive?(.result(transcription))
@@ -192,6 +193,24 @@ final class OnDeviceSpeechAnalyzer: SpeechAnalysis, @unchecked Sendable {
             failure = SpeechAnalysisFailure(kind: "recognition", message: "音声認識が正常に完了しませんでした")
         }
         receive?(.failed(failure))
+    }
+
+    private static func wordTimings(from text: AttributedString) -> [SpeechWordTiming] {
+        var words: [SpeechWordTiming] = []
+        for run in text.runs {
+            guard let range = run.audioTimeRange,
+                  range.start.isNumeric, range.duration.isNumeric,
+                  CMTimeCompare(range.duration, .zero) > 0 else {
+                continue
+            }
+            let word = String(text[run.range].characters)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !word.isEmpty else { continue }
+            words.append(
+                SpeechWordTiming(text: word, start: range.start, duration: range.duration)
+            )
+        }
+        return words
     }
 
     private func trace(_ result: SpeechTranscription) {

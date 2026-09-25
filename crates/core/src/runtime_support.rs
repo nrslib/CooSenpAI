@@ -3,27 +3,6 @@ use super::*;
 use crate::locale::{text, Locale, TextKey};
 use crate::provider::ProviderErrorKind;
 
-fn judge_feedback_is_negative(message: &str) -> bool {
-    let message = message
-        .trim()
-        .to_lowercase()
-        .trim_matches(|character: char| "。！？!?.,、".contains(character))
-        .to_owned();
-    matches!(
-        message.as_str(),
-        "うるさい"
-            | "静かに"
-            | "静かにして"
-            | "黙って"
-            | "黙っていて"
-            | "やめて"
-            | "too loud"
-            | "be quiet"
-            | "stop talking"
-            | "stop"
-    )
-}
-
 pub fn empty_runtime(config: Config) -> RuntimeHandle {
     RuntimeActor::spawn(config, None, None)
 }
@@ -204,10 +183,17 @@ pub(super) fn drain_closed_commands(
 ) {
     while let Ok(command) = control_rx.try_recv() {
         let response = match command {
-            ControlCommand::Observe { response, .. }
+            ControlCommand::BeginHearingSession { response, .. } => {
+                let _ = response.send(Err(RuntimeError::Closed));
+                None
+            }
+            ControlCommand::Observe(ObserveRequest { response, .. })
             | ControlCommand::Heartbeat { response, .. } => Some(response),
-            ControlCommand::CompanionObservations { response, .. }
-            | ControlCommand::ProcessCompanionMailbox { response, .. } => {
+            ControlCommand::CompanionObservations { response, .. } => {
+                let _ = response.send(Err(RuntimeError::Closed));
+                None
+            }
+            ControlCommand::ProcessCompanionMailbox { response, .. } => {
                 let _ = response.send(Err(RuntimeError::Closed));
                 None
             }
@@ -246,6 +232,9 @@ pub(super) fn drain_closed_commands(
                 let _ = response.send(Err(RuntimeError::Closed));
             }
             PriorityCommand::Quiesce { response, .. } => {
+                let _ = response.send(Err(RuntimeError::Closed));
+            }
+            PriorityCommand::DeleteConversationLogDay { response, .. } => {
                 let _ = response.send(Err(RuntimeError::Closed));
             }
             PriorityCommand::CancelUser { response, .. }
@@ -384,94 +373,6 @@ impl RuntimeActor {
         self.publish(snapshot_tx);
     }
 
-    pub(super) fn schedule_judge_feed(
-        &self,
-        targets: &[crate::companion_storage::JudgeFeedbackTarget],
-        messages: &[crate::companion::user::JudgeFeedbackMessage],
-    ) {
-        if targets.is_empty() {
-            return;
-        }
-        let judge = self.judge.clone();
-        let logger = self.logger.clone();
-        let cancellation = self.operation_cancellation.shutdown_token();
-        let targets = targets.to_vec();
-        let messages = messages
-            .iter()
-            .map(|message| (message.user_input_id.clone(), message.message.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
-        tokio::spawn(async move {
-            for target in targets {
-                let Some(message) = messages.get(&target.user_input_id) else {
-                    continue;
-                };
-                if message.trim().is_empty() {
-                    continue;
-                }
-                let sign = if judge_feedback_is_negative(message) {
-                    crate::judge::JudgeFeedSign::Negative
-                } else {
-                    crate::judge::JudgeFeedSign::Positive
-                };
-                let feedable = match judge
-                    .wait_for_evaluation(&target.input_id, cancellation.clone())
-                    .await
-                {
-                    Ok(feedable) => feedable,
-                    Err(error) => {
-                        if !matches!(error, crate::judge::JudgeError::Cancelled) {
-                            if let Some(logger) = &logger {
-                                let _ = logger.write(
-                                    "WARN",
-                                    &format!(
-                                        "判断役の評価完了を待てませんでした: input-id={} error={error}",
-                                        target.input_id
-                                    ),
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                };
-                if !feedable {
-                    if let Some(logger) = &logger {
-                        let _ = logger.write(
-                            "INFO",
-                            &format!(
-                                "判断役の成功応答が feed 対象外のため自動 feed を省略しました: input-id={}",
-                                target.input_id
-                            ),
-                        );
-                    }
-                    continue;
-                }
-                let event_id = format!("coosenpai:auto:{}", target.input_id);
-                if let Err(error) = judge
-                    .feed_event(
-                        crate::judge::JudgeFeedEvent {
-                            event_id: &event_id,
-                            input_id: &target.input_id,
-                            event_time: Some(&target.event_time),
-                            sign,
-                            strength: 1.0,
-                            source: crate::judge::JudgeFeedSource::Automatic,
-                            cancelled: false,
-                        },
-                        cancellation.clone(),
-                    )
-                    .await
-                {
-                    if let Some(logger) = &logger {
-                        let _ = logger.write(
-                            "WARN",
-                            &format!("判断役への自動 feed に失敗しました: event-id={event_id} input-id={} error={error}", target.input_id),
-                        );
-                    }
-                }
-            }
-        });
-    }
-
     pub(super) fn close_user_waiters(&mut self) {
         for (_, response) in self.user_waiters.drain() {
             let _ = response.send(Err(RuntimeError::Closed));
@@ -481,7 +382,7 @@ impl RuntimeActor {
     pub(super) fn defer_companion_observation_wake(
         &mut self,
         observations: Vec<ObservationRecord>,
-        response: oneshot::Sender<Result<CompanionResponse, RuntimeError>>,
+        response: oneshot::Sender<Result<CompanionObservationResult, RuntimeError>>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
     ) {
         let mut durable_observations = self.pending_observations.clone();
@@ -510,7 +411,11 @@ impl RuntimeActor {
                 self.pending_observations.push(observation);
             }
         }
-        let _ = response.send(Ok(crate::companion::silent_response()));
+        let _ = response.send(Ok(CompanionObservationResult {
+            response: crate::companion::silent_response(),
+            call_id: None,
+            deferred: true,
+        }));
         self.revision = self.revision.saturating_add(1);
         self.publish(snapshot_tx);
     }
@@ -556,7 +461,7 @@ impl RuntimeActor {
 pub(super) fn control_uses_observer(command: &ControlCommand) -> bool {
     matches!(
         command,
-        ControlCommand::Observe { .. } | ControlCommand::Heartbeat { .. }
+        ControlCommand::Observe(_) | ControlCommand::Heartbeat { .. }
     )
 }
 
@@ -708,7 +613,8 @@ impl RuntimeActor {
             preparer.cancel(input_id)?;
             false
         };
-        self.suppressed_terminal_user_failure_ids.remove(input_id);
+        self.suppressed_terminal_user_failure_ids
+            .insert(input_id.to_owned());
         self.operation_cancellation.cancel_lane(OperationLane::Coo);
         self.operation_cancellation.renew_lane(OperationLane::Coo);
         if self.last_error.as_ref().is_some_and(|error| {
@@ -764,16 +670,20 @@ impl RuntimeActor {
         &self,
         command: &PriorityCommand,
     ) -> Result<(), RuntimeError> {
-        let (expected, current) = match command {
+        match command {
             PriorityCommand::CancelUser {
                 input_id: Some(expected),
                 ..
-            } => (
-                expected,
-                self.active_user_message_id
+            } => {
+                let current = self
+                    .active_user_message_id
                     .clone()
-                    .or_else(|| self.terminal_user_input_id()),
-            ),
+                    .or_else(|| self.terminal_user_input_id());
+                let current = current.as_deref() == Some(expected.as_str());
+                if current || self.has_terminal_user_response(expected)? {
+                    return Ok(());
+                }
+            }
             PriorityCommand::RetryUser {
                 input_id: Some(expected),
                 ..
@@ -787,20 +697,60 @@ impl RuntimeActor {
                         "別の発言を処理中のため再試行を取り消しました".into(),
                     ));
                 }
-                (expected, Some(self.retry_user_input_id()?))
+                self.retry_user_input_id(Some(expected))?;
+                return Ok(());
             }
             _ => return Ok(()),
-        };
-        if current.as_deref() == Some(expected.as_str()) {
-            Ok(())
-        } else {
-            Err(RuntimeError::Factory(
-                "対象の発言が変わったため操作を取り消しました".into(),
-            ))
         }
+        Err(RuntimeError::Factory(
+            "対象の発言が変わったため操作を取り消しました".into(),
+        ))
     }
 
-    fn retry_user_input_id(&self) -> Result<String, RuntimeError> {
+    fn has_terminal_user_response(&self, input_id: &str) -> Result<bool, RuntimeError> {
+        let Some(companion) = self.companion.as_ref() else {
+            return Ok(false);
+        };
+        Ok(companion
+            .terminal_user_responses()?
+            .into_iter()
+            .any(|(candidate, _, _)| candidate == input_id))
+    }
+
+    fn retry_user_input_id(&self, expected: Option<&str>) -> Result<String, RuntimeError> {
+        if let Some(expected) = expected {
+            if self.terminal_user_input_id().as_deref() == Some(expected)
+                || self.has_terminal_user_response(expected)?
+            {
+                return Ok(expected.to_owned());
+            }
+            if self.user_retry_at.is_none()
+                || !self
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|error| error.belongs_to_user_input(expected))
+            {
+                return Err(RuntimeError::Factory(
+                    "再試行できる発言はありません".to_owned(),
+                ));
+            }
+            let preparer = self
+                .user_preparer
+                .read()
+                .map_err(|_| RuntimeError::CompanionUnavailable)?
+                .clone()
+                .ok_or(RuntimeError::CompanionUnavailable)?;
+            if preparer
+                .pending_messages()?
+                .into_iter()
+                .any(|input| input.id == expected && !input.is_terminal())
+            {
+                return Ok(expected.to_owned());
+            }
+            return Err(RuntimeError::Factory(
+                "再試行できる発言はありません".to_owned(),
+            ));
+        }
         if let Some(input_id) = self.terminal_user_input_id() {
             return Ok(input_id);
         }
@@ -832,19 +782,16 @@ impl RuntimeActor {
     }
 
     pub(super) fn retry_user(&mut self, expected: Option<&str>) -> Result<String, RuntimeError> {
-        let input_id = self.retry_user_input_id()?;
-        if expected.is_some_and(|expected| expected != input_id) {
-            return Err(RuntimeError::Factory(
-                "対象の発言が変わったため操作を取り消しました".into(),
-            ));
-        }
-        self.user_preparer
+        let input_id = self.retry_user_input_id(expected)?;
+        let retry_input_id = self
+            .user_preparer
             .read()
             .map_err(|_| RuntimeError::CompanionUnavailable)?
             .as_ref()
             .ok_or(RuntimeError::CompanionUnavailable)?
             .retry_user_input(&input_id)?;
-        self.suppressed_terminal_user_failure_ids.remove(&input_id);
+        self.suppressed_terminal_user_failure_ids
+            .insert(input_id.clone());
         self.operation_cancellation.renew();
         if self
             .last_error
@@ -857,7 +804,7 @@ impl RuntimeActor {
         self.user_retry_delay = Duration::from_secs(1);
         self.active_user_message_id = None;
         self.revision = self.revision.saturating_add(1);
-        Ok(input_id)
+        Ok(retry_input_id)
     }
 
     pub(super) fn terminal_user_input_id(&self) -> Option<String> {
@@ -879,7 +826,7 @@ impl RuntimeActor {
                     .first_terminal_user_response()
                     .ok()
                     .flatten()
-                    .map(|(input_id, _)| input_id)
+                    .map(|(input_id, _, _)| input_id)
             })
     }
 

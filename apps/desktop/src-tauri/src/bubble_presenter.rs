@@ -397,19 +397,6 @@ impl BubblePresenter {
                             model.set_hover(&id, hovering);
                             false
                         }
-                        #[cfg(test)]
-                        BubbleMutation::Seed {
-                            record,
-                            shown_ago,
-                            duration,
-                            replaced_ids,
-                        } => model.show_replacing(
-                            *record,
-                            Instant::now() - shown_ago,
-                            duration,
-                            self.config.bubble.max_stack,
-                            &replaced_ids,
-                        ),
                     };
                     (changed, model.conversation_generation())
                 };
@@ -640,14 +627,24 @@ impl BubblePresenter {
             UiEvent::SnapshotUpdated(snapshot) => {
                 self.initialize(&snapshot);
                 self.sync_latest_coo_speech(&snapshot).await;
-                if self.model.lock().await.sync_feedback_interactions(
-                    &snapshot.config,
-                    &snapshot.recorded_utterance_feedback_ids,
-                ) {
-                    self.refresh().await
-                } else {
-                    self.refresh_appearance().await
+                if self
+                    .model
+                    .lock()
+                    .await
+                    .sync_feedback_interactions(&snapshot.config, &snapshot.utterance_feedback)
+                {
+                    if let Some(snapshot) = self.snapshot.as_ref() {
+                        let mut snapshot = (**snapshot).clone();
+                        let model = self.model.lock().await;
+                        for record in &mut snapshot.records {
+                            if let Some(target) = model.click_target(&record.id) {
+                                record.interaction = target.record.interaction.clone();
+                            }
+                        }
+                        self.snapshot = Some(Arc::new(snapshot));
+                    }
                 }
+                self.refresh_appearance().await
             }
             UiEvent::Present(ViewCommand::Hide) => {
                 if main_focused {
@@ -940,7 +937,7 @@ fn latest_coo_speech(snapshot: &crate::snapshot::AppSnapshot) -> Option<BubbleRe
             let interaction = crate::utterance_feedback::interaction_for_speech(
                 &snapshot.config,
                 &message_kind,
-                snapshot.recorded_utterance_feedback_ids.contains(&entry.id),
+                snapshot.utterance_feedback.get(&entry.id),
             );
             (message_kind, interaction)
         } else if entry.role == coosenpai_core::state::ConversationRole::Companion
@@ -973,4 +970,3 @@ fn latest_coo_speech(snapshot: &crate::snapshot::AppSnapshot) -> Option<BubbleRe
         })
     })
 }
-

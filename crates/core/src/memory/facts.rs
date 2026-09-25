@@ -334,8 +334,6 @@ impl FactStore {
             confirmed_at: confirmed_at.to_owned(),
             tombstone: true,
         }));
-        #[cfg(test)]
-        fact_update_failpoint()?;
         crate::persistence::atomic_write_bytes(
             &self.paths.memory_facts,
             &serialize_fact_records(&records)?,
@@ -776,8 +774,3 @@ fn serialize_fact_records(records: &[FactRecord]) -> Result<Vec<u8>, serde_json:
     }
     Ok(output)
 }
-
-#[cfg(test)]
-static FACT_UPDATE_FAILPOINT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-

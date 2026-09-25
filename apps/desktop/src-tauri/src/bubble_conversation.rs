@@ -3,14 +3,6 @@ use crate::state::DesktopState;
 use coosenpai_core::locale::{text, Locale, TextKey};
 use std::sync::Arc;
 
-#[cfg(test)]
-fn reset_prompt_record(
-    config: &coosenpai_core::config::Config,
-    conversation_generation: u64,
-) -> BubbleRecord {
-    reset_prompt_record_for_locale(config, conversation_generation, Locale::Ja)
-}
-
 pub(crate) fn reset_prompt_record_for_locale(
     config: &coosenpai_core::config::Config,
     conversation_generation: u64,
@@ -102,4 +94,3 @@ fn reset_interaction_for_locale(locale: Locale) -> BubbleInteraction {
         technical_detail: None,
     }
 }
-

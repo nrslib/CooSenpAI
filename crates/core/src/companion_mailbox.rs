@@ -8,6 +8,12 @@ pub(super) struct PendingMailboxAck {
     outcome: MailboxOutcome,
 }
 
+pub(super) enum PendingMailboxAckPlan {
+    Unchanged,
+    Replace(serde_json::Value),
+    Discard,
+}
+
 enum MailboxOutcome {
     Complete(Option<CompanionResponse>),
     Retry(CompanionError),
@@ -15,6 +21,43 @@ enum MailboxOutcome {
 }
 
 impl CompanionAgent {
+    pub(super) fn prepare_pending_mailbox_ack(
+        &self,
+        scope: &crate::conversation_log::ConversationLogDeletionScope,
+    ) -> Result<PendingMailboxAckPlan, CompanionError> {
+        let Some(pending) = &self.pending_mailbox_ack else {
+            return Ok(PendingMailboxAckPlan::Unchanged);
+        };
+        if pending.claimed.envelope.kind != "observation" {
+            return Ok(PendingMailboxAckPlan::Unchanged);
+        }
+        // mixed Visual は音声だけを除いた claim の ACK を継続し、Audio 全体だけを破棄する。
+        let Some(payload) = crate::conversation_log::sanitize_observation_value(
+            &pending.claimed.envelope.payload,
+            scope,
+        )?
+        else {
+            return Ok(PendingMailboxAckPlan::Discard);
+        };
+        if payload == pending.claimed.envelope.payload {
+            Ok(PendingMailboxAckPlan::Unchanged)
+        } else {
+            Ok(PendingMailboxAckPlan::Replace(payload))
+        }
+    }
+
+    pub(super) fn apply_pending_mailbox_ack_plan(&mut self, plan: PendingMailboxAckPlan) {
+        match plan {
+            PendingMailboxAckPlan::Unchanged => {}
+            PendingMailboxAckPlan::Replace(payload) => {
+                if let Some(pending) = &mut self.pending_mailbox_ack {
+                    pending.claimed.envelope.payload = payload;
+                }
+            }
+            PendingMailboxAckPlan::Discard => self.pending_mailbox_ack = None,
+        }
+    }
+
     pub async fn process_incoming_mailbox(
         &mut self,
         cancellation: CancellationToken,

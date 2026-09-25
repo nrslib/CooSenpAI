@@ -1,4 +1,7 @@
-use crate::persistence::{set_private_file_mode, PersistenceError, SiblingLock};
+use crate::persistence::{
+    atomic_write_bytes, restore_file_snapshots, set_private_file_mode, FileSnapshot,
+    PersistenceError, SiblingLock,
+};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,6 +33,8 @@ pub enum MailboxError {
     InvalidEnvelope,
     #[error("mailbox の lock を取得できません: {0}")]
     Lock(#[from] PersistenceError),
+    #[error("mailbox observation の永続化に失敗しました: {0}")]
+    Persistence(PersistenceError),
 }
 
 impl MailboxError {
@@ -48,6 +53,7 @@ impl MailboxError {
             },
             Self::Json(_) | Self::Lock(PersistenceError::Json(_)) => "invalid-json",
             Self::Lock(PersistenceError::Invalid(_)) => "invalid-lock",
+            Self::Persistence(_) => "persistence",
             Self::InvalidRecipient => "invalid-recipient",
             Self::InvalidEnvelope => "invalid-envelope",
         }
@@ -257,6 +263,33 @@ impl Mailbox {
         Ok(())
     }
 
+    /// 選択日の削除対象 observation を未処理・処理中・完了・失敗の配達残りから外す。
+    ///
+    /// remark は Coo の会話履歴なので対象にせず、observation envelope だけを扱う。
+    /// 呼び出し側は RuntimeActor の直列化された制御操作から利用する。
+    pub(crate) fn discard_observations(
+        &self,
+        scope: &crate::conversation_log::ConversationLogDeletionScope,
+    ) -> Result<MailboxDeletionReceipt, MailboxError> {
+        let _lock = self.lock()?;
+        let mut changes = Vec::new();
+        for phase in ["inbox", "processing", "done", "failed"] {
+            let directory = self.directory(phase);
+            for entry in fs::read_dir(&directory)? {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_file()
+                    && path.extension().and_then(|value| value.to_str()) == Some("json")
+                {
+                    if let Some(change) = observation_envelope_replacement(&path, scope)? {
+                        changes.push(change);
+                    }
+                }
+            }
+        }
+        apply_mailbox_changes(changes)
+    }
+
     fn ensure_layout(&self) -> Result<(), MailboxError> {
         fs::create_dir_all(&self.root)?;
         set_private_mode(&self.root)?;
@@ -315,6 +348,90 @@ impl Mailbox {
     fn directory(&self, phase: &str) -> PathBuf {
         self.root.join(&self.recipient).join(phase)
     }
+}
+
+pub(crate) struct MailboxDeletionReceipt {
+    snapshots: Vec<FileSnapshot>,
+}
+
+impl MailboxDeletionReceipt {
+    pub(crate) fn rollback(&self) -> Result<(), MailboxError> {
+        restore_file_snapshots(&self.snapshots).map_err(MailboxError::Persistence)
+    }
+}
+
+struct MailboxChange {
+    snapshot: FileSnapshot,
+    replacement: Option<Vec<u8>>,
+}
+
+fn observation_envelope_replacement(
+    path: &Path,
+    scope: &crate::conversation_log::ConversationLogDeletionScope,
+) -> Result<Option<MailboxChange>, MailboxError> {
+    let bytes = fs::read(path)?;
+    let envelope = serde_json::from_slice::<MailboxEnvelope>(&bytes)?;
+    if !valid_envelope(&envelope) {
+        return Err(MailboxError::InvalidEnvelope);
+    }
+    if envelope.kind != "observation" {
+        return Ok(None);
+    }
+    let payload = crate::conversation_log::sanitize_observation_value(&envelope.payload, scope)
+        .map_err(MailboxError::Persistence)?;
+    if payload
+        .as_ref()
+        .is_some_and(|payload| payload == &envelope.payload)
+    {
+        return Ok(None);
+    }
+    let replacement = payload
+        .map(|payload| {
+            serde_json::to_vec_pretty(&MailboxEnvelope {
+                payload,
+                ..envelope
+            })
+            .map_err(MailboxError::Json)
+        })
+        .transpose()?;
+    Ok(Some(MailboxChange {
+        snapshot: FileSnapshot::capture(path).map_err(MailboxError::Persistence)?,
+        replacement,
+    }))
+}
+
+fn apply_mailbox_changes(
+    changes: Vec<MailboxChange>,
+) -> Result<MailboxDeletionReceipt, MailboxError> {
+    let snapshots = changes
+        .iter()
+        .map(|change| change.snapshot.clone())
+        .collect::<Vec<_>>();
+    for change in &changes {
+        let result = match &change.replacement {
+            Some(bytes) => {
+                atomic_write_bytes(change.snapshot.path(), bytes).map_err(MailboxError::Io)
+            }
+            None => remove_file_and_sync(change.snapshot.path()).map_err(MailboxError::Io),
+        };
+        if let Err(error) = result {
+            return Err(match restore_file_snapshots(&snapshots) {
+                Ok(()) => error,
+                Err(rollback) => MailboxError::Persistence(PersistenceError::Invalid(format!(
+                    "{error}; rollback={rollback}"
+                ))),
+            });
+        }
+    }
+    Ok(MailboxDeletionReceipt { snapshots })
+}
+
+fn remove_file_and_sync(path: &Path) -> Result<(), io::Error> {
+    fs::remove_file(path)?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 pub fn archive_mailbox_kind(

@@ -80,15 +80,6 @@ pub struct DesktopRuntimeFactory {
     resource_root: Option<PathBuf>,
     temporary_assertiveness: TemporaryAssertiveness,
     keychain: Arc<dyn ProviderApiKeyStore>,
-    #[cfg(test)]
-    candidate_build_barrier: Arc<std::sync::Mutex<Option<CandidateBuildTestBarrier>>>,
-}
-
-#[cfg(test)]
-struct CandidateBuildTestBarrier {
-    revision: u64,
-    reached: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Notify>,
 }
 
 /// 承認審査用のClaude bridgeと、作業を実行するハーネスの起動情報。
@@ -149,20 +140,6 @@ impl DesktopRuntimeFactory {
         Some((bridge, reviewer))
     }
 
-    #[cfg(test)]
-    pub fn new(
-        paths: ConfigPaths,
-        logger: Arc<FileLogger>,
-        cancellation: CancellationToken,
-    ) -> Result<Self, String> {
-        Self::new_with_keychain(
-            paths,
-            logger,
-            cancellation,
-            crate::platform::provider_api_key_store(),
-        )
-    }
-
     pub(crate) fn new_with_keychain(
         paths: ConfigPaths,
         logger: Arc<FileLogger>,
@@ -206,8 +183,6 @@ impl DesktopRuntimeFactory {
             resource_root,
             temporary_assertiveness: TemporaryAssertiveness::default(),
             keychain,
-            #[cfg(test)]
-            candidate_build_barrier: Default::default(),
         })
     }
 
@@ -638,27 +613,6 @@ impl DesktopRuntimeFactory {
         config: &Config,
         notice: Option<String>,
     ) -> Result<RuntimeAgents, DesktopFactoryError> {
-        #[cfg(test)]
-        {
-            let barrier = {
-                let mut slot = self.candidate_build_barrier.lock().expect("build barrier");
-                if slot
-                    .as_ref()
-                    .is_some_and(|barrier| barrier.revision == config.revision)
-                {
-                    slot.take()
-                } else {
-                    None
-                }
-            };
-            if let Some(barrier) = barrier {
-                barrier.reached.notify_one();
-                tokio::select! {
-                    () = barrier.release.notified() => {},
-                    () = self.cancellation.cancelled() => {},
-                }
-            }
-        }
         if self.cancellation.is_cancelled() {
             return Err(DesktopFactoryError::new(
                 "config",
@@ -767,23 +721,6 @@ impl DesktopRuntimeFactory {
             companion: Some(companion),
             memory: Some(memory),
         })
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn pause_candidate_build_for_test(
-        &self,
-        revision: u64,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let reached = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        *self.candidate_build_barrier.lock().expect("build barrier") =
-            Some(CandidateBuildTestBarrier {
-                revision,
-                reached: reached.clone(),
-                release: release.clone(),
-            });
-        (reached, release)
     }
 
     pub async fn provider_capabilities(
@@ -983,6 +920,7 @@ async fn run_connection_check(
                 prompt: "Return OK".to_owned(),
                 images: Vec::new(),
                 tools_disabled: true,
+                web_search_enabled: false,
                 output_schema: None,
                 output_validation_schema: None,
                 session: SessionRequest::Ephemeral,
@@ -1085,4 +1023,3 @@ fn resource_root_for_builtin_personas(directory: &std::path::Path) -> Option<Pat
     }
     Some(parent.to_owned())
 }
-

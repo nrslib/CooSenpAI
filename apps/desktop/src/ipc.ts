@@ -8,7 +8,7 @@ import type { WorkSnapshot } from "./work.js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { AppSnapshot, BubbleSnapshot, CapturePopupSnapshot, CompanionModelCatalog, ConfigPatch, CooSenpaiConfig, DataFlowLog, IpcResult, LicenseDocument, MemoryCatalog, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, RunningApplication, SettingsAppearancePreviewPayload, SpeakerManagementPayload, SpeechPopupSnapshot } from "./types.js";
+import type { AppSnapshot, BubbleSnapshot, CapturePopupSnapshot, CompanionModelCatalog, ConfigPatch, ConversationLogPage, CooSenpaiConfig, DataFlowLog, DebugWakeResult, IpcResult, LicenseDocument, MemoryCatalog, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, RunningApplication, SettingsAppearancePreviewPayload, SpeakerDirectory, SpeakerManagementPayload, SpeakerRenamePayload, SpeechPopupSnapshot } from "./types.js";
 
 // 各 WebView は独立した JS コンテキストなので、最後に受け取った snapshot の言語を
 // IPC の transport 例外にも使う。最初の snapshot 前は config の既定値 ja とする。
@@ -75,6 +75,8 @@ export const desktopApi = {
   workApprovalInput: (payload: import("./work-approval-view.js").WorkApprovalInput): Promise<IpcResult<null>> => call("work_approval_input", { payload }),
   subscribeWorkApprovalView: (listener: (view: import("./work-approval-view.js").WorkApprovalView) => void) => subscribeLocal("coosenpai:work-approval:view", listener),
   composerInput: (payload: import("./composer-view.js").ComposerInput): Promise<IpcResult<null>> => call("composer_input", { payload }),
+  exportUtteranceFeedback: (): Promise<IpcResult<string>> => call("export_utterance_feedback"),
+  debugWake: (image: readonly number[], context: string): Promise<IpcResult<DebugWakeResult>> => call("debug_wake", { payload: { image, context } }),
   conversationInput: (payload: import("./composer-view.js").ConversationInput): Promise<IpcResult<null>> => call("conversation_input", { payload }),
   subscribeComposerView: (listener: (view: import("./composer-view.js").ComposerView) => void) => subscribeLocal("coosenpai:composer:view", listener),
   subscribeConversationView: (listener: (view: import("./composer-view.js").ConversationView) => void) => subscribeLocal("coosenpai:conversation:view", listener),
@@ -158,13 +160,15 @@ export const desktopApi = {
   settingsRequested: (): Promise<IpcResult<null>> => call("settings_requested"),
   subscribeSelection: (listener: (id: string) => void) => subscribe(ipcChannels.conversationSelected, listener),
   subscribeSettingsRequested: (listener: () => void) => subscribe<void>(ipcChannels.settingsRequested, listener),
-  subscribeSettingsFocus: (listener: (section: "watch") => void) => subscribe<"watch">(ipcChannels.settingsFocus, listener),
+  subscribeSettingsFocus: (listener: (section: "watch" | "providers") => void) => subscribe<"watch" | "providers">(ipcChannels.settingsFocus, listener),
   subscribeComposerFocus: (listener: () => void) => subscribe<void>(ipcChannels.composerFocus, listener),
   startSpeech: (): Promise<IpcResult<null>> => call("speech_start", { payload: { source: "composer" } }),
   finishSpeech: (): Promise<IpcResult<null>> => call("speech_finish"),
   cancelSpeech: (): Promise<IpcResult<null>> => call("speech_cancel"),
   openSpeechSettings: (kind: "microphone" | "recognition"): Promise<IpcResult<null>> => call("speech_open_system_settings", { payload: { kind } }),
   speakerManagement: (payload: SpeakerManagementPayload): Promise<IpcResult<null>> => call("speaker_management", { payload }),
+  speakerDirectory: (): Promise<IpcResult<SpeakerDirectory>> => call("speaker_directory"),
+  speakerRename: (payload: SpeakerRenamePayload): Promise<IpcResult<SpeakerDirectory>> => call("speaker_rename", { payload }),
 };
 
 export const motionApi = {
@@ -213,6 +217,11 @@ export const detailsApi = {
   subscribePanelUpdates: (listener: (updates: readonly PanelUpdate[]) => void) => subscribeLocal("coosenpai:panel:updates", listener),
   ready: (): Promise<IpcResult<null>> => call("ui_view_mounted"),
   getDataFlowLog: (): Promise<IpcResult<DataFlowLog>> => call("details_dataflow_log"),
+  getConversationLog: (date: string | null): Promise<IpcResult<ConversationLogPage>> => call("details_conversation_log", { payload: { date } }),
+  deleteConversationLog: (date: string): Promise<IpcResult<null>> => call("details_delete_conversation_log", { payload: { date } }),
+  speakerManagement: (payload: SpeakerManagementPayload): Promise<IpcResult<null>> => call("speaker_management", { payload }),
+  speakerDirectory: (): Promise<IpcResult<SpeakerDirectory>> => call("speaker_directory"),
+  speakerRename: (payload: SpeakerRenamePayload): Promise<IpcResult<SpeakerDirectory>> => call("speaker_rename", { payload }),
   openDataFlowPath: (path: string): Promise<IpcResult<null>> => call("details_dataflow_open_path", { payload: { path } }),
   resetCompanionEmotions: (): Promise<IpcResult<AppSnapshot>> => call("companion_emotions_reset"),
   selectConversationGeneration: (generation: number): Promise<IpcResult<AppSnapshot>> => call("conversation_select", { payload: { generation } }),

@@ -1,12 +1,14 @@
 use super::*;
 
 pub(super) enum ControlCommand {
-    Observe {
-        frames: Vec<ObservationFrameInput>,
-        audio: Vec<crate::state::AudioObservation>,
+    BeginHearingSession {
+        generation: u64,
         cancellation: CancellationToken,
-        response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
+        response: oneshot::Sender<
+            Result<(String, crate::hearing_ingestion::HearingAudioIngestion), RuntimeError>,
+        >,
     },
+    Observe(ObserveRequest),
     Heartbeat {
         stagnation: Option<crate::state::StagnationObservation>,
         cancellation: CancellationToken,
@@ -16,7 +18,7 @@ pub(super) enum ControlCommand {
         observations: Vec<ObservationRecord>,
         context_notice: Option<String>,
         cancellation: CancellationToken,
-        response: oneshot::Sender<Result<CompanionResponse, RuntimeError>>,
+        response: oneshot::Sender<Result<CompanionObservationResult, RuntimeError>>,
     },
     ProcessCompanionMailbox {
         cancellation: CancellationToken,
@@ -28,7 +30,7 @@ pub(super) enum ControlCommand {
         sign: crate::judge::JudgeFeedSign,
         strength: f64,
         cancelled: bool,
-        response: oneshot::Sender<Result<(), RuntimeError>>,
+        response: oneshot::Sender<Result<crate::judge::JudgeFeedApplyResult, RuntimeError>>,
     },
     JudgeCompleted {
         generation: u64,
@@ -48,6 +50,14 @@ pub(super) enum ControlCommand {
         period: String,
         response: oneshot::Sender<Result<u64, RuntimeError>>,
     },
+}
+
+pub(super) struct ObserveRequest {
+    pub(super) frames: Vec<ObservationFrameInput>,
+    pub(super) audio: Vec<crate::state::AudioObservation>,
+    pub(super) allow_companion_delivery: bool,
+    pub(super) cancellation: CancellationToken,
+    pub(super) response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
 }
 
 pub(super) struct UserQueueCommand {
@@ -112,6 +122,11 @@ pub(super) enum PriorityCommand {
         response: oneshot::Sender<Result<u64, RuntimeError>>,
         clear_user_state: bool,
     },
+    DeleteConversationLogDay {
+        paths: Box<crate::config::ConfigPaths>,
+        date: chrono::NaiveDate,
+        response: oneshot::Sender<Result<(), RuntimeError>>,
+    },
 }
 
 impl PriorityCommand {
@@ -129,6 +144,7 @@ impl PriorityCommand {
             Self::UpdateAudioConfig { .. } => "audio-config",
             Self::EnterDegraded { .. } => "degraded",
             Self::Quiesce { .. } => "quiesce",
+            Self::DeleteConversationLogDay { .. } => "conversation-log-delete",
         }
     }
 }

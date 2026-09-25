@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 
+#[path = "conversation_log.rs"]
+mod conversation_log;
 #[path = "dataflow.rs"]
 mod dataflow;
 
@@ -20,6 +22,7 @@ pub(super) struct DetailsPresenter {
     reset_error: Option<String>,
     error: Option<String>,
     flow: dataflow::DataFlow,
+    log: conversation_log::ConversationLog,
 }
 impl DetailsPresenter {
     pub(super) fn handle(&mut self, event: PanelEvent, io: &mut PanelIo) -> Result<Value, String> {
@@ -31,11 +34,32 @@ impl DetailsPresenter {
                 "history" => self.flow.history(decode(value)?)?,
                 "tab" => {
                     let tab: String = decode(value)?;
-                    if !["state", "emotions", "conversation", "dataflow"].contains(&tab.as_str()) {
+                    if !["state", "emotions", "conversation", "dataflow", "log"]
+                        .contains(&tab.as_str())
+                    {
                         return Err(action_error(&tab));
+                    }
+                    if tab == "log" {
+                        if self.tab.as_deref() != Some("log") {
+                            self.log.activate(io);
+                        }
+                    } else {
+                        self.log.hidden();
                     }
                     self.tab = Some(tab);
                 }
+                "logDate" => self.log.select_date(decode(value)?, io)?,
+                "logDeleteRequest" => self.log.request_delete()?,
+                "logDeleteCancel" => self.log.cancel_delete(),
+                "logDeleteConfirm" => self.log.confirm_delete(io)?,
+                "logFilter" => self.log.set_filter(decode(value)?)?,
+                "logScroll" => self.log.set_scroll_position(decode(value)?),
+                "logSpeakerSelect" => self.log.select_speaker(decode(value)?)?,
+                "logEntrySelect" => self.log.select_entry(decode(value)?)?,
+                "logSpeakerName" => self.log.set_speaker_name(decode(value)?),
+                "logSpeakerSave" => self.log.save_speaker(io)?,
+                "logSpeakerClear" => self.log.clear_speaker(io)?,
+                "logSpeakerClose" => self.log.close_speaker()?,
                 "debug" => self.debug = decode(value)?,
                 "resetEmotions" => {
                     if self.resetting.is_none() && self.snapshot.is_some() {
@@ -63,13 +87,25 @@ impl DetailsPresenter {
             },
             PanelEvent::Completed { id, result } => {
                 if let Some(command) = io.completed(id) {
+                    if command.kind == "loadLog" {
+                        self.log.loaded(id, result, io)?;
+                        return self.view();
+                    }
+                    if command.kind == "speakerRename" {
+                        self.log.speaker_rename_completed(id, result, io);
+                        return self.view();
+                    }
+                    if command.kind == "deleteLogDay" {
+                        self.log.delete_completed(id, result, io);
+                        return self.view();
+                    }
                     if command.kind == "resetEmotions" {
                         if self.resetting != Some(id) {
                             return self.view();
                         }
                         self.resetting = None;
                         if result.ok {
-                            self.observe_snapshot(result.value)?;
+                            self.observe_snapshot(result.value, io)?;
                         } else {
                             self.reset_error = Some(result.message().into());
                         }
@@ -82,7 +118,7 @@ impl DetailsPresenter {
                         self.switching = None;
                     }
                     if result.ok && command.kind == "select" {
-                        self.observe_snapshot(result.value)?;
+                        self.observe_snapshot(result.value, io)?;
                     } else if !result.ok {
                         self.error = Some(result.message().into());
                     }
@@ -93,11 +129,16 @@ impl DetailsPresenter {
         self.view()
     }
     pub(super) fn hidden(&mut self, io: &mut PanelIo) {
+        self.log.hidden();
         if let Some(id) = self.resetting.take() {
             io.completed(id);
         }
     }
-    pub(super) fn observe_snapshot(&mut self, snapshot: Value) -> Result<bool, String> {
+    pub(super) fn observe_snapshot(
+        &mut self,
+        snapshot: Value,
+        io: &mut PanelIo,
+    ) -> Result<bool, String> {
         let revision = snapshot_revision(&snapshot)?;
         if self.snapshot.as_ref().is_some_and(|previous| {
             snapshot_revision(previous).expect("validated revision") >= revision
@@ -105,14 +146,24 @@ impl DetailsPresenter {
             return Ok(false);
         }
         self.flow.snapshot(snapshot.clone())?;
+        if self.snapshot.as_ref().is_some_and(|previous| {
+            previous["speakerDirectoryRevision"] != snapshot["speakerDirectoryRevision"]
+        }) {
+            self.log.invalidate();
+        }
         self.snapshot = Some(snapshot);
+        // 会話ログタブの表示中だけ、保存された新しい発話を読み直す
+        if self.tab.as_deref() == Some("log") {
+            self.log.refresh(io);
+        }
         Ok(true)
     }
     pub(super) fn view(&self) -> Result<Value, String> {
         Ok(
             json!({"snapshot":self.snapshot,"activeTab":self.tab.as_deref().unwrap_or("state"),"debugDetail":self.debug,
             "resetting":self.resetting.is_some(),"resetError":self.reset_error,
-            "switching":self.switching.is_some(),"error":self.error,"dataFlow":self.flow.view()}),
+            "switching":self.switching.is_some(),"error":self.error,"dataFlow":self.flow.view(),
+            "conversationLog":self.log.view()}),
         )
     }
 }

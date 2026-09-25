@@ -238,6 +238,8 @@ pub enum TextKey {
     AudioSystemFormatFailed,
     AudioSystemOverflow,
     AudioSystemStartupTimeout,
+    AudioProtocolInvalid,
+    AudioSpeakerProtocolInvalid,
 
     AudioHelperMissing,
     AudioHelperUnexpectedExit,
@@ -353,6 +355,8 @@ pub enum TextKey {
     ModelPopupCloseFailed,
     DetailsOpenFailed,
     DetailsDataflowLogReadFailed,
+    DetailsConversationLogReadFailed,
+    DetailsConversationLogDeleteFailed,
     DetailsDataflowPathOpenFailed,
     ModelConfigObject,
     ModelConfigCompanionOnly,
@@ -383,6 +387,19 @@ pub enum TextKey {
     BubbleGenerationUnknown,
     BubbleHeightOutOfRange,
     BubbleResizeFailed,
+    UtteranceFeedbackPositive,
+    UtteranceFeedbackNegative,
+    UtteranceFeedbackChangePositive,
+    UtteranceFeedbackChangeNegative,
+    UtteranceFeedbackAddReason,
+    UtteranceFeedbackExport,
+    UtteranceFeedbackSaved,
+    UtteranceFeedbackCancelled,
+    UtteranceFeedbackFeedApplied,
+    UtteranceFeedbackFeedNotApplied,
+    UtteranceFeedbackFeedUnknown,
+    UtteranceFeedbackFeedStatusSaveFailed,
+    UtteranceFeedbackReasonNone,
     UtteranceFeedbackOpen,
     UtteranceFeedbackRecorded,
     UtteranceFeedbackReasonNoActivity,
@@ -1158,6 +1175,18 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::AudioSystemOverflow, Locale::En) => "Speaker capture stopped because processing could not keep up. Reduce system load and restart Hearing AI.",
         (TextKey::AudioSystemStartupTimeout, Locale::Ja) => "スピーカー音声の開始がタイムアウトしました。システムオーディオ録音の許可と出力デバイスを確認してください。",
         (TextKey::AudioSystemStartupTimeout, Locale::En) => "Speaker capture timed out during startup. Check System Audio Recording permission and the output device.",
+        (TextKey::AudioProtocolInvalid, Locale::Ja) => {
+            "音声観察 helper のイベント形式が不正なため、音声認識を継続できません。"
+        }
+        (TextKey::AudioProtocolInvalid, Locale::En) => {
+            "The hearing helper event format is invalid, so audio recognition cannot continue."
+        }
+        (TextKey::AudioSpeakerProtocolInvalid, Locale::Ja) => {
+            "話者情報の通信形式が不正なため、音声観察を継続できません。"
+        }
+        (TextKey::AudioSpeakerProtocolInvalid, Locale::En) => {
+            "The speaker-identification event format is invalid, so audio observation cannot continue."
+        }
         (TextKey::AudioHelperMissing, Locale::Ja) => "coosenpai-hearing が見つかりません",
         (TextKey::AudioHelperMissing, Locale::En) => "The coosenpai-hearing helper was not found.",
         (TextKey::AudioHelperUnexpectedExit, Locale::Ja) => "聴覚観察 helper が予期せず終了しました",
@@ -1436,8 +1465,46 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         }
         (TextKey::InvalidBubbleAction, Locale::Ja) => "吹き出しの操作が不正です",
         (TextKey::InvalidBubbleAction, Locale::En) => "The bubble action is invalid.",
+        (TextKey::UtteranceFeedbackPositive, Locale::Ja) => "Good",
+        (TextKey::UtteranceFeedbackPositive, Locale::En) => "Good",
+        (TextKey::UtteranceFeedbackNegative, Locale::Ja) => "Bad",
+        (TextKey::UtteranceFeedbackNegative, Locale::En) => "Bad",
+        (TextKey::UtteranceFeedbackChangePositive, Locale::Ja) => "良かったに変更",
+        (TextKey::UtteranceFeedbackChangePositive, Locale::En) => "Change to good",
+        (TextKey::UtteranceFeedbackChangeNegative, Locale::Ja) => "不要だったに変更",
+        (TextKey::UtteranceFeedbackChangeNegative, Locale::En) => "Change to not needed",
+        (TextKey::UtteranceFeedbackAddReason, Locale::Ja) => "コメント",
+        (TextKey::UtteranceFeedbackAddReason, Locale::En) => "Comment",
+        (TextKey::UtteranceFeedbackExport, Locale::Ja) => "評価データを書き出す",
+        (TextKey::UtteranceFeedbackExport, Locale::En) => "Export feedback data",
+        (TextKey::UtteranceFeedbackSaved, Locale::Ja) => "評価を保存しました",
+        (TextKey::UtteranceFeedbackSaved, Locale::En) => "Feedback saved",
+        (TextKey::UtteranceFeedbackCancelled, Locale::Ja) => "評価を取り消しました",
+        (TextKey::UtteranceFeedbackCancelled, Locale::En) => "Feedback cancelled",
+        (TextKey::UtteranceFeedbackFeedApplied, Locale::Ja) => "判断役への適用も完了",
+        (TextKey::UtteranceFeedbackFeedApplied, Locale::En) => "Applied to the judge",
+        (TextKey::UtteranceFeedbackFeedNotApplied, Locale::Ja) => {
+            "評価は保存済み（判断役には未適用）"
+        }
+        (TextKey::UtteranceFeedbackFeedNotApplied, Locale::En) => {
+            "Feedback saved (not applied to the judge)"
+        }
+        (TextKey::UtteranceFeedbackFeedUnknown, Locale::Ja) => {
+            "評価は保存済み（判断役への適用結果は不明）"
+        }
+        (TextKey::UtteranceFeedbackFeedUnknown, Locale::En) => {
+            "Feedback saved (judge application is unknown)"
+        }
+        (TextKey::UtteranceFeedbackFeedStatusSaveFailed, Locale::Ja) => {
+            "評価は保存済みですが、判断役への適用結果を保存できませんでした。再試行してください"
+        }
+        (TextKey::UtteranceFeedbackFeedStatusSaveFailed, Locale::En) => {
+            "Feedback was saved, but the judge application result could not be saved. Retry."
+        }
+        (TextKey::UtteranceFeedbackReasonNone, Locale::Ja) => "理由なし",
+        (TextKey::UtteranceFeedbackReasonNone, Locale::En) => "No reason",
         (TextKey::UtteranceFeedbackOpen, Locale::Ja) => "要らなかった",
-        (TextKey::UtteranceFeedbackOpen, Locale::En) => "Not needed",
+        (TextKey::UtteranceFeedbackOpen, Locale::En) => "Bad",
         (TextKey::UtteranceFeedbackRecorded, Locale::Ja) => "記録済み",
         (TextKey::UtteranceFeedbackRecorded, Locale::En) => "Recorded",
         (TextKey::UtteranceFeedbackReasonNoActivity, Locale::Ja) => {
@@ -1458,8 +1525,8 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::UtteranceFeedbackReasonBadTiming, Locale::En) => "Bad timing",
         (TextKey::UtteranceFeedbackReasonOther, Locale::Ja) => "その他",
         (TextKey::UtteranceFeedbackReasonOther, Locale::En) => "Other",
-        (TextKey::UtteranceFeedbackFreeTextLabel, Locale::Ja) => "理由を補足（任意）",
-        (TextKey::UtteranceFeedbackFreeTextLabel, Locale::En) => "Add a short note (optional)",
+        (TextKey::UtteranceFeedbackFreeTextLabel, Locale::Ja) => "コメント（任意）",
+        (TextKey::UtteranceFeedbackFreeTextLabel, Locale::En) => "Comment (optional)",
         (TextKey::UtteranceFeedbackFreeTextPlaceholder, Locale::Ja) => "短く入力",
         (TextKey::UtteranceFeedbackFreeTextPlaceholder, Locale::En) => "Short note",
         (TextKey::UtteranceFeedbackSubmit, Locale::Ja) => "記録する",
@@ -1561,6 +1628,18 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         }
         (TextKey::DetailsDataflowLogReadFailed, Locale::En) => {
             "Could not read the observation log: {error}"
+        }
+        (TextKey::DetailsConversationLogReadFailed, Locale::Ja) => {
+            "会話ログを読み込めません: {error}"
+        }
+        (TextKey::DetailsConversationLogReadFailed, Locale::En) => {
+            "Could not read the conversation log: {error}"
+        }
+        (TextKey::DetailsConversationLogDeleteFailed, Locale::Ja) => {
+            "会話ログを削除できません: {error}"
+        }
+        (TextKey::DetailsConversationLogDeleteFailed, Locale::En) => {
+            "Could not delete the conversation log: {error}"
         }
         (TextKey::DetailsDataflowPathOpenFailed, Locale::Ja) => "参照元を開けませんでした",
         (TextKey::DetailsDataflowPathOpenFailed, Locale::En) => "Could not open the referenced file.",
@@ -1680,8 +1759,8 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         }
         (TextKey::RuntimeObserverUnavailable, Locale::Ja) => "observer が設定されていません",
         (TextKey::RuntimeObserverUnavailable, Locale::En) => "The observer is not configured.",
-        (TextKey::RuntimeCompanionUnavailable, Locale::Ja) => "companion が設定されていません",
-        (TextKey::RuntimeCompanionUnavailable, Locale::En) => "The companion is not configured.",
+        (TextKey::RuntimeCompanionUnavailable, Locale::Ja) => "Coo の応答処理を利用できません",
+        (TextKey::RuntimeCompanionUnavailable, Locale::En) => "Coo response processing is unavailable.",
         (TextKey::RuntimeResponseDropped, Locale::Ja) => "runtime 応答を受け取れませんでした",
         (TextKey::RuntimeResponseDropped, Locale::En) => "The runtime response was not received.",
         (TextKey::RuntimeProviderStartsBlocked, Locale::Ja) => {
@@ -1836,6 +1915,8 @@ pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> Stri
         "system-audio-format" => Some(TextKey::AudioSystemFormatFailed),
         "system-audio-overflow" => Some(TextKey::AudioSystemOverflow),
         "system-audio-start-timeout" => Some(TextKey::AudioSystemStartupTimeout),
+        "hearing-protocol" => Some(TextKey::AudioProtocolInvalid),
+        "speaker-protocol" => Some(TextKey::AudioSpeakerProtocolInvalid),
 
         "input-device-fallback"
             if matches_text(message, TextKey::SpeechInputDeviceFallbackShort) =>

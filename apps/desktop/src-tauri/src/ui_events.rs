@@ -322,8 +322,6 @@ pub(crate) enum UiEvent {
     InterruptCapture(bool),
     NativeShutdown(crate::shutdown::ExitKind),
     Shutdown,
-    #[cfg(test)]
-    Unhandled,
     ModelPicker(crate::model_picker_presenter::ModelPickerEvent),
     BubbleView(crate::bubble_controls_presenter::BubbleViewEvent),
     Composer(crate::composer_presenter::ComposerEvent),
@@ -515,6 +513,26 @@ pub(crate) enum UiTask {
         restart_setup: bool,
     },
     Conversation(crate::conversation_presenter::ConversationTask),
+    ConversationFeedback(crate::conversation_feedback::FeedbackTask),
+}
+
+impl UiTask {
+    pub(crate) fn is_utterance_feedback(&self) -> bool {
+        use crate::ui_commands::UserCommand;
+        match self {
+            Self::ConversationFeedback(_) | Self::UserCommand(UserCommand::FeedbackExport(_)) => {
+                true
+            }
+            Self::BubbleView {
+                action: Some(action),
+                ..
+            }
+            | Self::UserCommand(UserCommand::BubbleInteract { action, .. }) => {
+                crate::utterance_feedback::is_feedback_action(action)
+            }
+            _ => false,
+        }
+    }
 }
 
 impl UiEvent {
@@ -664,8 +682,6 @@ impl UiEvent {
             }
             Self::NativeShutdown(kind) => format!("NativeShutdown({kind:?})"),
             Self::Shutdown => "Shutdown".into(),
-            #[cfg(test)]
-            Self::Unhandled => "Unhandled".into(),
         }
     }
 }

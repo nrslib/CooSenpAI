@@ -31,6 +31,7 @@ pub(crate) enum AppInput {
     TutorialNext,
     TutorialFinish,
     Recover,
+    DismissBanner,
     SettingsPresented { generation: u64 },
     Report { error: Option<String> },
 }
@@ -435,7 +436,7 @@ impl AppPresenter {
             }
             MenuModel => {
                 self.view.menu_open = false;
-                vec![root(UiEvent::OpenModelPicker)]
+                vec![root(UiEvent::OpenSettingsAt("providers"))]
             }
             ToggleWatch => self.toggle(true, snapshot),
             ToggleAudio => self.toggle(false, snapshot),
@@ -459,6 +460,7 @@ impl AppPresenter {
                 self.acked_generation = Some(generation);
                 vec![self.operation(AppOperation::SettingsAck, config_revision(snapshot))]
             }
+            DismissBanner => self.status.dismiss_banner(),
             Recover => match self.status.recovery() {
                 Some(RecoveryAction::Settings) => vec![root(UiEvent::OpenSettings)],
                 Some(RecoveryAction::Relaunch) => vec![root(UiEvent::NativeShutdown(

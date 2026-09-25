@@ -3,10 +3,6 @@ use crate::commands::{
 };
 use crate::snapshot::AppSnapshot;
 use crate::state::DesktopState;
-#[cfg(test)]
-use crate::ui_command_effects::{
-    bubble_interaction_command, tutorial_advance_action, TutorialAdvanceAction,
-};
 use crate::ui_commands::UserCommand;
 use crate::ui_events::{UiEvent, UiView};
 use coosenpai_core::locale::{text, Locale, TextKey};
@@ -162,4 +158,3 @@ pub(crate) async fn conversation_reset_for_state(
         .await
         .unwrap_or_else(IpcResult::failure)
 }
-

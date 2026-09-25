@@ -37,11 +37,21 @@ pub async fn conversation_input(
     payload: ConversationInput,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
-    if let ConversationInput::Action { input_id, .. } = &payload {
+    if let ConversationInput::Action { input_id, .. }
+    | ConversationInput::Feedback { id: input_id, .. } = &payload
+    {
         crate::commands::validate_id_for_locale(
             input_id,
             coosenpai_core::locale::Locale::from_config(&state.runtime_config().ui.language),
         )?;
+    }
+    if let ConversationInput::Feedback {
+        value: Some(value), ..
+    } = &payload
+    {
+        if value.len() > 4000 {
+            return Err("コメントが長すぎます".into());
+        }
     }
     state.ui.input(
         UiView::Chat,
@@ -131,4 +141,18 @@ pub async fn motion_settings_input(
         )),
     );
     Ok(IpcResult::success(()))
+}
+
+#[tauri::command]
+pub async fn export_utterance_feedback(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<String> {
+    authorize_window(&window, CommandOrigin::Main)?;
+    state
+        .ui
+        .query(UiView::Settings, |reply| {
+            UiEvent::UserCommand(crate::ui_commands::UserCommand::FeedbackExport(reply))
+        })
+        .await
 }

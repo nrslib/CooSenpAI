@@ -30,6 +30,7 @@ struct Envelope {
 }
 
 enum RootMessage {
+    FeedbackCompleted(Envelope),
     Input(Envelope),
     Completed {
         pipeline: Pipeline,
@@ -115,6 +116,8 @@ pub(crate) struct UiRoot<P: UiPort> {
     windows: Vec<(PresenterId, WindowPresenter)>,
     port: Arc<P>,
     operation_busy: bool,
+    feedback_busy: bool,
+    feedback_tasks: std::collections::VecDeque<(UiTask, mpsc::UnboundedSender<RootMessage>)>,
     deferred: std::collections::VecDeque<Pipeline>,
     receiver: mpsc::UnboundedReceiver<RootMessage>,
 }
@@ -164,85 +167,6 @@ pub(crate) fn channel() -> (
     )
 }
 
-#[cfg(test)]
-pub(crate) fn test_channel_with_bubbles<P: UiPort>(
-    port: P,
-    config: coosenpai_core::config::Config,
-) -> (UiHandle, tokio::task::JoinHandle<()>) {
-    test_channel_with_bubble_tutorial(port, config, None)
-}
-
-#[cfg(test)]
-pub(crate) fn test_channel_with_bubble_tutorial<P: UiPort>(
-    port: P,
-    config: coosenpai_core::config::Config,
-    tutorial: Option<Arc<tokio::sync::Mutex<crate::tutorial::TutorialController>>>,
-) -> (UiHandle, tokio::task::JoinHandle<()>) {
-    let (sender, receiver) = mpsc::unbounded_channel();
-    let mut root = UiRoot::new(port, receiver);
-    let snapshot = crate::snapshot::AppSnapshot::initial(
-        config.clone(),
-        Vec::new(),
-        coosenpai_core::ports::ScreenCapturePermission::from_preflight(false, false),
-        Default::default(),
-        0,
-        0,
-        false,
-    );
-    root.snapshot = Some(crate::snapshot_presenter::SnapshotPresenter::new(
-        Arc::new(std::sync::Mutex::new(snapshot)),
-        Arc::new(std::sync::Mutex::new(
-            crate::speech_lifecycle::SpeechLifecycle::default(),
-        )),
-        Arc::new(crate::capture::ShortcutCoordinator::default()),
-    ));
-    root.bubble = BubblePresenter::new(config, 0);
-    root.bubble.tutorial = tutorial;
-    (UiHandle { sender }, tokio::spawn(root.run()))
-}
-
-#[cfg(test)]
-pub(crate) fn test_capture_channel<P: UiPort>(
-    make_port: impl FnOnce(crate::capture::CaptureHandle) -> P,
-    activation: crate::activation_policy::ActivationPolicy,
-) -> (
-    crate::capture::CaptureHandle,
-    UiHandle,
-    tokio::task::JoinHandle<()>,
-) {
-    let (sender, receiver) = mpsc::unbounded_channel();
-    let ui = UiHandle { sender };
-    let (handle, capture) = crate::capture::channel(ui.clone());
-    let mut root = UiRoot::with_activation(make_port(handle.clone()), receiver, activation);
-    root.capture = capture;
-    (handle, ui, tokio::spawn(root.run()))
-}
-
-#[cfg(test)]
-pub(crate) fn test_capture_channel_with_snapshot<P: UiPort>(
-    make_port: impl FnOnce(crate::capture::CaptureHandle) -> P,
-    activation: crate::activation_policy::ActivationPolicy,
-    snapshot: Arc<std::sync::Mutex<crate::snapshot::AppSnapshot>>,
-) -> (
-    crate::capture::CaptureHandle,
-    UiHandle,
-    tokio::task::JoinHandle<()>,
-) {
-    let (sender, receiver) = mpsc::unbounded_channel();
-    let ui = UiHandle { sender };
-    let (handle, capture) = crate::capture::channel(ui.clone());
-    let mut root = UiRoot::with_activation(make_port(handle.clone()), receiver, activation);
-    root.snapshot = Some(crate::snapshot_presenter::SnapshotPresenter::new(
-        snapshot,
-        Arc::new(std::sync::Mutex::new(
-            crate::speech_lifecycle::SpeechLifecycle::default(),
-        )),
-        Arc::new(crate::capture::ShortcutCoordinator::default()),
-    ));
-    root.capture = capture;
-    (handle, ui, tokio::spawn(root.run()))
-}
-
 impl<P: UiPort> UiRoot<P> {
 
     fn with_activation(
@@ -274,6 +198,8 @@ impl<P: UiPort> UiRoot<P> {
             port: Arc::new(port),
             receiver,
             operation_busy: false,
+            feedback_busy: false,
+            feedback_tasks: Default::default(),
             deferred: std::collections::VecDeque::new(),
         }
     }
@@ -303,6 +229,10 @@ impl<P: UiPort> UiRoot<P> {
                 },
             };
             match message {
+                RootMessage::FeedbackCompleted(envelope) => {
+                    self.feedback_busy = false;
+                    ready.push_back(Pipeline::new(envelope));
+                }
                 RootMessage::Input(envelope) => {
                     let pipeline = Pipeline::new(envelope);
                     if pipeline.operation && self.operation_busy {
@@ -326,6 +256,22 @@ impl<P: UiPort> UiRoot<P> {
             while let Some(pipeline) = ready.pop_front() {
                 if let Some((pipeline, result)) = self.advance(pipeline, &mut jobs).await {
                     self.complete(pipeline, result, &mut ready).await;
+                }
+            }
+            if !self.feedback_busy {
+                if let Some((task, sender)) = self.feedback_tasks.pop_front() {
+                    self.feedback_busy = true;
+                    let port = self.port.clone();
+                    jobs.spawn(async move {
+                        let result = run_task(port.as_ref(), task).await;
+                        let completion = sender.clone();
+                        let _ = sender.send(RootMessage::FeedbackCompleted(Envelope {
+                            presenter: PresenterId::Root,
+                            event: UiEvent::EffectCompleted(result),
+                            reply: None,
+                            completion,
+                        }));
+                    });
                 }
             }
             while let Some(result) = jobs.try_join_next() {
@@ -441,6 +387,11 @@ impl<P: UiPort> UiRoot<P> {
                     effect: UiEffect::Spawn(task),
                     ..
                 } => {
+                    if task.is_utterance_feedback() {
+                        self.feedback_tasks
+                            .push_back((task, pipeline.completion.clone()));
+                        continue;
+                    }
                     let port = self.port.clone();
                     let ui = UiHandle {
                         sender: pipeline.completion.clone(),
@@ -1369,4 +1320,3 @@ async fn run_task(port: &impl UiPort, task: UiTask) -> Result<EffectResult, Stri
         task => port.run(task).await,
     }
 }
-

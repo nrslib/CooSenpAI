@@ -61,15 +61,6 @@ fn deserialize_minimum_system_version<'de, D: serde::Deserializer<'de>>(
 }
 
 impl UpdateClient {
-    #[cfg(test)]
-    pub(crate) fn new(
-        config: &serde_json::Value,
-        current: Version,
-        architecture: &str,
-        system: SystemVersion,
-    ) -> Result<Self, String> {
-        Self::new_for_locale(config, current, architecture, system, Locale::Ja)
-    }
 
     pub(crate) fn new_for_locale(
         config: &serde_json::Value,
@@ -236,7 +227,3 @@ fn allowed_distribution_url(url: &Url) -> bool {
             )
         )
 }
-
-#[cfg(test)]
-#[path = "update_transport_tests.rs"]
-pub(crate) mod tests;

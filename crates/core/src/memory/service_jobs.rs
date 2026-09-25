@@ -133,6 +133,7 @@ impl MemoryService {
                 prompt,
                 images: Vec::new(),
                 tools_disabled: true,
+                web_search_enabled: false,
                 output_schema: Some(memory_summary_schema()),
                 output_validation_schema: None,
                 session: SessionRequest::Ephemeral,

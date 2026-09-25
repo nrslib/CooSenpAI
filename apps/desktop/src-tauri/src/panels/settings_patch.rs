@@ -73,6 +73,7 @@ pub(super) fn category_for_issue(path: &str) -> &'static str {
             | "observer.hearing.executable"
             | "companion.executable"
             | "debug.enabled"
+            | "debug.feedbackEnabled"
             | "audio.debugDumpDir"
     ) {
         "developer"

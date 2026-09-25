@@ -13,6 +13,8 @@ import { SettingsCategoryProps } from "./SettingsCategoryProps.js";
 import { BooleanInput, NumberInput, ReminderEditor, SelectInput } from "./SettingsControls.js";
 
 interface Props extends SettingsCategoryProps {
+  readonly feedbackExport: import("../useSettingsPresenter.js").SettingsView["feedbackExport"] | undefined;
+  readonly onFeedbackExport: () => void;
   readonly personas: readonly PersonaOption[];
   readonly avatarInputRef: RefObject<HTMLInputElement | null>;
   readonly onSelectAvatar: (event: ChangeEvent<HTMLInputElement>) => void;
@@ -22,7 +24,7 @@ interface Props extends SettingsCategoryProps {
   readonly onOpenPersonaPicker: () => void;
 }
 
-export function GeneralSettings({ form, snapshot, saving, update, errorFor, personas, avatarInputRef, onSelectAvatar, onResetAvatar, onReloadPersona, onEditPersona, onOpenPersonaPicker }: Props): ReactElement {
+export function GeneralSettings({ feedbackExport, onFeedbackExport, form, snapshot, saving, update, errorFor, personas, avatarInputRef, onSelectAvatar, onResetAvatar, onReloadPersona, onEditPersona, onOpenPersonaPicker }: Props): ReactElement {
   const { locale, t } = useI18n();
   const selectedPersona = personas.find((option) => option.id === form.persona);
   return <>
@@ -72,6 +74,12 @@ export function GeneralSettings({ form, snapshot, saving, update, errorFor, pers
       <p className="field-help">{t("settings.memorySettings.help")}</p>
     </fieldset>
     <MemoryPanel status={snapshot.memoryStatus} />
+
+    <fieldset id="settings-feedback"><legend>{t("feedback.exportHeading")}</legend>
+      <button type="button" disabled={feedbackExport === undefined || feedbackExport.busy} onClick={onFeedbackExport}>{t(feedbackExport?.busy ? "feedback.exporting" : "feedback.export")}</button>
+      {feedbackExport?.path == null ? null : <p role="status">{feedbackExport.path}</p>}
+      {feedbackExport?.error == null ? null : <p role="alert">{feedbackExport.error}</p>}
+    </fieldset>
 
     <fieldset id="settings-app"><legend>{t("settings.appSettings.heading")}</legend><BooleanInput label={t("settings.appSettings.checkForUpdates")} path="app.checkForUpdates" value={form.checkForUpdates} update={(value) => update("checkForUpdates", value)} /><p className="field-help">{t("settings.appSettings.checkForUpdatesHelp")}</p><BooleanInput label={t("settings.appSettings.launchAtLogin")} path="app.launchAtLogin" value={form.launchAtLogin} update={(value) => update("launchAtLogin", value)} /></fieldset>
 

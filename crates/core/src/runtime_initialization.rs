@@ -77,35 +77,21 @@ impl RuntimeActor {
 
     pub(super) fn complete_user_response(
         &mut self,
-        companion: &CompanionAgent,
+        _companion: &CompanionAgent,
         input_ids: &[String],
     ) {
         if input_ids.is_empty() {
             return;
         }
-        if let Ok(terminal_responses) = companion.terminal_user_responses() {
-            self.suppressed_terminal_user_failure_ids
-                .extend(terminal_responses.into_iter().map(|(input_id, _)| input_id));
-        }
-        if let Some(input_id) = self
-            .last_error
-            .as_ref()
-            .filter(|error| error.is_user_response_error())
-            .and_then(RuntimeLastError::terminal_user_input_id)
-        {
-            self.suppressed_terminal_user_failure_ids
-                .insert(input_id.to_owned());
-        }
         if self
             .last_error
             .as_ref()
-            .is_some_and(RuntimeLastError::is_conversation_user_error)
+            .is_some_and(RuntimeLastError::is_user_response_error)
         {
             self.last_error = None;
             self.user_retry_at = None;
             self.user_retry_delay = Duration::from_secs(1);
         }
-        // 永続 cursor の terminal は明示的な取消まで残すが、成功後に画面へ再投影しない。
     }
 
     pub(super) fn companion_recovery_can_start(&self) -> bool {
@@ -177,10 +163,17 @@ impl RuntimeActor {
         kind: RuntimeErrorKind,
     ) -> Result<(), CompanionError> {
         let terminal_attachment = companion.first_terminal_attachment_failure()?;
-        let terminal_user_response = companion
-            .terminal_user_responses()?
-            .into_iter()
-            .find(|(input_id, _)| !self.suppressed_terminal_user_failure_ids.contains(input_id));
+        let terminal_user_response =
+            companion
+                .terminal_user_responses()?
+                .into_iter()
+                .find(|(input_id, _, _)| {
+                    !self.suppressed_terminal_user_failure_ids.contains(input_id)
+                        && !self
+                            .cancelled_user_message_ids
+                            .iter()
+                            .any(|cancelled| cancelled == input_id)
+                });
         if let Some(error) = self.last_error.as_ref() {
             if !error.is_user_response_error() && !error.is_attachment_error() {
                 return Ok(());
@@ -204,27 +197,15 @@ impl RuntimeActor {
                 });
                 let same_user_response = terminal_user_response
                     .as_ref()
-                    .is_some_and(|(input_id, _)| current_input_id == Some(input_id.as_str()));
+                    .is_some_and(|(input_id, _, _)| current_input_id == Some(input_id.as_str()));
                 if !same_user_response {
                     return Ok(());
                 }
             }
         }
         let Some((input_id, failure)) = terminal_attachment else {
-            if let Some((input_id, attempts)) = terminal_user_response {
-                self.user_retry_at = None;
-                self.user_retry_delay = Duration::from_secs(1);
-                self.last_error = Some(RuntimeLastError {
-                    kind,
-                    source: RuntimeErrorSource::UserResponse,
-                    occurred_at: chrono::Utc::now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                    message: None,
-                    issues: Vec::new(),
-                    attachment_ocr: None,
-                    user_response: Some(RuntimeUserResponseFailure { input_id, attempts }),
-                    user_input_id: None,
-                });
+            if let Some((input_id, attempts, provider)) = terminal_user_response {
+                self.restore_settled_user_failure(&[(input_id, attempts, provider)], kind);
                 return Ok(());
             }
             return Ok(());
@@ -247,6 +228,44 @@ impl RuntimeActor {
             }),
         });
         Ok(())
+    }
+
+    pub(super) fn restore_settled_user_failure(
+        &mut self,
+        failures: &[(String, u8, Option<crate::provider::ProviderFailureSummary>)],
+        kind: RuntimeErrorKind,
+    ) {
+        for (input_id, _, _) in failures {
+            self.suppressed_terminal_user_failure_ids
+                .insert(input_id.clone());
+        }
+        let Some((input_id, attempts, provider)) = failures.last().cloned() else {
+            return;
+        };
+        self.user_retry_at = None;
+        self.user_retry_delay = Duration::from_secs(1);
+        let kind = if provider
+            .as_ref()
+            .is_some_and(|failure| failure.kind == crate::provider::ProviderErrorKind::Timeout)
+        {
+            RuntimeErrorKind::ProviderTimeout
+        } else {
+            kind
+        };
+        self.last_error = Some(RuntimeLastError {
+            kind,
+            source: RuntimeErrorSource::UserResponse,
+            occurred_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            message: None,
+            issues: Vec::new(),
+            attachment_ocr: None,
+            user_response: Some(RuntimeUserResponseFailure {
+                input_id,
+                attempts,
+                provider,
+            }),
+            user_input_id: None,
+        });
     }
 
     fn publish_retry_error(
@@ -312,6 +331,7 @@ impl RuntimeActor {
             user_work_pending: self.user_work_pending,
             cancelled_user_message_ids: self.cancelled_user_message_ids.clone(),
             companion_draft: self.companion_draft.clone(),
+            conversation_revision: self.conversation_revision,
             latest_companion_thought: self.latest_companion_thought.clone(),
             latest_companion_decision: self.latest_companion_decision.clone(),
             latest_judge_decision: self.latest_judge_decision.clone(),
@@ -322,6 +342,7 @@ impl RuntimeActor {
     }
 
     pub(super) fn publish(&self, sender: &watch::Sender<RuntimeSnapshot>) {
+        self.sync_microphone_command_policy();
         let mut next = self.snapshot();
         sender.send_if_modified(|current| {
             let revision = next.revision;

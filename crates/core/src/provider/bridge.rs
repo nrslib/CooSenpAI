@@ -72,19 +72,10 @@ struct BridgeInner {
     state: Mutex<BridgeState>,
     write_lock: Mutex<()>,
     capabilities: RwLock<HashMap<ProviderName, ProviderCapabilities>>,
-    #[cfg(test)]
-    reap_gate: std::sync::Mutex<Option<ReapGate>>,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-struct ReapGate {
-    reaper_waiting: Arc<tokio::sync::Notify>,
-    request_waiting: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Notify>,
 }
 
 struct BridgeState {
+    working_directory: Option<tempfile::TempDir>,
     generation: u64,
     stdin: Option<ChildStdin>,
     pid: Option<u32>,
@@ -153,6 +144,7 @@ impl ProviderBridge {
                 clear_environment,
                 launch: RwLock::new(launch),
                 state: Mutex::new(BridgeState {
+                    working_directory: None,
                     generation: 0,
                     stdin: None,
                     pid: None,
@@ -166,8 +158,6 @@ impl ProviderBridge {
                 }),
                 write_lock: Mutex::new(()),
                 capabilities: RwLock::new(HashMap::new()),
-                #[cfg(test)]
-                reap_gate: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -353,10 +343,44 @@ impl ProviderBridge {
             .open(provider, cancellation.clone(), input.timeout)
             .await?;
         validate_call(&capabilities, &input)?;
-        let temporary_cwd = tempfile::Builder::new()
-            .prefix("coosenpai-provider-")
-            .tempdir()
-            .map_err(|_| retryable("provider の作業ディレクトリを作成できません。"))?;
+        let cwd = {
+            let mut state = self.inner.state.lock().await;
+            if state.working_directory.is_none() {
+                state.working_directory = Some(
+                    tempfile::Builder::new()
+                        .prefix("coosenpai-provider-")
+                        .tempdir()
+                        .map_err(|_| retryable("provider の作業ディレクトリを作成できません。"))?,
+                );
+            }
+            let path = state
+                .working_directory
+                .as_ref()
+                .expect("provider working directory")
+                .path();
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(ProviderError {
+                        kind: ProviderErrorKind::Permission,
+                        message: "provider の専用作業ディレクトリが置き換えられています。".into(),
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let mut builder = std::fs::DirBuilder::new();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::DirBuilderExt;
+                        builder.mode(0o700);
+                    }
+                    builder
+                        .create(path)
+                        .map_err(|_| retryable("provider の作業ディレクトリを復元できません。"))?;
+                }
+                Err(_) => return Err(retryable("provider の作業ディレクトリを確認できません。")),
+            }
+            path.to_owned()
+        };
         let id = uuid::Uuid::new_v4().to_string();
         let (session_mode, session_id) = session_json(
             provider,
@@ -368,7 +392,7 @@ impl ProviderBridge {
             &id,
             provider,
             executable.map(PathBuf::as_path),
-            temporary_cwd.path(),
+            &cwd,
             &input,
             session_mode,
             session_id,
@@ -576,10 +600,6 @@ impl BridgeInner {
             let Some((generation, mut wait)) = wait else {
                 return Ok(());
             };
-            #[cfg(test)]
-            if let Some(gate) = self.reap_gate.lock().expect("reap gate").clone() {
-                gate.request_waiting.notify_one();
-            }
             if !wait_for_reap(&mut wait, SHUTDOWN_REAP_LIMIT).await {
                 return Err(retryable("provider bridge の終了待ちが timeout しました。"));
             }
@@ -703,15 +723,8 @@ impl BridgeInner {
         let inner = Arc::clone(self);
         tokio::spawn(async move { inner.read_stderr(stderr, generation).await });
         let inner = Arc::clone(self);
-        #[cfg(test)]
-        let reap_gate = self.reap_gate.lock().expect("reap gate").clone();
         tokio::spawn(async move {
             let mut process_group = ActiveProcessGroup::register(pid);
-            #[cfg(test)]
-            if let Some(gate) = reap_gate {
-                gate.reaper_waiting.notify_one();
-                gate.release.notified().await;
-            }
             let _ = child.wait().await;
             cleanup_process_group(pid).await;
             process_group.disarm();
@@ -1045,4 +1058,3 @@ impl Drop for BridgeInner {
         }
     }
 }
-

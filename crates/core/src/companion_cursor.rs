@@ -8,7 +8,7 @@ use crate::state::{
 use serde::{de::Error as DeError, ser::Error as SerError, Deserialize, Serialize};
 use serde_json::Value;
 
-pub const MAX_USER_RESPONSE_ATTEMPTS: u8 = 3;
+pub const MAX_USER_RESPONSE_ATTEMPTS: u8 = 2;
 
 pub(crate) const OWNED_USER_ID_PREFIX: &str = "runtime-user-";
 
@@ -204,6 +204,8 @@ pub struct PendingUserMessage {
     pub response_attempts: u8,
     #[serde(default, skip_serializing_if = "is_false")]
     pub response_terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_failure: Option<crate::provider::ProviderFailureSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tutorial_response_key: Option<String>,
 }

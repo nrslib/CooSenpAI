@@ -3,9 +3,10 @@ import { chmod, copyFile, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROVIDER_CAPABILITIES } from "../provider-capabilities.js";
-import { BridgeError, invalidJsonOutput, safeProviderError } from "../errors.js";
+import { BridgeError, invalidJsonOutput } from "../errors.js";
 import { validateImages } from "../images.js";
 import type { EffortSelection, ProviderAgent, ProviderCallOptions, ProviderCallResult, ProviderCompactSessionOptions, ProviderUsage } from "../types.js";
+import { codexProviderError } from "./codex-errors.js";
 import { codexInput, codexOutputSchema } from "./inputs.js";
 import { observationDirectories } from "./observation-frame-directory.js";
 
@@ -114,12 +115,13 @@ export class CodexAgent implements ProviderAgent {
   async send(options: ProviderCallOptions): Promise<ProviderCallResult> {
     if (options.isolateTools === true) throw new BridgeError("unsupported", "Codex の作業用 tool 隔離は未対応です");
     const ephemeral = options.session.mode === "ephemeral" ? await ephemeralEnvironment() : undefined;
+    let streamError: BridgeError | undefined;
     try {
       const sdkEnvironment = ephemeral?.env ?? await persistentEnvironment();
       const config = {
         developer_instructions: options.systemPrompt,
         mcp_servers: {},
-        web_search: "disabled",
+        web_search: options.webSearchEnabled === true ? "live" : "disabled",
         model_reasoning_summary: "auto",
       } as CodexOptions["config"];
       const client = this.createClient({
@@ -136,7 +138,7 @@ export class CodexAgent implements ProviderAgent {
         sandboxMode: "read-only",
         approvalPolicy: "never",
         networkAccessEnabled: false,
-        webSearchMode: "disabled",
+        webSearchMode: options.webSearchEnabled === true ? "live" : "disabled",
         ...(readableObservationDirectories.length === 0
           ? {}
           : { additionalDirectories: readableObservationDirectories }),
@@ -165,6 +167,8 @@ export class CodexAgent implements ProviderAgent {
       let usage: ProviderUsage | undefined;
       for await (const event of turn.events) {
         options.emitProgress();
+        if (event.type === "turn.failed") throw codexProviderError(new Error(event.error.message));
+        if (event.type === "error") streamError = codexProviderError(new Error(event.message));
         if (event.type === "thread.started") sessionId = event.thread_id;
         usage = usageFromEvent(event) ?? usage;
         if (event.type !== "item.updated" && event.type !== "item.completed") continue;
@@ -174,6 +178,14 @@ export class CodexAgent implements ProviderAgent {
             tool: "command_execution",
             input: { command: event.item.command },
             output: event.item.aggregated_output,
+          });
+        }
+        if (event.type === "item.completed" && event.item.type === "web_search") {
+          options.onToolExecution?.({
+            provider: "codex",
+            tool: "web_search",
+            input: { query: event.item.query },
+            output: { completed: true },
           });
         }
         if (event.type === "item.completed" && event.item.type === "mcp_tool_call") {
@@ -193,7 +205,7 @@ export class CodexAgent implements ProviderAgent {
         }
         if (event.type === "item.completed") finalText = event.item.text;
       }
-      if (finalText.length === 0) throw new BridgeError("invalid-output", "Codex の応答本文がありません");
+      if (finalText.length === 0) throw streamError ?? new BridgeError("invalid-output", "Codex の応答本文がありません");
       let value: unknown;
       if (options.schema !== undefined) {
         try {
@@ -209,7 +221,7 @@ export class CodexAgent implements ProviderAgent {
         ...(usage === undefined ? {} : { usage }),
       };
     } catch (error) {
-      throw safeProviderError(error);
+      throw error instanceof BridgeError || options.signal.aborted ? codexProviderError(error) : streamError ?? codexProviderError(error);
     } finally {
       await ephemeral?.cleanup();
     }

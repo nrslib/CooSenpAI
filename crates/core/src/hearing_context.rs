@@ -2,6 +2,10 @@ use crate::state::AudioObservationSource;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+#[path = "microphone_commands.rs"]
+pub(crate) mod microphone_commands;
+use microphone_commands::{MicrophoneCommandBatch, MicrophoneCommands};
+
 pub const MAX_HEARING_TEXT_BYTES: usize = 4096;
 pub const MAX_PENDING_AUDIO_COUNT: usize = 64;
 pub const MAX_PENDING_AUDIO_BYTES: usize = 64 * 1024;
@@ -48,6 +52,7 @@ impl HearingContext {
                 speaker.speaker_id.as_deref(),
                 speaker.speaker_registry_id.as_deref(),
                 speaker.speaker_status,
+                speaker.speaker_segments.clone(),
             )?;
         }
         Ok(record)
@@ -155,6 +160,7 @@ pub(crate) struct HearingContextBuffer {
     latest: Vec<HearingContext>,
     pending_audio: Vec<crate::state::AudioObservation>,
     persistent: bool,
+    microphone_commands: MicrophoneCommands,
 }
 
 impl Default for HearingContextBuffer {
@@ -164,6 +170,7 @@ impl Default for HearingContextBuffer {
             latest: Vec::new(),
             pending_audio: Vec::new(),
             persistent: true,
+            microphone_commands: MicrophoneCommands::default(),
         }
     }
 }
@@ -178,6 +185,7 @@ impl HearingContextBuffer {
         }
         self.latest.clear();
         self.pending_audio.clear();
+        self.microphone_commands.reset_session();
         self.persistent = persistent;
     }
 
@@ -208,7 +216,51 @@ impl HearingContextBuffer {
         let id = uuid::Uuid::new_v4().to_string();
         self.session = Some((generation, id.clone(), cancellation));
         self.latest.clear();
+        self.microphone_commands.reset_session();
         Some(id)
+    }
+
+    pub(crate) fn set_microphone_commands_enabled(&mut self, enabled: bool) {
+        self.microphone_commands
+            .set_enabled(enabled && self.persistent);
+    }
+
+    pub(crate) fn register_microphone_final(
+        &mut self,
+        context: &HearingContext,
+    ) -> Result<(), crate::state::ObservationError> {
+        if self.accepts_session(&context.session_id) {
+            self.microphone_commands.record(context)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn microphone_command_candidates(
+        &mut self,
+        audio: &[crate::state::AudioObservation],
+    ) -> Option<MicrophoneCommandBatch> {
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|(_, _, cancellation)| cancellation.is_cancelled())
+        {
+            return None;
+        }
+        self.microphone_commands.candidates(audio)
+    }
+
+    pub(crate) fn take_microphone_commands(
+        &mut self,
+        batch: &MicrophoneCommandBatch,
+    ) -> Vec<crate::state::AudioObservation> {
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|(_, _, cancellation)| cancellation.is_cancelled())
+        {
+            return Vec::new();
+        }
+        self.microphone_commands.take(batch)
     }
 
     pub(crate) fn prepare_update(&self, mut context: HearingContext) -> Option<HearingContext> {
@@ -260,7 +312,49 @@ impl HearingContextBuffer {
     }
 
     pub(crate) fn acknowledge_saved_audio(&mut self, id: &str) {
-        self.pending_audio.retain(|record| record.id != id);
+        let observation_id = crate::state::audio_segment_observation_id(id);
+        self.pending_audio
+            .retain(|record| record.id != observation_id);
+    }
+
+    pub(crate) fn pending_audio_after_discard_for_day_with_ids(
+        &self,
+        date: chrono::NaiveDate,
+        audio_ids: &std::collections::HashSet<String>,
+    ) -> Result<Vec<crate::state::AudioObservation>, crate::persistence::PersistenceError> {
+        let parse_timestamp = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value).map_err(|_| {
+                crate::persistence::PersistenceError::Invalid(
+                    "保留中の音声時刻が不正です".to_owned(),
+                )
+            })
+        };
+        let mut retained = Vec::with_capacity(self.pending_audio.len());
+        for record in &self.pending_audio {
+            let parsed = parse_timestamp(&record.created_at)?;
+            parse_timestamp(&record.window_start)?;
+            parse_timestamp(&record.window_end)?;
+            let observation_id = crate::state::audio_segment_observation_id(&record.id);
+            if observation_id.is_empty() {
+                return Err(crate::persistence::PersistenceError::Invalid(
+                    "保留中の音声 ID が不正です".to_owned(),
+                ));
+            }
+            if !audio_ids.contains(observation_id)
+                && crate::config::local_date_at(parsed.with_timezone(&chrono::Utc))
+                    != date.format("%Y-%m-%d").to_string()
+            {
+                retained.push(record.clone());
+            }
+        }
+        Ok(retained)
+    }
+
+    pub(crate) fn replace_pending_audio(
+        &mut self,
+        pending_audio: Vec<crate::state::AudioObservation>,
+    ) {
+        self.pending_audio = pending_audio;
     }
 
     pub(crate) fn pending_audio(&self) -> &[crate::state::AudioObservation] {
@@ -268,4 +362,3 @@ impl HearingContextBuffer {
     }
 
 }
-

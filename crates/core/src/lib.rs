@@ -9,6 +9,7 @@ pub mod companion_cursor;
 pub mod companion_storage;
 pub mod config;
 pub mod conversation_archive;
+pub mod conversation_log;
 pub mod dataflow_log;
 pub mod debug;
 pub mod emotion;
@@ -57,3 +58,6 @@ pub use process::{ProcessError, ProcessOutput, ProcessRequest, ProcessRunner};
 pub mod work;
 
 pub mod screen_frames;
+pub mod speaker_decision;
+pub mod speaker_id;
+pub mod speaker_names;

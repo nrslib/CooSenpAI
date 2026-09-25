@@ -1,6 +1,9 @@
 use crate::logging::FileLogger;
 use crate::mailbox::{Mailbox, MailboxError};
-use crate::persistence::{atomic_write_json, PersistenceError, SiblingLock};
+use crate::persistence::{
+    atomic_write_bytes, atomic_write_json, restore_file_snapshots, FileSnapshot, PersistenceError,
+    SiblingLock,
+};
 use crate::ports::RuntimeLogger;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -199,6 +202,34 @@ impl DurableOutbox {
         Ok(())
     }
 
+    /// 選択日の observation 配達残りだけを削除する。remark は Coo の会話履歴なので残す。
+    pub(crate) fn discard_observations(
+        &self,
+        scope: &crate::conversation_log::ConversationLogDeletionScope,
+    ) -> Result<OutboxDeletionReceipt, OutboxError> {
+        let _lock = self.directory_lock()?;
+        self.validate_root_layout()?;
+        let mut changes = Vec::new();
+        for directory in [
+            self.pending_directory(),
+            self.done_directory(),
+            self.failed_directory(),
+        ] {
+            for entry in fs::read_dir(&directory)? {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_file()
+                    && path.extension().and_then(|value| value.to_str()) == Some("json")
+                {
+                    if let Some(change) = outbox_observation_replacement(&path, scope)? {
+                        changes.push(change);
+                    }
+                }
+            }
+        }
+        apply_outbox_changes(changes)
+    }
+
     fn directory_lock(&self) -> Result<SiblingLock, OutboxError> {
         fs::create_dir_all(&self.directory)?;
         fs::create_dir_all(self.pending_directory())?;
@@ -287,6 +318,82 @@ impl DurableOutbox {
         }
         Ok(())
     }
+}
+
+pub(crate) struct OutboxDeletionReceipt {
+    snapshots: Vec<FileSnapshot>,
+}
+
+impl OutboxDeletionReceipt {
+    pub(crate) fn rollback(&self) -> Result<(), OutboxError> {
+        restore_file_snapshots(&self.snapshots).map_err(OutboxError::Persistence)
+    }
+}
+
+struct OutboxChange {
+    snapshot: FileSnapshot,
+    replacement: Option<Vec<u8>>,
+}
+
+fn outbox_observation_replacement(
+    path: &Path,
+    scope: &crate::conversation_log::ConversationLogDeletionScope,
+) -> Result<Option<OutboxChange>, OutboxError> {
+    let bytes = fs::read(path)?;
+    let entry = serde_json::from_slice::<OutboxEntry>(&bytes)?;
+    validate_entry(&entry)?;
+    if entry.kind != "observation" {
+        return Ok(None);
+    }
+    let payload = crate::conversation_log::sanitize_observation_value(&entry.payload, scope)
+        .map_err(OutboxError::Persistence)?;
+    if payload
+        .as_ref()
+        .is_some_and(|payload| payload == &entry.payload)
+    {
+        return Ok(None);
+    };
+    let replacement = payload
+        .map(|payload| {
+            serde_json::to_vec_pretty(&OutboxEntry { payload, ..entry }).map_err(OutboxError::Json)
+        })
+        .transpose()?;
+    Ok(Some(OutboxChange {
+        snapshot: FileSnapshot::capture(path).map_err(OutboxError::Persistence)?,
+        replacement,
+    }))
+}
+
+fn apply_outbox_changes(changes: Vec<OutboxChange>) -> Result<OutboxDeletionReceipt, OutboxError> {
+    let snapshots = changes
+        .iter()
+        .map(|change| change.snapshot.clone())
+        .collect::<Vec<_>>();
+    for change in &changes {
+        let result = match &change.replacement {
+            Some(bytes) => {
+                atomic_write_bytes(change.snapshot.path(), bytes).map_err(OutboxError::Io)
+            }
+            None => remove_file_and_sync(change.snapshot.path()).map_err(OutboxError::Io),
+        };
+        if let Err(error) = result {
+            return Err(match restore_file_snapshots(&snapshots) {
+                Ok(()) => error,
+                Err(rollback) => OutboxError::Persistence(PersistenceError::Invalid(format!(
+                    "{error}; rollback={rollback}"
+                ))),
+            });
+        }
+    }
+    Ok(OutboxDeletionReceipt { snapshots })
+}
+
+fn remove_file_and_sync(path: &Path) -> Result<(), io::Error> {
+    fs::remove_file(path)?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn load_pending_entry(path: &Path) -> Result<PendingOutboxEntry, OutboxError> {

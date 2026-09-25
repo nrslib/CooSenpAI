@@ -2,6 +2,28 @@ use super::*;
 use crate::locale::{text, Locale, TextKey};
 
 impl RuntimeHandle {
+    pub async fn begin_hearing_session(
+        &self,
+        generation: u64,
+        cancellation: CancellationToken,
+    ) -> Result<(String, crate::hearing_ingestion::HearingAudioIngestion), RuntimeError> {
+        self.ensure_open()?;
+        let (response, result) = oneshot::channel();
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(RuntimeError::Closed),
+            _ = cancellation.cancelled() => Err(RuntimeError::Closed),
+            result = async {
+                self.control_tx.send(ControlCommand::BeginHearingSession {
+                    generation,
+                    cancellation: cancellation.clone(),
+                    response,
+                }).await.map_err(|_| RuntimeError::Closed)?;
+                result.await.map_err(|_| RuntimeError::ResponseDropped)?
+            } => result,
+        }
+    }
+
     pub fn hearing_audio_ingestion(
         &self,
         session_id: String,
@@ -226,8 +248,6 @@ impl RuntimeHandle {
             tutorial_response_key,
         )?;
         let id = input.id.clone();
-        #[cfg(test)]
-        test_barrier::wait(&input.message).await;
         if self
             .user_tx
             .send(UserCommand::Enqueue(Box::new(UserQueueCommand {

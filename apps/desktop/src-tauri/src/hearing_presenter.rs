@@ -17,6 +17,11 @@ pub(crate) enum HearingResult {
         microphone: SpeechPermissionKind,
         recognition: SpeechPermissionKind,
     },
+    Recovered {
+        generation: u64,
+        source: AudioObservationSource,
+        final_result: bool,
+    },
     Warning {
         generation: u64,
         kind: String,
@@ -49,6 +54,14 @@ pub(crate) enum HearingResult {
     },
 }
 
+fn can_replace_protocol_warning(current: Option<&str>, incoming: &str) -> bool {
+    match current {
+        Some("hearing-protocol") => incoming == "hearing-protocol",
+        Some("speaker-protocol") => incoming == "speaker-protocol",
+        _ => true,
+    }
+}
+
 pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
     let locale = Locale::from_config(&snapshot.config.ui.language);
     let view = &mut snapshot.audio;
@@ -66,8 +79,6 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
         HearingResult::Started(generation) => {
             view.generation = generation;
             view.phase = "starting".to_owned();
-            view.warning_kind = None;
-            view.message = None;
         }
         HearingResult::PermissionLoaded {
             generation,
@@ -84,6 +95,26 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             view.microphone_permission = crate::speech::permission_name(microphone);
             view.recognition_permission = crate::speech::permission_name(recognition);
         }
+        HearingResult::Recovered {
+            generation,
+            source,
+            final_result,
+        } if view.generation == generation && view.phase == "listening" => {
+            let clears_warning = match view.warning_kind.as_deref() {
+                Some("speaker-protocol") => {
+                    final_result && source == AudioObservationSource::Speaker
+                }
+                Some("hearing-protocol") => {
+                    final_result && source == AudioObservationSource::Microphone
+                }
+                Some("helper" | "helper-closed" | "helper-start") => true,
+                _ => false,
+            };
+            if clears_warning {
+                view.message = None;
+                view.warning_kind = None;
+            }
+        }
         HearingResult::Warning {
             generation,
             kind,
@@ -99,8 +130,10 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
                     view.warning_kind = None;
                 }
             } else {
-                view.message = Some(localize_audio_message(&kind, &message, locale));
-                view.warning_kind = Some(kind);
+                if can_replace_protocol_warning(view.warning_kind.as_deref(), &kind) {
+                    view.message = Some(localize_audio_message(&kind, &message, locale));
+                    view.warning_kind = Some(kind);
+                }
             }
         }
         HearingResult::Recognition {
@@ -162,18 +195,20 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
         } if snapshot.config.audio.enabled
             && generation.is_none_or(|expected| view.generation == expected) =>
         {
-            view.phase = "error".to_owned();
-            view.message = Some(localize_audio_message(&kind, &message, locale));
-            match kind.as_str() {
-                "permission-microphone" => view.microphone_permission = "denied".to_owned(),
-                "permission-speech" => {
-                    view.recognition_permission = crate::speech::permission_name(
-                        recognition.unwrap_or(SpeechPermissionKind::Denied),
-                    );
+            if can_replace_protocol_warning(view.warning_kind.as_deref(), &kind) {
+                view.phase = "error".to_owned();
+                view.message = Some(localize_audio_message(&kind, &message, locale));
+                match kind.as_str() {
+                    "permission-microphone" => view.microphone_permission = "denied".to_owned(),
+                    "permission-speech" => {
+                        view.recognition_permission = crate::speech::permission_name(
+                            recognition.unwrap_or(SpeechPermissionKind::Denied),
+                        );
+                    }
+                    _ => {}
                 }
-                _ => {}
+                view.warning_kind = Some(kind);
             }
-            view.warning_kind = Some(kind);
         }
         _ => return false,
     }

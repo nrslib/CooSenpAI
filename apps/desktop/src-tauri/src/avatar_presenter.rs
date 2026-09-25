@@ -46,7 +46,10 @@ impl AvatarState {
             .conversation
             .iter()
             .rev()
-            .find(|entry| entry.role == coosenpai_core::state::ConversationRole::Companion)
+            .find(|entry| {
+                entry.role == coosenpai_core::state::ConversationRole::Companion
+                    && !entry.is_response_failure()
+            })
             .map(|entry| entry.id.clone());
         let generation = Some(snapshot.selected_conversation_generation);
         let reply_id = if self.conversation_generation != generation || latest_reply_id.is_none() {

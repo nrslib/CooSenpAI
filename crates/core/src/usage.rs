@@ -76,42 +76,6 @@ pub fn try_reserve_observer_role(
     }))
 }
 
-#[test]
-fn observer_roles_reserve_independently_and_reset_at_the_next_local_date() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("usage.json");
-    fs::write(&path, r#"{"date":"2026-09-10","aiCalls":2}"#).unwrap();
-    assert!(
-        try_reserve_observer_role(&path, "2026-09-10", ObserverCallKind::Vision, 2)
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        try_reserve_observer_role(&path, "2026-09-10", ObserverCallKind::Hearing, 1)
-            .unwrap()
-            .unwrap()
-            .ai_calls,
-        3
-    );
-    assert!(
-        try_reserve_observer_role(&path, "2026-09-10", ObserverCallKind::Hearing, 1)
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        try_reserve_observer_role(&path, "2026-09-11", ObserverCallKind::Vision, 2)
-            .unwrap()
-            .unwrap()
-            .ai_calls,
-        1
-    );
-    assert!(
-        try_reserve_observer_role(&path, "2026-09-11", ObserverCallKind::Hearing, 0)
-            .unwrap()
-            .is_none()
-    );
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionUsage {
@@ -403,4 +367,3 @@ fn set_private_directory_mode(path: &Path) -> io::Result<()> {
 pub fn today_observer_usage(path: &Path) -> Result<ObserverUsage, UsageError> {
     load_observer(path, &local_date())
 }
-

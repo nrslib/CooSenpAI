@@ -107,6 +107,8 @@ pub(crate) struct PanelUpdate {
     pub session: String,
     pub revision: u64,
     pub state: Value,
+    // Presenter が push 経路で発行した I/O 指示。完了は通常の Panel イベントで戻る。
+    pub commands: Vec<PanelCommand>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -248,6 +250,7 @@ impl PanelPresenters {
                         session: session.clone(),
                         revision: current.revision,
                         state: parent.refresh_children(activity),
+                        commands: Vec::new(),
                     })
                 } else {
                     None
@@ -279,12 +282,13 @@ impl PanelPresenters {
         let mut updates = Vec::new();
         for (id, session) in &mut self.sessions {
             if let Panel::Details(panel) = &mut session.panel {
-                if panel.observe_snapshot(snapshot.clone())? {
+                if panel.observe_snapshot(snapshot.clone(), &mut session.io)? {
                     session.revision += 1;
                     updates.push(PanelUpdate {
                         session: id.clone(),
                         revision: session.revision,
                         state: panel.view()?,
+                        commands: std::mem::take(&mut session.io.commands),
                     });
                 }
             }
@@ -344,7 +348,7 @@ impl PanelPresenters {
                     (&self.details_snapshot, self.sessions.get_mut(&session))
                 {
                     if let Panel::Details(panel) = &mut current.panel {
-                        panel.observe_snapshot(seed.clone())?;
+                        panel.observe_snapshot(seed.clone(), &mut current.io)?;
                     }
                 }
             }

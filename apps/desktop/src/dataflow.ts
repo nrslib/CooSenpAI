@@ -10,6 +10,7 @@ import type {
   TranscriptRecord,
   VisualObservation,
 } from "./types.js";
+import { speakerDisplayId } from "./view-model.js";
 
 export type DataFlowSubject = "vision" | "hearing" | "coo";
 export type DataFlowKindFilter = "all" | DataFlowSubject;
@@ -131,7 +132,7 @@ function speakerAnnotation(
   const speakerID = typeof transcript === "string" || transcript == null
     ? record.speakerId
     : transcript.speakerTag ?? record.speakerId;
-  if (status === "identified" && speakerID !== undefined) return ` · ${speakerID}`;
+  if (status === "identified" && speakerID !== undefined) return ` · ${speakerDisplayId(speakerID)}`;
   return status === undefined ? "" : ` · ${status}`;
 }
 
@@ -140,7 +141,7 @@ function hearingObservationEvent(
   transcript: string | TranscriptRecord | null | undefined,
   locale: Locale,
 ): string {
-  return `${audioSourceLabel(record.source, locale)}${speakerAnnotation(record, transcript)} · ${t(locale, "details.dataflowTranscriptConfirmed")}: ${preview(transcriptText(record, transcript))}`;
+  return `${audioSourceLabel(record.source, locale)}${speakerAnnotation(record, transcript)} · ${t(locale, "details.dataflowObservationRecorded")}: ${preview(transcriptText(record, transcript))}`;
 }
 
 function decisionEvent(decision: CompanionDecision, locale: Locale): string {

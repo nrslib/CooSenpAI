@@ -233,7 +233,7 @@ private final class SpeechSession: @unchecked Sendable {
     private func handleOutput(_ output: SpeechOutput) {
         switch output {
         case let .partial(text): emit(["event": "partial", "text": text])
-        case let .final(text):
+        case let .final(text, _):
             guard closeDebugDump() else { return }
             terminalResultEmitted = true
             emit(["event": "final", "text": text])

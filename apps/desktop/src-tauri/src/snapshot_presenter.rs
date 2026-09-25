@@ -26,6 +26,10 @@ pub(crate) enum SnapshotEvent {
         initial: bool,
     },
     MetadataChanged,
+    UtteranceFeedbackChanged {
+        id: String,
+        feedback: crate::utterance_feedback::FeedbackSummary,
+    },
     TutorialLoaded(crate::tutorial_projection::TutorialSnapshotData),
     TutorialActivated {
         config: Box<coosenpai_core::config::Config>,
@@ -57,6 +61,7 @@ pub(crate) enum SnapshotEvent {
     CompanionReconfigured(coosenpai_core::config::Config),
     CompanionFailed(coosenpai_core::runtime::RuntimeLastError),
     AvatarRefresh,
+    SpeakerDirectoryChanged,
     AvatarLoaded {
         generation: u64,
         result: crate::avatar::AvatarLoadResult,
@@ -164,6 +169,7 @@ impl SnapshotPresenter {
                         (previous.phase != runtime.phase
                             && previous.phase != coosenpai_core::runtime::RuntimePhase::Idle)
                             || previous.active_user_message_id != runtime.active_user_message_id
+                            || previous.conversation_revision != runtime.conversation_revision
                             || previous.cancelled_user_message_ids
                                 != runtime.cancelled_user_message_ids
                             || previous.latest_companion_decision
@@ -197,7 +203,14 @@ impl SnapshotPresenter {
                     }));
                 }
             }
+            SnapshotEvent::UtteranceFeedbackChanged { id, feedback } => {
+                snapshot.utterance_feedback.insert(id, feedback);
+            }
             SnapshotEvent::MetadataChanged => {}
+            SnapshotEvent::SpeakerDirectoryChanged => {
+                snapshot.speaker_directory_revision =
+                    snapshot.speaker_directory_revision.saturating_add(1);
+            }
             SnapshotEvent::TutorialLoaded(tutorial) => snapshot.onboarding = tutorial.view(),
             SnapshotEvent::TutorialActivated { config, tutorial } => {
                 snapshot.apply_config(*config);
@@ -439,6 +452,8 @@ impl SnapshotEvent {
             Self::Speech { .. } => "Speech",
             Self::Watch { .. } => "Watch",
             Self::MetadataChanged => "MetadataChanged",
+            Self::UtteranceFeedbackChanged { .. } => "UtteranceFeedbackChanged",
+            Self::SpeakerDirectoryChanged => "SpeakerDirectoryChanged",
             Self::TutorialLoaded(_)
             | Self::TutorialActivated { .. }
             | Self::TutorialEnded { .. }

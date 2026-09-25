@@ -139,7 +139,7 @@ export function App(): ReactElement {
     <NowLine snapshot={currentSnapshot} onOpenDetails={() => { void handle(desktopApi.openDetails()); }} onAssertiveness={(value) => { void handle(desktopApi.setAssertiveness(value)); }} />
     <AppUpdatePanel enabled={currentSnapshot.config.app.checkForUpdates} showCheck={false} />
     <VoiceOutputPanel enabled={currentSnapshot.config.voiceOutput.enabled} showTest={false} />
-    <StatusBanner view={status?.banner ?? null} onRecover={() => send({ type: "recover" })} />
+    <StatusBanner view={status?.banner ?? null} onRecover={() => send({ type: "recover" })} onDismiss={() => send({ type: "dismissBanner" })} />
     <ThoughtBubble view={status?.thought ?? null} />
     {view.tutorial === null ? null : <div className="tutorial-controls" role="status"><span>{text(view.tutorial.message)}</span>
       {view.tutorial.next === null ? null : <button type="button" onClick={() => send({ type: "tutorialNext" })}>{t(locale, view.tutorial.next === "retry" ? "app.tutorialRetry" : "app.tutorialNext")}</button>}
@@ -158,6 +158,7 @@ export function App(): ReactElement {
       providerApiKeys={providerApiKeys}
       providerApiKeysError={providerApiKeysError}
       focusSection={view.settingsFocus ?? undefined}
+      focusGeneration={view.settingsGeneration}
       onClose={() => { send({ type: "closeSettings" }); }}
       onSave={(patch, avatarImage, baseConfigRevision) => handle(desktopApi.updateConfig(patch, avatarImage, baseConfigRevision))}
       onSelectPersona={selectPersona}
@@ -176,6 +177,8 @@ export function App(): ReactElement {
       onOpenLicenseDocument={(document) => void handle(desktopApi.openLicenseDocument(document))}
       onOpenSpeechSettings={(kind) => void handle(desktopApi.openSpeechSettings(kind))}
       onSpeakerManagement={(payload) => handle(desktopApi.speakerManagement(payload))}
+      onSpeakerDirectory={() => desktopApi.speakerDirectory()}
+      onSpeakerRename={(payload) => handle(desktopApi.speakerRename(payload))}
       onToggleAvatar={() => void handle(avatarApi.toggle())}
       onRelaunch={() => void handle(desktopApi.relaunch())}
       onAppearancePreview={previewAppearance}

@@ -33,6 +33,7 @@ export interface SendRequest extends RequestBase {
   readonly executable?: string;
   readonly cwd: string;
   readonly toolsDisabled: boolean;
+  readonly webSearchEnabled?: boolean;
   readonly isolateTools?: boolean;
   readonly stallTimeoutMs: number;
   readonly timeoutMs: number;
@@ -80,6 +81,7 @@ const SEND_KEYS = [
   "executable",
   "cwd",
   "toolsDisabled",
+  "webSearchEnabled",
   "isolateTools",
   "stallTimeoutMs",
   "timeoutMs",
@@ -154,6 +156,12 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
     throw new BridgeError("protocol", "schema exceeds the byte limit");
   }
   if (record.toolsDisabled !== true) throw new BridgeError("protocol", "toolsDisabled must be true");
+  if (record.webSearchEnabled !== undefined && typeof record.webSearchEnabled !== "boolean") {
+    throw new BridgeError("protocol", "webSearchEnabled must be a boolean");
+  }
+  if (record.isolateTools === true && record.webSearchEnabled === true) {
+    throw new BridgeError("protocol", "isolated calls cannot enable Web search");
+  }
   if (record.isolateTools !== undefined && typeof record.isolateTools !== "boolean") {
     throw new BridgeError("protocol", "isolateTools must be a boolean");
   }
@@ -185,6 +193,7 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
     ...(executable === undefined ? {} : { executable }),
     cwd,
     toolsDisabled: true,
+    webSearchEnabled: record.webSearchEnabled === true,
     isolateTools: record.isolateTools === true,
     stallTimeoutMs: record.stallTimeoutMs,
     timeoutMs: record.timeoutMs,

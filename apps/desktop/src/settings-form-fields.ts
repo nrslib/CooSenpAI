@@ -14,6 +14,7 @@ const paths = {
   watchEnabled: "watch.enabled", watchFullscreen: "watch.fullscreen", watchFocusElement: "watch.focusElement", watchApps: "watch.apps",
   voiceOutputEnabled: "voiceOutput.enabled", voiceOutputProvider: "voiceOutput.provider",
   voiceOutputRate: "voiceOutput.rate", voicevoxStyleId: "voiceOutput.voicevoxStyleId",
+  audioMicrophoneCommandsEnabled: "audio.microphoneCommandsEnabled",
   audioEnabled: "audio.enabled", audioMic: "audio.mic", audioSpeaker: "audio.speaker",
   audioSpeakerIdentificationEnabled: "audio.speakerIdentification.enabled", audioDebugDumpDir: "audio.debugDumpDir",
   providerObserver: "observer.vision.provider", providerCompanion: "companion.provider",
@@ -59,7 +60,7 @@ const paths = {
   notificationMode: "notification.mode", minPriority: "notification.minPriority",
   bubbleDurationMs: "notification.bubbleDurationMs",
   observationDays: "retention.observationDays", conversationDays: "retention.conversationDays",
-  debugEnabled: "debug.enabled", checkForUpdates: "app.checkForUpdates", launchAtLogin: "app.launchAtLogin",
+  debugEnabled: "debug.enabled", feedbackEnabled: "debug.feedbackEnabled", checkForUpdates: "app.checkForUpdates", launchAtLogin: "app.launchAtLogin",
   judgeFollow: "judge.follow",
 } satisfies Record<keyof ConfigForm, string>;
 

@@ -94,12 +94,12 @@ function model(value: string | undefined): string | undefined {
   return value === undefined || value === "default" ? undefined : value;
 }
 
-function readToolHooks(options: ProviderCallOptions): NonNullable<Options["hooks"]> {
+function readOnlyToolHooks(options: ProviderCallOptions): NonNullable<Options["hooks"]> {
   return {
     PostToolUse: [{
-      matcher: "Read",
+      matcher: "Read|WebSearch",
       hooks: [async (input) => {
-        if (input.hook_event_name === "PostToolUse" && input.tool_name === "Read") {
+        if (input.hook_event_name === "PostToolUse" && ["Read", "WebSearch"].includes(input.tool_name)) {
           options.onToolExecution?.({
             provider: "claude",
             tool: input.tool_name,
@@ -132,7 +132,10 @@ export class ClaudeAgent implements ProviderAgent {
     const selectedModel = model(options.model);
     const selectedEffort = effort(options.effort);
     const readableObservationDirectories = options.isolateTools === true ? [] : observationDirectories();
-    const readTools = readableObservationDirectories.length === 0 ? [] : ["Read"];
+    const readTools = options.isolateTools === true ? [] : [
+      ...(readableObservationDirectories.length === 0 ? [] : ["Read"]),
+      ...(options.webSearchEnabled === true ? ["WebSearch"] : []),
+    ];
     const sdkOptions: Options = {
       abortController: controller,
       cwd: options.cwd,
@@ -162,7 +165,7 @@ export class ClaudeAgent implements ProviderAgent {
         : { outputFormat: { type: "json_schema", schema: options.schema } }),
       ...(options.executable === undefined ? {} : { pathToClaudeCodeExecutable: options.executable }),
       ...(options.session.mode === "resume" ? { resume: options.session.id } : {}),
-      ...(options.onToolExecution === undefined ? {} : { hooks: readToolHooks(options) }),
+      ...(options.onToolExecution === undefined ? {} : { hooks: readOnlyToolHooks(options) }),
     };
     let finalText = "";
     let sessionId = options.session.id;

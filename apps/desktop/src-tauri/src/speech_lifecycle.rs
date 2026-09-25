@@ -78,8 +78,6 @@ pub(crate) struct CancelOutcome {
     pub(crate) generation: Option<u64>,
     pub(crate) cancellation: Option<CancellationToken>,
     pub(crate) control: Option<SpeechSessionControl>,
-    #[cfg(test)]
-    pub(crate) changed: bool,
     pub(crate) startup_owned: bool,
     pub(crate) message: Option<CancelMessage>,
 }
@@ -239,8 +237,6 @@ impl SpeechLifecycle {
                 generation: Some(self.next_generation),
                 cancellation: None,
                 control: None,
-                #[cfg(test)]
-                changed: false,
                 startup_owned: false,
                 message: Some(CancelMessage::Sending),
             };
@@ -250,8 +246,6 @@ impl SpeechLifecycle {
                 generation: Some(self.next_generation),
                 cancellation: None,
                 control: None,
-                #[cfg(test)]
-                changed: false,
                 startup_owned: false,
                 message: Some(CancelMessage::Ending),
             };
@@ -269,8 +263,6 @@ impl SpeechLifecycle {
                     generation: Some(generation),
                     cancellation: Some(cancellation),
                     control: None,
-                    #[cfg(test)]
-                    changed: true,
                     startup_owned: true,
                     message: None,
                 }
@@ -287,8 +279,6 @@ impl SpeechLifecycle {
                     generation: Some(generation),
                     cancellation: Some(cancellation),
                     control: Some(control),
-                    #[cfg(test)]
-                    changed: true,
                     startup_owned: false,
                     message: None,
                 }
@@ -300,8 +290,6 @@ impl SpeechLifecycle {
                     generation: Some(generation),
                     cancellation: None,
                     control: None,
-                    #[cfg(test)]
-                    changed: true,
                     startup_owned: false,
                     message: None,
                 }
@@ -310,8 +298,6 @@ impl SpeechLifecycle {
                 generation: None,
                 cancellation: None,
                 control: None,
-                #[cfg(test)]
-                changed: false,
                 startup_owned: false,
                 message: None,
             },
@@ -341,19 +327,6 @@ impl SpeechLifecycle {
         } else {
             false
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn claim_final(
-        &mut self,
-        generation: u64,
-        source: SpeechSource,
-        confirm_before_send: bool,
-    ) -> Option<FinalOutcome> {
-        self.claim_final_outcome(
-            generation,
-            crate::speech_presenter::final_outcome(source, confirm_before_send),
-        )
     }
 
     pub(crate) fn claim_final_outcome(
@@ -559,4 +532,3 @@ impl SpeechLifecycle {
         self.revision = self.revision.saturating_add(1);
     }
 }
-

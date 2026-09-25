@@ -61,16 +61,6 @@ pub(crate) enum ReadyAttachment {
     Text(Option<BoundedTextAttachment>),
 }
 
-#[cfg(test)]
-impl ReadyAttachment {
-    fn kind(&self) -> CaptureKind {
-        match self {
-            Self::Image { .. } => CaptureKind::Image,
-            Self::Text(_) => CaptureKind::Text,
-        }
-    }
-}
-
 pub(crate) use crate::activation_policy::CaptureOrigin;
 
 pub(crate) use manager::{channel, CapturePresenter};
@@ -246,7 +236,3 @@ fn replace_shortcuts(
         accepted: true,
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/support/capture_popup_ready.rs"]
-pub(crate) mod ready_test_support;

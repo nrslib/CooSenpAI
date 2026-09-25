@@ -11,6 +11,9 @@ pub(super) enum ProviderStreamUpdate {
     Reset {
         input_id: String,
     },
+    Committed {
+        input_id: String,
+    },
     Usage {
         input_id: String,
         usage: ProviderUsage,
@@ -24,6 +27,12 @@ pub(super) struct RuntimeProviderEvents {
 }
 
 impl ProviderEventSink for RuntimeProviderEvents {
+    fn message_committed(&self) {
+        let _ = self.sender.send(ProviderStreamUpdate::Committed {
+            input_id: self.input_id.clone(),
+        });
+    }
+
     fn delta(&self, text: &str) {
         let _ = self.sender.send(ProviderStreamUpdate::Delta {
             input_id: self.input_id.clone(),

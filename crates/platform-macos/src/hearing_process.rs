@@ -3,7 +3,7 @@ use coosenpai_core::interactive_process::{
     InteractiveProcess, InteractiveProcessControl, InteractiveProcessEvent,
     InteractiveProcessRequest,
 };
-use coosenpai_core::ports::{HearingEvent, PortError, RuntimeLogger};
+use coosenpai_core::ports::{decode_hearing_event, HearingEvent, PortError, RuntimeLogger};
 use coosenpai_core::state::AudioObservationSource;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,19 +11,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const MAX_RESTART_ATTEMPTS: u8 = 3;
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TestProcessEvent {
-    Spawned,
-    TerminationRequested,
-    Reaped,
-    RestartDelayStarted,
-}
-
-#[cfg(test)]
-pub(crate) type TestProcessObserver =
-    Arc<dyn Fn(AudioObservationSource, TestProcessEvent) + Send + Sync>;
 
 pub(crate) struct SourceProcessSpec {
     pub(crate) source: AudioObservationSource,
@@ -33,8 +20,6 @@ pub(crate) struct SourceProcessSpec {
     pub(crate) initial_error: Option<PortError>,
     pub(crate) parent_cancellation: CancellationToken,
     pub(crate) logger: Arc<dyn RuntimeLogger>,
-    #[cfg(test)]
-    pub(crate) test_process_observer: Option<TestProcessObserver>,
 }
 
 pub(crate) struct SourceProcessEvent {
@@ -45,16 +30,25 @@ pub(crate) struct SourceProcessEvent {
 pub(crate) enum SourceProcessEventKind {
     Restarting,
     Event(HearingEvent),
-    Unavailable,
+    Unavailable { error: Option<PortError> },
     Exhausted { error: Option<PortError> },
 }
 
 enum ProcessOutcome {
     Restart {
         error: Option<PortError>,
-        ready_seen: bool,
+        reset_restart_budget: bool,
     },
     Stopped(Result<(), PortError>),
+}
+
+struct ForwardSanitizedFinalContext<'a> {
+    source: AudioObservationSource,
+    events: &'a mpsc::Sender<SourceProcessEvent>,
+    cancellation: &'a CancellationToken,
+    parent_cancellation: &'a CancellationToken,
+    logger: &'a dyn RuntimeLogger,
+    diagnostic_logged: bool,
 }
 
 pub(crate) async fn run_source_process(
@@ -104,8 +98,6 @@ pub(crate) async fn run_source_process(
                     &cancellation,
                     &spec.parent_cancellation,
                     spec.logger.as_ref(),
-                    #[cfg(test)]
-                    spec.test_process_observer.as_ref(),
                 )
                 .await
                 {
@@ -122,14 +114,15 @@ pub(crate) async fn run_source_process(
             &cancellation,
             &spec.parent_cancellation,
             spec.logger.as_ref(),
-            #[cfg(test)]
-            spec.test_process_observer.as_ref(),
         )
         .await;
         match outcome {
             ProcessOutcome::Stopped(result) => return result,
-            ProcessOutcome::Restart { error, ready_seen } => {
-                if ready_seen {
+            ProcessOutcome::Restart {
+                error,
+                reset_restart_budget,
+            } => {
+                if reset_restart_budget {
                     restart_attempts = 0;
                 }
                 if !schedule_restart(
@@ -140,8 +133,6 @@ pub(crate) async fn run_source_process(
                     &cancellation,
                     &spec.parent_cancellation,
                     spec.logger.as_ref(),
-                    #[cfg(test)]
-                    spec.test_process_observer.as_ref(),
                 )
                 .await
                 {
@@ -164,10 +155,6 @@ async fn spawn_process(spec: &SourceProcessSpec) -> Result<InteractiveProcess, P
     )
     .await
     .map_err(process_error)?;
-    #[cfg(test)]
-    if let Some(observer) = spec.test_process_observer.as_ref() {
-        observer(spec.source, TestProcessEvent::Spawned);
-    }
     Ok(process)
 }
 
@@ -180,19 +167,7 @@ async fn schedule_restart(
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
-    #[cfg(test)] observer: Option<&TestProcessObserver>,
 ) -> bool {
-    if !send_source_event(
-        events,
-        source,
-        SourceProcessEventKind::Unavailable,
-        cancellation,
-        parent_cancellation,
-    )
-    .await
-    {
-        return false;
-    }
     if let Some(error) = error.as_ref() {
         let _ = logger.write(
             "WARN",
@@ -202,11 +177,22 @@ async fn schedule_restart(
             ),
         );
     }
+    if !send_source_event(
+        events,
+        source,
+        SourceProcessEventKind::Unavailable { error },
+        cancellation,
+        parent_cancellation,
+    )
+    .await
+    {
+        return false;
+    }
     if *restart_attempts >= MAX_RESTART_ATTEMPTS {
         let _ = send_source_event(
             events,
             source,
-            SourceProcessEventKind::Exhausted { error },
+            SourceProcessEventKind::Exhausted { error: None },
             cancellation,
             parent_cancellation,
         )
@@ -217,25 +203,36 @@ async fn schedule_restart(
     let delay = restart_delay(*restart_attempts);
     let delay_sleep = tokio::time::sleep(delay);
     tokio::pin!(delay_sleep);
-    #[cfg(test)]
-    {
-        use std::future::Future;
-
-        // テスト通知を送る前にタイマーを登録し、通知を基準時刻として扱えるようにする。
-        std::future::poll_fn(|context| {
-            let _ = delay_sleep.as_mut().poll(context);
-            std::task::Poll::Ready(())
-        })
-        .await;
-        if let Some(observer) = observer {
-            observer(source, TestProcessEvent::RestartDelayStarted);
-        }
-    }
     tokio::select! {
         _ = &mut delay_sleep => true,
         _ = cancellation.cancelled() => false,
         _ = parent_cancellation.cancelled() => false,
     }
+}
+
+async fn forward_sanitized_final(
+    event: HearingEvent,
+    reason: &str,
+    context: &mut ForwardSanitizedFinalContext<'_>,
+) -> bool {
+    if !context.diagnostic_logged {
+        let _ = context.logger.write(
+            "WARN",
+            &format!(
+                "speaker-metadata-unavailable utterance-identification-unavailable transcription-continued source={} path={reason}",
+                source_name(context.source),
+            ),
+        );
+        context.diagnostic_logged = true;
+    }
+    send_source_event(
+        context.events,
+        context.source,
+        SourceProcessEventKind::Event(event),
+        context.cancellation,
+        context.parent_cancellation,
+    )
+    .await
 }
 
 async fn monitor_process(
@@ -245,10 +242,17 @@ async fn monitor_process(
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
-    #[cfg(test)] observer: Option<&TestProcessObserver>,
 ) -> ProcessOutcome {
     let control = process.control();
-    let mut ready_seen = false;
+    let mut valid_final_seen = false;
+    let mut forward_context = ForwardSanitizedFinalContext {
+        source,
+        events,
+        cancellation,
+        parent_cancellation,
+        logger,
+        diagnostic_logged: false,
+    };
     let device_started = std::time::Instant::now();
     let _ = logger.write(
         "INFO",
@@ -271,91 +275,122 @@ async fn monitor_process(
         };
         match event {
             Some(Ok(InteractiveProcessEvent::StdoutLine(line))) => {
-                match serde_json::from_slice::<HearingEvent>(&line) {
-                    Ok(event) if !event.is_valid_for_source(source) => {
-                        let error = PortError::Unavailable(
-                            "聴覚観察 helper の話者情報が不正です".to_owned(),
-                        );
-                        return terminate_before_restart(
-                            #[cfg(test)]
-                            source,
-                            process,
-                            &control,
-                            Some(error),
-                            ready_seen,
-                            cancellation,
-                            parent_cancellation,
-                            logger,
-                            #[cfg(test)]
-                            observer,
-                        )
-                        .await;
-                    }
-                    Ok(event @ HearingEvent::Ready { .. }) => {
-                        let _ = logger.write("INFO", &format!("hearing-start: source={source:?} stage=device-ready phase=end elapsed-ms={}", device_started.elapsed().as_millis()));
-                        ready_seen = true;
-                        if !send_source_event(
-                            events,
-                            source,
-                            SourceProcessEventKind::Event(event),
-                            cancellation,
-                            parent_cancellation,
-                        )
-                        .await
-                        {
-                            return ProcessOutcome::Stopped(
-                                cancel_and_reap(process, &control, logger).await,
-                            );
+                match decode_hearing_event(&line) {
+                    Ok(decoded) => {
+                        let (event, wire_metadata_reason) = decoded.into_parts();
+                        if let Some(reason) = wire_metadata_reason {
+                            if event.is_valid_required_final_for_source(source)
+                                && event.is_valid_for_source(source)
+                            {
+                                valid_final_seen = true;
+                                if !forward_sanitized_final(event, reason, &mut forward_context)
+                                    .await
+                                {
+                                    return ProcessOutcome::Stopped(
+                                        cancel_and_reap(process, &control, logger).await,
+                                    );
+                                }
+                                continue;
+                            }
                         }
-                    }
-                    Ok(HearingEvent::Error { ref kind, .. }) if kind == "no-input-source" => {}
-                    Ok(HearingEvent::Closed) => {
-                        return terminate_before_restart(
-                            #[cfg(test)]
-                            source,
-                            process,
-                            &control,
-                            None,
-                            ready_seen,
-                            cancellation,
-                            parent_cancellation,
-                            logger,
-                            #[cfg(test)]
-                            observer,
-                        )
-                        .await;
-                    }
-                    Ok(event) => {
-                        if !send_source_event(
-                            events,
-                            source,
-                            SourceProcessEventKind::Event(event),
-                            cancellation,
-                            parent_cancellation,
-                        )
-                        .await
-                        {
-                            return ProcessOutcome::Stopped(
-                                cancel_and_reap(process, &control, logger).await,
-                            );
+                        match event {
+                            event if !event.is_valid_for_source(source) => {
+                                if let Some((event, reason)) =
+                                    event.detach_invalid_speaker_metadata(source)
+                                {
+                                    valid_final_seen = true;
+                                    if !forward_sanitized_final(
+                                        event,
+                                        &reason,
+                                        &mut forward_context,
+                                    )
+                                    .await
+                                    {
+                                        return ProcessOutcome::Stopped(
+                                            cancel_and_reap(process, &control, logger).await,
+                                        );
+                                    }
+                                    continue;
+                                }
+                                let error = invalid_protocol_error(
+                                    source,
+                                    "聴覚観察 helper の話者情報が不正です",
+                                    "聴覚観察 helper のイベント形式が不正です",
+                                );
+                                return terminate_before_restart(
+                                    process,
+                                    &control,
+                                    Some(error),
+                                    valid_final_seen,
+                                    cancellation,
+                                    parent_cancellation,
+                                    logger,
+                                )
+                                .await;
+                            }
+                            event @ HearingEvent::Ready { .. } => {
+                                let _ = logger.write("INFO", &format!("hearing-start: source={source:?} stage=device-ready phase=end elapsed-ms={}", device_started.elapsed().as_millis()));
+                                if !send_source_event(
+                                    events,
+                                    source,
+                                    SourceProcessEventKind::Event(event),
+                                    cancellation,
+                                    parent_cancellation,
+                                )
+                                .await
+                                {
+                                    return ProcessOutcome::Stopped(
+                                        cancel_and_reap(process, &control, logger).await,
+                                    );
+                                }
+                            }
+                            HearingEvent::Error { ref kind, .. } if kind == "no-input-source" => {}
+                            HearingEvent::Closed => {
+                                return terminate_before_restart(
+                                    process,
+                                    &control,
+                                    None,
+                                    valid_final_seen,
+                                    cancellation,
+                                    parent_cancellation,
+                                    logger,
+                                )
+                                .await;
+                            }
+                            event => {
+                                if matches!(event, HearingEvent::Final { .. }) {
+                                    valid_final_seen = true;
+                                }
+                                if !send_source_event(
+                                    events,
+                                    source,
+                                    SourceProcessEventKind::Event(event),
+                                    cancellation,
+                                    parent_cancellation,
+                                )
+                                .await
+                                {
+                                    return ProcessOutcome::Stopped(
+                                        cancel_and_reap(process, &control, logger).await,
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(_) => {
-                        let error = PortError::Unavailable(
-                            "聴覚観察 helper が不正な応答を返しました".to_owned(),
+                        let error = invalid_protocol_error(
+                            source,
+                            "聴覚観察 helper の話者イベント JSON が不正です",
+                            "聴覚観察 helper のイベント JSON が不正です",
                         );
                         return terminate_before_restart(
-                            #[cfg(test)]
-                            source,
                             process,
                             &control,
                             Some(error),
-                            ready_seen,
+                            valid_final_seen,
                             cancellation,
                             parent_cancellation,
                             logger,
-                            #[cfg(test)]
-                            observer,
                         )
                         .await;
                     }
@@ -369,39 +404,34 @@ async fn monitor_process(
                     return ProcessOutcome::Stopped(Ok(()));
                 }
                 let error = (status != Some(0)).then(|| helper_exit_error(&stderr));
-                return ProcessOutcome::Restart { error, ready_seen };
+                return ProcessOutcome::Restart {
+                    reset_restart_budget: valid_final_seen,
+                    error,
+                };
             }
             Some(Err(error)) => {
                 return terminate_before_restart(
-                    #[cfg(test)]
-                    source,
                     process,
                     &control,
                     Some(process_error(error)),
-                    ready_seen,
+                    valid_final_seen,
                     cancellation,
                     parent_cancellation,
                     logger,
-                    #[cfg(test)]
-                    observer,
                 )
                 .await;
             }
             None => {
                 return terminate_before_restart(
-                    #[cfg(test)]
-                    source,
                     process,
                     &control,
                     Some(PortError::Unavailable(
                         "聴覚観察 helper が停止しました".to_owned(),
                     )),
-                    ready_seen,
+                    valid_final_seen,
                     cancellation,
                     parent_cancellation,
                     logger,
-                    #[cfg(test)]
-                    observer,
                 )
                 .await;
             }
@@ -411,21 +441,15 @@ async fn monitor_process(
 
 #[allow(clippy::too_many_arguments)]
 async fn terminate_before_restart(
-    #[cfg(test)] source: AudioObservationSource,
     process: &mut InteractiveProcess,
     control: &InteractiveProcessControl,
     restart_error: Option<PortError>,
-    ready_seen: bool,
+    valid_final_seen: bool,
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
-    #[cfg(test)] observer: Option<&TestProcessObserver>,
 ) -> ProcessOutcome {
     let termination_error = control.terminate(false).await.err().map(process_error);
-    #[cfg(test)]
-    if let Some(observer) = observer {
-        observer(source, TestProcessEvent::TerminationRequested);
-    }
     let mut wait_error = restart_error;
     let mut stopping = cancellation.is_cancelled() || parent_cancellation.is_cancelled();
 
@@ -451,16 +475,12 @@ async fn terminate_before_restart(
         }
         match event {
             Some(Ok(InteractiveProcessEvent::Exited { .. })) => {
-                #[cfg(test)]
-                if let Some(observer) = observer {
-                    observer(source, TestProcessEvent::Reaped);
-                }
                 if stopping {
                     return ProcessOutcome::Stopped(Ok(()));
                 }
                 return ProcessOutcome::Restart {
                     error: wait_error,
-                    ready_seen,
+                    reset_restart_budget: valid_final_seen,
                 };
             }
             Some(Ok(InteractiveProcessEvent::StdoutLine(_))) => {}
@@ -481,6 +501,18 @@ async fn terminate_before_restart(
                 return ProcessOutcome::Stopped(Err(error));
             }
         }
+    }
+}
+
+fn invalid_protocol_error(
+    source: AudioObservationSource,
+    speaker_message: &str,
+    generic_message: &str,
+) -> PortError {
+    if source == AudioObservationSource::Speaker {
+        PortError::SpeakerProtocol(speaker_message.to_owned())
+    } else {
+        PortError::Protocol(generic_message.to_owned())
     }
 }
 
@@ -557,4 +589,3 @@ fn log_helper_stderr(logger: &dyn RuntimeLogger, line: &[u8]) {
     }
     let _ = logger.write("INFO", &format!("聴覚観察 helper stderr: {message}"));
 }
-

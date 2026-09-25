@@ -4,6 +4,7 @@ import Foundation
 import Speech
 
 struct SpeechRecognitionSegment {
+    let text: String
     let timestamp: TimeInterval
     let duration: TimeInterval
 }
@@ -139,7 +140,11 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
     private func makeTranscription(from result: SFSpeechRecognitionResult) throws -> SpeechTranscription? {
         let transcription = result.bestTranscription
         let segments = transcription.segments.map {
-            SpeechRecognitionSegment(timestamp: $0.timestamp, duration: $0.duration)
+            SpeechRecognitionSegment(
+                text: $0.substring,
+                timestamp: $0.timestamp,
+                duration: $0.duration
+            )
         }
         return try Self.transcription(text: transcription.formattedString, segments: segments, isFinal: result.isFinal)
     }
@@ -149,6 +154,7 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
         segments: [SpeechRecognitionSegment],
         isFinal: Bool
     ) throws -> SpeechTranscription? {
+        var words: [SpeechWordTiming] = []
         let ranges = try segments.compactMap { segment -> CMTimeRange? in
             guard segment.timestamp.isFinite, segment.duration.isFinite,
                   segment.timestamp >= 0, segment.duration >= 0 else {
@@ -163,6 +169,7 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
                 throw SpeechAnalysisFailure(kind: "recognition", message: "音声認識が不正な区間の結果を返しました")
             }
             guard CMTimeCompare(end, start) > 0 else { return nil }
+            words.append(SpeechWordTiming(text: segment.text, start: start, duration: duration))
             return CMTimeRange(start: start, end: end)
         }
         guard let firstRange = ranges.first else { return nil }
@@ -181,7 +188,8 @@ final class OnDeviceSpeechRecognizer: SpeechAnalysis, @unchecked Sendable {
         return SpeechTranscription(
             text: text,
             audioRange: CMTimeRange(start: start, end: end),
-            resultsFinalizationTime: isFinal ? end : .zero
+            resultsFinalizationTime: isFinal ? end : .zero,
+            words: words
         )
     }
 

@@ -4,52 +4,12 @@ use super::*;
 use crate::attachments::bound_text_attachment;
 use crate::companion_cursor::OWNED_USER_ID_PREFIX;
 use crate::companion_storage::{
-    JudgeFeedbackTarget, PendingAttachmentFailure, PendingFrameContextChange, PendingInput,
-    PendingUserMessage,
+    PendingAttachmentFailure, PendingFrameContextChange, PendingInput, PendingUserMessage,
+    MAX_CURSOR_IDS,
 };
 use crate::provider::ProviderMidTurnInput;
 use std::path::PathBuf;
 use uuid::Uuid;
-
-fn judge_feedback_targets(
-    observations: &[crate::state::ObservationRecord],
-    user_input_id: &str,
-) -> Vec<JudgeFeedbackTarget> {
-    let mut targets = Vec::new();
-    for observation in observations {
-        match observation {
-            crate::state::ObservationRecord::Visual(value) => {
-                if let Some(input_id) = value.source_frame_ids.first() {
-                    targets.push(JudgeFeedbackTarget {
-                        input_id: input_id.clone(),
-                        event_time: value.created_at.clone(),
-                        user_input_id: user_input_id.to_owned(),
-                    });
-                }
-                if value.source_frame_ids.is_empty() {
-                    if let Some(segment) = value.audio_segments.first() {
-                        targets.push(JudgeFeedbackTarget {
-                            input_id: segment.id.clone(),
-                            event_time: segment.time.clone(),
-                            user_input_id: user_input_id.to_owned(),
-                        });
-                    }
-                }
-            }
-            crate::state::ObservationRecord::Audio(value) => {
-                targets.push(JudgeFeedbackTarget {
-                    input_id: value.id.clone(),
-                    event_time: value.created_at.clone(),
-                    user_input_id: user_input_id.to_owned(),
-                });
-            }
-            crate::state::ObservationRecord::NoChange(_) => {}
-        }
-    }
-    let mut seen = std::collections::HashSet::new();
-    targets.retain(|target| seen.insert(target.input_id.clone()));
-    targets
-}
 
 impl UserMessagePreparer {
     pub(crate) fn uses_persistent_queue(&self) -> bool {
@@ -236,7 +196,6 @@ impl UserMessagePreparer {
             .transpose()?
             .unwrap_or(0);
         let created_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let judge_feedback_targets = judge_feedback_targets(&observations, &id);
         let attachment_path = match (attachment_source.as_deref(), self.storage.as_ref()) {
             (Some(source), Some(storage)) => {
                 Some(storage.persist_attachment(source, &id, &created_at)?)
@@ -279,7 +238,8 @@ impl UserMessagePreparer {
             attachment_path,
             attachment_text,
             observations,
-            judge_feedback_targets,
+            // 旧cursorのjudge_feedback_targetsは読み取り互換だけを維持し、新規生成しない。
+            judge_feedback_targets: Vec::new(),
             pending_frames,
             hearing_context: Vec::new(),
             pending_audio: Vec::new(),
@@ -290,6 +250,7 @@ impl UserMessagePreparer {
             attachment_failure: None,
             response_attempts: 0,
             response_terminal: false,
+            response_failure: None,
             tutorial_response_key,
         };
         if let Some(storage) = &self.storage {
@@ -319,6 +280,11 @@ impl UserMessagePreparer {
                 cursor.pending_inputs.retain(|input| input.id() != input_id);
                 if !cursor.cancelled_input_ids.iter().any(|id| id == input_id) {
                     cursor.cancelled_input_ids.push(input_id.to_owned());
+                    if cursor.cancelled_input_ids.len() > MAX_CURSOR_IDS {
+                        cursor
+                            .cancelled_input_ids
+                            .drain(..cursor.cancelled_input_ids.len() - MAX_CURSOR_IDS);
+                    }
                 }
                 if let Some(lease) = cursor.user_dispatch.as_mut() {
                     lease.input_ids.retain(|id| id != input_id);
@@ -444,6 +410,9 @@ impl UserMessagePreparer {
                     attempts,
                     terminal,
                 };
+                // この失敗は provider 呼び出し前の添付準備で起きるため、今回の
+                // 応答予算予約を戻す。OCR の上限は attachment_failure で別管理する。
+                message.response_attempts = message.response_attempts.saturating_sub(1);
                 message.attachment_failure = Some(failure.clone());
                 if terminal {
                     if let Some(lease) = cursor.user_dispatch.as_mut() {
@@ -454,6 +423,39 @@ impl UserMessagePreparer {
                     }
                 }
                 Ok(failure)
+            })
+            .map_err(CompanionError::from)
+    }
+
+    pub(crate) fn complete_attachment_preparation(
+        &self,
+        input_ids: &[String],
+    ) -> Result<(), CompanionError> {
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        storage
+            .update_cursor(|cursor| {
+                for input_id in input_ids {
+                    let Some(PendingInput::UserMessage(input)) = cursor
+                        .pending_inputs
+                        .iter_mut()
+                        .find(|pending| pending.id() == input_id)
+                    else {
+                        return Err(PersistenceError::Invalid(
+                            "添付準備を完了する入力が cursor にありません".to_owned(),
+                        ));
+                    };
+                    let retrying_attachment = input
+                        .attachment_failure
+                        .as_ref()
+                        .is_some_and(|failure| !failure.terminal);
+                    if retrying_attachment {
+                        input.attachment_failure = None;
+                        super::user_retry::begin_response_attempt(input)?;
+                    }
+                }
+                Ok(())
             })
             .map_err(CompanionError::from)
     }

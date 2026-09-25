@@ -73,7 +73,8 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
 
 fn main_allows(command: DesktopCommand) -> bool {
     match command {
-        DesktopCommand::WorkApprove
+        DesktopCommand::UtteranceFeedback
+        | DesktopCommand::WorkApprove
         | DesktopCommand::WorkConfigure
         | DesktopCommand::ChatSend
         | DesktopCommand::ChatCancel
@@ -116,7 +117,8 @@ fn main_allows(command: DesktopCommand) -> bool {
         | DesktopCommand::LicenseDocumentOpen
         | DesktopCommand::WatchStart
         | DesktopCommand::WatchStop
-        | DesktopCommand::CaptureStartImage => true,
+        | DesktopCommand::CaptureStartImage
+        | DesktopCommand::DebugWake => true,
         DesktopCommand::CaptureStartText
         | DesktopCommand::CaptureSendImage
         | DesktopCommand::CaptureSendText
@@ -124,7 +126,6 @@ fn main_allows(command: DesktopCommand) -> bool {
         | DesktopCommand::TutorialInteract
         | DesktopCommand::BubbleFastForward
         | DesktopCommand::BubbleNavigate
-        | DesktopCommand::UtteranceFeedback
         | DesktopCommand::TutorialResume
         | DesktopCommand::WatchPowerSuspend
         | DesktopCommand::WatchPowerResume

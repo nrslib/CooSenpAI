@@ -93,6 +93,10 @@ pub(crate) struct WorkApprovalPresenter {
     allow_after_save: Option<String>,
 }
 impl WorkApprovalPresenter {
+    pub(crate) fn snapshot(&self) -> &WorkSnapshot {
+        &self.snapshot
+    }
+
     pub(crate) fn observe(&mut self, snapshot: &AppSnapshot) -> Vec<UiEffect> {
         let manual = snapshot.config.work.approval_mode == ApprovalMode::Manual;
         let changed = self.view.manual != manual;

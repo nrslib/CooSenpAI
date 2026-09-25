@@ -14,6 +14,25 @@ impl RuntimeHandle {
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError> {
+        self.observe_cancellable_with_delivery(frames, cancellation, true)
+            .await
+    }
+
+    pub async fn observe_without_companion_delivery(
+        &self,
+        frames: Vec<ObservationFrameInput>,
+        cancellation: CancellationToken,
+    ) -> Result<ObservationRecord, RuntimeError> {
+        self.observe_cancellable_with_delivery(frames, cancellation, false)
+            .await
+    }
+
+    async fn observe_cancellable_with_delivery(
+        &self,
+        frames: Vec<ObservationFrameInput>,
+        cancellation: CancellationToken,
+        allow_companion_delivery: bool,
+    ) -> Result<ObservationRecord, RuntimeError> {
         self.ensure_open()?;
         let generation = self.watch_scope_generation();
         if frames
@@ -24,16 +43,15 @@ impl RuntimeHandle {
         }
         let (response, result) = oneshot::channel();
         self.control_tx
-            .send(ControlCommand::Observe {
+            .send(ControlCommand::Observe(ObserveRequest {
                 frames,
                 audio: Vec::new(),
+                allow_companion_delivery,
                 cancellation,
                 response,
-            })
+            }))
             .await
             .map_err(|_| RuntimeError::Closed)?;
-        #[cfg(test)]
-        test_barrier::wait("observe queued").await;
         result.await.map_err(|_| RuntimeError::ResponseDropped)?
     }
 
@@ -50,6 +68,27 @@ impl RuntimeHandle {
         observations: Vec<ObservationRecord>,
         cancellation: CancellationToken,
     ) -> Result<CompanionResponse, RuntimeError> {
+        self.companion_observations_cancellable_with_result(observations, cancellation)
+            .await
+            .map(|result| result.response)
+    }
+
+    pub async fn companion_observations_with_result(
+        &self,
+        observations: Vec<ObservationRecord>,
+    ) -> Result<CompanionObservationResult, RuntimeError> {
+        self.companion_observations_cancellable_with_result(
+            observations,
+            self.cancellation.child_token(),
+        )
+        .await
+    }
+
+    pub async fn companion_observations_cancellable_with_result(
+        &self,
+        observations: Vec<ObservationRecord>,
+        cancellation: CancellationToken,
+    ) -> Result<CompanionObservationResult, RuntimeError> {
         self.ensure_open()?;
         let (response, result) = oneshot::channel();
         self.control_tx
@@ -101,12 +140,13 @@ impl RuntimeHandle {
         }
         let (response, result) = oneshot::channel();
         self.control_tx
-            .send(ControlCommand::Observe {
+            .send(ControlCommand::Observe(ObserveRequest {
                 frames: Vec::new(),
                 audio,
+                allow_companion_delivery: true,
                 cancellation,
                 response,
-            })
+            }))
             .await
             .map_err(|_| RuntimeError::Closed)?;
         result.await.map_err(|_| RuntimeError::ResponseDropped)?
@@ -160,6 +200,30 @@ impl RuntimeHandle {
         context_notice: String,
         cancellation: CancellationToken,
     ) -> Result<CompanionResponse, RuntimeError> {
+        self.companion_nudge_cancellable_with_result(observation, context_notice, cancellation)
+            .await
+            .map(|result| result.response)
+    }
+
+    pub async fn companion_nudge_with_result(
+        &self,
+        observation: ObservationRecord,
+        context_notice: String,
+    ) -> Result<CompanionObservationResult, RuntimeError> {
+        self.companion_nudge_cancellable_with_result(
+            observation,
+            context_notice,
+            self.cancellation.child_token(),
+        )
+        .await
+    }
+
+    pub async fn companion_nudge_cancellable_with_result(
+        &self,
+        observation: ObservationRecord,
+        context_notice: String,
+        cancellation: CancellationToken,
+    ) -> Result<CompanionObservationResult, RuntimeError> {
         self.ensure_open()?;
         let (response, result) = oneshot::channel();
         self.control_tx

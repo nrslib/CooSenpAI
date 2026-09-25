@@ -27,12 +27,13 @@ function errorMessage(event: Event): string | undefined {
   return typeof record.data?.message === "string" ? record.data.message : "OpenCode session error";
 }
 
-export function openCodeToolPolicy(): Record<string, boolean> {
+export function openCodeToolPolicy(webSearchEnabled = false): Record<string, boolean> {
   return {
     read: true,
     edit: false,
     bash: false,
     webfetch: false,
+    websearch: webSearchEnabled,
   };
 }
 
@@ -102,7 +103,7 @@ export class OpenCodeAgent implements ProviderAgent {
         directory: options.cwd,
         model,
         agent: "coosenpai",
-        tools: openCodeToolPolicy(),
+        tools: openCodeToolPolicy(options.webSearchEnabled === true),
         system: options.systemPrompt,
         ...(options.effort === undefined || options.effort.value === "default"
           ? {}

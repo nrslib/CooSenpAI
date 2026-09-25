@@ -1,4 +1,6 @@
-use super::{retain_entries, BubbleEntry, BubbleMilestone, BubbleRecord, BubbleState};
+use super::{
+    requires_action, retain_entries, BubbleEntry, BubbleMilestone, BubbleRecord, BubbleState,
+};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -28,7 +30,7 @@ impl BubbleState {
         let before = self.entries.len();
         retain_entries(&mut self.entries, |entry| {
             !ids.contains(&entry.record.id)
-                || (entry.display_order.is_some() && entry.record.interaction.is_none())
+                || (entry.display_order.is_some() && !requires_action(&entry.record.interaction))
         });
         let mut changed = before != self.entries.len();
         for entry in self
@@ -121,7 +123,7 @@ impl BubbleState {
             .iter_mut()
             .find(|entry| Some(&entry.record.id) == self.active_id.as_ref())
         {
-            if previous.read.is_cancelled() && previous.record.interaction.is_none() {
+            if previous.read.is_cancelled() && !requires_action(&previous.record.interaction) {
                 previous.expires_at.get_or_insert(now + previous.duration);
                 previous.restarts_setup_on_dismiss = false;
             }
@@ -155,7 +157,7 @@ impl BubbleState {
         entry.read.cancel();
         entry.reading_until = None;
         entry.reading_remaining = Duration::ZERO;
-        if !entry.record.persistent && entry.record.interaction.is_none() {
+        if !entry.record.persistent && !requires_action(&entry.record.interaction) {
             entry.expires_at = Some(now + entry.duration);
         }
         true
@@ -202,7 +204,7 @@ impl BubbleState {
     pub(crate) fn navigate(&mut self, direction: BubbleDeckDirection, now: Instant) -> bool {
         if self
             .active_entry()
-            .is_some_and(|entry| entry.record.interaction.is_some())
+            .is_some_and(|entry| requires_action(&entry.record.interaction))
             || self.front_record().is_some_and(is_critical_notification)
         {
             return false;
@@ -278,7 +280,7 @@ impl BubbleState {
         let restored_interrupted_history = self.interrupted_history.is_some()
             && !self.entries.iter().any(|entry| {
                 is_critical_notification(&entry.record)
-                    && (!entry.read.is_cancelled() || entry.record.interaction.is_some())
+                    && (!entry.read.is_cancelled() || requires_action(&entry.record.interaction))
             });
         if restored_interrupted_history {
             let (history, active) = self
@@ -298,7 +300,7 @@ impl BubbleState {
         let paused = self.history_id.is_some();
         let can_advance = !paused
             && self.active_entry().is_none_or(|entry| {
-                entry.record.interaction.is_none() && entry.read.is_cancelled()
+                !requires_action(&entry.record.interaction) && entry.read.is_cancelled()
             });
         if can_advance {
             let next = self
@@ -313,7 +315,7 @@ impl BubbleState {
                 .or_else(|| {
                     self.entries.iter().find(|entry| {
                         entry.display_order.is_some()
-                            && entry.record.interaction.is_some()
+                            && requires_action(&entry.record.interaction)
                             && Some(&entry.record.id) != self.active_id.as_ref()
                     })
                 })
@@ -407,5 +409,5 @@ fn is_critical_notification(record: &BubbleRecord) -> bool {
 }
 
 fn is_stack_limited(entry: &BubbleEntry) -> bool {
-    !is_critical_notification(&entry.record) && entry.record.interaction.is_none()
+    !is_critical_notification(&entry.record) && !requires_action(&entry.record.interaction)
 }

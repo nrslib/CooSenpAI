@@ -35,14 +35,6 @@ pub(crate) async fn deliver(
     deliver_plan(tutorial, &mut plan, effects).await
 }
 
-#[cfg(test)]
-pub(crate) async fn reconcile(
-    tutorial: &Mutex<TutorialController>,
-    effects: &dyn TutorialNoticeEffects,
-) -> Result<TutorialBubbleOutcome, RuntimeError> {
-    reconcile_except(tutorial, effects, &[]).await
-}
-
 pub(crate) async fn reconcile_except(
     tutorial: &Mutex<TutorialController>,
     effects: &dyn TutorialNoticeEffects,
@@ -98,4 +90,3 @@ async fn deliver_plan(
 fn onboarding_error(error: coosenpai_core::onboarding::OnboardingError) -> RuntimeError {
     RuntimeError::Factory(error.to_string())
 }
-

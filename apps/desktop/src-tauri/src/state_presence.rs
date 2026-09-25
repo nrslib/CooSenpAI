@@ -111,6 +111,7 @@ impl DesktopState {
         self.core_runtime()
             .companion_nudge(observation, context, self.cancellation.child_token())
             .await
+            .map(|_| ())
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 

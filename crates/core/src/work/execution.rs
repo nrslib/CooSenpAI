@@ -93,6 +93,7 @@ impl ApprovalReviewer for Reviewer {
                     prompt: json!({"kind":request.kind,"cwd":request.target,"root":request.root,"brief":self.brief,"effect":request.reason}).to_string(),
                     images: vec![],
                     tools_disabled: true,
+                    web_search_enabled: false,
                     output_schema: Some(schema),
                     output_validation_schema: None,
                     session: SessionRequest::Isolated,

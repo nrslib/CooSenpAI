@@ -49,7 +49,7 @@ fn copy_latest_reply(
     let Some(reply) = conversation
         .iter()
         .rev()
-        .find(|entry| entry.role == ConversationRole::Companion)
+        .find(|entry| entry.role == ConversationRole::Companion && !entry.is_response_failure())
     else {
         return Ok(false);
     };

@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 
+import { ConversationFeedback } from "./ConversationFeedback.js";
+import { ConversationProgress } from "./ConversationProgress.js";
 import { WorkApproval } from "./WorkApproval.js";
 import { Composer } from "./Composer.js";
+import { renderUiText } from "../app-view.js";
 import { desktopApi } from "../ipc.js";
 import { AttachmentImage } from "./AttachmentImage.js";
 import { DebugDrawer } from "./DebugDrawer.js";
@@ -26,10 +29,13 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
   const previousScrollTop = useRef(0);
   const entryElements = useRef(new Map<string, HTMLDivElement>());
   const selectedId = view?.selectedId;
-  const newestEntryId = snapshot.conversation.at(-1)?.id;
-  const unreadIndex = unreadBoundaryIndex(snapshot.conversation, snapshot.unreadCount);
-  const respondedUserIds = new Set(snapshot.conversation.flatMap((entry) => entry.role === "companion" ? entry.causedByIds ?? [] : []));
-  const thinking = view?.thinking === true;
+  const visibleConversation = snapshot.conversation.filter((entry) => !isResponseFailureHistoryEntry(entry));
+  const newestEntryId = visibleConversation.at(-1)?.id;
+  const unreadIndex = unreadBoundaryIndex(visibleConversation, snapshot.unreadCount);
+  const respondedUserIds = new Set(snapshot.conversation.flatMap((entry) => entry.role === "companion" && entry.messageKind !== "progress" ? entry.causedByIds ?? [] : []));
+  const notifyLayout = useCallback(() => {
+    void desktopApi.conversationInput({ type: "layout" });
+  }, []);
   const action = (inputId: string, action: ConversationAction): void => {
     if (view !== undefined) void desktopApi.conversationInput({ type: "action", action, inputId, generation: view.operationGeneration });
   };
@@ -77,9 +83,11 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
         previousScrollTop.current = top;
       }}
     >
-      {snapshot.conversation.length === 0 ? <div className="conversation-empty"><p>{t("conversation.empty")}</p><span>{t("conversation.emptyPrompt", { name: snapshot.companionDisplayName })}</span></div> : null}
-      {snapshot.conversation.map((entry, index) => {
-        const previous = snapshot.conversation[index - 1];
+      {visibleConversation.length === 0 ? <div className="conversation-empty"><p>{t("conversation.empty")}</p><span>{t("conversation.emptyPrompt", { name: snapshot.companionDisplayName })}</span></div> : null}
+      {visibleConversation.map((entry, index) => {
+        const feedback = view?.feedback[entry.id];
+        const responseFailure = view?.actions[entry.id]?.failure;
+        const previous = visibleConversation[index - 1];
         const showDate = previous === undefined || conversationDate(previous.createdAt, locale) !== conversationDate(entry.createdAt, locale);
         const sourceIds = entry.role === "user"
           ? [entry.id]
@@ -112,26 +120,44 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
               {entry.attachmentPath === undefined ? null : <AttachmentImage path={entry.attachmentPath} />}
               {attachedText === undefined ? null : <blockquote className="attachment-text-preview">{attachedText.preview}{attachedText.previewTruncated ? "…" : ""}{attachedText.truncationNotice === undefined ? null : <small>{attachedText.truncationNotice}</small>}</blockquote>}
               <p>{entry.message}</p>
+              {entry.role === "companion" && feedback?.available ? <ConversationFeedback
+                id={entry.id} row={feedback}
+                onInput={(action, value) => { void desktopApi.conversationInput({ type: "feedback", id: entry.id, action, value, revision: feedback.revision, generation: snapshot.selectedConversationGeneration }); }}
+              /> : null}
               {snapshot.config.debug.enabled && entryDetail !== undefined
                 ? <button className="detail-link" type="button" onClick={() => setDetail(entryDetail)}>{t("conversation.details")}</button>
                 : null}
             </div>
-            {entry.role === "user" && attachmentState !== undefined
+            {responseFailure !== undefined
+              ? <div className="message-state" role="alert">{renderUiText(responseFailure, t)}<button type="button" disabled={!view?.actions[entry.id]?.cancel} onClick={() => action(entry.id, "cancel")}>{t("conversation.cancel")}</button><button type="button" disabled={!view?.actions[entry.id]?.retry} onClick={() => action(entry.id, "retry")}>{t("common.retry")}</button></div>
+              : entry.role === "user" && attachmentState !== undefined
               ? <div className="message-state">{attachmentState.message}{attachmentState.terminal ? <><button type="button" disabled={!view?.actions[entry.id]?.cancel} onClick={() => action(entry.id, "cancel")}>{t("conversation.cancel")}</button><button type="button" disabled={!view?.actions[entry.id]?.retry} onClick={() => action(entry.id, "retry")}>{t("common.retry")}</button></> : null}</div>
               : entry.role === "user" && snapshot.cancelledUserMessageIds.includes(entry.id)
               ? <div className="message-state">{t("conversation.cancelled")} <button type="button" disabled={!view?.actions[entry.id]?.resend} onClick={() => action(entry.id, "resend")}>{cancelledRetryLabel(entry.attachmentPath !== undefined || entry.attachmentText !== undefined, locale)}</button></div>
               : entry.role === "user" && !respondedUserIds.has(entry.id)
                 ? snapshot.config.chat.whileThinking === "append" && snapshot.activeUserMessageId !== undefined && snapshot.activeUserMessageId !== entry.id
                   ? null
-                  : <div className="message-state">{snapshot.activeUserMessageId === entry.id ? t("conversation.thinking") : t("conversation.queued")}</div>
+                  : snapshot.activeUserMessageId === entry.id ? null : <div className="message-state">{t("conversation.queued")}</div>
                 : null}
           </div>
         </div>;
       })}
+      {view?.progress.visible ? <ConversationProgress
+        progress={view.progress}
+        onToggle={() => {
+          if (view.progress.inputId !== null) void desktopApi.conversationInput({ type: "progressToggle", inputId: view.progress.inputId, generation: view.operationGeneration });
+        }}
+        onCancel={() => {
+          if (view.progress.inputId !== null) action(view.progress.inputId, "cancel");
+        }}
+        onLayoutChange={notifyLayout}
+      /> : null}
+      {view?.thinking && snapshot.companionDraft !== undefined && snapshot.companionDraft.length > 0
+        ? <div className="thinking-row" aria-live="polite"><span className="streaming-draft">{snapshot.companionDraft}</span></div>
+        : null}
       {view?.workInputId != null ? <WorkApproval
         key={view.workInputId} inputId={view.workInputId}
-        onLayoutChange={() => { void desktopApi.conversationInput({ type: "layout" }); }} /> : null}
-      {thinking ? <div className="thinking-row" aria-live="polite">{snapshot.companionDraft === undefined || snapshot.companionDraft.length === 0 ? <span className="thinking-dots"><i /><i /><i /></span> : <span className="streaming-draft">{snapshot.companionDraft}</span>}<span>{snapshot.companionDraft === undefined || snapshot.companionDraft.length === 0 ? t("conversation.thinkingWithName", { name: snapshot.companionDisplayName }) : ""}</span></div> : null}
+        onLayoutChange={notifyLayout} /> : null}
     </div>
     {view?.error == null ? null : <p role="alert">{view.error}</p>}
   </section>
@@ -142,6 +168,12 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
 
     {detail === undefined ? null : <DebugDrawer detail={detail} close={() => setDetail(undefined)} />}
   </>;
+}
+
+function isResponseFailureHistoryEntry(entry: AppSnapshot["conversation"][number]): boolean {
+  return entry.role === "companion"
+    && entry.messageKind === "system"
+    && entry.message.startsWith("response-failure;");
 }
 
 export function cancelledRetryLabel(hasAttachment: boolean, locale: "ja" | "en" = "ja"): string {

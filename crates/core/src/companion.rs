@@ -146,6 +146,7 @@ pub enum AttachmentOcrFailureKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ObservationFailureKind {
+    Ignored,
     Infrastructure,
     DeterministicObservation,
 }
@@ -153,9 +154,9 @@ enum ObservationFailureKind {
 impl CompanionError {
     fn observation_failure_kind(&self) -> ObservationFailureKind {
         match self {
+            Self::Cancelled => ObservationFailureKind::Ignored,
             Self::ObservationPrompt => ObservationFailureKind::DeterministicObservation,
-            Self::Cancelled
-            | Self::Provider(_)
+            Self::Provider(_)
             | Self::Output
             | Self::LimitReached
             | Self::Usage(_)
@@ -373,10 +374,15 @@ impl CompanionAgent {
     }
 
     pub(crate) fn has_pending_user_inputs(&self) -> Result<bool, CompanionError> {
+        // provider の terminal は履歴へ移して cursor から除去する。添付 OCR の
+        // terminal は明示的な cancel/retry まで cursor に所有させ、観察を先行させない。
         if !self.uses_persistent_user_queue() {
-            return Ok(!self.pending_user_messages.is_empty());
+            return Ok(self
+                .pending_user_messages
+                .iter()
+                .any(|input| !input.response_terminal));
         }
-        Ok(!self
+        Ok(self
             .storage
             .as_ref()
             .ok_or_else(|| {
@@ -386,7 +392,12 @@ impl CompanionAgent {
             })?
             .reconcile_pending_user_inputs()?
             .pending_inputs
-            .is_empty())
+            .iter()
+            .any(|input| match input {
+                crate::companion_storage::PendingInput::UserMessage(input) => {
+                    !input.response_terminal
+                }
+            }))
     }
 
     pub(crate) fn has_runnable_user_inputs(&self) -> Result<bool, CompanionError> {
@@ -553,12 +564,6 @@ impl CompanionAgent {
         if let Some(mailbox) = &self.incoming_mailbox {
             mailbox.recover()?;
         }
-        #[cfg(test)]
-        crate::runtime::test_barrier::wait(&format!(
-            "initialization reconcile: {}",
-            self.display_name()
-        ))
-        .await;
         if self.delivery_ownership == DeliveryOwnership::Owner {
             if let Some(storage) = &self.storage {
                 storage.clear_transient_observation_markers()?;
@@ -630,6 +635,7 @@ impl CompanionAgent {
             self.defer_observations(&observations)?;
             return Ok(CompanionCallOutcome {
                 decision_produced: false,
+                deferred: true,
                 response: silent_response(),
                 data: crate::prompts::CompanionPromptData::default(),
                 observations: Vec::new(),
@@ -649,6 +655,7 @@ impl CompanionAgent {
         if observations.is_empty() {
             return Ok(CompanionCallOutcome {
                 decision_produced: false,
+                deferred: false,
                 response: silent_response(),
                 data: crate::prompts::CompanionPromptData::default(),
                 observations: Vec::new(),
@@ -667,6 +674,7 @@ impl CompanionAgent {
             self.proactive_not_before = None;
             return Ok(CompanionCallOutcome {
                 decision_produced: false,
+                deferred: true,
                 response: silent_response(),
                 data: crate::prompts::CompanionPromptData::default(),
                 observations: Vec::new(),
@@ -687,6 +695,7 @@ impl CompanionAgent {
                 self.proactive_not_before = quiet_deadline;
                 return Ok(CompanionCallOutcome {
                     decision_produced: false,
+                    deferred: true,
                     response: silent_response(),
                     data: crate::prompts::CompanionPromptData::default(),
                     observations: Vec::new(),
@@ -1015,6 +1024,7 @@ impl CompanionAgent {
                 self.log_proactive_limit_reached()?;
                 return Ok(CompanionCallOutcome {
                     decision_produced: false,
+                    deferred: false,
                     response: silent_response(),
                     data,
                     observations,
@@ -1074,6 +1084,7 @@ impl CompanionAgent {
         }
         Ok(CompanionCallOutcome {
             decision_produced: true,
+            deferred: false,
             response,
             data,
             observations,
@@ -1206,6 +1217,7 @@ impl CompanionAgent {
                 prompt: summary_prompt,
                 images: Vec::new(),
                 tools_disabled: true,
+                web_search_enabled: false,
                 output_schema: Some(crate::prompts::companion_output_schema(
                     self.config.emotions_enabled,
                     false,
@@ -1319,4 +1331,3 @@ impl CompanionAgent {
         Ok(changed)
     }
 }
-

@@ -274,25 +274,3 @@ async fn wait_for_focus_event(
         _ = tokio::time::sleep(timeout) => FocusWaitOutcome::TimedOut,
     }
 }
-
-#[cfg(test)]
-fn format_focus_failure_details(
-    result: FocusRequestResult,
-    frontmost: &str,
-    key_window: &str,
-) -> String {
-    format!(
-        "self-active-after-request={} frontmost-app={frontmost} key-window={key_window}",
-        result.self_active_after_request
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn log_focus_failure(
-    logger: &dyn coosenpai_core::ports::RuntimeLogger,
-    target: &str,
-    details: &str,
-) {
-    let _ = logger.write("WARN", &focus_failure_message(target, details));
-}
-

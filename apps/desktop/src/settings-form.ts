@@ -33,6 +33,7 @@ export interface FormState {
   voicevoxStyleId: number | null;
   audioEnabled: boolean;
   audioMic: boolean;
+  audioMicrophoneCommandsEnabled: boolean;
   audioSpeaker: boolean;
   audioSpeakerIdentificationEnabled: boolean;
   audioDebugDumpDir: string;
@@ -129,6 +130,7 @@ export interface FormState {
   observationDays: string;
   conversationDays: string;
   debugEnabled: boolean;
+  feedbackEnabled: boolean;
   judgeFollow: boolean;
   checkForUpdates: boolean;
   launchAtLogin: boolean;
@@ -147,7 +149,7 @@ const pageFields: Readonly<Record<SettingsCategory, readonly ConfigFormKey[]>> =
     "memoryDailyRetentionDays", "memoryWeeklyRetentionWeeks", "factPromptDailyLimit", "observationDays", "conversationDays",
   ],
   vision: ["watchFullscreen", "watchApps", "watchFocusElement"],
-  hearing: ["audioMic", "audioSpeaker", "audioSpeakerIdentificationEnabled"],
+  hearing: ["audioMicrophoneCommandsEnabled", "audioMic", "audioSpeaker", "audioSpeakerIdentificationEnabled"],
   speech: ["speechLocale", "speechInputDevice", "speechMode", "speechConfirmBeforeSend", "voiceOutputEnabled", "voiceOutputProvider", "voiceOutputRate", "voicevoxStyleId"],
   notifications: ["notificationMode", "bubblePosition", "bubbleDisplay", "bubbleEdgeRecall", "thoughtBubble", "bubbleKeepLatest", "textQuickActions", "imageQuickActions", "minPriority", "bubbleDurationMs"],
   providers: [
@@ -156,7 +158,7 @@ const pageFields: Readonly<Record<SettingsCategory, readonly ConfigFormKey[]>> =
   ],
   shortcuts: ["captureShortcut", "microphoneShortcut", "togglePanelShortcut", "toggleAvatarShortcut", "toggleWatchShortcut", "sendTextShortcut", "copyLastReplyShortcut", "sendKey"],
   setup: [],
-  developer: ["ocrGateExecutable", "observerExecutable", "hearingExecutable", "companionExecutable", "debugEnabled", "audioDebugDumpDir", "judgeFollow"],
+  developer: ["ocrGateExecutable", "observerExecutable", "hearingExecutable", "companionExecutable", "debugEnabled", "feedbackEnabled", "audioDebugDumpDir", "judgeFollow"],
 };
 
 const globalSettingsFields = ["watchEnabled", "audioEnabled"] as const satisfies readonly ConfigFormKey[];
@@ -204,6 +206,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     voicevoxStyleId: config.voiceOutput.voicevoxStyleId,
     audioEnabled: config.audio.enabled,
     audioMic: config.audio.mic,
+    audioMicrophoneCommandsEnabled: config.audio.microphoneCommandsEnabled,
     audioSpeaker: config.audio.speaker,
     audioSpeakerIdentificationEnabled: config.audio.speakerIdentification.enabled,
     audioDebugDumpDir: config.audio.debugDumpDir ?? "",
@@ -242,6 +245,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     observationDays: String(config.retention.observationDays),
     conversationDays: String(config.retention.conversationDays),
     debugEnabled: config.debug.enabled,
+    feedbackEnabled: config.debug.feedbackEnabled,
     judgeFollow: config.judge?.follow ?? false,
     checkForUpdates: config.app.checkForUpdates,
     launchAtLogin: config.app.launchAtLogin,
@@ -317,6 +321,7 @@ function toBaseForm(source: CooSenpaiConfig) {
     observationDays: String(source.retention.observationDays),
     conversationDays: String(source.retention.conversationDays),
     debugEnabled: source.debug.enabled,
+    feedbackEnabled: source.debug.feedbackEnabled,
     checkForUpdates: source.app.checkForUpdates,
   };
 }
@@ -330,6 +335,7 @@ export function toPatch(form: FormState): ConfigPatch {
     audio: {
       enabled: form.audioEnabled,
       mic: form.audioMic,
+      microphoneCommandsEnabled: form.audioMicrophoneCommandsEnabled,
       speaker: form.audioSpeaker,
       speakerIdentification: { enabled: form.audioSpeakerIdentificationEnabled },
       debugDumpDir: form.audioDebugDumpDir === "" ? null : form.audioDebugDumpDir,
@@ -437,7 +443,7 @@ function toBasePatch(form: FormState): ConfigPatch {
     },
     notification: { mode: form.notificationMode, minPriority: form.minPriority, bubbleDurationMs: Number(form.bubbleDurationMs) },
     retention: { observationDays: Number(form.observationDays), conversationDays: Number(form.conversationDays) },
-    debug: { enabled: form.debugEnabled },
+    debug: { enabled: form.debugEnabled, feedbackEnabled: form.feedbackEnabled },
   };
 }
 

@@ -131,8 +131,10 @@ impl BubbleControlsPresenter {
             .records
             .iter()
             .find(|r| Some(&r.id) == snapshot.front_id.as_ref());
-        if front.map(|r| (&r.id, &r.interaction))
-            != self.view.record.as_ref().map(|r| (&r.id, &r.interaction))
+        if front.map(|r| &r.id) != self.view.record.as_ref().map(|r| &r.id)
+            || (!self.view.busy
+                && front.map(|r| &r.interaction)
+                    != self.view.record.as_ref().map(|r| &r.interaction))
         {
             self.operation += 1;
             self.view.busy = false;
@@ -151,8 +153,9 @@ impl BubbleControlsPresenter {
             .iter()
             .position(|id| Some(id) == snapshot.front_id.as_ref());
         self.view.dismissible = front.is_some_and(|r| r.message_kind != "tutorial");
-        self.view.body_button =
-            front.is_some_and(|r| r.interaction.is_none() || r.message_kind == "tutorial");
+        self.view.body_button = front.as_ref().is_some_and(|r| {
+            r.message_kind == "tutorial" || !crate::bubbles::requires_action(&r.interaction)
+        });
         self.view.older_edge = !critical && index.is_some_and(|i| i > 0);
         self.view.second_edge = !critical && index.is_some_and(|i| i > 1);
         self.view.show_latest =

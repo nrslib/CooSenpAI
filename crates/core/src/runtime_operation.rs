@@ -96,10 +96,13 @@ impl RuntimeActor {
             self.companion = Some(companion);
             return StartResult::Completed;
         }
-        if let Err(error) = companion.settle_exhausted_user_responses() {
-            self.schedule_user_retry(initialization_error_kind(&error), snapshot_tx);
-            self.companion = Some(companion);
-            return StartResult::Completed;
+        match companion.settle_exhausted_user_responses() {
+            Ok(settled) => self.restore_settled_user_failure(&settled, RuntimeErrorKind::Provider),
+            Err(error) => {
+                self.schedule_user_retry(initialization_error_kind(&error), snapshot_tx);
+                self.companion = Some(companion);
+                return StartResult::Completed;
+            }
         }
         let persistent_queue = companion.uses_persistent_user_queue();
         let inputs = if persistent_queue {
@@ -432,7 +435,7 @@ impl RuntimeActor {
         sign: crate::judge::JudgeFeedSign,
         strength: f64,
         cancelled: bool,
-        response: oneshot::Sender<Result<(), RuntimeError>>,
+        response: oneshot::Sender<Result<crate::judge::JudgeFeedApplyResult, RuntimeError>>,
     ) -> StartResult {
         let Some(cancellation) = self
             .operation_cancellation
@@ -445,7 +448,7 @@ impl RuntimeActor {
         let token = cancellation.token.clone();
         let task = tokio::spawn(async move {
             let result = judge
-                .feed_event(
+                .feed_event_with_result(
                     crate::judge::JudgeFeedEvent {
                         event_id: &event_id,
                         input_id: &input_id,
@@ -598,13 +601,17 @@ impl RuntimeActor {
 
     pub(super) fn start_observe(
         &mut self,
-        frames: Vec<ObservationFrameInput>,
-        audio: Vec<crate::state::AudioObservation>,
-        request_cancellation: CancellationToken,
-        response: oneshot::Sender<Result<ObservationRecord, RuntimeError>>,
+        request: super::handle_types::ObserveRequest,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
         judge_result_tx: &tokio::sync::mpsc::Sender<ControlCommand>,
     ) -> StartResult {
+        let super::handle_types::ObserveRequest {
+            frames,
+            audio,
+            allow_companion_delivery,
+            cancellation: request_cancellation,
+            response,
+        } = request;
         if !frames.is_empty() && !self.accepts_watch_scope(&frames) {
             let _ = response.send(Err(RuntimeError::StaleWatchScope));
             return StartResult::Completed;
@@ -643,13 +650,24 @@ impl RuntimeActor {
         let catch_panic_to_keep_agent = self.factory.is_none();
         let hearing_context = self.hearing_context.clone();
         let audio_to_ack = audio.clone();
+        let microphone_commands = if frames.is_empty() {
+            hearing_context
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .microphone_command_candidates(&audio)
+        } else {
+            None
+        };
+        observer.classify_microphone_commands(microphone_commands.as_ref().map(|batch| {
+            crate::observer::MicrophoneCommandPrompt {
+                ids: batch.ids.clone(),
+                companion_name: self.companion_display_name.clone(),
+            }
+        }));
         let judge = self.judge.clone();
         let judge_generation = self.judge_generation;
         let judge_follow = self.config.judge.follow;
         let judge_enabled = judge.enabled();
-        if judge_enabled {
-            judge.register_evaluation(&frames, &audio);
-        }
         if judge_enabled && !judge_follow {
             let judge = judge.clone();
             let frames_for_judge = frames.clone();
@@ -675,15 +693,19 @@ impl RuntimeActor {
                 let evaluation = judge
                     .evaluate(&frames, &audio, provider_cancellation.clone())
                     .await;
-                (evaluation.decision, evaluation.companion_delivery)
+                (
+                    evaluation.decision,
+                    allow_companion_delivery && evaluation.companion_delivery,
+                )
             } else {
-                (None, true)
+                (None, allow_companion_delivery)
             };
-            let silence = judge_decision.as_ref().is_some_and(|decision| {
-                judge_follow
-                    && decision.action == crate::judge::JudgeAction::Silence
-                    && !provider_cancellation.is_cancelled()
-            });
+            let silence = microphone_commands.is_none()
+                && judge_decision.as_ref().is_some_and(|decision| {
+                    judge_follow
+                        && decision.action == crate::judge::JudgeAction::Silence
+                        && !provider_cancellation.is_cancelled()
+                });
             let result = if silence {
                 let audio_ids = audio
                     .iter()
@@ -751,6 +773,7 @@ impl RuntimeActor {
             Box::new(OperationOutcome::Observe {
                 observer: Box::new(observer),
                 result,
+                microphone_commands,
                 judge_generation,
                 judge_decision,
                 companion_delivery,
@@ -799,7 +822,7 @@ impl RuntimeActor {
         observations: Vec<ObservationRecord>,
         context_notice: Option<String>,
         request_cancellation: CancellationToken,
-        response: oneshot::Sender<Result<CompanionResponse, RuntimeError>>,
+        response: oneshot::Sender<Result<CompanionObservationResult, RuntimeError>>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
     ) -> StartResult {
         let Some(runtime_cancellation) = self.operation_cancellation.cancellation_for_start()
@@ -860,7 +883,7 @@ impl RuntimeActor {
                 cause: runtime_cancellation.cause,
             },
             Some(relay_stop),
-            OperationReply::Companion(response),
+            OperationReply::CompanionObservation(response),
             task,
         )))
     }
@@ -987,11 +1010,16 @@ impl RuntimeActor {
             OperationOutcome::Observe {
                 observer,
                 result,
+                mut microphone_commands,
                 judge_generation,
                 judge_decision,
                 companion_delivery,
             } => {
-                self.observer = Some(*observer);
+                let mut observer = *observer;
+                if let Some(batch) = &mut microphone_commands {
+                    batch.selected_ids = observer.take_microphone_command_ids();
+                }
+                self.observer = Some(observer);
                 if let Ok(observation) = &result {
                     self.judge_trace_store.associate_observation(observation);
                 }
@@ -1038,6 +1066,10 @@ impl RuntimeActor {
                         Err(error) => Err(error),
                     }
                 };
+                let result = result.and_then(|observation| {
+                    self.enqueue_microphone_commands(microphone_commands)?;
+                    Ok(observation)
+                });
                 self.clear_observation_in_progress();
                 if let OperationReply::Observation(response) = reply {
                     let _ = response.send(result);
@@ -1049,140 +1081,172 @@ impl RuntimeActor {
                 result,
             } => {
                 let mut companion = *companion;
-                let response_result = if config_update_cancelled {
-                    if let Ok(candidate) = result {
-                        if let Err(error) = companion.discard_proactive_candidate(
-                            &candidate.observations,
-                            &candidate.consumed_observations,
-                        ) {
-                            self.schedule_initialization_retry(
-                                initialization_error_kind(&error),
-                                snapshot_tx,
-                            );
+                let response_result: Result<CompanionObservationResult, RuntimeError> =
+                    if config_update_cancelled {
+                        if let Ok(candidate) = result {
+                            if let Err(error) = companion.discard_proactive_candidate(
+                                &candidate.observations,
+                                &candidate.consumed_observations,
+                            ) {
+                                self.schedule_initialization_retry(
+                                    initialization_error_kind(&error),
+                                    snapshot_tx,
+                                );
+                            }
+                        } else {
+                            companion.discard_provider_session();
                         }
+                        self.companion_recovery_pending =
+                            companion.has_pending_proactive_observations();
+                        self.companion_recovery_at = None;
+                        Err(RuntimeError::ConfigUpdateCancelled)
+                    } else if preempted_for_user {
+                        let response = if let Ok(candidate) = result {
+                            let call_id = candidate.call_id.clone();
+                            let deferred = candidate.deferred && call_id.is_none();
+                            if let Err(error) = companion.discard_proactive_candidate(
+                                &candidate.observations,
+                                &candidate.consumed_observations,
+                            ) {
+                                self.schedule_initialization_retry(
+                                    initialization_error_kind(&error),
+                                    snapshot_tx,
+                                );
+                            }
+                            CompanionObservationResult {
+                                response: crate::companion::silent_response(),
+                                call_id,
+                                deferred,
+                            }
+                        } else {
+                            companion.discard_provider_session();
+                            CompanionObservationResult {
+                                response: crate::companion::silent_response(),
+                                call_id: None,
+                                deferred: true,
+                            }
+                        };
+                        self.companion_recovery_pending = true;
+                        self.companion_recovery_at = None;
+                        Ok(response)
                     } else {
-                        companion.discard_provider_session();
-                    }
-                    self.companion_recovery_pending =
-                        companion.has_pending_proactive_observations();
-                    self.companion_recovery_at = None;
-                    Err(RuntimeError::ConfigUpdateCancelled)
-                } else if preempted_for_user {
-                    if let Ok(candidate) = result {
-                        if let Err(error) = companion.discard_proactive_candidate(
-                            &candidate.observations,
-                            &candidate.consumed_observations,
-                        ) {
-                            self.schedule_initialization_retry(
-                                initialization_error_kind(&error),
-                                snapshot_tx,
-                            );
-                        }
-                    } else {
-                        companion.discard_provider_session();
-                    }
-                    self.companion_recovery_pending = true;
-                    self.companion_recovery_at = None;
-                    Ok(crate::companion::silent_response())
-                } else {
-                    match result {
-                        Ok(candidate) => {
-                            let stale =
-                                match (companion.user_epoch(), companion.has_pending_user_inputs())
-                                {
+                        match result {
+                            Ok(candidate) => {
+                                let candidate_call_id = candidate.call_id.clone();
+                                let candidate_deferred = candidate.deferred;
+                                let stale = match (
+                                    companion.user_epoch(),
+                                    companion.has_pending_user_inputs(),
+                                ) {
                                     (Ok(epoch), Ok(has_pending)) => {
                                         epoch != user_epoch || has_pending
                                     }
                                     _ => true,
                                 };
-                            if stale {
-                                let _ = companion.discard_proactive_candidate(
-                                    &candidate.observations,
-                                    &candidate.consumed_observations,
-                                );
-                                self.companion_recovery_pending = true;
-                                self.companion_recovery_at = None;
-                                Ok(crate::companion::silent_response())
-                            } else {
-                                let decision_produced = candidate.decision_produced;
-                                let candidate_observations = candidate.observations.clone();
-                                let candidate_consumed_observations =
-                                    candidate.consumed_observations.clone();
-                                let turn_commit_lock = self.turn_commit_lock.clone();
-                                let _turn_commit_guard = turn_commit_lock
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                match companion
-                                    .commit_proactive_candidate_if_current(candidate, user_epoch)
-                                {
-                                    Ok(Some(commit)) => {
-                                        if decision_produced {
-                                            self.accept_companion_response(
-                                                &companion,
-                                                &commit.response,
-                                                commit.consumed_ids.clone(),
-                                                commit.call_id.clone(),
-                                                commit.utterance_observation_ids.clone(),
-                                            );
+                                if stale {
+                                    let _ = companion.discard_proactive_candidate(
+                                        &candidate.observations,
+                                        &candidate.consumed_observations,
+                                    );
+                                    self.companion_recovery_pending = true;
+                                    self.companion_recovery_at = None;
+                                    Ok(CompanionObservationResult {
+                                        response: crate::companion::silent_response(),
+                                        deferred: candidate_deferred && candidate_call_id.is_none(),
+                                        call_id: candidate_call_id,
+                                    })
+                                } else {
+                                    let decision_produced = candidate.decision_produced;
+                                    let candidate_observations = candidate.observations.clone();
+                                    let candidate_consumed_observations =
+                                        candidate.consumed_observations.clone();
+                                    let turn_commit_lock = self.turn_commit_lock.clone();
+                                    let _turn_commit_guard = turn_commit_lock
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    match companion.commit_proactive_candidate_if_current(
+                                        candidate, user_epoch,
+                                    ) {
+                                        Ok(Some(commit)) => {
+                                            let call_id =
+                                                commit.call_id.clone().or(candidate_call_id);
+                                            if decision_produced {
+                                                self.accept_companion_response(
+                                                    &companion,
+                                                    &commit.response,
+                                                    commit.consumed_ids.clone(),
+                                                    call_id.clone(),
+                                                    commit.utterance_observation_ids.clone(),
+                                                );
+                                            }
+                                            self.pending_observations.retain(|observation| {
+                                                !commit
+                                                    .consumed_ids
+                                                    .iter()
+                                                    .any(|id| id == observation.id())
+                                            });
+                                            self.clear_non_user_error();
+                                            self.initialization_retry_at = None;
+                                            self.initialization_retry_delay =
+                                                Duration::from_secs(1);
+                                            self.companion_recovery_at = companion
+                                                .proactive_retry_after()
+                                                .map(|delay| Instant::now() + delay);
+                                            Ok(CompanionObservationResult {
+                                                response: commit.response,
+                                                deferred: candidate_deferred && call_id.is_none(),
+                                                call_id,
+                                            })
                                         }
-                                        self.pending_observations.retain(|observation| {
-                                            !commit
-                                                .consumed_ids
-                                                .iter()
-                                                .any(|id| id == observation.id())
-                                        });
-                                        self.clear_non_user_error();
-                                        self.initialization_retry_at = None;
-                                        self.initialization_retry_delay = Duration::from_secs(1);
-                                        self.companion_recovery_at = companion
-                                            .proactive_retry_after()
-                                            .map(|delay| Instant::now() + delay);
-                                        Ok(commit.response)
-                                    }
-                                    Ok(None) => {
-                                        self.companion_recovery_pending = true;
-                                        self.companion_recovery_at = None;
-                                        let _ = companion.discard_proactive_candidate(
-                                            &candidate_observations,
-                                            &candidate_consumed_observations,
-                                        );
-                                        Ok(crate::companion::silent_response())
-                                    }
-                                    Err(error) => {
-                                        if companion.has_active_turn_commit().unwrap_or(false) {
+                                        Ok(None) => {
                                             self.companion_recovery_pending = true;
                                             self.companion_recovery_at = None;
-                                        }
-                                        if let Err(restore_error) = companion
-                                            .discard_proactive_candidate(
+                                            let _ = companion.discard_proactive_candidate(
                                                 &candidate_observations,
                                                 &candidate_consumed_observations,
-                                            )
-                                        {
-                                            self.schedule_initialization_retry(
-                                                initialization_error_kind(&restore_error),
-                                                snapshot_tx,
                                             );
+                                            Ok(CompanionObservationResult {
+                                                response: crate::companion::silent_response(),
+                                                deferred: candidate_deferred
+                                                    && candidate_call_id.is_none(),
+                                                call_id: candidate_call_id,
+                                            })
                                         }
-                                        Err(RuntimeError::Companion(error))
+                                        Err(error) => {
+                                            if companion.has_active_turn_commit().unwrap_or(false) {
+                                                self.companion_recovery_pending = true;
+                                                self.companion_recovery_at = None;
+                                            }
+                                            if let Err(restore_error) = companion
+                                                .discard_proactive_candidate(
+                                                    &candidate_observations,
+                                                    &candidate_consumed_observations,
+                                                )
+                                            {
+                                                self.schedule_initialization_retry(
+                                                    initialization_error_kind(&restore_error),
+                                                    snapshot_tx,
+                                                );
+                                            }
+                                            Err(RuntimeError::Companion(error))
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Err(error) => {
-                            companion.discard_provider_session();
-                            if let RuntimeError::Companion(companion_error) = &error {
-                                self.schedule_initialization_retry(
-                                    initialization_error_kind(companion_error),
-                                    snapshot_tx,
-                                );
+                            Err(error) => {
+                                companion.discard_provider_session();
+                                if let RuntimeError::Companion(companion_error) = &error {
+                                    self.schedule_initialization_retry(
+                                        initialization_error_kind(companion_error),
+                                        snapshot_tx,
+                                    );
+                                }
+                                Err(error)
                             }
-                            Err(error)
                         }
-                    }
-                };
+                    };
                 self.companion = Some(companion);
-                if let OperationReply::Companion(response) = reply {
+                if let OperationReply::CompanionObservation(response) = reply {
                     let _ = response.send(response_result);
                 }
             }
@@ -1283,10 +1347,6 @@ impl RuntimeActor {
                                                     .iter()
                                                     .any(|id| id == observation.id())
                                             });
-                                            self.schedule_judge_feed(
-                                                &completed.judge_feedback_targets,
-                                                &completed.judge_feedback_messages,
-                                            );
                                             self.complete_user_response(
                                                 &companion,
                                                 &completed.input_ids,
@@ -1331,9 +1391,19 @@ impl RuntimeActor {
                             }
                         }
                     }
+                    if let Err(RuntimeError::Companion(error)) = &committed_result {
+                        if let Err(error) = companion
+                            .record_user_response_failure(std::slice::from_ref(&input_id), error)
+                        {
+                            committed_result = Err(RuntimeError::Companion(error));
+                        }
+                    }
                     if committed_result.is_err() {
                         match companion.settle_exhausted_user_responses() {
-                            Ok(exhausted) => terminal_user_failure |= exhausted.contains(&input_id),
+                            Ok(exhausted) => {
+                                terminal_user_failure |=
+                                    exhausted.iter().any(|(id, _, _)| id == &input_id)
+                            }
                             Err(error) => committed_result = Err(RuntimeError::Companion(error)),
                         }
                     }
@@ -1423,6 +1493,11 @@ impl RuntimeActor {
                 result,
             } => {
                 let delivery_status_after = companion.pending_delivery_status();
+                let terminal_restore = if result.is_ok() {
+                    self.restore_terminal_user_failure(&companion, RuntimeErrorKind::Provider)
+                } else {
+                    Ok(())
+                };
                 let mut companion = *companion;
                 if preempted_for_user {
                     companion.discard_provider_session();
@@ -1430,6 +1505,12 @@ impl RuntimeActor {
                 self.companion = Some(companion);
                 match result {
                     Ok(()) => {
+                        if let Err(error) = terminal_restore {
+                            self.schedule_initialization_retry(
+                                initialization_error_kind(&error),
+                                snapshot_tx,
+                            );
+                        }
                         pending_user_drain = PendingUserDrain::Continue;
                         if self.provider_build_failed {
                             self.clear_non_user_error();

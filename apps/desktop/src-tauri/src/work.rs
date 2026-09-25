@@ -2,8 +2,8 @@ use crate::factory::DesktopRuntimeFactory;
 use coosenpai_core::persistence::atomic_write_json;
 use coosenpai_core::process::TokioProcessRunner;
 use coosenpai_core::work::{
-    execute, AllowedRoot, ApprovalMode, ApprovalRequest, Harness, RootPolicy, RootStatus,
-    WorkExecution, WorkRequest, WorkResult, WORK_TIME_LIMIT,
+    execute, AllowedRoot, ApprovalMode, ApprovalRequest, ApprovalStatus, ChatWorkError, Harness,
+    RootPolicy, RootStatus, WorkExecution, WorkRequest, WorkResult, WORK_TIME_LIMIT,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -18,6 +18,7 @@ pub(crate) enum WorkPhase {
     Succeeded,
     Failed,
     Cancelled,
+    Denied,
     Interrupted,
 }
 
@@ -26,6 +27,8 @@ pub(crate) enum WorkPhase {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WorkRecord {
     id: String,
+    #[serde(default)]
+    input_id: Option<String>,
     phase: WorkPhase,
     request: WorkRequest,
     harness: Harness,
@@ -51,15 +54,33 @@ impl WorkSnapshot {
         &self,
         input_id: &str,
     ) -> (bool, Option<ApprovalRequest>, Option<String>) {
-        let visible = self
-            .task
-            .as_ref()
-            .is_some_and(|task| task.id == input_id && task.phase == WorkPhase::Running);
-        let approval = self
-            .approval
-            .clone()
-            .filter(|approval| visible && approval.task_id == input_id);
+        let visible = self.task.as_ref().is_some_and(|task| {
+            task.input_id.as_deref().unwrap_or(&task.id) == input_id
+                && task.phase == WorkPhase::Running
+        });
+        let approval = self.approval.clone().filter(|approval| {
+            visible
+                && self
+                    .task
+                    .as_ref()
+                    .is_some_and(|task| approval.task_id == task.id)
+        });
         (visible, approval, self.error.clone())
+    }
+
+    pub(crate) fn activity_for(&self, input_id: &str) -> Option<(WorkPhase, bool)> {
+        let task = self.task.as_ref()?;
+        if task.input_id.as_deref().unwrap_or(&task.id) != input_id {
+            return None;
+        }
+        let approval_pending = self.approval.as_ref().is_some_and(|approval| {
+            approval.task_id == task.id
+                && matches!(
+                    approval.status,
+                    ApprovalStatus::AwaitingUser | ApprovalStatus::Reviewing
+                )
+        });
+        Some((task.phase, approval_pending))
     }
 }
 
@@ -174,39 +195,62 @@ impl WorkController {
     fn start(
         self: &Arc<Self>,
         input_id: &str,
+        operation_id: &str,
         request: WorkRequest,
         harness: Harness,
         factory: Arc<DesktopRuntimeFactory>,
         parent: CancellationToken,
-    ) -> Result<WorkSnapshot, String> {
+    ) -> Result<WorkSnapshot, ChatWorkError> {
         if let Some(error) = &self.load_error {
-            return Err(error.clone());
+            return Err(ChatWorkError::Stopped(error.clone()));
         }
         if request.brief.proposal.trim().is_empty() || request.cwd.as_os_str().len() > 4096 {
-            return Err("作業ディレクトリと作業内容を確認してください".into());
+            return Err(ChatWorkError::Failed(
+                "作業ディレクトリと作業内容を確認してください".into(),
+            ));
         }
         let mut state = self.state.lock().expect("work state");
         if state.active.is_some() {
-            return Err("先に実行中の作業を停止してください".into());
+            return Err(ChatWorkError::Stopped(
+                "先に実行中の作業を停止してください".into(),
+            ));
         }
         if parent.is_cancelled() {
-            return Err("終了処理中です".into());
+            return Err(ChatWorkError::Stopped("終了処理中です".into()));
         }
-        if input_id.is_empty()
-            || input_id.len() > 128
-            || !input_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err("会話入力IDが不正です".into());
+        for identifier in [input_id, operation_id] {
+            if identifier.is_empty()
+                || identifier.len() > 128
+                || !identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return Err(ChatWorkError::Stopped(
+                    "会話入力または操作のIDが不正です".into(),
+                ));
+            }
         }
-        let id = input_id.to_owned();
-        if let Some(record) = Self::restore(&self.task_path(&id))? {
-            if record.id != id || record.request != request {
-                return Err(
-                    "同じ会話入力の作業内容が変わりました。新しいメッセージで依頼してください"
-                        .into(),
-                );
+        let id = operation_id.to_owned();
+        let mut recorded = Self::restore(&self.task_path(&id)).map_err(ChatWorkError::Stopped)?;
+        let mut legacy = false;
+        if recorded.is_none() && id == format!("{input_id}-work-0") {
+            recorded = Self::restore(&self.task_path(input_id)).map_err(ChatWorkError::Stopped)?;
+            legacy = recorded.is_some();
+        }
+        if let Some(mut record) = recorded {
+            let expected_id = if legacy { input_id } else { &id };
+            if record.id != expected_id
+                || record.input_id.as_deref().unwrap_or(&record.id) != input_id
+                || record.request != request
+            {
+                return Err(ChatWorkError::Stopped(
+                    "同じ操作IDに異なる依頼が指定されました".into(),
+                ));
+            }
+            if legacy {
+                record.id = id.clone();
+                record.input_id = Some(input_id.to_owned());
+                self.save_record(&record).map_err(ChatWorkError::Stopped)?;
             }
             return Ok(WorkSnapshot {
                 task: Some(record),
@@ -217,6 +261,7 @@ impl WorkController {
         let roots = state.roots.clone();
         let record = WorkRecord {
             id: id.clone(),
+            input_id: Some(input_id.to_owned()),
             phase: WorkPhase::Running,
             request: request.clone(),
             harness,
@@ -228,7 +273,7 @@ impl WorkController {
             stderr_summary: None,
             error: None,
         };
-        self.save_record(&record)?;
+        self.save_record(&record).map_err(ChatWorkError::Stopped)?;
         let cancellation = parent.child_token();
         state.active = Some(cancellation.clone());
         state.record = Some(record.clone());
@@ -304,14 +349,24 @@ impl WorkController {
                     record.stderr_summary = Some(result.stderr_summary);
                 }
                 Err(error) => {
-                    record.phase = WorkPhase::Failed;
+                    record.phase = match self
+                        .approvals
+                        .snapshot()
+                        .filter(|approval| approval.task_id == id)
+                        .map(|approval| approval.status)
+                    {
+                        Some(ApprovalStatus::Denied) => WorkPhase::Denied,
+                        Some(ApprovalStatus::Cancelled) => WorkPhase::Cancelled,
+                        _ => WorkPhase::Failed,
+                    };
                     record.error = Some(error);
                 }
             }
         }
         if self.save_record(record).is_err() {
-            record.phase = WorkPhase::Failed;
-            record.error = Some("作業結果を保存できませんでした".into());
+            record.phase = WorkPhase::Interrupted;
+            record.error =
+                Some("操作結果を保存できませんでした。重複実行を避けるため停止しました".into());
         }
         self.approvals.finish(id);
         state.active = None;
@@ -392,7 +447,7 @@ pub(crate) struct DesktopChatWork {
     pub harness: Harness,
 }
 
-fn recorded_result(record: WorkRecord) -> Result<WorkResult, String> {
+fn recorded_result(record: WorkRecord) -> Result<WorkResult, ChatWorkError> {
     match (
         record.phase,
         record.answer,
@@ -406,10 +461,15 @@ fn recorded_result(record: WorkRecord) -> Result<WorkResult, String> {
             changed_files: record.changed_files,
             stderr_summary: record.stderr_summary.unwrap_or_default(),
         }),
-        _ => Err(record.error.unwrap_or_else(|| {
-            "前回の作業は未完了です。自動で再実行しません。新しいメッセージで依頼してください"
-                .into()
-        })),
+        (phase, _, _, _) => {
+            let message = record
+                .error
+                .unwrap_or_else(|| "操作は完了していません。自動で再実行しません".into());
+            Err(match phase {
+                WorkPhase::Failed => ChatWorkError::Failed(message),
+                _ => ChatWorkError::Stopped(message),
+            })
+        }
     }
 }
 
@@ -418,14 +478,16 @@ impl coosenpai_core::work::ChatWorkExecutor for DesktopChatWork {
     async fn execute(
         &self,
         input_id: &str,
+        operation_id: &str,
         request: WorkRequest,
         cancellation: CancellationToken,
-    ) -> Result<WorkResult, String> {
-        let id = input_id.to_owned();
+    ) -> Result<WorkResult, ChatWorkError> {
+        let id = operation_id.to_owned();
         if cancellation.is_cancelled() {
-            return Err("作業を停止しました".into());
+            return Err(ChatWorkError::Stopped("作業を停止しました".into()));
         }
         let started = self.controller.start(
+            input_id,
             &id,
             request,
             self.harness,
@@ -438,17 +500,17 @@ impl coosenpai_core::work::ChatWorkExecutor for DesktopChatWork {
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                self.controller.stop(&id)?;
-                self.controller.await_completion(&id).await?;
+                self.controller.stop(&id).map_err(ChatWorkError::Stopped)?;
+                self.controller.await_completion(&id).await.map_err(ChatWorkError::Stopped)?;
             }
-            result = self.controller.await_completion(&id) => { result?; }
+            result = self.controller.await_completion(&id) => { result.map_err(ChatWorkError::Stopped)?; }
         }
         let record = self
             .controller
             .snapshot()
             .task
             .filter(|task| task.id == id)
-            .ok_or("作業結果が見つかりません")?;
+            .ok_or_else(|| ChatWorkError::Stopped("作業結果が見つかりません".into()))?;
         recorded_result(record)
     }
 }

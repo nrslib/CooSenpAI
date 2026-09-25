@@ -604,42 +604,6 @@ fn save_config_preserving_audio(
     )
 }
 
-#[cfg(test)]
-struct PersistedConfigUpdate {
-    staged: Config,
-    provider_start_gate: Option<coosenpai_core::runtime::ProviderStartGate>,
-}
-
-#[cfg(test)]
-fn persist_config_update<F>(
-    paths: &ConfigPaths,
-    runtime: &RuntimeHandle,
-    recovery: &Config,
-    update: F,
-    mut staged_avatar: Option<crate::avatar::StagedAvatar>,
-    expected_revision: Option<u64>,
-) -> Result<PersistedConfigUpdate, coosenpai_core::config::ConfigError>
-where
-    F: FnOnce(Config) -> Result<Config, coosenpai_core::config::ConfigError>,
-{
-    let prepared = prepare_config_update(paths, runtime, recovery, update, expected_revision)?;
-    let saved = save_config_candidate(
-        paths,
-        &prepared.previous,
-        &prepared.staged,
-        &mut staged_avatar,
-    )?;
-    if let Some(avatar) = staged_avatar.as_mut() {
-        avatar
-            .finalize()
-            .map_err(coosenpai_core::config::ConfigError::Io)?;
-    }
-    Ok(PersistedConfigUpdate {
-        staged: saved.config,
-        provider_start_gate: prepared.provider_start_gate,
-    })
-}
-
 async fn restore_shortcuts_after_failed_commit(
     state: &DesktopState,
     previous: &Config,
@@ -741,26 +705,6 @@ fn persona_change_notice(previous: &Config, next: &Config, locale: Locale) -> Op
     })
 }
 
-#[cfg(test)]
-pub(crate) async fn commit_config_or_degrade(
-    factory: &DesktopRuntimeFactory,
-    runtime: &RuntimeHandle,
-    config: &Config,
-) -> Result<(), ConfigCommitError> {
-    let commit = async {
-        let agents = factory.build_candidate(config).await?;
-        runtime.replace_config(config.clone(), agents).await?;
-        Ok::<(), ConfigCommitError>(())
-    };
-    if let Err(error) = commit.await {
-        runtime
-            .enter_degraded(config_commit_last_error(&error))
-            .await?;
-        return Err(error);
-    }
-    Ok(())
-}
-
 pub(crate) fn config_commit_last_error_for_locale(
     error: &ConfigCommitError,
     locale: Locale,
@@ -776,4 +720,3 @@ pub(crate) fn config_commit_last_error_for_locale(
         user_input_id: None,
     }
 }
-

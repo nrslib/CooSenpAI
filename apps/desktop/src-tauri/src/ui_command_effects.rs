@@ -13,6 +13,47 @@ use std::sync::Arc;
 pub(crate) async fn execute(state: Arc<DesktopState>, command: UserCommand) -> UiEvent {
     let owner = command.owner();
     let completion = match command {
+        UserCommand::FeedbackExport(reply) => {
+            let handler = state.clone();
+            let result = dispatch_result(
+                state,
+                CommandSource::IpcMain,
+                DesktopCommand::UtteranceFeedback,
+                move |_context| async move {
+                    match handler.export_utterance_feedback().await {
+                        Ok(path) => IpcResult::success(path),
+                        Err(error) => IpcResult::failure(error.format_for_locale(
+                            Locale::from_config(&handler.runtime_config().ui.language),
+                        )),
+                    }
+                },
+            )
+            .await;
+            CommandCompletion::Text { result, reply }
+        }
+        UserCommand::DebugWake {
+            image,
+            context,
+            reply,
+        } => {
+            let handler = state.clone();
+            let result = dispatch_result(
+                state,
+                CommandSource::IpcMain,
+                DesktopCommand::DebugWake,
+                move |_context| async move {
+                    match crate::commands_debug::run(handler, image, context).await {
+                        Ok(result) => IpcResult::success(result),
+                        Err(error) => IpcResult::failure(error),
+                    }
+                },
+            )
+            .await;
+            CommandCompletion::DebugWake {
+                result: Box::new(result),
+                reply,
+            }
+        }
         UserCommand::CaptureSnapshot(reply) => {
             let locale = Locale::from_config(&state.runtime_config().ui.language);
             let result = match crate::capture::snapshot(&state).await {

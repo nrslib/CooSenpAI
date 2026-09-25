@@ -32,6 +32,7 @@ export function openCodeObservationPermissions(readableObservationDirectories: r
     edit: "deny",
     bash: "deny",
     webfetch: "deny",
+    websearch: "allow",
     external_directory: observationPermission,
   };
 }

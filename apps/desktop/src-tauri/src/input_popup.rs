@@ -10,8 +10,6 @@ pub(crate) enum InputPopupStartAction {
     Start,
     Focus,
     CancelThenStart,
-    #[cfg(test)]
-    FinishSpeech,
 }
 
 pub(crate) fn speech_start_action(current: Option<InputPopupKind>) -> InputPopupStartAction {
@@ -23,4 +21,3 @@ pub(crate) fn speech_start_action(current: Option<InputPopupKind>) -> InputPopup
         }
     }
 }
-

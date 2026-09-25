@@ -54,3 +54,42 @@ div.dataflow-row { display: flex; gap: 8px; align-items: baseline; }
 .dataflow-reference { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 5px; background: var(--surface-raised); border-radius: var(--radius-control); overflow-wrap: anywhere; }
 .dataflow-reference button { flex: 0 0 auto; padding: 1px 4px; color: var(--accent); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-control); font-size: 10px; }
 .dataflow-detail { margin: 6px 0 2px; max-height: 240px; overflow: auto; padding: 8px; background: var(--surface-raised); border-radius: var(--radius-control); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.log-panel { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; gap: 8px; }
+.log-panel .dataflow-controls { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.log-panel .log-filter-control { display: flex; flex: 0 1 240px; min-width: 0; max-width: 100%; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
+.log-panel .log-filter-control > span { flex: 0 0 auto; }
+.log-panel .log-filter-select { width: 100%; min-width: 0; max-width: 100%; flex: 1 1 auto; padding: 4px 8px; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); font-size: 12px; }
+.log-delete-control { display: flex; flex: 1 1 100%; align-items: center; justify-content: space-between; gap: 8px; }
+.log-delete-control button { padding: 4px 8px; color: var(--error); background: transparent; border: 1px solid var(--error); border-radius: var(--radius-control); font-size: 12px; }
+.log-list { flex: 1 1 auto; }
+.log-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 8px; border-bottom: 1px solid var(--line); border-left: 3px solid transparent; font-size: 12px; }
+.log-row-selectable { cursor: pointer; }
+.log-row-selectable:hover, .log-row-selectable:focus-visible { background: var(--accent-soft); outline: none; }
+.log-row-mic { border-left-color: var(--accent); }
+.log-row-speaker { border-left-color: var(--warning); }
+.log-row time { flex: 0 0 auto; color: var(--faint); font-variant-numeric: tabular-nums; }
+.log-source { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+.log-speaker { flex: 0 0 auto; padding: 0 6px; color: var(--text); background: var(--surface-raised); border-radius: var(--radius-control); font-size: 11px; }
+.log-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.log-speaker-editor { display: grid; gap: 8px; padding: 10px; background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius-control); }
+.log-speaker-editor-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.log-speaker-editor-heading h3 { margin: 0; font-size: 12px; }
+.log-speaker-editor-heading span { color: var(--muted); font-size: 11px; }
+.log-speaker-editor-field { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.log-speaker-editor-field input { min-width: 0; padding: 5px 7px; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); font-size: 12px; }
+.log-speaker-editor-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.log-speaker-editor-actions button { padding: 4px 9px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--line); border-radius: var(--radius-control); font-size: 11px; }
+.log-speaker-editor-actions button:disabled { opacity: .6; }
+.log-speaker-details {
+  flex: 0 0 auto;
+  max-height: 48vh;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border-color, #7774);
+  border-radius: 8px;
+}
+.log-speaker-decision + .log-speaker-decision { border-top: 1px solid #7774; margin-top: 12px; padding-top: 12px; }
+.log-speaker-decision h4, .log-speaker-decision p { margin: 6px 0; }
+.log-speaker-decision table { width: 100%; text-align: left; font-variant-numeric: tabular-nums; }
+.log-speaker-decision th, .log-speaker-decision td { padding: 3px 8px 3px 0; }

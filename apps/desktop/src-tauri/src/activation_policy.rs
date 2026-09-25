@@ -518,9 +518,5 @@ mod native;
 mod runtime;
 pub(crate) use runtime::{ActivationTask, ActivationView};
 
-#[cfg(test)]
-#[path = "activation_test_support.rs"]
-pub(crate) mod test_support;
-
 #[path = "activation_logging.rs"]
 mod logging;

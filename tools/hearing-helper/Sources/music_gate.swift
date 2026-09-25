@@ -130,7 +130,7 @@ final class SoundAnalysisMusicClassifier: NSObject, SNResultsObserving {
 }
 
 final class SpeakerMusicGateSegment {
-    private let classifier: SoundAnalysisMusicClassifier
+    private let classifier: SoundAnalysisMusicClassifier?
     private(set) var decision: SpeakerMusicGateDecision = .pending
     private(set) var closeReason: RecognitionSegmentCloseReason?
     private var bufferedAudio: [PendingAudioBuffer] = []
@@ -151,6 +151,10 @@ final class SpeakerMusicGateSegment {
         )
     }
 
+    init(forTesting: Void) {
+        classifier = nil
+    }
+
     func append(_ audio: PendingAudioBuffer, durationNanoseconds: UInt64) {
         guard decision == .pending, closeReason == nil else {
             preconditionFailure("music gate segment is no longer accepting audio")
@@ -162,7 +166,7 @@ final class SpeakerMusicGateSegment {
         )
         precondition(!overflow, "music gate audio duration overflowed")
         bufferedDurationNanoseconds = newDuration
-        classifier.analyze(audio.buffer)
+        classifier?.analyze(audio.buffer)
         if bufferedDurationNanoseconds >= speakerMusicGateAnalysisWindowNanoseconds {
             completeAnalysisIfNeeded()
         }
@@ -191,6 +195,6 @@ final class SpeakerMusicGateSegment {
     private func completeAnalysisIfNeeded() {
         guard !analysisCompleted else { return }
         analysisCompleted = true
-        classifier.complete()
+        classifier?.complete()
     }
 }

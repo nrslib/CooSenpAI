@@ -218,11 +218,22 @@ impl Default for ChatConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DebugConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub feedback_enabled: bool,
+}
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            feedback_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,6 +345,8 @@ pub struct AudioConfig {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub mic: bool,
+    #[serde(default)]
+    pub microphone_commands_enabled: bool,
     #[serde(default = "default_true")]
     pub speaker: bool,
     #[serde(default)]
@@ -342,11 +355,17 @@ pub struct AudioConfig {
     pub debug_dump_dir: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SpeakerIdentificationConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for SpeakerIdentificationConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 impl Default for AudioConfig {
@@ -354,6 +373,7 @@ impl Default for AudioConfig {
         Self {
             enabled: false,
             mic: true,
+            microphone_commands_enabled: false,
             speaker: true,
             speaker_identification: SpeakerIdentificationConfig::default(),
             debug_dump_dir: None,

@@ -431,18 +431,23 @@ pub(super) fn load_transcript(
                 continue;
             }
         };
-        if let Some(transcript) = records.into_iter().find_map(|record| {
-            (record.get("observationId").and_then(Value::as_str) == Some(observation_id))
-                .then(|| {
-                    record
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned)
-                })
-                .flatten()
-        }) {
-            return Some(transcript);
+        // 期間行を持つ観察は、期間行を audioStartMs 順に連結した全文を正本とする。
+        let mut matches = records
+            .into_iter()
+            .filter_map(|record| {
+                if record.get("observationId").and_then(Value::as_str) != Some(observation_id) {
+                    return None;
+                }
+                let text = record.get("text").and_then(Value::as_str)?.to_owned();
+                let start = record.get("audioStartMs").and_then(Value::as_u64);
+                Some((start.is_none(), start, text))
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            continue;
         }
+        matches.sort_by_key(|(legacy, start, _)| (*legacy, *start));
+        return Some(matches.into_iter().map(|(_, _, text)| text).collect());
     }
     if transcript_path.is_some() {
         issues.push(format!("transcript-not-found:{observation_id}"));

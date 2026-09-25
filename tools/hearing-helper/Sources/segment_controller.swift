@@ -64,7 +64,7 @@ enum RecognitionSessionCancelReason: String {
 }
 
 enum RecognitionSessionOutcome {
-    case success(text: String)
+    case success(text: String, words: [SpeechWordTiming])
     case noSpeech
     case error(Error)
     case cancelled

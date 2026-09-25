@@ -67,7 +67,14 @@ impl ChatPresenter {
                     request,
                 },
             ) => Handling::Handled(self.configure_work_approval(generation, request)),
-            UiEvent::WorkApproval(event) => Handling::Handled(self.work_approval.handle(event)),
+            UiEvent::WorkApproval(event) => {
+                let mut effects = self.work_approval.handle(event);
+                effects.extend(
+                    self.conversation
+                        .observe_work(self.work_approval.snapshot(), self.snapshot.as_ref()),
+                );
+                Handling::Handled(effects)
+            }
             UiEvent::Composer(event) => {
                 let mut effects = self.composer.handle(event);
                 if let Some(snapshot) = &self.snapshot {
@@ -266,6 +273,10 @@ impl ChatPresenter {
         effects.extend(
             self.conversation
                 .observe(snapshot.clone(), self.composer.pending_sends()),
+        );
+        effects.extend(
+            self.conversation
+                .observe_work(self.work_approval.snapshot(), Some(&snapshot)),
         );
         effects.extend(self.app.observe(&snapshot, highlight_changed));
         effects

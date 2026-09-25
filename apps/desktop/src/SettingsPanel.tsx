@@ -1,6 +1,7 @@
 import { Fragment, lazy, Suspense, useEffect, useRef, useState, type ChangeEvent, type ComponentProps, type ReactElement } from "react";
 
-import type { AppSnapshot, ConfigIssue, ConfigPatch, CooSenpaiConfig, IpcResult, LicenseDocument, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, SpeakerManagementPayload } from "./types.js";
+import type { AppSnapshot, ConfigIssue, ConfigPatch, CooSenpaiConfig, IpcResult, LicenseDocument, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, SpeakerManagementPayload, SpeakerDirectory, SpeakerRenamePayload } from "./types.js";
+import { desktopApi } from "./ipc.js";
 import { t, useI18n, type Locale } from "./i18n/index.js";
 import { ConfirmationDialog } from "./components/ConfirmationDialog.js";
 import { GeneralSettings } from "./components/GeneralSettings.js";
@@ -37,6 +38,14 @@ export { resetShortcutToDefault, shortcutFromKeyboardEvent } from "./components/
 
 const AVATAR_CONFIG_PATH = "state/avatar.png";
 const MAX_AVATAR_UPLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_DEBUG_WAKE_BYTES = 32 * 1024 * 1024;
+
+function isSupportedDebugWakeImage(file: File): boolean {
+  if (file.type === "image/png" || file.type === "image/jpeg") return true;
+  if (file.type !== "") return false;
+  const name = file.name.toLowerCase();
+  return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg");
+}
 
 function settingsResetRequest(scope: SettingsResetRequest["scope"] | null, category: SettingsCategory | null): SettingsResetRequest {
   switch (scope) {
@@ -69,7 +78,8 @@ interface Props {
   readonly providerModelsError?: string;
   readonly providerApiKeys?: ProviderApiKeyStatus;
   readonly providerApiKeysError?: string;
-  readonly focusSection?: "watch";
+  readonly focusSection?: "watch" | "providers";
+  readonly focusGeneration?: number;
   readonly onClose: () => void;
   readonly onSave: (patch: ConfigPatch, avatarImage: readonly number[] | undefined, baseConfigRevision: number) => Promise<IpcResult<CooSenpaiConfig>>;
   readonly onSelectPersona: (persona: string) => Promise<IpcResult<CooSenpaiConfig>>;
@@ -88,6 +98,8 @@ interface Props {
   readonly onOpenLicenseDocument: (document: LicenseDocument) => void;
   readonly onOpenSpeechSettings: (kind: "microphone" | "recognition") => void;
   readonly onSpeakerManagement?: (payload: SpeakerManagementPayload) => Promise<IpcResult<null>>;
+  readonly onSpeakerDirectory?: () => Promise<IpcResult<SpeakerDirectory>>;
+  readonly onSpeakerRename?: (payload: SpeakerRenamePayload) => Promise<IpcResult<SpeakerDirectory>>;
   readonly onToggleAvatar: () => void;
   readonly onRelaunch: () => void;
   readonly onAppearancePreview: (preview?: SettingsAppearancePreview) => Promise<IpcResult<null>>;
@@ -97,7 +109,7 @@ interface Props {
 
 export { SettingsDiscardDialog } from "./components/SettingsDiscardDialog.js";
 
-export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, onClose, onSave, onSelectPersona, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRefreshPersonas, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenAccessibilitySettings, onOpenLicenseDocument, onOpenSpeechSettings, onSpeakerManagement, onToggleAvatar, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
+export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, focusGeneration = 0, onClose, onSave, onSelectPersona, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRefreshPersonas, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenAccessibilitySettings, onOpenLicenseDocument, onOpenSpeechSettings, onSpeakerManagement, onSpeakerDirectory, onSpeakerRename, onToggleAvatar, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
   const { locale, t } = useI18n();
   const [formSync] = useState(() => new SettingsFormSync(toForm(snapshot.config, snapshot.avatarImageLoadFailed), snapshot.configRevision));
   const [form, setForm] = useState(formSync.form);
@@ -107,7 +119,13 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
   const panelRef = useRef<HTMLElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const resetUndoTracking = useRef<ResetUndoTracking | undefined>(undefined);
-  const presenter = useSettingsPresenter(snapshot, focusSection, formSync.input(), {
+  const focusHandledGeneration = useRef<number | undefined>(undefined);
+  const presenter = useSettingsPresenter(snapshot, focusSection, focusGeneration, formSync.input(), {
+    speakerManagement: onSpeakerManagement ?? (async () => ({ ok: false, error: { message: "Speaker management unavailable" } })),
+    speakerDirectory: onSpeakerDirectory ?? (async () => ({ ok: false, error: { message: "Speaker directory unavailable" } })),
+    speakerRename: onSpeakerRename ?? (async () => ({ ok: false, error: { message: "Speaker names unavailable" } })),
+    feedbackExport: desktopApi.exportUtteranceFeedback,
+    debugWake: desktopApi.debugWake,
     save: onSave, selectPersona: onSelectPersona, getPersona: onGetPersona, reload: onReloadConfig,
     resetConversation: onResetConversation, clearPreview: () => onAppearancePreview(undefined), close: onClose,
     reflect: (value) => {
@@ -131,6 +149,24 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     focusFirst: () => { if (panelRef.current !== null) focusFirstSettingsControl(panelRef.current); },
   });
   const action = (name: string, value: unknown = null): void => presenter.send({ type: "action", name, value: name === "save" || name === "close" ? formSync.input() : value });
+  const selectDebugWakeImage = async (file: File | undefined): Promise<void> => {
+    if (file === undefined) return;
+    action("debugWakeLoading");
+    if (file.size > MAX_DEBUG_WAKE_BYTES) {
+      action("debugWakeSelectionError", t("settings.developer.debugWakeTooLarge"));
+      return;
+    }
+    if (!isSupportedDebugWakeImage(file)) {
+      action("debugWakeSelectionError", t("settings.developer.debugWakeUnsupported"));
+      return;
+    }
+    try {
+      const image = Array.from(new Uint8Array(await file.arrayBuffer()));
+      action("debugWakeSelect", { name: file.name, image });
+    } catch {
+      action("debugWakeSelectionError", t("settings.developer.debugWakeReadFailed"));
+    }
+  };
   const edit = (next: FormState, trackResetChanges = true): void => {
     if (trackResetChanges) {
       const tracking = resetUndoTracking.current;
@@ -145,6 +181,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     presenter.send({ type: "change", value: formSync.input() });
   };
   const state = presenter.state;
+  const debugWake = state?.debugWake ?? { phase: "idle" as const, selectedName: null, context: "", result: null, error: null };
   const issues = state?.issues ?? [];
   const saving = state === undefined || state.saving || state.closing;
   const saved = state?.saved === true;
@@ -180,11 +217,15 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
   useEffect(() => {
     const highlight = focusSection ?? snapshot.onboarding.settingsHighlight;
     if (highlight === undefined) return;
+    const targetId = highlight === "watch" ? "settings-watch-targets" : highlight === "providers" ? "settings-ai" : "settings-companion";
     const frame = requestAnimationFrame(() => {
-      document.getElementById(highlight === "watch" ? "settings-watch-targets" : "settings-companion")?.scrollIntoView({ behavior: "auto", block: "center" });
+      const target = document.getElementById(targetId);
+      if (target === null || focusSection !== undefined && focusHandledGeneration.current === focusGeneration) return;
+      target.scrollIntoView({ behavior: "auto", block: "center" });
+      if (focusSection !== undefined) focusHandledGeneration.current = focusGeneration;
     });
     return () => cancelAnimationFrame(frame);
-  }, [focusSection, snapshot.onboarding.settingsHighlight, activeCategory]);
+  }, [focusSection, focusGeneration, snapshot.onboarding.settingsHighlight, activeCategory]);
   const selectAvatar = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
     const file = event.currentTarget.files?.[0];
     if (file === undefined) return;
@@ -257,7 +298,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
   const openPersonaPicker = (): void => {
     action("openPicker");
   };
-  const generalProps: ComponentProps<typeof GeneralSettings> = { ...categoryProps, personas, avatarInputRef, onSelectAvatar: (event) => { void selectAvatar(event); }, onResetAvatar: resetAvatar, onReloadPersona: () => { void onReloadPersona(); }, onEditPersona: editPersona, onOpenPersonaPicker: openPersonaPicker };
+  const generalProps: ComponentProps<typeof GeneralSettings> = { ...categoryProps, feedbackExport: presenter.state?.feedbackExport, onFeedbackExport: () => presenter.send({ type: "action", name: "feedbackExport", value: null }), personas, avatarInputRef, onSelectAvatar: (event) => { void selectAvatar(event); }, onResetAvatar: resetAvatar, onReloadPersona: () => { void onReloadPersona(); }, onEditPersona: editPersona, onOpenPersonaPicker: openPersonaPicker };
   const providerProps: ComponentProps<typeof ProviderSettings> = { ...categoryProps, providerModels, providerApiKeys, providerApiKeysError, providerApiKeyDrafts, onChangeProvider: changeProvider, onProviderApiKeyDraftChange: updateProviderApiKeyDraft, onSaveProviderApiKey, onDeleteProviderApiKey };
   const renderCategory = (category: SettingsCategory): ReactElement => {
     let content: ReactElement;
@@ -269,7 +310,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
         content = <VisionSettings {...categoryProps} highlight={focusSection === "watch"} onOpenSystemSettings={onOpenSystemSettings} onOpenAccessibilitySettings={onOpenAccessibilitySettings} onRelaunch={onRelaunch} />;
         break;
       case "hearing":
-        content = <HearingSettings {...categoryProps} onOpenSpeechSettings={onOpenSpeechSettings} onSpeakerManagement={onSpeakerManagement} />;
+        content = <HearingSettings {...categoryProps} onOpenSpeechSettings={onOpenSpeechSettings} speaker={state?.speakerManagement} speakerConfirmation={confirmation === "speaker-delete" || confirmation === "speaker-delete-all" ? confirmation : null} onSpeakerAction={action} />;
         break;
       case "speech":
         content = <SpeechSettings {...categoryProps} />;
@@ -291,7 +332,13 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
         break;
       case "developer":
         content = <>
-          <DeveloperSettings {...categoryProps} />
+          <DeveloperSettings
+            {...categoryProps}
+            debugWake={debugWake}
+            onDebugWakeImage={(file) => { void selectDebugWakeImage(file); }}
+            onDebugWakeContext={(value) => action("debugWakeContext", value)}
+            onDebugWakeSend={() => action("debugWakeSend")}
+          />
           <SettingsSearchItem label={t("app.vrmMenu")} description={t("settings.categories.developer")}>
             <fieldset id="settings-vrm"><legend>{t("app.vrmMenu")}</legend>
               <div className="button-row">

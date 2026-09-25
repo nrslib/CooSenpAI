@@ -7,7 +7,7 @@ mod roots;
 pub use approval::{
     ApprovalDecision, ApprovalMode, ApprovalRequest, ApprovalStatus, WorkApprovals,
 };
-pub use chat::{ChatWorkExecutor, WorkBrief, WorkProposal, WorkRequest, WorkResult};
+pub use chat::{ChatWorkError, ChatWorkExecutor, WorkBrief, WorkProposal, WorkRequest, WorkResult};
 pub use execution::{execute, WorkExecution, WORK_TIME_LIMIT};
 pub use harness::{build_prompt, harness_arguments, harness_environment, Harness, HarnessLaunch};
 pub use roots::{AllowedRoot, RootPolicy, RootStatus, WorkKind};

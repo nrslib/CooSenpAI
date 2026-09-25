@@ -19,13 +19,13 @@ export interface SettingsCategoryDefinition {
 }
 
 export const SETTINGS_CATEGORIES: readonly SettingsCategoryDefinition[] = [
-  { id: "work", labelKey: "settings.categories.work" },
   { id: "general", labelKey: "settings.categories.general" },
+  { id: "providers", labelKey: "settings.categories.providers" },
   { id: "vision", labelKey: "settings.categories.vision" },
   { id: "hearing", labelKey: "settings.categories.hearing" },
+  { id: "work", labelKey: "settings.categories.work" },
   { id: "speech", labelKey: "settings.categories.speech" },
   { id: "notifications", labelKey: "settings.categories.notifications" },
-  { id: "providers", labelKey: "settings.categories.providers" },
   { id: "shortcuts", labelKey: "settings.categories.shortcuts" },
   { id: "setup", labelKey: "settings.categories.setup" },
   { id: "developer", labelKey: "settings.categories.developer" },

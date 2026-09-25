@@ -221,13 +221,6 @@ pub(crate) fn permission_name(permission: SpeechPermissionKind) -> String {
     .to_owned()
 }
 
-#[cfg(test)]
-pub(super) fn denied_permission_message(
-    permissions: coosenpai_core::ports::SpeechPermissions,
-) -> Option<&'static str> {
-    denied_permission_message_for_locale(permissions, Locale::Ja)
-}
-
 pub(super) fn denied_permission_message_for_locale(
     permissions: coosenpai_core::ports::SpeechPermissions,
     locale: Locale,
@@ -253,4 +246,3 @@ pub(super) fn denied_permission_message_for_locale(
         }
     }
 }
-

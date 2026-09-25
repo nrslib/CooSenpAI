@@ -146,14 +146,6 @@ fn prepare_text_attachment(text: Option<&str>) -> Option<BoundedTextAttachment> 
     text.and_then(bound_text_attachment)
 }
 
-#[cfg(test)]
-fn prepare_clipboard_attachment(
-    reader: &dyn ClipboardReader,
-) -> Result<Option<BoundedTextAttachment>, PortError> {
-    let text = reader.read_text()?;
-    Ok(prepare_text_attachment(text.as_deref()))
-}
-
 pub(super) async fn select(
     copier: &dyn SelectedTextCopyPort,
     reader: &dyn ClipboardReader,
@@ -181,4 +173,3 @@ pub(super) async fn select(
             }
         })
 }
-

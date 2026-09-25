@@ -12,13 +12,9 @@ use tokio_util::sync::CancellationToken;
 pub(crate) mod presenter;
 #[path = "bubble_registration.rs"]
 mod registration;
-#[cfg(test)]
-pub(crate) use presenter::register_replacing_for_surface;
 pub(crate) use registration::await_presentation;
 pub(crate) use registration::{complete_presentation, register, show_replacing};
 pub use registration::{show, show_best_effort};
-#[cfg(test)]
-pub(crate) use registration::{wait_for_acknowledgement, wait_for_presentation_completion};
 
 #[path = "bubble_deck.rs"]
 mod deck;
@@ -70,6 +66,8 @@ pub struct BubbleSecretInput {
     pub placeholder: String,
     pub action: String,
     pub submit_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -229,7 +227,7 @@ impl BubbleState {
     pub(crate) fn set_latest_coo_speech(&mut self, mut record: Option<BubbleRecord>) {
         if let (Some(previous), Some(next)) = (self.latest_coo_speech.as_ref(), record.as_mut()) {
             if previous.id == next.id
-                && is_recorded_feedback(&previous.interaction)
+                && is_feedback_interaction(&previous.interaction)
                 && is_feedback_interaction(&next.interaction)
             {
                 next.interaction = previous.interaction.clone();
@@ -241,14 +239,14 @@ impl BubbleState {
     pub(crate) fn sync_feedback_interactions(
         &mut self,
         config: &coosenpai_core::config::Config,
-        recorded_ids: &HashSet<String>,
+        feedback: &std::collections::BTreeMap<String, crate::utterance_feedback::FeedbackSummary>,
     ) -> bool {
         let mut changed = false;
         for entry in &mut self.entries {
-            changed |= sync_feedback_interaction(&mut entry.record, config, recorded_ids);
+            changed |= sync_feedback_interaction(&mut entry.record, config, feedback);
         }
         if let Some(record) = self.latest_coo_speech.as_mut() {
-            changed |= sync_feedback_interaction(record, config, recorded_ids);
+            changed |= sync_feedback_interaction(record, config, feedback);
         }
         if changed {
             self.mark_changed();
@@ -563,7 +561,7 @@ impl BubbleState {
         if self
             .entries
             .iter()
-            .any(|entry| entry.record.id == id && entry.record.interaction.is_some())
+            .any(|entry| entry.record.id == id && requires_action(&entry.record.interaction))
         {
             return false;
         }
@@ -577,7 +575,7 @@ impl BubbleState {
         let previous_entry_count = self.entries.len();
         let previous_hover_count = self.hovered.len();
         retain_entries(&mut self.entries, |entry| {
-            entry.record.interaction.is_some()
+            requires_action(&entry.record.interaction)
         });
         let entries = &self.entries;
         self.hovered
@@ -771,7 +769,7 @@ fn retain_entries(entries: &mut Vec<BubbleEntry>, mut keep: impl FnMut(&BubbleEn
 fn sync_feedback_interaction(
     record: &mut BubbleRecord,
     config: &coosenpai_core::config::Config,
-    recorded_ids: &HashSet<String>,
+    feedback: &std::collections::BTreeMap<String, crate::utterance_feedback::FeedbackSummary>,
 ) -> bool {
     let is_feedback = is_feedback_interaction(&record.interaction);
     if record.interaction.is_some() && !is_feedback {
@@ -780,13 +778,29 @@ fn sync_feedback_interaction(
     let next = crate::utterance_feedback::interaction_for_speech(
         config,
         &record.message_kind,
-        recorded_ids.contains(&record.id),
+        feedback.get(&record.id),
     );
+    // 保存結果が同じ間は入力中のコメントを保持する。取消後は編集を閉じる。
+    if config.debug.feedback_enabled
+        && record
+            .interaction
+            .as_ref()
+            .is_some_and(|current| current.secret_input.is_some())
+        && feedback
+            .get(&record.id)
+            .is_some_and(|feedback| feedback.sign.is_some())
+    {
+        return false;
+    }
     if record.interaction == next {
         return false;
     }
     record.interaction = next;
     true
+}
+
+pub(crate) fn requires_action(interaction: &Option<BubbleInteraction>) -> bool {
+    interaction.is_some() && !is_feedback_interaction(interaction)
 }
 
 fn is_feedback_interaction(interaction: &Option<BubbleInteraction>) -> bool {
@@ -803,15 +817,6 @@ fn is_feedback_interaction(interaction: &Option<BubbleInteraction>) -> bool {
                 .secret_input
                 .as_ref()
                 .is_some_and(|input| crate::utterance_feedback::is_feedback_action(&input.action))
-    })
-}
-
-fn is_recorded_feedback(interaction: &Option<BubbleInteraction>) -> bool {
-    interaction.as_ref().is_some_and(|interaction| {
-        interaction
-            .actions
-            .iter()
-            .any(|action| action.id == crate::utterance_feedback::TOGGLE_ACTION)
     })
 }
 
@@ -835,13 +840,6 @@ pub(crate) enum BubbleMutation {
     Hover {
         id: String,
         hovering: bool,
-    },
-    #[cfg(test)]
-    Seed {
-        record: Box<BubbleRecord>,
-        shown_ago: Duration,
-        duration: Duration,
-        replaced_ids: Vec<String>,
     },
 }
 
@@ -1019,4 +1017,3 @@ pub(crate) async fn sync_window(state: &DesktopState) -> Result<()> {
         .map_err(anyhow::Error::msg)?;
     Ok(())
 }
-

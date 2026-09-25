@@ -26,12 +26,15 @@ const MAX_CANDIDATES: usize = 256;
 const MAX_HISTORY: usize = 50;
 const CODEX_BUILTIN_CANDIDATES: &[&str] = &[
     "default",
+    "gpt-6-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
-    "gpt-6-astra",
 ];
-const CLAUDE_BUILTIN_CANDIDATES: &[&str] = &["default", "opus", "sonnet", "haiku"];
+const CLAUDE_BUILTIN_CANDIDATES: &[&str] =
+    &["default", "opus", "sonnet", "haiku", "claude-opus-5-5"];
 const BUILTIN_EFFORT_CANDIDATES: &[&str] = &["default", "low", "medium", "high", "xhigh", "max"];
 
 static REMOTE_REFRESH_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();

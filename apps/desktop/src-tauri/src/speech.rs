@@ -43,8 +43,6 @@ pub struct SpeechController {
     transcript: Mutex<SpeechTranscript>,
     projection: tokio::sync::Mutex<()>,
     cancel_completed: Notify,
-    #[cfg(test)]
-    shortcut_refresh_disabled: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -98,38 +96,7 @@ impl SpeechController {
             transcript: Mutex::new(SpeechTranscript::default()),
             projection: tokio::sync::Mutex::new(()),
             cancel_completed: Notify::new(),
-            #[cfg(test)]
-            shortcut_refresh_disabled: std::sync::atomic::AtomicBool::new(false),
         }
-    }
-
-    #[cfg(test)]
-    fn with_ports(
-        key_state: Arc<dyn SpeechKeyStatePort>,
-        input_devices: Arc<dyn SpeechInputDevicePort>,
-    ) -> Self {
-        Self {
-            speech_port: Mutex::new(None),
-            permission_port: Mutex::new(Arc::new(crate::platform::MacSpeechPermissions)),
-            key_state,
-            input_devices,
-            lifecycle: Arc::new(Mutex::new(SpeechLifecycle::default())),
-            transcript: Mutex::new(SpeechTranscript::default()),
-            projection: tokio::sync::Mutex::new(()),
-            cancel_completed: Notify::new(),
-            #[cfg(test)]
-            shortcut_refresh_disabled: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn install_ports_for_test(
-        &self,
-        speech_port: Arc<dyn SpeechPort>,
-        permission_port: Arc<dyn SpeechPermissionPort>,
-    ) {
-        *self.speech_port.lock().expect("speech port") = Some(speech_port);
-        *self.permission_port.lock().expect("permission port") = permission_port;
     }
 
     pub(super) async fn begin(
@@ -765,4 +732,3 @@ impl SpeechController {
         }
     }
 }
-

@@ -61,6 +61,7 @@ export interface CooSenpaiConfig {
   readonly audio: {
     readonly enabled: boolean;
     readonly mic: boolean;
+    readonly microphoneCommandsEnabled: boolean;
     readonly speaker: boolean;
     readonly speakerIdentification: { readonly enabled: boolean };
     readonly debugDumpDir?: string | null;
@@ -119,7 +120,7 @@ export interface CooSenpaiConfig {
   };
   readonly chat: { readonly whileThinking: "queue" | "append" };
   readonly memory: MemoryConfig;
-  readonly debug: { readonly enabled: boolean };
+  readonly debug: { readonly enabled: boolean; readonly feedbackEnabled: boolean };
   readonly notification: {
     readonly mode: "bubble" | "os" | "both";
     readonly minPriority: "info" | "warning" | "critical";
@@ -212,7 +213,7 @@ export interface ConversationEntry {
   readonly createdAt: string;
   readonly role: "user" | "companion";
   readonly message: string;
-  readonly messageKind: "chat" | "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "tutorial" | "notice" | "setup" | "fact-confirmation" | "thought" | "system";
+  readonly messageKind: "chat" | "progress" | "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "tutorial" | "notice" | "setup" | "fact-confirmation" | "thought" | "system";
   readonly attachmentPath?: string;
   readonly attachmentText?: string;
   readonly tutorialResponseKey?: string;
@@ -311,6 +312,16 @@ export interface AudioObservation {
   readonly speakerId?: string;
   readonly speakerRegistryId?: string;
   readonly speakerStatus?: SpeakerIdentificationStatus;
+  readonly speakerSegments?: readonly HearingSpeakerSegment[];
+}
+
+export interface HearingSpeakerSegment {
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly speakerId?: string;
+  readonly speakerRegistryId?: string;
+  readonly status: SpeakerIdentificationStatus;
+  readonly text?: string;
 }
 
 export type ObservationRecord = VisualObservation | NoChangeObservation | AudioObservation;
@@ -323,6 +334,8 @@ export interface TranscriptRecord {
   readonly speakerTag?: string;
   readonly speakerRegistryId?: string;
   readonly speakerStatus?: SpeakerIdentificationStatus;
+  readonly audioStartMs?: number;
+  readonly audioEndMs?: number;
   readonly transcriptPath?: string;
 }
 
@@ -333,9 +346,114 @@ export interface DataFlowLog {
   readonly transcripts: readonly TranscriptRecord[];
 }
 
+export interface ConversationLogEntry {
+  readonly observationId: string;
+  readonly time: string;
+  readonly source: string;
+  readonly text: string;
+  readonly speakerTag?: string;
+  readonly speakerStatus?: SpeakerIdentificationStatus;
+  readonly speakerName?: string;
+  readonly audioStartMs?: number;
+  readonly audioEndMs?: number;
+  readonly speakerDecisionDetails?: readonly SpeakerDecisionDetails[];
+}
+
+export interface SpeakerDecisionDetails {
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly decisionVersion: string;
+  readonly registryId?: string;
+  readonly modelPackageDigest: string;
+  readonly phase: "initial" | "initial-recent" | "backfill-anchor" | "backfill-samples";
+  readonly status: SpeakerIdentificationStatus;
+  readonly reason: "matched-known" | "enrolled-new" | "enrolled-pending" | "pending-candidate" | "below-known-above-new" | "single-window" | "mixed-clusters" | "no-evidence" | "matched-samples" | "ambiguous-representatives" | "replayed-confirmed";
+  readonly candidates: readonly { readonly speakerId: string; readonly score: number }[];
+  readonly candidateNames: Readonly<Record<string, string>>;
+  readonly candidateCount: number;
+  readonly knownThreshold: number;
+  readonly marginThreshold: number;
+  readonly evidenceWindowCount: number;
+  readonly voicedFrameCount: number;
+  readonly supportingSamples: readonly {
+    readonly segmentId: string; readonly startMs: number; readonly endMs: number;
+    readonly anchorId: string; readonly anchorScore: number; readonly score: number;
+  }[];
+  readonly supportThreshold?: number;
+  readonly recentCandidateCount?: number;
+  readonly recentMatchCount?: number;
+  readonly recentBestScore?: number;
+  readonly recentComparisons?: readonly {
+    readonly segmentId: string; readonly startMs: number; readonly endMs: number; readonly score: number;
+  }[];
+  readonly recentComparisonSources?: readonly {
+    readonly segmentId: string; readonly startMs: number; readonly endMs: number;
+    readonly time?: string; readonly text?: string;
+  }[];
+}
+
+export interface ConversationLogEntryView {
+  readonly observationId: string;
+  readonly time: string;
+  readonly source: string;
+  readonly text: string;
+  readonly speakerTag?: string;
+  readonly speakerStatus?: SpeakerIdentificationStatus;
+  readonly speakerName?: string;
+  readonly audioStartMs?: number;
+  readonly audioEndMs?: number;
+  readonly speakerDecisionDetails?: readonly SpeakerDecisionDetails[];
+  readonly speakerEditId: string | null;
+  readonly speakerDetailsKey: { readonly observationId: string; readonly audioStartMs: number | null; readonly audioEndMs: number | null } | null;
+}
+
+export interface ConversationLogPage {
+  readonly dates: readonly string[];
+  readonly selectedDate: string;
+  readonly entries: readonly ConversationLogEntry[];
+  readonly truncated: boolean;
+}
+
+export interface ConversationLogSpeaker {
+  readonly tag: string;
+  readonly name: string | null;
+}
+
+export interface ConversationLogSpeakerEditor {
+  readonly speakerId: string;
+  readonly name: string;
+  readonly saving: boolean;
+  readonly error: string | null;
+}
+
+export interface SpeakerDirectoryState {
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly speakers: readonly SpeakerSummary[] | null;
+  readonly merged: readonly MergedSpeakers[] | null;
+}
+
+export interface ConversationLogState {
+  readonly dates: readonly string[];
+  readonly selectedDate: string | null;
+  readonly filter: string | null;
+  readonly speakers: readonly ConversationLogSpeaker[];
+  readonly entries: readonly ConversationLogEntryView[];
+  readonly speakerEditor: ConversationLogSpeakerEditor | null;
+  readonly speakerDetails: ConversationLogEntry | null;
+  readonly scrollToEnd?: { readonly request: number; readonly generation: number } | null;
+  readonly truncated: boolean;
+  readonly loading: boolean;
+  readonly loadError: string | null;
+  readonly deleteConfirmation: string | null;
+  readonly deleting: boolean;
+  readonly deleteError: string | null;
+}
+
 export interface CompanionDecision {
   readonly sequence: number;
   readonly occurredAt: string;
+  readonly callId?: string;
   readonly emit: boolean;
   readonly messageKind: string;
   readonly message?: string;
@@ -343,9 +461,14 @@ export interface CompanionDecision {
   readonly observationIds?: readonly string[];
 }
 
+export interface ProviderFailureSummary {
+  readonly kind: "retryable" | "timeout" | "auth" | "unsupported" | "invalid-model" | "invalid-request" | "permission" | "quota" | "rate-limit" | "invalid-output";
+  readonly model?: string;
+}
+
 export interface RuntimeLastError {
   readonly source?: "runtime" | "user-response" | "attachment-ocr" | "observer" | "companion" | "config";
-  readonly userResponse?: { readonly inputId: string; readonly attempts: number };
+  readonly userResponse?: { readonly inputId: string; readonly attempts: number; readonly provider?: ProviderFailureSummary };
   readonly userInputId?: string;
   readonly kind: string;
   readonly occurredAt: string;
@@ -368,7 +491,16 @@ export interface CompanionEmotions {
   readonly frustration: number;
 }
 
+export interface UtteranceFeedbackSummary {
+  readonly revision: number;
+  readonly sign: "positive" | "negative" | null;
+  readonly comment: string | null;
+  readonly feedStatus: "pending" | "applied" | "not-applied" | "unknown" | null;
+}
+
 export interface AppSnapshot {
+  readonly utteranceFeedback: Readonly<Record<string, UtteranceFeedbackSummary>>;
+  readonly speakerDirectoryRevision?: number;
   readonly companionEmotions: CompanionEmotions;
   readonly revision: number;
   readonly configRevision: number;
@@ -561,6 +693,16 @@ export interface DebugDetail {
   readonly companionContext?: string;
 }
 
+export interface DebugWakeResult {
+  readonly sourceId: string;
+  readonly callId?: string;
+  readonly status: "emitted" | "silent" | "deferred";
+  readonly emit: boolean;
+  readonly messageKind: string;
+  readonly thought?: string;
+  readonly message?: string;
+}
+
 export interface DebugCatalog {
   readonly details: readonly DebugDetail[];
   readonly latestGate?: DebugGateRecord;
@@ -624,7 +766,7 @@ export interface BubbleRecord {
   readonly id: string;
   readonly createdAt: string;
   readonly message: string;
-  readonly messageKind: "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "chat" | "thought" | "tutorial" | "setup" | "notice" | "fact-confirmation";
+  readonly messageKind: "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "chat" | "progress" | "thought" | "tutorial" | "setup" | "notice" | "fact-confirmation";
   readonly notificationPriority: NotificationPriority;
   readonly causedBy?: string;
   readonly displayName: string;
@@ -643,6 +785,7 @@ export interface BubbleInteraction {
     readonly confirmLabel: string;
   };
   readonly secretInput?: {
+    readonly value?: string;
     readonly label: string;
     readonly placeholder: string;
     readonly action: string;
@@ -686,4 +829,26 @@ export interface SpeakerManagementPayload {
   readonly sourceId?: string;
   readonly targetId?: string;
   readonly speakerId?: string;
+}
+
+export interface SpeakerSummary {
+  readonly id: string;
+  readonly name?: string;
+}
+
+export interface MergedSpeakers {
+  readonly sourceId: string;
+  readonly targetId: string;
+  readonly sourceName?: string;
+  readonly targetName?: string;
+}
+
+export interface SpeakerDirectory {
+  readonly speakers: readonly SpeakerSummary[];
+  readonly merged: readonly MergedSpeakers[];
+}
+
+export interface SpeakerRenamePayload {
+  readonly speakerId: string;
+  readonly name: string | null;
 }

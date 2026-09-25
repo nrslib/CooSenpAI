@@ -29,6 +29,7 @@ pub(super) fn send_request_value(
         "executable": executable,
         "cwd": cwd,
         "toolsDisabled": input.tools_disabled,
+        "webSearchEnabled": input.web_search_enabled,
         "isolateTools": matches!(input.session, SessionRequest::Isolated),
         "stallTimeoutMs": u64::try_from(input.stall_timeout.as_millis()).unwrap_or(u64::MAX),
         "timeoutMs": u64::try_from(input.timeout.as_millis()).unwrap_or(u64::MAX),

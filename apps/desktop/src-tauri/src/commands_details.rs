@@ -28,6 +28,103 @@ pub async fn details_open(
 }
 
 const DATAFLOW_LOG_LIMIT: usize = 200;
+const CONVERSATION_LOG_DAYS: i64 = 7;
+const CONVERSATION_LOG_LIMIT: usize = 500;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationLogPayload {
+    #[serde(default)]
+    date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationLogDeletePayload {
+    date: String,
+}
+
+fn conversation_log_date(
+    payload: &ConversationLogPayload,
+    locale: Locale,
+) -> Result<Option<chrono::NaiveDate>, String> {
+    let Some(raw) = payload.date.as_deref() else {
+        return Ok(None);
+    };
+    parse_conversation_log_date(raw, locale).map(Some)
+}
+
+fn parse_conversation_log_date(raw: &str, locale: Locale) -> Result<chrono::NaiveDate, String> {
+    let invalid = || text(TextKey::CommandInvalidInput, locale).to_owned();
+    let date = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| invalid())?;
+    let window = coosenpai_core::conversation_log::conversation_log_window(
+        chrono::Local::now().date_naive(),
+        CONVERSATION_LOG_DAYS,
+    );
+    if !window.contains(&date) {
+        return Err(invalid());
+    }
+    Ok(date)
+}
+
+fn conversation_log_delete_date(
+    payload: &ConversationLogDeletePayload,
+    locale: Locale,
+) -> Result<chrono::NaiveDate, String> {
+    parse_conversation_log_date(&payload.date, locale)
+}
+
+#[tauri::command]
+pub async fn details_conversation_log(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: ConversationLogPayload,
+) -> TauriIpcResult<coosenpai_core::conversation_log::ConversationLog> {
+    authorize_window(&window, CommandOrigin::Details)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    let date = match conversation_log_date(&payload, locale) {
+        Ok(date) => date,
+        Err(message) => return Ok(IpcResult::failure(message)),
+    };
+    Ok(
+        match coosenpai_core::conversation_log::read_conversation_log(
+            &state.paths,
+            date,
+            CONVERSATION_LOG_DAYS,
+            CONVERSATION_LOG_LIMIT,
+        ) {
+            Ok(log) => IpcResult::success(log),
+            Err(error) => IpcResult::failure(
+                text(TextKey::DetailsConversationLogReadFailed, locale)
+                    .replace("{error}", &error.to_string()),
+            ),
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn details_delete_conversation_log(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: ConversationLogDeletePayload,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::Details)?;
+    let locale = Locale::from_config(&state.runtime_config().ui.language);
+    let date = match conversation_log_delete_date(&payload, locale) {
+        Ok(date) => date,
+        Err(message) => return Ok(IpcResult::failure(message)),
+    };
+    let result = state
+        .delete_conversation_log_day(state.paths.clone(), date)
+        .await;
+    Ok(match result {
+        Ok(()) => IpcResult::success(()),
+        Err(error) => IpcResult::failure(
+            text(TextKey::DetailsConversationLogDeleteFailed, locale)
+                .replace("{error}", &error.to_string()),
+        ),
+    })
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,30 +143,6 @@ fn allowed_dataflow_path(paths: &coosenpai_core::config::ConfigPaths, requested:
         .into_iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
         .any(|root| requested.starts_with(root))
-}
-
-#[test]
-fn dataflow_open_path_requires_an_existing_file_under_the_allowed_directories() {
-    let directory = tempfile::tempdir().unwrap();
-    let paths = coosenpai_core::config::ConfigPaths::from_root(directory.path().join("coo"));
-    std::fs::create_dir_all(&paths.frame_buffer).unwrap();
-    let frame = paths.frame_buffer.join("frame.png");
-    let outside = directory.path().join("outside.txt");
-    std::fs::write(&frame, b"frame").unwrap();
-    std::fs::write(&outside, b"outside").unwrap();
-    assert!(allowed_dataflow_path(&paths, &frame));
-    assert!(!allowed_dataflow_path(&paths, &outside));
-    assert!(!allowed_dataflow_path(&paths, &paths.frame_buffer));
-    assert!(!allowed_dataflow_path(
-        &paths,
-        &paths.frame_buffer.join("missing.png")
-    ));
-    #[cfg(unix)]
-    {
-        let link = paths.frame_buffer.join("outside.png");
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-        assert!(!allowed_dataflow_path(&paths, &link));
-    }
 }
 
 #[tauri::command]

@@ -81,6 +81,10 @@ pub(super) fn parse_error_kind(kind: Option<&str>) -> ProviderErrorKind {
         Some("auth") => ProviderErrorKind::Auth,
         Some("unsupported") => ProviderErrorKind::Unsupported,
         Some("invalid-model") => ProviderErrorKind::InvalidModel,
+        Some("invalid-request") => ProviderErrorKind::InvalidRequest,
+        Some("permission") => ProviderErrorKind::Permission,
+        Some("quota") => ProviderErrorKind::Quota,
+        Some("rate-limit") => ProviderErrorKind::RateLimit,
         Some("invalid-output") | Some("protocol") => ProviderErrorKind::InvalidOutput,
         _ => ProviderErrorKind::Retryable,
     }

@@ -27,29 +27,3 @@ pub(super) async fn prepare_image(
         accessibility_permission_required: false,
     })
 }
-
-#[cfg(test)]
-pub(super) async fn guide_permission_error(
-    settings: &dyn coosenpai_core::ports::SystemSettingsPort,
-    logger: &dyn coosenpai_core::ports::RuntimeLogger,
-    cancellation: &CancellationToken,
-    error: &str,
-) {
-    if error != crate::platform::SCREENSHOT_ACCESS_REQUIRED || cancellation.is_cancelled() {
-        return;
-    }
-    let _ = logger.write("DEBUG", "範囲選択: 段階=accessibility-settings-open");
-    if let Err(error) = settings
-        .open(
-            coosenpai_core::ports::SystemSettingsPane::Accessibility,
-            cancellation.clone(),
-        )
-        .await
-    {
-        let _ = logger.write(
-            "WARN",
-            &format!("アクセシビリティ設定を開けません: {error}"),
-        );
-    }
-}
-

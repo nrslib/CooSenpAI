@@ -27,6 +27,13 @@ export function ProviderSettings({ form, snapshot, saving, update, errorFor, pro
   return <>
     <fieldset id="settings-ai" className={tutorialSettingsHighlight(snapshot.onboarding, "provider") ? "tutorial-highlight" : undefined}>
       <legend>{t("settings.providers.heading")}</legend>
+      <h3>{snapshot.companionDisplayName}</h3>
+      <ProviderInput path="companion.provider" value={form.providerCompanion} update={(value) => onChangeProvider("companion", value)} />
+      <ModelInput path="companion.model" value={form.companionModel} options={companionModels?.candidates ?? []} label={t("settings.providers.replyModel")} description={t("settings.providers.replyDescription")} update={(value) => update("companionModel", value)} />
+      <EffortInput path="companion.effort" value={form.companionEffort} options={companionModels === undefined ? [] : effortCandidatesForModel(companionModels, form.companionModel)} label={t("settings.providers.replyEffort")} description={t("settings.providers.replyDescription")} update={(value) => update("companionEffort", value)} />
+      <ModelInput path="companion.proactiveModel" value={form.proactiveModel} options={companionModels?.candidates ?? []} label={t("settings.providers.proactiveModel")} description={t("settings.providers.proactiveDescription")} placeholder={t("settings.providers.sameAsReply")} update={(value) => update("proactiveModel", value)} />
+      <EffortInput path="companion.proactiveEffort" value={form.proactiveEffort} options={companionModels === undefined ? [] : effortCandidatesForModel(companionModels, form.proactiveModel === "" ? form.companionModel : form.proactiveModel)} label={t("settings.providers.proactiveEffort")} description={t("settings.providers.proactiveDescription")} placeholder={t("settings.providers.sameAsReply")} update={(value) => update("proactiveEffort", value)} />
+      <NumberInput label={t("settings.providers.companionLimit")} path="companion.dailyProactiveLimit" value={form.companionLimit} update={(value) => update("companionLimit", value)} errorFor={errorFor} />
       <h3>{t("settings.providers.vision")}</h3>
       <ProviderInput path="observer.vision.provider" value={form.providerObserver} update={(value) => onChangeProvider("vision", value)} />
       <ModelInput path="observer.vision.model" value={form.observerModel} options={visionModels?.candidates ?? []} update={(value) => update("observerModel", value)} />
@@ -37,13 +44,6 @@ export function ProviderSettings({ form, snapshot, saving, update, errorFor, pro
       <ModelInput path="observer.hearing.model" value={form.hearingModel} options={hearingModels?.candidates ?? []} update={(value) => update("hearingModel", value)} />
       <EffortInput path="observer.hearing.effort" value={form.hearingEffort} options={hearingModels === undefined ? [] : effortCandidatesForModel(hearingModels, form.hearingModel)} update={(value) => update("hearingEffort", value)} />
       <NumberInput label={t("settings.providers.observerLimit")} path="observer.hearing.dailyCallLimit" value={form.hearingLimit} update={(value) => update("hearingLimit", value)} errorFor={errorFor} />
-      <h3>{snapshot.companionDisplayName}</h3>
-      <ProviderInput path="companion.provider" value={form.providerCompanion} update={(value) => onChangeProvider("companion", value)} />
-      <ModelInput path="companion.model" value={form.companionModel} options={companionModels?.candidates ?? []} label={t("settings.providers.replyModel")} description={t("settings.providers.replyDescription")} update={(value) => update("companionModel", value)} />
-      <EffortInput path="companion.effort" value={form.companionEffort} options={companionModels === undefined ? [] : effortCandidatesForModel(companionModels, form.companionModel)} label={t("settings.providers.replyEffort")} description={t("settings.providers.replyDescription")} update={(value) => update("companionEffort", value)} />
-      <ModelInput path="companion.proactiveModel" value={form.proactiveModel} options={companionModels?.candidates ?? []} label={t("settings.providers.proactiveModel")} description={t("settings.providers.proactiveDescription")} placeholder={t("settings.providers.sameAsReply")} update={(value) => update("proactiveModel", value)} />
-      <EffortInput path="companion.proactiveEffort" value={form.proactiveEffort} options={companionModels === undefined ? [] : effortCandidatesForModel(companionModels, form.proactiveModel === "" ? form.companionModel : form.proactiveModel)} label={t("settings.providers.proactiveEffort")} description={t("settings.providers.proactiveDescription")} placeholder={t("settings.providers.sameAsReply")} update={(value) => update("proactiveEffort", value)} />
-      <NumberInput label={t("settings.providers.companionLimit")} path="companion.dailyProactiveLimit" value={form.companionLimit} update={(value) => update("companionLimit", value)} errorFor={errorFor} />
     </fieldset>
     <fieldset id="settings-provider-keys">
       <ProviderApiKeyFields status={providerApiKeys} error={providerApiKeysError} disabled={saving} drafts={providerApiKeyDrafts} onDraftChange={onProviderApiKeyDraftChange} onSave={onSaveProviderApiKey} onDelete={onDeleteProviderApiKey} />

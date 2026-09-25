@@ -297,10 +297,7 @@ impl DesktopState {
         &self,
     ) -> crate::bubbles::presenter::NotificationContext {
         let runtime = self.runtime_snapshot();
-        let recorded_feedback_ids =
-            coosenpai_core::utterance_feedback::UtteranceFeedbackStore::from_paths(&self.paths)
-                .recorded_utterance_ids()
-                .unwrap_or_default();
+        let utterance_feedback = self.snapshot().await.utterance_feedback;
         crate::bubbles::presenter::NotificationContext {
             config: self.runtime_config(),
             display_name: runtime.companion_display_name,
@@ -308,7 +305,7 @@ impl DesktopState {
             tutorial_active: self.tutorial.lock().await.state().tutorial_active(),
             latest_thought: runtime.latest_companion_thought,
             latest_thought_generation: runtime.latest_companion_thought_generation,
-            recorded_feedback_ids,
+            utterance_feedback,
         }
     }
 

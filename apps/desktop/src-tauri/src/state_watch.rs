@@ -25,8 +25,6 @@ pub(super) struct WatchControl {
     pub(super) lifecycle: WatchLifecycle,
     pub(super) generation: u64,
     pub(super) resume_after_power: bool,
-    #[cfg(test)]
-    pub(super) start_commit_barrier: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 pub(crate) struct WatchStartIntent {
@@ -294,11 +292,6 @@ impl DesktopState {
                 control.lifecycle = WatchLifecycle::Stopped;
                 return Err(error);
             }
-        }
-        #[cfg(test)]
-        if let Some((entered, release)) = control.start_commit_barrier.take() {
-            entered.notify_one();
-            release.notified().await;
         }
         let _ = self.logger.write("INFO", "見守りを開始しました。");
         let snapshot = self
@@ -706,4 +699,3 @@ fn watch_fullscreen_consent_record_for_locale(
         }),
     }
 }
-

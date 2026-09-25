@@ -53,8 +53,6 @@ impl SpeechPort for MacSpeech {
                 })?;
             args.extend(["--debug-dump-wav".to_owned(), path_text.to_owned()]);
         }
-        #[cfg(test)]
-        let process_guard = crate::test_support::acquire_helper_process_lock().await;
         let process = InteractiveProcess::spawn(
             InteractiveProcessRequest {
                 executable: self.helper.clone(),
@@ -72,8 +70,6 @@ impl SpeechPort for MacSpeech {
             process,
             command_rx,
             event_tx,
-            #[cfg(test)]
-            process_guard,
         ));
         Ok(SpeechSession::from_channels(command_tx, event_rx))
     }
@@ -83,7 +79,6 @@ async fn run_session(
     mut process: InteractiveProcess,
     mut commands: mpsc::Receiver<SpeechCommand>,
     events: mpsc::Sender<Result<SpeechEvent, PortError>>,
-    #[cfg(test)] _process_guard: crate::test_support::HelperProcessLock,
 ) {
     let control = process.control();
     let mut terminal_event_seen = false;
@@ -207,4 +202,3 @@ async fn cancel_and_reap(
 fn process_error(error: impl std::fmt::Display) -> PortError {
     PortError::Unavailable(format!("音声認識 helper の実行に失敗しました: {error}"))
 }
-

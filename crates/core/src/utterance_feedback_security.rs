@@ -154,7 +154,7 @@ pub(super) fn validate_materials(
     Ok(())
 }
 
-fn allowed_material_path(path: &str) -> bool {
+pub(super) fn allowed_material_path(path: &str) -> bool {
     if matches!(path, "manifest.json" | "utterance.json") {
         return true;
     }

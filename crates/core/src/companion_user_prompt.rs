@@ -49,14 +49,6 @@ pub(super) fn keep_latest_observations(
     observations
 }
 
-#[cfg(test)]
-pub(super) fn bound_user_screen_context(
-    observations: Vec<ObservationRecord>,
-    pending_frames: Vec<PendingFrameContext>,
-) -> (Vec<ObservationRecord>, Vec<PendingFrameContext>) {
-    bound_user_screen_context_with_frame_paths(observations, pending_frames, &HashMap::new())
-}
-
 pub(super) fn bound_user_screen_context_with_frame_paths(
     observations: Vec<ObservationRecord>,
     pending_frames: Vec<PendingFrameContext>,
@@ -186,4 +178,3 @@ fn format_single_user_message(input: &PendingUserMessage) -> Result<String, Comp
     );
     Ok(message)
 }
-

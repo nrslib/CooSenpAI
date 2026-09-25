@@ -167,15 +167,6 @@ fn validate_path_for_locale(path: &Path, locale: Locale) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-fn validate_bundle(
-    bundle: &Path,
-    expected: &Version,
-    architecture: &str,
-) -> Result<SystemVersion, String> {
-    validate_bundle_for_locale(bundle, expected, architecture, Locale::Ja)
-}
-
 fn validate_bundle_for_locale(
     bundle: &Path,
     expected: &Version,
@@ -273,4 +264,3 @@ impl<R: Read> Read for ExpandedReader<R> {
         Ok(count)
     }
 }
-

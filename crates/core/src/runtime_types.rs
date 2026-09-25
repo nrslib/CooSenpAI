@@ -1,4 +1,6 @@
-use crate::companion::{AttachmentOcrFailureKind, CompanionAgent, CompanionError};
+use crate::companion::{
+    AttachmentOcrFailureKind, CompanionAgent, CompanionError, CompanionResponse,
+};
 use crate::config::{Config, ConfigError, ConfigValidationIssue};
 use crate::locale::{text, Locale, TextKey};
 use crate::mailbox::MailboxError;
@@ -30,6 +32,7 @@ pub struct RuntimeSnapshot {
     pub user_work_pending: bool,
     pub cancelled_user_message_ids: Vec<String>,
     pub companion_draft: Option<String>,
+    pub conversation_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_companion_thought: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,6 +74,15 @@ pub struct CompanionDecision {
     /// 発言評価が発言と LLM 判断を対応付けるときの正本とする。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub utterance_observation_ids: Vec<String>,
+}
+
+/// 観測 Wake の結果。通常の `CompanionResponse` に加えて、モデル呼び出しの有無を
+/// caller が判定できるようにする。`call_id` がある場合は実際の provider 呼び出しを表す。
+#[derive(Debug)]
+pub struct CompanionObservationResult {
+    pub response: CompanionResponse,
+    pub call_id: Option<String>,
+    pub deferred: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +167,8 @@ pub enum RuntimeErrorSource {
 pub struct RuntimeUserResponseFailure {
     pub input_id: String,
     pub attempts: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::provider::ProviderFailureSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,7 +227,7 @@ pub enum RuntimeError {
     ObservationCancelled,
     #[error("observer が設定されていません")]
     ObserverUnavailable,
-    #[error("companion が設定されていません")]
+    #[error("Coo の応答処理を利用できません")]
     CompanionUnavailable,
     #[error("observer エラー: {0}")]
     Observer(#[from] ObserverError),

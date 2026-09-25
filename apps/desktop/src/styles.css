@@ -133,15 +133,29 @@ h1, h2, h3, h4, p { margin: 0; }
 .attachment-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 42px 18px 18px; background: rgb(0 0 0 / 72%); }
 .attachment-overlay img { max-width: 100%; max-height: 100%; object-fit: contain; border: 1px solid var(--line-strong); border-radius: var(--radius-surface); }
 .attachment-close { position: absolute; top: 12px; right: 14px; color: white; border: 1px solid rgb(255 255 255 / 35%); background: rgb(20 20 20 / 70%); border-radius: 999px; padding: 6px 12px; }
+.message-feedback { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; margin-top: 8px; }
+.message-feedback-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.message-feedback-actions button { min-height: 28px; padding: 3px 8px; font-size: 12px; }
+.message-feedback-actions button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.message-feedback-comment { width: 100%; display: flex; flex-direction: column; gap: 5px; }
+.message-feedback-comment label, .message-feedback small { font-size: 12px; }
+.message-feedback-comment textarea { width: 100%; min-height: 58px; resize: vertical; }
+.message-bubble .message-feedback-saved-comment { font-size: 12px; }
+.message-feedback [role="alert"] { color: var(--error); }
 .message-bubble .detail-link { display: block; margin-top: 6px; }
 .role-user .detail-link { color: var(--accent); }
 .thinking-row { display: flex; align-items: center; gap: 8px; margin: 3px 5px 14px; color: var(--muted); font-size: 12px; }
-.thinking-dots { display: flex; gap: 3px; padding: 8px 10px; background: var(--companion-bubble); border: 1px solid var(--line); border-radius: var(--radius-surface); }
-.thinking-dots i { width: 4px; height: 4px; background: var(--muted); border-radius: 50%; animation: thinking 1.2s ease-in-out infinite; }
-.thinking-dots i:nth-child(2) { animation-delay: 120ms; }
-.thinking-dots i:nth-child(3) { animation-delay: 240ms; }
 .streaming-draft { max-width: 82%; padding: 9px 12px; color: var(--text); background: var(--companion-bubble); border: 1px solid var(--line); border-radius: var(--radius-surface); }
-@keyframes thinking { 50% { opacity: .3; transform: translateY(-2px); } }
+.conversation-progress { display: flex; flex-direction: column; gap: 6px; margin: 3px 5px 14px; color: var(--muted); font-size: 12px; }
+.conversation-progress-line { display: flex; align-items: center; gap: 6px; }
+.conversation-progress-summary { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 8px; padding: 7px 9px; color: inherit; background: var(--surface-raised); border: 1px solid var(--line); border-radius: var(--radius-control); text-align: left; }
+.conversation-progress-summary span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-progress-summary time { flex: 0 0 auto; color: var(--faint); font-variant-numeric: tabular-nums; }
+.conversation-progress-summary span:last-child { flex: 0 0 auto; color: var(--faint); }
+.conversation-progress-stop { flex: 0 0 auto; padding: 6px 9px; color: var(--error); background: transparent; border: 1px solid var(--error); border-radius: var(--radius-control); }
+.conversation-progress-history { display: grid; gap: 5px; margin: 0; padding: 7px 10px 7px 28px; background: var(--surface-raised); border-left: 2px solid var(--line-strong); }
+.conversation-progress-history li { display: flex; gap: 8px; }
+.conversation-progress-history time { flex: 0 0 auto; color: var(--faint); font-variant-numeric: tabular-nums; }
 
 .composer { position: relative; display: flex; flex: 0 0 auto; align-items: flex-end; gap: 8px; padding: 10px 12px 22px; background: var(--surface); border-top: 1px solid var(--line); }
 .send-key-hint { position: absolute; right: 58px; bottom: 5px; color: var(--faint); font-size: 11px; }

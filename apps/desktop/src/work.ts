@@ -7,7 +7,8 @@ export interface WorkSnapshot {
   readonly error?: string | null;
   readonly task: {
     readonly id: string;
-    readonly phase: "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
+    readonly inputId?: string | null;
+    readonly phase: "running" | "succeeded" | "failed" | "cancelled" | "denied" | "interrupted";
     readonly request: {
       readonly kind: WorkKind;
       readonly cwd: string;

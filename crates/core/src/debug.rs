@@ -441,10 +441,6 @@ impl DebugStore {
             prompt: prompt.to_owned(),
             response: response.clone(),
         };
-        atomic_write_bytes(
-            &directory.join(format!("companion-prompt-{call_id}.txt")),
-            prompt.as_bytes(),
-        )?;
         write_json(
             &directory.join(format!("companion-response-{call_id}.json")),
             response,

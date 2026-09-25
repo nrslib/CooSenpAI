@@ -1,6 +1,7 @@
 use crate::config::ConfigPaths;
 use crate::hearing_context::HearingContextBuffer;
 use crate::persistence::PersistenceError;
+use crate::ports::HearingSpeakerCorrection;
 use crate::state::AudioObservation;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -18,6 +19,18 @@ pub struct HearingAudioRecord {
 }
 
 impl HearingAudioIngestion {
+    pub fn register_microphone_final(
+        &self,
+        context: &crate::hearing_context::HearingContext,
+    ) -> Result<(), PersistenceError> {
+        if context.session_id != self.session_id {
+            return Ok(());
+        }
+        self.lock()?
+            .register_microphone_final(context)
+            .map_err(|error| PersistenceError::Invalid(error.to_string()))
+    }
+
     pub(crate) fn new(session_id: String, buffer: Arc<Mutex<HearingContextBuffer>>) -> Self {
         Self { session_id, buffer }
     }
@@ -28,6 +41,16 @@ impl HearingAudioIngestion {
         retention_days: u64,
         observation: AudioObservation,
     ) -> Result<Option<HearingAudioRecord>, PersistenceError> {
+        self.record_with_corrections(paths, retention_days, observation, &[])
+    }
+
+    pub fn record_with_corrections(
+        &self,
+        paths: &ConfigPaths,
+        retention_days: u64,
+        observation: AudioObservation,
+        corrections: &[HearingSpeakerCorrection],
+    ) -> Result<Option<HearingAudioRecord>, PersistenceError> {
         let mut buffer = self.lock()?;
         if !buffer.accepts_session(&self.session_id) {
             return Ok(None);
@@ -35,6 +58,12 @@ impl HearingAudioIngestion {
         // モード切替も同じロックを使い、判定後から書き込みまでの競合を防ぐ。
         let observation = if buffer.is_persistent() {
             let observation = persist_audio(paths, retention_days, observation)?;
+            crate::observer::apply_speaker_corrections(
+                paths,
+                retention_days,
+                corrections,
+                chrono::Utc::now(),
+            )?;
             buffer.acknowledge_saved_audio(&observation.id);
             observation
         } else {

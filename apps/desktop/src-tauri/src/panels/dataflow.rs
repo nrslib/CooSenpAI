@@ -118,11 +118,17 @@ impl DataFlow {
                     }
                 }
                 if reference["type"] == "transcript" && !reference["text"].is_string() {
+                    let reference_observation_id = reference["id"]
+                        .as_str()
+                        .map(coosenpai_core::state::audio_segment_observation_id);
                     if let Some(transcript) = self.events.iter().find_map(|event| {
                         let data = &event["content"]["data"];
                         if data["id"] == reference["id"] && data["text"].is_string() {
                             Some(data)
-                        } else if data["transcript"]["observationId"] == reference["id"] {
+                        } else if reference_observation_id.is_some()
+                            && data["transcript"]["observationId"].as_str()
+                                == reference_observation_id
+                        {
                             Some(&data["transcript"])
                         } else {
                             None
@@ -165,12 +171,58 @@ fn record(
 fn observation_events(value: &Value, transcripts: &[Value]) -> Result<Vec<Value>, String> {
     let kind = string(value, "kind")?;
     if kind == "audio" {
-        let transcript = transcripts
+        let mut period_rows = transcripts
             .iter()
-            .rev()
-            .find(|transcript| transcript["observationId"] == value["id"]);
+            .filter(|transcript| transcript["observationId"] == value["id"])
+            .collect::<Vec<_>>();
+        let transcript = if period_rows
+            .iter()
+            .any(|transcript| transcript["audioStartMs"].is_number())
+        {
+            // 期間行を持つ観察: 観察単位の本文は観察の全文を正本とし、
+            // 欠けている場合だけ期間行を audioStartMs 順に連結する。
+            period_rows.sort_by(|left, right| {
+                (
+                    !left["audioStartMs"].is_number(),
+                    left["audioStartMs"].as_u64(),
+                )
+                    .cmp(&(
+                        !right["audioStartMs"].is_number(),
+                        right["audioStartMs"].as_u64(),
+                    ))
+            });
+            let full_text = match value["text"].as_str() {
+                Some(text) if !text.is_empty() => text.to_owned(),
+                _ => period_rows
+                    .iter()
+                    .filter_map(|transcript| transcript["text"].as_str())
+                    .collect(),
+            };
+            period_rows.first().map(|first| {
+                let mut synthesized = (*first).clone();
+                if let Some(object) = synthesized.as_object_mut() {
+                    object.insert("text".into(), Value::String(full_text));
+                    for key in [
+                        "speakerTag",
+                        "speakerRegistryId",
+                        "speakerStatus",
+                        "audioStartMs",
+                        "audioEndMs",
+                    ] {
+                        object.remove(key);
+                    }
+                }
+                synthesized
+            })
+        } else {
+            transcripts
+                .iter()
+                .rev()
+                .find(|transcript| transcript["observationId"] == value["id"])
+                .cloned()
+        };
         let references = transcript
-            .into_iter()
+            .iter()
             .map(transcript_reference)
             .collect::<Vec<_>>();
         return Ok(vec![record(
@@ -219,6 +271,7 @@ fn matching_transcripts<'a>(value: &Value, transcripts: &'a [Value]) -> Vec<&'a 
         .into_iter()
         .flat_map(|segments| segments.iter())
         .filter_map(|segment| segment["id"].as_str())
+        .map(coosenpai_core::state::audio_segment_observation_id)
         .collect::<std::collections::HashSet<_>>();
     transcripts
         .iter()
@@ -251,10 +304,18 @@ fn observation_references(value: &Value, subject: &str, transcripts: &[Value]) -
             .flat_map(|segments| segments.iter())
             .map(|segment| {
                 let mut reference = audio_segment_reference(segment);
-                if let Some(transcript) = transcripts
-                    .iter()
-                    .find(|transcript| transcript["observationId"] == segment["id"])
-                {
+                // 期間ごとの表示は (observationId, audioStartMs) で期間行を突き合わせる。
+                let observation_id = coosenpai_core::state::audio_segment_observation_id(
+                    segment["id"].as_str().unwrap_or(""),
+                );
+                let segment_start = segment["audioStartMs"].as_u64();
+                if let Some(transcript) = transcripts.iter().find(|transcript| {
+                    transcript["observationId"].as_str() == Some(observation_id)
+                        && match segment_start {
+                            Some(start) => transcript["audioStartMs"].as_u64() == Some(start),
+                            None => !transcript["audioStartMs"].is_number(),
+                        }
+                }) {
                     reference["text"] = transcript["text"].clone();
                 }
                 reference

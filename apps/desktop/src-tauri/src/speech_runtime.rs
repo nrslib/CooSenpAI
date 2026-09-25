@@ -47,10 +47,6 @@ impl SpeechController {
     }
 
     pub(super) async fn refresh_cancel_shortcut(&self, state: &DesktopState) {
-        #[cfg(test)]
-        if self.shortcut_refresh_disabled.load(Ordering::Acquire) {
-            return;
-        }
         let shortcut_state = self.lifecycle().shortcut_state();
         crate::capture::refresh_speech_cancel_shortcut(state, shortcut_state).await;
     }

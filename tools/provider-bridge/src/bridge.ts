@@ -16,11 +16,11 @@ import {
   type ResolveRequest,
   type SendRequest,
 } from "./protocol.js";
-import { classifyEffort } from "./types.js";
+import { classifyEffort, type ProviderToolExecution } from "./types.js";
 
 interface BridgeEvent {
   readonly id: string;
-  readonly event: "session" | "progress" | "delta" | "final" | "usage" | "error" | "closed";
+  readonly event: "session" | "progress" | "delta" | "final" | "usage" | "error" | "closed" | "trace" | "tool";
   readonly [key: string]: unknown;
 }
 
@@ -36,10 +36,16 @@ export class BridgeHost {
   private readonly pending = new Map<string, ActiveRequest>();
   private closing = false;
   private readonly startupError: BridgeError | undefined;
+  private readonly traceToolExecutions: boolean;
 
-  constructor(registry = new ProviderRegistry(), startupError?: BridgeError) {
+  constructor(
+    registry = new ProviderRegistry(),
+    startupError?: BridgeError,
+    traceToolExecutions = process.env.COOSENPAI_EVAL_TOOL_TRACE === "1",
+  ) {
     this.registry = registry;
     this.startupError = startupError;
+    this.traceToolExecutions = traceToolExecutions;
   }
 
   accept(request: BridgeRequest): void {
@@ -149,6 +155,14 @@ export class BridgeHost {
       () => controller.abort(new BridgeError("timeout", "provider request timed out")),
       request.timeoutMs,
     );
+    if (this.traceToolExecutions) {
+      this.emit({
+        id: request.id,
+        event: "trace",
+        provider: request.provider,
+        historyAvailable: true,
+      });
+    }
     try {
       const result = await agent.send({
         requestId: request.id,
@@ -162,6 +176,7 @@ export class BridgeHost {
         ...(request.executable === undefined ? {} : { executable: request.executable }),
         cwd: request.cwd,
         toolsDisabled: request.toolsDisabled,
+        webSearchEnabled: request.webSearchEnabled === true,
         isolateTools: request.isolateTools === true,
         signal: controller.signal,
         emitDelta: (text) => {
@@ -184,6 +199,9 @@ export class BridgeHost {
           resetStallTimeout();
           this.emit({ id: request.id, event: "progress" });
         },
+        ...(this.traceToolExecutions
+          ? { onToolExecution: (execution: ProviderToolExecution) => this.emitToolExecution(request.id, execution) }
+          : {}),
       });
       if (controller.signal.aborted) {
         const reason = controller.signal.reason;
@@ -269,6 +287,17 @@ export class BridgeHost {
     this.emit({ id, event: "error", kind: safe.kind, message: safe.message, detail: safe.detail });
   }
 
+  private emitToolExecution(id: string, execution: ProviderToolExecution): void {
+    this.emit({
+      id,
+      event: "tool",
+      provider: execution.provider,
+      tool: execution.tool,
+      input: execution.input,
+      output: boundedTraceOutput(execution.output),
+    });
+  }
+
   private emit(event: BridgeEvent): void {
     const line = JSON.stringify(event);
     if (Buffer.byteLength(line, "utf8") > RESPONSE_LINE_MAX_BYTES) {
@@ -277,6 +306,21 @@ export class BridgeHost {
       return;
     }
     process.stdout.write(`${line}\n`);
+  }
+}
+
+function boundedTraceOutput(value: unknown): unknown {
+  if (typeof value === "string") {
+    return value.length <= 4096
+      ? value
+      : { truncated: true, preview: value.slice(0, 4096) };
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined || Buffer.byteLength(serialized, "utf8") <= 8192) return value;
+    return { truncated: true, preview: serialized.slice(0, 4096) };
+  } catch {
+    return { unavailable: true };
   }
 }
 

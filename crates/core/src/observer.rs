@@ -13,6 +13,7 @@ use crate::provider::{
     ProviderCall, ProviderClient, ProviderError, ProviderErrorKind, ProviderResult,
     ProviderSession, SessionRequest,
 };
+use crate::speaker_id::is_valid_speaker_id;
 use crate::state::{
     parse_observation, parse_visual_observation, ActivityTriggerKind, AudioObservation,
     ObservationFrame, ObservationLimits, ObservationRecord, VisualObservation,
@@ -38,15 +39,15 @@ const OBSERVER_SESSION_MAX_CALLS: usize = 60;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SpeakerAliasIndex {
+pub(crate) struct SpeakerAliasIndex {
     schema_version: u8,
-    // v0.4.0 が書き出した registryID キーの索引も受け付ける。
-    #[serde(alias = "registryID")]
-    registry_id: String,
-    aliases: BTreeMap<String, String>,
+    pub(crate) registry_id: String,
+    pub(crate) aliases: BTreeMap<String, String>,
 }
 
-fn load_speaker_aliases(paths: &ConfigPaths) -> Result<SpeakerAliasIndex, ObserverError> {
+pub(crate) fn load_speaker_aliases(
+    paths: &ConfigPaths,
+) -> Result<SpeakerAliasIndex, ObserverError> {
     let path = paths.speakers.join("aliases.json");
     let data = match fs::read(&path) {
         Ok(data) => data,
@@ -74,7 +75,7 @@ fn load_speaker_aliases(paths: &ConfigPaths) -> Result<SpeakerAliasIndex, Observ
         )));
     }
     if index.aliases.iter().any(|(source, target)| {
-        !valid_prompt_speaker_id(source) || !valid_prompt_speaker_id(target) || source == target
+        !is_valid_speaker_id(source) || !is_valid_speaker_id(target) || source == target
     }) {
         return Err(ObserverError::SpeakerAliasIndex(format!(
             "{}: 別名の話者 ID が不正です",
@@ -97,14 +98,7 @@ fn load_speaker_aliases(paths: &ConfigPaths) -> Result<SpeakerAliasIndex, Observ
     Ok(index)
 }
 
-fn valid_prompt_speaker_id(value: &str) -> bool {
-    value
-        .strip_prefix("speaker-")
-        .and_then(|number| number.parse::<u64>().ok())
-        .is_some_and(|number| number > 0)
-}
-
-fn canonical_prompt_speaker_id(id: &str, aliases: &BTreeMap<String, String>) -> String {
+pub(crate) fn canonical_prompt_speaker_id(id: &str, aliases: &BTreeMap<String, String>) -> String {
     let mut current = id.to_owned();
     let mut visited = HashSet::new();
     while let Some(next) = aliases.get(&current) {
@@ -120,9 +114,9 @@ fn namespaced_prompt_speaker_id(registry_id: &str, id: &str) -> Option<String> {
     let namespace = speaker_registry_namespace(registry_id)?;
     let prefix = format!("{namespace}/");
     if let Some(raw_id) = id.strip_prefix(&prefix) {
-        return valid_prompt_speaker_id(raw_id).then(|| id.to_owned());
+        return is_valid_speaker_id(raw_id).then(|| id.to_owned());
     }
-    valid_prompt_speaker_id(id).then(|| format!("{namespace}/{id}"))
+    is_valid_speaker_id(id).then(|| format!("{namespace}/{id}"))
 }
 
 fn speaker_registry_namespace(registry_id: &str) -> Option<String> {
@@ -141,10 +135,33 @@ fn prompt_speaker_id(record: &AudioObservation, aliases: &SpeakerAliasIndex) -> 
         return None;
     }
     let id = record.speaker_id.as_deref()?;
-    if record.speaker_registry_id.as_deref() == Some(aliases.registry_id.as_str()) {
-        valid_prompt_speaker_id(id).then(|| canonical_prompt_speaker_id(id, &aliases.aliases))
+    resolve_prompt_speaker_id(Some(id), record.speaker_registry_id.as_deref(), aliases)
+}
+
+fn prompt_speaker_id_for_segment(
+    segment: &crate::ports::HearingSpeakerSegment,
+    aliases: &SpeakerAliasIndex,
+) -> Option<String> {
+    if segment.status != crate::state::SpeakerIdentificationStatus::Identified {
+        return None;
+    }
+    resolve_prompt_speaker_id(
+        segment.speaker_id.as_deref(),
+        segment.speaker_registry_id.as_deref(),
+        aliases,
+    )
+}
+
+fn resolve_prompt_speaker_id(
+    id: Option<&str>,
+    registry_id: Option<&str>,
+    aliases: &SpeakerAliasIndex,
+) -> Option<String> {
+    let id = id?;
+    if registry_id == Some(aliases.registry_id.as_str()) {
+        is_valid_speaker_id(id).then(|| canonical_prompt_speaker_id(id, &aliases.aliases))
     } else {
-        namespaced_prompt_speaker_id(record.speaker_registry_id.as_deref()?, id)
+        namespaced_prompt_speaker_id(registry_id?, id)
     }
 }
 
@@ -172,7 +189,7 @@ fn sanitize_previous_audio(value: &Value, aliases: &SpeakerAliasIndex) -> Value 
                 if let Some(value) = object.get(speaker_key) {
                     let replacement = value.as_str().and_then(|id| {
                         if registry_id.as_deref() == Some(aliases.registry_id.as_str()) {
-                            valid_prompt_speaker_id(id)
+                            is_valid_speaker_id(id)
                                 .then(|| canonical_prompt_speaker_id(id, &aliases.aliases))
                         } else {
                             registry_id
@@ -229,14 +246,15 @@ fn session_mode(session: &SessionRequest) -> &'static str {
 #[path = "observer_storage.rs"]
 mod storage;
 pub use storage::{
-    append_observation, excluded_bounds_for_self, mark_audio_consumed, migrate_legacy_audio,
-    observation_store, read_audio_by_ids, read_observations_by_ids, read_unobserved_audio,
-    record_audio_observation,
+    append_observation, apply_speaker_corrections, excluded_bounds_for_self, mark_audio_consumed,
+    migrate_legacy_audio, observation_store, read_audio_by_ids, read_observations_by_ids,
+    read_unobserved_audio, record_audio_observation,
 };
 use storage::{
     append_observation_record, read_latest_observation, reconcile_transcripts, stagnation_identity,
     timestamp,
 };
+pub(crate) use storage::{prepare_audio_migration_deletion, AudioMigrationDeletionPlan};
 
 #[derive(Debug, Clone)]
 pub struct ObservationFrameInput {
@@ -263,6 +281,10 @@ pub(crate) struct ScopedObservationOptions {
     pub(crate) scope_commit_lock: Arc<std::sync::Mutex<()>>,
     pub(crate) allow_companion_delivery: bool,
 }
+
+#[path = "observer_microphone_commands.rs"]
+mod microphone_commands;
+pub(crate) use microphone_commands::MicrophoneCommandPrompt;
 
 #[derive(Debug, Error)]
 pub enum ObserverError {
@@ -332,8 +354,8 @@ pub struct ObserverAgent {
     last_outbox_warning_at: Option<Instant>,
     debug_store: Option<DebugStore>,
     transcript_reconciliation_pending: bool,
-    #[cfg(test)]
-    fail_retention_after_append: bool,
+    microphone_command_prompt: Option<MicrophoneCommandPrompt>,
+    classified_microphone_command_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,6 +365,15 @@ enum ObserverRole {
 }
 
 impl ObserverAgent {
+    pub(crate) fn classify_microphone_commands(&mut self, prompt: Option<MicrophoneCommandPrompt>) {
+        self.microphone_command_prompt = prompt;
+        self.classified_microphone_command_ids.clear();
+    }
+
+    pub(crate) fn take_microphone_command_ids(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.classified_microphone_command_ids)
+    }
+
     pub fn new<C>(provider: Arc<dyn ProviderClient>, config: C) -> Self
     where
         C: Into<AgentConfig>,
@@ -385,8 +416,8 @@ impl ObserverAgent {
             last_outbox_warning_at: None,
             debug_store: None,
             transcript_reconciliation_pending: false,
-            #[cfg(test)]
-            fail_retention_after_append: false,
+            microphone_command_prompt: None,
+            classified_microphone_command_ids: Vec::new(),
         }
     }
 
@@ -424,6 +455,34 @@ impl ObserverAgent {
             mark_audio_consumed(paths, ids)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn prepare_conversation_log_day(
+        &self,
+        scope: &crate::conversation_log::ConversationLogDeletionScope,
+    ) -> Result<ObserverDeletionPlan, ObserverError> {
+        let pending_outbox = self
+            .pending_outbox
+            .iter()
+            .map(|record| crate::conversation_log::sanitize_observation_record(record, scope))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let previous = self
+            .previous
+            .as_ref()
+            .map(|previous| crate::conversation_log::sanitize_observation_value(previous, scope))
+            .transpose()?;
+        Ok(ObserverDeletionPlan {
+            pending_outbox,
+            previous: previous.flatten(),
+        })
+    }
+
+    pub(crate) fn apply_conversation_log_day(&mut self, plan: ObserverDeletionPlan) {
+        self.pending_outbox = plan.pending_outbox;
+        self.previous = plan.previous;
     }
 
     fn configure_observation_store(&mut self, paths: &ConfigPaths, retention_days: u64) {
@@ -551,6 +610,8 @@ impl ObserverAgent {
         )>,
         allow_companion_delivery: bool,
     ) -> Result<VisualObservation, ObserverError> {
+        let microphone_command_prompt = self.microphone_command_prompt.take();
+        self.classified_microphone_command_ids.clear();
         require_active_observation(&cancellation)?;
         self.select_role(if frames.is_empty() && !audio.is_empty() {
             ObserverRole::Hearing
@@ -629,36 +690,80 @@ impl ObserverAgent {
                 let time = DateTime::parse_from_rfc3339(&record.created_at)
                     .map_err(|_| ObserverError::AudioTimestamp(record.created_at.clone()))?
                     .with_timezone(&Utc);
-                Ok(crate::state::AudioSegmentReference {
-                    id: record.id.clone(),
-                    time: record.created_at.clone(),
-                    source: record.source,
-                    transcript_path: self.transcript_directory.as_ref().map(|directory| {
-                        directory
-                            .join(format!("{}.jsonl", local_date_at(time)))
-                            .to_string_lossy()
-                            .into_owned()
-                    }),
-                    speaker_tag: prompt_speaker_id(record, &speaker_aliases),
-                    speaker_registry_id: record.speaker_registry_id.clone(),
-                    speaker_status: record.speaker_status,
-                })
+                let transcript_path = self.transcript_directory.as_ref().map(|directory| {
+                    directory
+                        .join(format!("{}.jsonl", local_date_at(time)))
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                // 期間列を持つ観察は期間ごとに1要素にする。
+                if record.speaker_segments.is_empty() {
+                    return Ok(vec![crate::state::AudioSegmentReference {
+                        id: record.id.clone(),
+                        time: record.created_at.clone(),
+                        source: record.source,
+                        transcript_path,
+                        speaker_tag: prompt_speaker_id(record, &speaker_aliases),
+                        speaker_registry_id: record.speaker_registry_id.clone(),
+                        speaker_status: record.speaker_status,
+                        audio_start_ms: None,
+                        audio_end_ms: None,
+                    }]);
+                }
+                Ok(record
+                    .speaker_segments
+                    .iter()
+                    .map(|segment| crate::state::AudioSegmentReference {
+                        id: crate::state::audio_segment_period_id(&record.id, segment.start_ms),
+                        time: record.created_at.clone(),
+                        source: record.source,
+                        transcript_path: transcript_path.clone(),
+                        speaker_tag: prompt_speaker_id_for_segment(segment, &speaker_aliases),
+                        speaker_registry_id: segment.speaker_registry_id.clone(),
+                        speaker_status: Some(segment.status),
+                        audio_start_ms: Some(segment.start_ms),
+                        audio_end_ms: Some(segment.end_ms),
+                    })
+                    .collect())
             })
-            .collect::<Result<Vec<_>, ObserverError>>()?;
+            .collect::<Result<Vec<Vec<_>>, ObserverError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         if !audio.is_empty() {
             let prompt_audio = audio
                 .iter()
-                .map(|record| PromptAudioSegment {
-                    kind: Some(record.kind.clone()),
-                    schema_version: Some(record.schema_version),
-                    id: record.id.clone(),
-                    created_at: record.created_at.clone(),
-                    window_start: Some(record.window_start.clone()),
-                    window_end: Some(record.window_end.clone()),
-                    source: record.source,
-                    text: record.text.clone(),
-                    speaker_id: prompt_speaker_id(record, &speaker_aliases),
-                    speaker_status: record.speaker_status,
+                .flat_map(|record| {
+                    if record.speaker_segments.is_empty() {
+                        return vec![PromptAudioSegment {
+                            kind: Some(record.kind.clone()),
+                            schema_version: Some(record.schema_version),
+                            id: record.id.clone(),
+                            created_at: record.created_at.clone(),
+                            window_start: Some(record.window_start.clone()),
+                            window_end: Some(record.window_end.clone()),
+                            source: record.source,
+                            text: record.text.clone(),
+                            speaker_id: prompt_speaker_id(record, &speaker_aliases),
+                            speaker_status: record.speaker_status,
+                        }];
+                    }
+                    record
+                        .speaker_segments
+                        .iter()
+                        .map(|segment| PromptAudioSegment {
+                            kind: Some(record.kind.clone()),
+                            schema_version: Some(record.schema_version),
+                            id: record.id.clone(),
+                            created_at: record.created_at.clone(),
+                            window_start: Some(record.window_start.clone()),
+                            window_end: Some(record.window_end.clone()),
+                            source: record.source,
+                            text: segment.text.clone().unwrap_or_default(),
+                            speaker_id: prompt_speaker_id_for_segment(segment, &speaker_aliases),
+                            speaker_status: Some(segment.status),
+                        })
+                        .collect()
                 })
                 .collect::<Vec<_>>();
             prompt.push_str(&crate::prompts::observer_audio_context(&prompt_audio)?);
@@ -674,6 +779,12 @@ impl ObserverAgent {
                 crate::prompts::BUILTIN_OBSERVER_AUDIO_INSTRUCTIONS.trim_end_matches('\n'),
             );
         }
+        let output_schema = if let Some(commands) = &microphone_command_prompt {
+            commands.append(&mut system_prompt, &mut prompt);
+            commands.schema()
+        } else {
+            observer_schema()
+        };
         let debug_call_id = DebugStore::new_id();
         if let Some(store) = &self.debug_store {
             if store
@@ -695,11 +806,12 @@ impl ObserverAgent {
                 &prompt,
                 &image_paths,
                 &debug_call_id,
+                &output_schema,
                 cancellation.clone(),
             )
             .await?;
         require_active_observation(&cancellation)?;
-        let value = result.value.ok_or(ObserverError::Output)?;
+        let mut value = result.value.ok_or(ObserverError::Output)?;
         if let Some(store) = &self.debug_store {
             if store
                 .record_response("observer", &debug_call_id, &value, self.clock.now())
@@ -707,6 +819,9 @@ impl ObserverAgent {
             {
                 self.log_debug_failure("observer-response");
             }
+        }
+        if let Some(commands) = &microphone_command_prompt {
+            self.classified_microphone_command_ids = commands.extract(&mut value)?;
         }
         let data = parse_visual_observation(value.clone(), self.limits)
             .map_err(|_| ObserverError::Output)?;
@@ -943,6 +1058,7 @@ impl ObserverAgent {
         prompt: &str,
         image_paths: &[PathBuf],
         debug_call_id: &str,
+        output_schema: &Value,
         cancellation: CancellationToken,
     ) -> Result<ProviderResult, ObserverError> {
         let mut session = self.next_session_request();
@@ -972,7 +1088,8 @@ impl ObserverAgent {
                     prompt: prompt.to_owned(),
                     images: image_paths.iter().cloned().map(Into::into).collect(),
                     tools_disabled: true,
-                    output_schema: Some(observer_schema()),
+                    web_search_enabled: false,
+                    output_schema: Some(output_schema.clone()),
                     output_validation_schema: None,
                     session: session.clone(),
                     model: Some(self.config.model.clone()),
@@ -1411,12 +1528,6 @@ impl ObserverAgent {
         directory: &std::path::Path,
         retention_days: u64,
     ) -> Result<(), PersistenceError> {
-        #[cfg(test)]
-        if mem::take(&mut self.fail_retention_after_append) {
-            return Err(PersistenceError::Invalid(
-                "post-append retention failpoint".to_owned(),
-            ));
-        }
         prune_daily_jsonl_at(
             directory,
             retention_days,
@@ -1481,3 +1592,7 @@ impl ObserverAgent {
     }
 }
 
+pub(crate) struct ObserverDeletionPlan {
+    pending_outbox: Vec<ObservationRecord>,
+    previous: Option<Value>,
+}

@@ -25,6 +25,7 @@ mod commands_capture;
 mod commands_chat_view;
 mod commands_config;
 mod commands_conversation;
+mod commands_debug;
 mod commands_details;
 mod commands_license;
 mod commands_memory;
@@ -40,6 +41,7 @@ mod commands_voice_output;
 mod commands_work;
 mod composer_presenter;
 mod config_update;
+mod conversation_feedback;
 mod conversation_presenter;
 mod core_runtime_port;
 mod e2e_logs;
@@ -295,6 +297,7 @@ pub fn run() -> anyhow::Result<()> {
             commands::chat_send,
             commands::chat_cancel,
             commands::chat_retry,
+            commands_debug::debug_wake,
             commands::config_get,
             commands_config::config_get_persisted,
             commands::config_update,
@@ -306,6 +309,8 @@ pub fn run() -> anyhow::Result<()> {
             commands_details::details_open,
             commands_details::details_dataflow_log,
             commands_details::details_dataflow_open_path,
+            commands_details::details_conversation_log,
+            commands_details::details_delete_conversation_log,
             commands::companion_assertiveness_set,
             commands::persona_list,
             commands::provider_models,
@@ -362,6 +367,7 @@ pub fn run() -> anyhow::Result<()> {
             commands_chat_view::avatar_scene_input,
             commands_chat_view::motion_settings_input,
             commands_chat_view::conversation_input,
+            commands_chat_view::export_utterance_feedback,
             commands_bubble::bubble_view_input,
             commands_capture::capture_popup_cancel,
             commands_capture::capture_popup_open_accessibility_settings,
@@ -370,6 +376,8 @@ pub fn run() -> anyhow::Result<()> {
             commands_speech::speech_finish,
             commands_speech::speech_cancel,
             commands_speaker::speaker_management,
+            commands_speaker::speaker_directory,
+            commands_speaker::speaker_rename,
             commands_speech::speech_popup_snapshot,
             commands_speech::speech_popup_send,
             commands_speech::speech_popup_edit,

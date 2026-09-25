@@ -92,6 +92,7 @@ pub struct ProviderCall {
     pub prompt: String,
     pub images: Vec<ProviderImageAttachment>,
     pub tools_disabled: bool,
+    pub web_search_enabled: bool,
     pub output_schema: Option<Value>,
     /// 生成スキーマと受信契約が異なる場合のみ指定する。未指定なら output_schema で検証する。
     pub output_validation_schema: Option<Value>,
@@ -154,17 +155,38 @@ pub struct ProviderCompactSessionOptions {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProviderErrorKind {
     Retryable,
     Timeout,
     Auth,
     Unsupported,
     InvalidModel,
+    InvalidRequest,
+    Permission,
+    Quota,
+    RateLimit,
     InvalidOutput,
 }
 
 impl ProviderErrorKind {
+    pub fn from_wire(value: &str) -> Option<Self> {
+        Some(match value {
+            "retryable" => Self::Retryable,
+            "timeout" => Self::Timeout,
+            "auth" => Self::Auth,
+            "unsupported" => Self::Unsupported,
+            "invalid-model" => Self::InvalidModel,
+            "invalid-request" => Self::InvalidRequest,
+            "permission" => Self::Permission,
+            "quota" => Self::Quota,
+            "rate-limit" => Self::RateLimit,
+            "invalid-output" => Self::InvalidOutput,
+            _ => return None,
+        })
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Retryable => "retryable",
@@ -172,13 +194,39 @@ impl ProviderErrorKind {
             Self::Auth => "auth",
             Self::Unsupported => "unsupported",
             Self::InvalidModel => "invalid-model",
+            Self::InvalidRequest => "invalid-request",
+            Self::Permission => "permission",
+            Self::Quota => "quota",
+            Self::RateLimit => "rate-limit",
             Self::InvalidOutput => "invalid-output",
         }
     }
 
     pub fn is_retryable(self) -> bool {
-        matches!(self, Self::Retryable | Self::Timeout)
+        matches!(self, Self::Retryable | Self::Timeout | Self::RateLimit)
     }
+
+    pub fn stops_automatic_retry(self) -> bool {
+        !self.is_retryable()
+    }
+}
+
+pub(crate) fn safe_provider_model(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 100
+        && !value.starts_with("sk-")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._:".contains(&byte)))
+    .then(|| value.to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderFailureSummary {
+    pub kind: ProviderErrorKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -193,6 +241,8 @@ pub trait ProviderEventSink: Send + Sync {
     fn progress(&self) {}
     fn usage(&self, _usage: &ProviderUsage) {}
     fn reset(&self) {}
+    /// A complete assistant message has been persisted while this turn continues.
+    fn message_committed(&self) {}
     fn mid_turn_accepted(&self, _source_id: &str) {}
 }
 

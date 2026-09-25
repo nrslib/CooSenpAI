@@ -312,16 +312,19 @@ pub(super) enum AppendPendingResult {
 pub(super) enum OperationReply {
     None,
     Observation(oneshot::Sender<Result<ObservationRecord, RuntimeError>>),
+    CompanionObservation(oneshot::Sender<Result<CompanionObservationResult, RuntimeError>>),
     Companion(oneshot::Sender<Result<CompanionResponse, RuntimeError>>),
     User(Vec<String>),
     Revision(oneshot::Sender<Result<u64, RuntimeError>>),
-    JudgeFeed(oneshot::Sender<Result<(), RuntimeError>>),
+    JudgeFeed(oneshot::Sender<Result<crate::judge::JudgeFeedApplyResult, RuntimeError>>),
 }
 
 pub(super) enum OperationOutcome {
     Observe {
         observer: Box<ObserverAgent>,
         result: Result<ObservationRecord, RuntimeError>,
+        microphone_commands:
+            Option<crate::hearing_context::microphone_commands::MicrophoneCommandBatch>,
         judge_generation: u64,
         judge_decision: Option<crate::judge::JudgeDecision>,
         companion_delivery: bool,
@@ -353,7 +356,7 @@ pub(super) enum OperationOutcome {
         result: Result<(), String>,
     },
     JudgeFeed {
-        result: Result<(), RuntimeError>,
+        result: Result<crate::judge::JudgeFeedApplyResult, RuntimeError>,
     },
 }
 
@@ -579,6 +582,9 @@ impl OperationReply {
                 let _ = response.send(Err(cancellation_error(reason)));
             }
             Self::Companion(response) => {
+                let _ = response.send(Err(cancellation_error(reason)));
+            }
+            Self::CompanionObservation(response) => {
                 let _ = response.send(Err(cancellation_error(reason)));
             }
             Self::User(_) => {}

@@ -32,6 +32,7 @@ enum CommandClass {
     PresentationDismiss,
     BubbleDeck,
     UtteranceFeedback,
+    DebugWake,
     TutorialInteract,
     TutorialAdvance,
     TutorialSettingsPresented,
@@ -101,6 +102,7 @@ pub(crate) fn permit_class(command: DesktopCommand) -> PermitClass {
         | DesktopCommand::BubbleFastForward
         | DesktopCommand::BubbleNavigate
         | DesktopCommand::UtteranceFeedback
+        | DesktopCommand::DebugWake
         | DesktopCommand::TutorialSettingsPresented
         | DesktopCommand::TutorialResume
         | DesktopCommand::SetupPrompt
@@ -198,6 +200,7 @@ fn finish_decision(class: CommandClass) -> Admission {
         | CommandClass::ConversationSelect
         | CommandClass::TutorialInteract
         | CommandClass::UtteranceFeedback
+        | CommandClass::DebugWake
         | CommandClass::EmotionsReset
         | CommandClass::TutorialAdvance
         | CommandClass::TutorialSettingsPresented
@@ -247,6 +250,7 @@ fn setup_decision(class: CommandClass) -> Admission {
         | CommandClass::ConversationReset
         | CommandClass::ConversationSelect
         | CommandClass::UtteranceFeedback
+        | CommandClass::DebugWake
         | CommandClass::TutorialAdvance
         | CommandClass::EmotionsReset
         | CommandClass::TutorialSettingsPresented
@@ -343,6 +347,7 @@ fn tutorial_decision(
         | CommandClass::ConversationReset
         | CommandClass::ConversationSelect
         | CommandClass::UtteranceFeedback
+        | CommandClass::DebugWake
         | CommandClass::TutorialSettingsPresented
         | CommandClass::TutorialRestart
         | CommandClass::SetupPrompt
@@ -375,6 +380,7 @@ fn normal_decision(class: CommandClass) -> Admission {
         | CommandClass::PresentationDismiss
         | CommandClass::BubbleDeck
         | CommandClass::UtteranceFeedback
+        | CommandClass::DebugWake
         | CommandClass::EmotionsReset
         | CommandClass::TutorialRestart
         | CommandClass::SetupRestart
@@ -447,6 +453,7 @@ fn command_class(command: DesktopCommand) -> CommandClass {
             CommandClass::BubbleDeck
         }
         DesktopCommand::UtteranceFeedback => CommandClass::UtteranceFeedback,
+        DesktopCommand::DebugWake => CommandClass::DebugWake,
         DesktopCommand::SettingsAppearancePreview => CommandClass::AppearancePreview,
         DesktopCommand::TutorialAdvance => CommandClass::TutorialAdvance,
         DesktopCommand::TutorialSettingsPresented => CommandClass::TutorialSettingsPresented,
@@ -479,7 +486,8 @@ fn requires_runtime(command: DesktopCommand) -> bool {
         | DesktopCommand::MemoryConsolidate
         | DesktopCommand::WatchStart
         | DesktopCommand::WatchPowerResume
-        | DesktopCommand::CompanionPresence => true,
+        | DesktopCommand::CompanionPresence
+        | DesktopCommand::DebugWake => true,
         DesktopCommand::CompanionEmotionsReset => true,
         DesktopCommand::WorkApprove
         | DesktopCommand::WorkConfigure
@@ -557,6 +565,7 @@ fn transition_for(class: CommandClass) -> Option<TransitionOperation> {
         | CommandClass::PresentationDismiss
         | CommandClass::BubbleDeck
         | CommandClass::UtteranceFeedback
+        | CommandClass::DebugWake
         | CommandClass::EmotionsReset
         | CommandClass::TutorialInteract
         | CommandClass::TutorialAdvance
@@ -582,6 +591,7 @@ fn completion_for(class: CommandClass) -> CompletionPoint {
         | CommandClass::Chat
         | CommandClass::TextAttachment
         | CommandClass::ImageAttachment
+        | CommandClass::DebugWake
         | CommandClass::Voice => CompletionPoint::DurableCoreAcceptance,
         CommandClass::ConfigRestricted
         | CommandClass::ProviderCredential

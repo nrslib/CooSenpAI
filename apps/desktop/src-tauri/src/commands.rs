@@ -187,6 +187,16 @@ pub(super) fn main_or_details_source(window: &WebviewWindow) -> Result<CommandSo
     }
 }
 
+/// dispatcher を通らない command の送信元を main / details に限定する。
+pub(super) fn authorize_main_or_details<R: tauri::Runtime>(
+    window: &WebviewWindow<R>,
+) -> Result<(), String> {
+    match window.label() {
+        "main" | "details" => Ok(()),
+        _ => Err(text(TextKey::CommandWindowNotAllowed, Locale::Ja).to_owned()),
+    }
+}
+
 pub(super) async fn dispatch_result<T, F, Fut>(
     state: Arc<DesktopState>,
     source: CommandSource,
@@ -215,32 +225,6 @@ where
 
 /// ポップアップ送信の逐次: dispatch が受理・失敗・拒否のどれで終わっても、
 /// 結果を呼び出し元へ返す前にメイン画面を前面に出す。
-#[cfg(test)]
-pub(super) async fn dispatch_send_and_present<F, Fut>(
-    logger: &dyn RuntimeLogger,
-    locale: Locale,
-    dispatch: F,
-    present_main: impl FnOnce(),
-) -> IpcResult<String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<IpcResult<String>, DispatchError>> + Send + 'static,
-{
-    let result = run_detached(dispatch()).await;
-    let outcome = match &result {
-        Ok(IpcResult::Success { .. }) => crate::windows::SendOutcome::Accepted,
-        Ok(IpcResult::Failure { .. }) => crate::windows::SendOutcome::Failed,
-        Err(DispatchError::Rejected(_)) => crate::windows::SendOutcome::Rejected,
-        Err(DispatchError::Failed(_) | DispatchError::Indeterminate(_)) => {
-            crate::windows::SendOutcome::Failed
-        }
-    };
-    crate::windows::present_main_after_send(logger, outcome, present_main);
-    match result {
-        Ok(result) => result,
-        Err(error) => IpcResult::failure(error.format_for_locale(locale)),
-    }
-}
 
 fn run_detached<T, Fut>(future: Fut) -> impl std::future::Future<Output = Result<T, DispatchError>>
 where
@@ -299,13 +283,6 @@ impl<T: Serialize> IpcResult<T> {
             },
         }
     }
-}
-
-#[cfg(test)]
-#[async_trait]
-trait CommandRuntime: Send + Sync {
-    async fn snapshot(&self) -> AppSnapshot;
-    async fn chat(&self, message: String) -> Result<String, String>;
 }
 
 #[tauri::command]

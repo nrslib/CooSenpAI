@@ -12,7 +12,6 @@ use coosenpai_core::state::{
     VisualObservation,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 #[derive(Default)]
 pub struct AudioPermissions {
@@ -24,6 +23,8 @@ pub struct AudioPermissions {
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     pub revision: u64,
+    #[serde(default)]
+    pub speaker_directory_revision: u64,
     pub config_revision: u64,
     pub config: Config,
     pub observer_running: bool,
@@ -86,8 +87,9 @@ pub struct AppSnapshot {
     pub speech: SpeechView,
     pub audio: AudioView,
     pub onboarding: OnboardingView,
-    #[serde(skip)]
-    pub(crate) recorded_utterance_feedback_ids: HashSet<String>,
+    #[serde(default)]
+    pub(crate) utterance_feedback:
+        std::collections::BTreeMap<String, crate::utterance_feedback::FeedbackSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -368,6 +370,7 @@ impl AppSnapshot {
         };
         Self {
             revision: 1,
+            speaker_directory_revision: 0,
             config_revision,
             observer_running: false,
             watch_intent_active: false,
@@ -468,7 +471,7 @@ impl AppSnapshot {
             onboarding: OnboardingView::from_state(
                 &coosenpai_core::onboarding::OnboardingState::default(),
             ),
-            recorded_utterance_feedback_ids: HashSet::new(),
+            utterance_feedback: Default::default(),
         }
     }
 
@@ -499,8 +502,12 @@ impl AppSnapshot {
             self.companion_emotions_revision = runtime.revision;
         }
         self.provider_usage = runtime.provider_usage.clone();
-        self.companion.ready = self.last_error.is_none();
-        self.companion.phase = if self.last_error.is_some() {
+        let companion_has_global_error = self
+            .last_error
+            .as_ref()
+            .is_some_and(|error| !error.is_user_response_error());
+        self.companion.ready = !companion_has_global_error;
+        self.companion.phase = if companion_has_global_error {
             CompanionViewPhase::Error
         } else if matches!(
             runtime.phase,

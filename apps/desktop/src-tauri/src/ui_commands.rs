@@ -9,6 +9,12 @@ pub(crate) type Reply<T> = oneshot::Sender<IpcResult<T>>;
 
 #[derive(Debug)]
 pub(crate) enum UserCommand {
+    FeedbackExport(Reply<String>),
+    DebugWake {
+        image: Vec<u8>,
+        context: String,
+        reply: Reply<crate::commands_debug::DebugWakeResult>,
+    },
     CaptureSnapshot(Reply<crate::commands_capture::CapturePopupIpcSnapshot>),
     SpeechSnapshot(Reply<crate::speech::SpeechPopupSnapshot>),
     WatchStart {
@@ -86,7 +92,9 @@ impl UserCommand {
             | Self::BubbleFastForward { .. }
             | Self::BubbleNavigate { .. } => PresenterId::Bubble,
             Self::ModelSave { .. } => PresenterId::ModelPicker,
-            Self::SystemSettings { .. } => PresenterId::Settings,
+            Self::SystemSettings { .. } | Self::FeedbackExport(_) | Self::DebugWake { .. } => {
+                PresenterId::Settings
+            }
             _ => PresenterId::Chat,
         }
     }
@@ -109,6 +117,10 @@ pub(crate) enum CommandCompletion {
     Text {
         result: IpcResult<String>,
         reply: Reply<String>,
+    },
+    DebugWake {
+        result: Box<IpcResult<crate::commands_debug::DebugWakeResult>>,
+        reply: Reply<crate::commands_debug::DebugWakeResult>,
     },
     Unit {
         result: IpcResult<()>,
@@ -133,6 +145,9 @@ impl CommandCompletion {
             }
             Self::Text { result, reply } => {
                 let _ = reply.send(result);
+            }
+            Self::DebugWake { result, reply } => {
+                let _ = reply.send(*result);
             }
             Self::Unit { result, reply } => {
                 let _ = reply.send(result);

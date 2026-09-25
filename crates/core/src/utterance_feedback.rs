@@ -1,5 +1,5 @@
 use crate::config::ConfigPaths;
-use crate::judge::{JudgeAction, JudgeDecision, JudgeTrace};
+use crate::judge::{JudgeAction, JudgeDecision, JudgeFeedSign, JudgeTrace};
 use crate::persistence::{JsonlStore, PersistenceError, SiblingLock};
 use crate::state::{AudioObservationSource, ConversationEntry, ObservationRecord};
 #[path = "utterance_feedback_archive.rs"]
@@ -19,14 +19,23 @@ use std::path::PathBuf;
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const UTTERANCE_FEEDBACK_SCHEMA_VERSION: u8 = 1;
+pub const UTTERANCE_FEEDBACK_SCHEMA_VERSION: u8 = 2;
 pub const UTTERANCE_FEEDBACK_FILE_NAME: &str = "utterance-feedback.jsonl";
 pub const UTTERANCE_FEEDBACK_ARCHIVE_DIRECTORY: &str = "utterance-feedback";
 pub const UTTERANCE_FEEDBACK_FREE_TEXT_MAX_CHARS: usize = 500;
 
+fn default_feedback_sign() -> JudgeFeedSign {
+    JudgeFeedSign::Negative
+}
+
+fn default_feedback_revision() -> u64 {
+    1
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum FeedbackReasonCode {
+    None,
     NoActivity,
     Repeated,
     Misunderstood,
@@ -37,6 +46,7 @@ pub enum FeedbackReasonCode {
 impl FeedbackReasonCode {
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
+            "none" => Self::None,
             "no-activity" => Self::NoActivity,
             "repeated" => Self::Repeated,
             "misunderstood" => Self::Misunderstood,
@@ -50,10 +60,16 @@ impl FeedbackReasonCode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UtteranceFeedbackRecord {
+    #[serde(default)]
+    pub trigger: FeedbackTrigger,
     pub schema_version: u8,
     pub record_id: String,
     pub recorded_at: String,
     pub cancelled: bool,
+    #[serde(default = "default_feedback_sign")]
+    pub sign: JudgeFeedSign,
+    #[serde(default = "default_feedback_revision")]
+    pub revision: u64,
     pub utterance: UtteranceFeedbackUtterance,
     pub observation_ids: Vec<String>,
     #[serde(default)]
@@ -73,7 +89,31 @@ pub struct UtteranceFeedbackRecord {
     pub reason_code: FeedbackReasonCode,
     #[serde(default)]
     pub free_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<FeedbackFeed>,
     pub archive: FeedbackArchive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeedbackFeedStatus {
+    Pending,
+    Applied,
+    NotApplied,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FeedbackFeed {
+    pub event_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<String>,
+    pub sign: JudgeFeedSign,
+    pub strength: f64,
+    pub status: FeedbackFeedStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -153,8 +193,18 @@ pub struct FeedbackArchive {
     pub issues: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeedbackTrigger {
+    UserReply,
+    Proactive,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone)]
 pub struct UtteranceFeedbackInput {
+    pub trigger: FeedbackTrigger,
     pub utterance: ConversationEntry,
     pub observation_ids: Vec<String>,
     pub observations: Vec<ObservationRecord>,
@@ -189,8 +239,6 @@ pub struct UtteranceFeedbackStore {
     transcript_directory: PathBuf,
     frame_directory: PathBuf,
     debug_directory: PathBuf,
-    #[cfg(test)]
-    fail_jsonl_append: bool,
 }
 
 impl UtteranceFeedbackStore {
@@ -202,8 +250,6 @@ impl UtteranceFeedbackStore {
             transcript_directory: paths.transcripts.clone(),
             frame_directory: paths.frame_buffer.clone(),
             debug_directory: paths.debug.clone(),
-            #[cfg(test)]
-            fail_jsonl_append: false,
         }
     }
 
@@ -211,7 +257,7 @@ impl UtteranceFeedbackStore {
         &self,
         input: UtteranceFeedbackInput,
     ) -> Result<UtteranceFeedbackResult, UtteranceFeedbackError> {
-        self.record_at(input, Utc::now())
+        self.record_at_with_sign(input, Utc::now(), JudgeFeedSign::Negative, false)
     }
 
     pub fn record_at(
@@ -219,16 +265,69 @@ impl UtteranceFeedbackStore {
         input: UtteranceFeedbackInput,
         recorded_at: DateTime<Utc>,
     ) -> Result<UtteranceFeedbackResult, UtteranceFeedbackError> {
+        self.record_at_with_sign(input, recorded_at, JudgeFeedSign::Negative, false)
+    }
+
+    pub fn record_with_sign(
+        &self,
+        input: UtteranceFeedbackInput,
+        sign: JudgeFeedSign,
+    ) -> Result<UtteranceFeedbackResult, UtteranceFeedbackError> {
+        self.record_at_with_sign(input, Utc::now(), sign, false)
+    }
+
+    pub fn revise_with_sign(
+        &self,
+        input: UtteranceFeedbackInput,
+        sign: JudgeFeedSign,
+    ) -> Result<UtteranceFeedbackResult, UtteranceFeedbackError> {
+        self.record_at_with_sign(input, Utc::now(), sign, true)
+    }
+
+    fn record_at_with_sign(
+        &self,
+        input: UtteranceFeedbackInput,
+        recorded_at: DateTime<Utc>,
+        sign: JudgeFeedSign,
+        revise: bool,
+    ) -> Result<UtteranceFeedbackResult, UtteranceFeedbackError> {
         validate_input(&input)?;
+        let free_text = normalize_free_text(input.free_text.clone())?;
         let _operation_lock = SiblingLock::acquire(&self.operation_lock_path())?;
-        if let Some(previous) = self.latest_for_utterance(&input.utterance.id)? {
-            if !previous.cancelled {
-                return Ok(UtteranceFeedbackResult::AlreadyRecorded(previous));
+        let previous = self.latest_for_utterance(&input.utterance.id)?;
+        if let Some(previous) = &previous {
+            if !previous.cancelled && !revise {
+                return Ok(UtteranceFeedbackResult::AlreadyRecorded(previous.clone()));
+            }
+            if !previous.cancelled
+                && revise
+                && previous.sign == sign
+                && previous.reason_code == input.reason_code
+                && previous.free_text.as_deref() == free_text.as_deref()
+            {
+                return Ok(UtteranceFeedbackResult::AlreadyRecorded(previous.clone()));
             }
         }
-        let free_text = normalize_free_text(input.free_text.clone())?;
         let record_id = Uuid::new_v4().to_string();
         validate_record_id(&record_id)?;
+        let revision = previous
+            .as_ref()
+            .map_or(1, |record| record.revision.saturating_add(1));
+        let event_id = previous
+            .as_ref()
+            .and_then(|record| record.feed.as_ref())
+            .map(|feed| feed.event_id.clone())
+            .unwrap_or_else(|| format!("coosenpai:explicit:{}", Uuid::new_v4()));
+        let judge_input_id = input
+            .judge_trace
+            .as_ref()
+            .map(|trace| trace.input_id.clone())
+            .or_else(|| {
+                input
+                    .judge_decision
+                    .as_ref()
+                    .map(|decision| decision.input_id.clone())
+            });
         let source_ids = if input.observation_ids.is_empty() {
             unique_ids(
                 input
@@ -264,12 +363,28 @@ impl UtteranceFeedbackStore {
         if let Some(reason) = judge_unavailable_reason.as_deref() {
             context.issues.push(format!("judge-unavailable:{reason}"));
         }
-        let prepared = self.prepare_archive(&record_id, &input.utterance, &source_ids, &context);
+        let prepared = self.prepare_archive(
+            &record_id,
+            &input.utterance,
+            &source_ids,
+            &context,
+            sign,
+            revision,
+        );
         let mut record = UtteranceFeedbackRecord {
+            trigger: if input.trigger == FeedbackTrigger::Unknown {
+                previous
+                    .as_ref()
+                    .map_or(FeedbackTrigger::Unknown, |record| record.trigger)
+            } else {
+                input.trigger
+            },
             schema_version: UTTERANCE_FEEDBACK_SCHEMA_VERSION,
             record_id,
             recorded_at: timestamp(recorded_at),
             cancelled: false,
+            sign,
+            revision,
             utterance: UtteranceFeedbackUtterance::from(&input.utterance),
             observation_ids: source_ids,
             observations: context
@@ -289,6 +404,14 @@ impl UtteranceFeedbackStore {
             llm_call_id: input.llm_call_id.as_deref().map(sanitize_text),
             reason_code: input.reason_code,
             free_text: free_text.as_deref().map(sanitize_text),
+            feed: Some(FeedbackFeed {
+                event_id,
+                input_id: judge_input_id,
+                sign,
+                strength: 1.0,
+                status: FeedbackFeedStatus::Pending,
+                reason: None,
+            }),
             archive: FeedbackArchive {
                 directory: prepared.directory.clone(),
                 status: if prepared.issues.is_empty() {
@@ -324,12 +447,6 @@ impl UtteranceFeedbackStore {
                 }
             }
         }
-        #[cfg(test)]
-        if self.fail_jsonl_append {
-            return Err(UtteranceFeedbackError::Persistence(
-                PersistenceError::Invalid("test: JSONL append failed".to_owned()),
-            ));
-        }
         JsonlStore::new(self.path.clone()).append(&record)?;
         Ok(UtteranceFeedbackResult::Recorded(record))
     }
@@ -356,8 +473,65 @@ impl UtteranceFeedbackStore {
         let mut record = previous;
         record.recorded_at = timestamp(recorded_at);
         record.cancelled = true;
+        record.revision = record.revision.saturating_add(1);
+        if record.feed.is_none() {
+            record.feed = Some(FeedbackFeed {
+                event_id: format!("coosenpai:explicit:{}", Uuid::new_v4()),
+                input_id: None,
+                sign: record.sign,
+                strength: 1.0,
+                status: FeedbackFeedStatus::Pending,
+                reason: None,
+            });
+        } else if let Some(feed) = record.feed.as_mut() {
+            feed.status = FeedbackFeedStatus::Pending;
+            feed.reason = None;
+        }
         JsonlStore::new(self.path.clone()).append(&record)?;
         Ok(UtteranceFeedbackResult::Cancelled(record))
+    }
+
+    pub fn update_feed(
+        &self,
+        record_id: &str,
+        input_id: Option<String>,
+        status: FeedbackFeedStatus,
+        reason: Option<String>,
+    ) -> Result<UtteranceFeedbackRecord, UtteranceFeedbackError> {
+        validate_record_id(record_id).map_err(UtteranceFeedbackError::Persistence)?;
+        if input_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(UtteranceFeedbackError::Invalid(
+                "判断役の input ID が空です".to_owned(),
+            ));
+        }
+        let _operation_lock = SiblingLock::acquire(&self.operation_lock_path())?;
+        let records = JsonlStore::new(self.path.clone()).read::<UtteranceFeedbackRecord>()?;
+        let Some(mut record) = records
+            .into_iter()
+            .rev()
+            .find(|record| record.record_id == record_id)
+        else {
+            return Err(UtteranceFeedbackError::Invalid(
+                "発言評価の記録がありません".to_owned(),
+            ));
+        };
+        let Some(feed) = record.feed.as_mut() else {
+            return Err(UtteranceFeedbackError::Invalid(
+                "発言評価に feed event がありません".to_owned(),
+            ));
+        };
+        if let Some(input_id) = input_id {
+            feed.input_id = Some(input_id);
+        }
+        feed.status = status;
+        feed.reason = reason
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| sanitize_text(&value));
+        JsonlStore::new(self.path.clone()).append(&record)?;
+        Ok(record)
     }
 
     pub fn latest_for_utterance(
@@ -403,6 +577,8 @@ impl UtteranceFeedbackStore {
         utterance: &ConversationEntry,
         observation_ids: &[String],
         context: &MaterialContext,
+        sign: JudgeFeedSign,
+        revision: u64,
     ) -> PreparedArchive {
         let directory = format!("{UTTERANCE_FEEDBACK_ARCHIVE_DIRECTORY}/{record_id}");
         let path = self.archive_directory.join(record_id);
@@ -426,6 +602,8 @@ impl UtteranceFeedbackStore {
             "recordId": record_id,
             "utteranceId": utterance.id,
             "observationIds": observation_ids,
+            "sign": sign,
+            "revision": revision,
             "files": file_names,
             "issues": issues,
         });
@@ -442,6 +620,32 @@ impl UtteranceFeedbackStore {
             issues,
         }
     }
+}
+
+/// 別端末へ渡す bundle 用に、既存の発言評価 scrubber を全 JSON 値へ適用する。
+/// キーは archive の相対参照を残すため削除せず、値だけを scrub する。
+pub fn sanitize_feedback_export(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), sanitize_feedback_export(value)))
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(sanitize_feedback_export).collect())
+        }
+        serde_json::Value::String(value) => serde_json::Value::String(sanitize_text(value)),
+        value => value.clone(),
+    }
+}
+
+pub fn sanitize_feedback_export_text(value: &str) -> String {
+    sanitize_text(value)
+}
+
+pub fn is_allowed_feedback_archive_path(path: &str) -> bool {
+    security::allowed_material_path(path)
 }
 
 struct PreparedArchive {

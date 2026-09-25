@@ -49,7 +49,7 @@ const CONTROL_PATHS = new Set<string>([
   "memory.dailyRetentionDays",
   "memory.weeklyRetentionWeeks", "memory.factPromptDailyLimit",
   "memory.enabled", "memory.providerConsent", "watch.fullscreen", "watch.focusElement", "watch.ocrGate.executable",
-  "audio.mic", "audio.speaker", "audio.speakerIdentification.enabled",
+  "audio.microphoneCommandsEnabled", "audio.mic", "audio.speaker", "audio.speakerIdentification.enabled",
   "voiceOutput.enabled", "voiceOutput.provider", "voiceOutput.rate", "voiceOutput.voicevoxStyleId",
   "work.approvalMode", "work.allowedRoots",
   "notification.mode", "bubble.position", "bubble.display",
@@ -62,7 +62,7 @@ const CONTROL_PATHS = new Set<string>([
   "keymap.togglePanel", "keymap.toggleAvatar", "keymap.toggleWatch", "keymap.sendKey",
   "ui.avatarColor", "ui.theme", "ui.font",
   "ui.avatarPath",
-  "ui.thoughtBubble", "speech.confirmBeforeSend", "debug.enabled", "audio.debugDumpDir",
+  "ui.thoughtBubble", "speech.confirmBeforeSend", "debug.enabled", "debug.feedbackEnabled", "audio.debugDumpDir",
   "observer.vision.executable", "observer.hearing.executable", "companion.executable",
   "app.checkForUpdates", "app.launchAtLogin",
 ]);
