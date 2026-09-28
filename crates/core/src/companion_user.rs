@@ -14,6 +14,170 @@ use uuid::Uuid;
 
 const MAX_BATCHED_USER_PROMPT_BYTES: usize = 512 * 1024;
 
+fn candidate_matches_accepted_proposal(
+    candidate: &crate::speaker_name_proposals::SpeakerNameProposalCandidate,
+    proposal: &crate::speaker_name_proposals::StoredSpeakerNameProposal,
+) -> bool {
+    crate::speaker_name_proposals::candidate_matches_stored_proposal(candidate, proposal)
+}
+
+fn proposal_guidance(
+    candidates: &[crate::speaker_name_proposals::SpeakerNameProposalCandidate],
+    accepted: &[crate::speaker_name_proposals::StoredSpeakerNameProposal],
+    locale: Locale,
+) -> Option<String> {
+    let unique_candidates = candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            !candidates[..*index].iter().any(|earlier| {
+                crate::speaker_name_proposals::same_proposal_candidate(earlier, candidate)
+            })
+        })
+        .map(|(_, candidate)| candidate)
+        .collect::<Vec<_>>();
+    let mut accepted_ids = HashSet::new();
+    let mut accepted_count = 0;
+    for candidate in &unique_candidates {
+        if let Some(proposal) = accepted.iter().find(|proposal| {
+            candidate_matches_accepted_proposal(candidate, proposal)
+                && !accepted_ids.contains(proposal.id.as_str())
+        }) {
+            accepted_count += usize::from(accepted_ids.insert(proposal.id.as_str()));
+        }
+    }
+    let candidate_count = unique_candidates.len();
+    let rejected_count = candidate_count.saturating_sub(accepted_count);
+    let inferred_count = accepted
+        .iter()
+        .filter(|proposal| {
+            proposal.source == crate::speaker_name_proposals::SpeakerNameProposalSource::Inferred
+        })
+        .count();
+    if candidate_count == 0 && accepted_count == 0 && accepted.is_empty() {
+        return None;
+    }
+    if candidate_count == 0 && !accepted.is_empty() {
+        return Some(match locale {
+            Locale::Ja => "利用者が選んだ名前候補の確認カードを表示します。".to_owned(),
+            Locale::En => {
+                "I will show a confirmation card for the name candidate you selected.".to_owned()
+            }
+        });
+    }
+    Some(match (locale, accepted_count, rejected_count) {
+        (Locale::Ja, 0, _) => {
+            "話者名を登録する根拠を検証できなかったため、確認カードを作成できません。"
+                .to_owned()
+        }
+        (Locale::Ja, _, 0) if inferred_count > 0 => {
+            "根拠を確認できた名前候補の確認カードを表示します。".to_owned()
+        }
+        (Locale::Ja, _, 0) => "根拠を確認できた話者名の確認カードを表示します。".to_owned(),
+        (Locale::Ja, _, _) => {
+            "根拠を確認できた候補だけ確認カードを表示します。ほかの候補は根拠を確認できませんでした。"
+                .to_owned()
+        }
+        (Locale::En, 0, _) => {
+            "I could not verify the evidence for this speaker-name change, so I cannot show a confirmation card."
+                .to_owned()
+        }
+        (Locale::En, _, 0) if inferred_count > 0 => {
+            "I will show a confirmation card for the name candidate whose evidence I verified."
+                .to_owned()
+        }
+        (Locale::En, _, 0) => {
+            "I will show a confirmation card for the speaker name whose evidence I verified."
+                .to_owned()
+        }
+        (Locale::En, _, _) => {
+            "I will show cards only for proposals whose evidence I verified; I could not verify the other candidates."
+                .to_owned()
+        }
+    })
+}
+
+fn append_speaker_name_proposal_guidance(
+    response: &mut CompanionResponse,
+    candidates: &[crate::speaker_name_proposals::SpeakerNameProposalCandidate],
+    accepted: &[crate::speaker_name_proposals::StoredSpeakerNameProposal],
+    conflicts: &[crate::speaker_name_proposals::SpeakerNameProposalConflict],
+    locale: Locale,
+) {
+    if !conflicts.is_empty() {
+        append_host_guidance(
+            response,
+            format_speaker_name_conflicts(conflicts, locale),
+            locale,
+        );
+        return;
+    }
+    let guidance = proposal_guidance(candidates, accepted, locale);
+    let Some(guidance) = guidance else {
+        return;
+    };
+
+    append_host_guidance(response, guidance, locale);
+}
+
+fn append_host_guidance(response: &mut CompanionResponse, guidance: String, locale: Locale) {
+    let message = response.message.get_or_insert_with(String::new);
+    if !message.is_empty() {
+        message.push_str(match locale {
+            Locale::Ja => "\n",
+            Locale::En => " ",
+        });
+    }
+    message.push_str(&guidance);
+}
+
+fn format_speaker_name_conflicts(
+    conflicts: &[crate::speaker_name_proposals::SpeakerNameProposalConflict],
+    locale: Locale,
+) -> String {
+    conflicts
+        .iter()
+        .map(|conflict| {
+            let options = conflict
+                .options
+                .iter()
+                .map(|option| {
+                    let quotes = option
+                        .evidence
+                        .iter()
+                        .map(|evidence| format!("「{}」", evidence.quote))
+                        .collect::<Vec<_>>()
+                        .join(match locale {
+                            Locale::Ja => "、",
+                            Locale::En => "; ",
+                        });
+                    match locale {
+                        Locale::Ja => format!("・「{}」: {}", option.name, quotes),
+                        Locale::En => format!("- “{}”: {}", option.name, quotes),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let question = match (locale, conflict.options.len()) {
+                (Locale::Ja, 2) => "どちらを候補として確認しますか？",
+                (Locale::Ja, _) => "どの候補を確認しますか？",
+                (Locale::En, _) => "Which candidate should I check?",
+            };
+            match locale {
+                Locale::Ja => format!(
+                    "同じ話者に複数の名前候補がありました。根拠の引用を示します。\n{}\n{}",
+                    options, question
+                ),
+                Locale::En => format!(
+                    "There are conflicting name candidates for one speaker. Here are the supporting quotes:\n{}\n{}",
+                    options, question
+                ),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn tutorial_response_key(inputs: &[PendingUserMessage]) -> Result<Option<String>, CompanionError> {
     let key = inputs
         .iter()
@@ -377,6 +541,80 @@ impl CompanionAgent {
             )
             .await?;
         }
+        let proposal_candidates = std::mem::take(&mut outcome.response.speaker_name_proposals);
+        let mut guidance_candidates = proposal_candidates.clone();
+        let mut accepted_proposals = Vec::new();
+        let mut proposal_conflicts = Vec::new();
+        if outcome.response.work_request.is_none() {
+            if let (Some(storage), Some(resolver)) = (
+                self.storage.as_ref(),
+                outcome.data.speaker_id_resolver.as_ref(),
+            ) {
+                let paths = storage.config_paths()?;
+                let aliases = crate::observer::load_speaker_aliases(&paths).map_err(|error| {
+                    PersistenceError::Invalid(format!(
+                        "話者名提案の話者台帳を確認できません: {error}"
+                    ))
+                })?;
+                if !aliases.registry_id.is_empty() {
+                    let mut source_messages = inputs
+                        .iter()
+                        .map(|input| (input.id.clone(), input.message.clone()))
+                        .collect::<Vec<_>>();
+                    for pending in storage.reconcile_pending_user_inputs()?.pending_inputs {
+                        let PendingInput::UserMessage(input) = pending;
+                        if input_ids.contains(&input.id)
+                            && !source_messages.iter().any(|(id, _)| id == &input.id)
+                        {
+                            source_messages.push((input.id, input.message));
+                        }
+                    }
+                    accepted_proposals =
+                        crate::speaker_name_proposals::resolve_pending_speaker_name_conflict(
+                            &paths,
+                            &source_messages,
+                            &aliases.registry_id,
+                            self.clock.now(),
+                        )?;
+                    let resolved_speakers = accepted_proposals
+                        .iter()
+                        .map(|proposal| proposal.speaker_id.as_str())
+                        .collect::<HashSet<_>>();
+                    let unresolved_candidates = proposal_candidates
+                        .iter()
+                        .filter(|candidate| {
+                            !resolved_speakers.contains(candidate.speaker_id.as_str())
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    guidance_candidates = unresolved_candidates.clone();
+                    if !unresolved_candidates.is_empty() {
+                        let acceptance =
+                            crate::speaker_name_proposals::accept_speaker_name_proposals_with_conflicts(
+                                &paths,
+                                &unresolved_candidates,
+                                crate::speaker_name_proposals::SpeakerNameProposalAcceptanceContext {
+                                    user_messages: &source_messages,
+                                    audio_log_index: outcome.data.audio_log_index.as_ref(),
+                                    current_observation: outcome.data.last_observation.as_ref(),
+                                    resolver,
+                                    active_registry_id: &aliases.registry_id,
+                                },
+                                self.clock.now(),
+                            )?;
+                        accepted_proposals.extend(acceptance.proposals);
+                        proposal_conflicts = acceptance.conflicts;
+                    }
+                }
+            }
+        }
+        append_speaker_name_proposal_guidance(
+            &mut outcome.response,
+            &guidance_candidates,
+            &accepted_proposals,
+            &proposal_conflicts,
+            self.locale,
+        );
         let prepared = PreparedUserResponse {
             audio_ids: Vec::new(),
             emotion_epoch: emotions.epoch,
@@ -501,15 +739,15 @@ impl CompanionAgent {
             .clone()
             .map_or(SessionRequest::New, SessionRequest::Resume);
         let tutorial_response_key = tutorial_response_key(&inputs)?;
-        Ok(crate::provider::bridge_send_request_fits(
-            &self.provider_call(
-                &prompt,
-                true,
-                &images,
-                session,
-                tutorial_response_key.as_deref(),
-            ),
-        ))
+        let mut call = self.provider_call(
+            &prompt,
+            true,
+            &images,
+            session,
+            tutorial_response_key.as_deref(),
+        );
+        call.allowed_transcript_paths = crate::prompts::companion_transcript_read_allowlist(&data);
+        Ok(crate::provider::bridge_send_request_fits(&call))
     }
 
     fn user_prompt_data(
@@ -525,17 +763,44 @@ impl CompanionAgent {
             .map(|input| input.id.as_str())
             .collect::<Vec<_>>();
         let observations = turn_observations(inputs);
+        let observation_values = observation_values(&observations)?;
+        let (audio_log_index, speaker_name_context, speaker_id_resolver) =
+            match self.storage.as_ref() {
+                Some(storage) => {
+                    let context = storage.audio_log_context(&observation_values)?;
+                    (
+                        Some(context.index),
+                        Some(context.speaker_names),
+                        Some(context.speaker_id_resolver),
+                    )
+                }
+                None => (None, None, None),
+            };
+        let user_message = format_user_messages(inputs)?;
+        let pending_speaker_name_conflict_selection = match (
+            self.storage.as_ref(),
+            speaker_id_resolver.as_ref(),
+        ) {
+            (Some(storage), Some(resolver)) => {
+                let paths = storage.config_paths()?;
+                crate::speaker_name_proposals::pending_speaker_name_conflict_selection_may_be_in_progress(
+                    &paths,
+                    &user_message,
+                    resolver.active_registry_id(),
+                )?
+            }
+            _ => false,
+        };
         Ok(CompanionPromptData {
             companion_emotions: None,
             companion_name: self.display_name.clone(),
-            observations: observation_values(&observations)?,
+            observations: observation_values,
             observation_frame_paths,
             observation_log_directory: self.observation_log_directory()?,
-            audio_log_index: self
-                .storage
-                .as_ref()
-                .map(CompanionStorage::audio_log_index)
-                .transpose()?,
+            audio_log_index,
+            speaker_name_context,
+            speaker_id_resolver,
+            pending_speaker_name_conflict_selection,
             omitted_observations: Some(Vec::new()),
             compact_observations: true,
             omitted_summary: None,
@@ -546,7 +811,8 @@ impl CompanionAgent {
             repeated_error_count: 0,
             previous_summary: self.previous_summary.clone(),
             recent_conversation_jsonl: None,
-            user_message: Some(format_user_messages(inputs)?),
+            recent_proactive_utterances: Vec::new(),
+            user_message: Some(user_message),
             user_message_id: Some(if input_ids.len() == 1 {
                 input.id.clone()
             } else {
@@ -1045,5 +1311,6 @@ fn prepared_response(response: &PreparedUserResponse) -> CompanionResponse {
         thought: None,
         fact_candidates: Vec::new(),
         fact_updates: Vec::new(),
+        speaker_name_proposals: Vec::new(),
     }
 }

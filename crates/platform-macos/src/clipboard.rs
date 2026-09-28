@@ -233,4 +233,3 @@ impl SelectedTextCopyPort for MacSelectedTextCopier {
         .await
     }
 }
-

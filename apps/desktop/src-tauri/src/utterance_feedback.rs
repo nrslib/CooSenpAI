@@ -828,4 +828,3 @@ fn merge_observations(
         .filter_map(|id| by_id.remove(id))
         .collect()
 }
-

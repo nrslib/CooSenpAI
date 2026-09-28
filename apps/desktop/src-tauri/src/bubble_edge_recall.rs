@@ -102,4 +102,3 @@ pub(crate) fn suspend_edge_recall(previous: EdgeRecallDebounce) -> EdgeRecallDeb
 pub(crate) fn should_publish_edge_poll(previous_at_edge: Option<bool>, at_edge: bool) -> bool {
     at_edge || previous_at_edge != Some(false)
 }
-

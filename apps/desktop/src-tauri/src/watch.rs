@@ -11,18 +11,22 @@ use coosenpai_core::onboarding::TutorialStep;
 use coosenpai_core::ports::{
     ActivityPort, FocusElementPort, HelperResolverPort, PortError, RuntimeLogger, ScreenCapturePort,
 };
-use coosenpai_core::screen_frames::prepare_screen_frames;
-use coosenpai_core::state::{ActivityTriggerKind, PendingFrameContext, StagnationObservation};
+use coosenpai_core::screen_frames::{attach_own_window_context, prepare_screen_frames};
+use coosenpai_core::state::{
+    ActivityTriggerKind, ObservationRecord, PendingFrameContext, StagnationObservation,
+};
 use coosenpai_core::watch_coordinator::{
     effective_max_interval_ms, evaluate_activity_poll, frame_target_is_enabled,
-    is_self_application, retain_enabled_frames, watch_send_due, StagnationFingerprint,
-    StagnationReportIntent, StagnationTracker, TriggerCoordinator, WatchStagnationStore,
+    is_self_application, watch_send_due, StagnationFingerprint, StagnationReportIntent,
+    StagnationTracker, TriggerCoordinator, WatchStagnationStore,
 };
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 #[path = "watch_app.rs"]
@@ -43,6 +47,8 @@ mod watch_worker;
 #[async_trait::async_trait]
 pub(crate) trait WatchWorker: Send {
     async fn poll(&mut self) -> Result<ControlFlow<()>>;
+
+    async fn shutdown(&mut self) {}
 }
 
 #[async_trait::async_trait]
@@ -131,19 +137,155 @@ async fn supervise_watch_worker<F, Fut>(
 
 pub(super) struct WatchMemory {
     publication: coosenpai_core::persistence::PublicationGate,
-    frames: Vec<ObservationFrameInput>,
-    directories: Vec<tempfile::TempDir>,
+    pending: PendingCaptureSets,
+    active_work: Option<JoinHandle<WatchWorkCompletion>>,
     last_hash: Option<String>,
     last_ocr: Option<String>,
     last_capture: Instant,
     last_observation: Instant,
     window_start: Instant,
-    last_accepted: Option<Instant>,
     front_app: Option<String>,
     stagnation: StagnationTracker,
     stagnation_store: WatchStagnationStore,
     pending_stagnation_report: Option<StagnationReportIntent>,
     last_meaningful_change_at: chrono::DateTime<chrono::Utc>,
+}
+
+struct PendingCaptureSet {
+    scope_generation: u64,
+    config_revision: u64,
+    user_input_sequence: u64,
+    accepted_at: Instant,
+    frames: Vec<ObservationFrameInput>,
+    directory: tempfile::TempDir,
+}
+
+pub(super) struct PendingCaptureSetInput {
+    pub(super) target: String,
+    pub(super) scope_generation: u64,
+    pub(super) config_revision: u64,
+    pub(super) user_input_sequence: u64,
+    pub(super) accepted_at: Instant,
+    pub(super) frames: Vec<ObservationFrameInput>,
+    pub(super) directory: tempfile::TempDir,
+}
+
+#[derive(Default)]
+struct PendingCaptureSets {
+    by_target: BTreeMap<String, PendingCaptureSet>,
+    last_accepted: Option<Instant>,
+}
+
+impl PendingCaptureSets {
+    fn enqueue(&mut self, input: PendingCaptureSetInput) {
+        if input.frames.is_empty() {
+            return;
+        }
+        self.by_target.insert(
+            input.target,
+            PendingCaptureSet {
+                scope_generation: input.scope_generation,
+                config_revision: input.config_revision,
+                user_input_sequence: input.user_input_sequence,
+                accepted_at: input.accepted_at,
+                frames: input.frames,
+                directory: input.directory,
+            },
+        );
+        self.last_accepted = self.by_target.values().map(|set| set.accepted_at).max();
+    }
+
+    fn retain_current_capture_sets(
+        &mut self,
+        config: &Config,
+        scope_generation: u64,
+        config_revision: u64,
+        user_input_sequence: u64,
+    ) {
+        self.by_target.retain(|target, set| {
+            set.scope_generation == scope_generation
+                && set.config_revision == config_revision
+                && set.user_input_sequence == user_input_sequence
+                && frame_target_is_enabled(config, target)
+                && set
+                    .frames
+                    .iter()
+                    .all(|frame| frame.scope_generation == scope_generation)
+        });
+        self.last_accepted = self.by_target.values().map(|set| set.accepted_at).max();
+    }
+
+    fn pending_frame_count(&self) -> usize {
+        self.by_target.values().map(|set| set.frames.len()).sum()
+    }
+
+    fn take_pending_capture_sets(
+        &mut self,
+    ) -> (Vec<ObservationFrameInput>, Vec<tempfile::TempDir>) {
+        let mut frames = Vec::new();
+        let mut directories = Vec::new();
+        for (_, mut set) in std::mem::take(&mut self.by_target) {
+            frames.append(&mut set.frames);
+            directories.push(set.directory);
+        }
+        self.last_accepted = None;
+        (frames, directories)
+    }
+
+    fn clear(&mut self) {
+        self.by_target.clear();
+        self.last_accepted = None;
+    }
+}
+
+impl WatchMemory {
+    pub(super) fn enqueue_capture_set(&mut self, input: PendingCaptureSetInput) {
+        self.pending.enqueue(input);
+    }
+
+    fn retain_current_capture_sets(
+        &mut self,
+        config: &Config,
+        scope_generation: u64,
+        config_revision: u64,
+        user_input_sequence: u64,
+    ) {
+        self.pending.retain_current_capture_sets(
+            config,
+            scope_generation,
+            config_revision,
+            user_input_sequence,
+        );
+    }
+
+    fn pending_frame_count(&self) -> usize {
+        self.pending.pending_frame_count()
+    }
+
+    fn has_pending_capture_sets(&self) -> bool {
+        !self.pending.by_target.is_empty()
+    }
+
+    fn start_work(
+        &mut self,
+        work: impl Future<Output = WatchWorkCompletion> + Send + 'static,
+    ) -> bool {
+        if self.active_work.is_some() {
+            return false;
+        }
+        self.active_work = Some(tokio::spawn(work));
+        true
+    }
+
+    fn last_accepted_capture(&self) -> Option<Instant> {
+        self.pending.last_accepted
+    }
+
+    fn take_pending_capture_sets(
+        &mut self,
+    ) -> (Vec<ObservationFrameInput>, Vec<tempfile::TempDir>) {
+        self.pending.take_pending_capture_sets()
+    }
 }
 
 fn watch_error_detail(error: &anyhow::Error) -> String {
@@ -164,13 +306,17 @@ async fn run<H: WatchHost>(
     let mut recovery = WatchRecovery::new(session_kind);
     loop {
         match worker.poll().await {
-            Ok(ControlFlow::Break(())) => break,
+            Ok(ControlFlow::Break(())) => {
+                worker.shutdown().await;
+                break;
+            }
             Ok(ControlFlow::Continue(())) => {
                 recovery.reset();
                 state.clear_watch_error(generation).await;
             }
             Err(error) => {
                 if cancellation.is_cancelled() {
+                    worker.shutdown().await;
                     break;
                 }
                 match record_watch_failure(&state, &mut recovery, &error, generation, &cancellation)
@@ -178,8 +324,14 @@ async fn run<H: WatchHost>(
                 {
                     WatchRecoveryDecision::Retry | WatchRecoveryDecision::ConfigUpdateCancelled => {
                     }
-                    WatchRecoveryDecision::Stop => return Err(error),
-                    WatchRecoveryDecision::Cancelled => break,
+                    WatchRecoveryDecision::Stop => {
+                        worker.shutdown().await;
+                        return Err(error);
+                    }
+                    WatchRecoveryDecision::Cancelled => {
+                        worker.shutdown().await;
+                        break;
+                    }
                 }
             }
         }
@@ -240,7 +392,9 @@ async fn capture(
     else {
         return Err(anyhow::anyhow!("見守りの撮影が取り消されました"));
     };
-    let scope_generation = state.core_runtime().watch_scope_generation();
+    let runtime = state.core_runtime();
+    let scope_generation = runtime.watch_scope_generation();
+    let user_input_sequence = runtime.user_input_sequence();
     ensure_capture_active(&cancellation)?;
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("screens");
@@ -252,9 +406,12 @@ async fn capture(
                 .await
         })
     });
+    let mut user_response_in_progress = None;
     let stable = capture_with_window_mask(state.own_bounds.as_ref(), async {
         let capture_started = Instant::now();
         let _ = state.logger.write("INFO", "見守り: 段階=capture-start target=fullscreen backend=in-process");
+        user_response_in_progress =
+            Some(state.snapshot().await.active_user_message_id.is_some());
         let captured = screen_capture.capture(&source, cancellation.clone()).await;
         let _ = state.logger.write("INFO", &format!(
             "見守り: 段階=capture-done target=fullscreen backend=in-process elapsed-ms={} success={} display-count={}",
@@ -296,7 +453,7 @@ async fn capture(
     };
     let captured_at = stable.captured_at;
     ensure_capture_active(&cancellation)?;
-    let prepared = prepare_screen_frames(
+    let mut prepared = prepare_screen_frames(
         stable.screens,
         directory.path(),
         config,
@@ -307,6 +464,11 @@ async fn capture(
         &cancellation,
     )
     .await?;
+    attach_own_window_context(
+        &mut prepared.frames,
+        &stable.own_windows,
+        user_response_in_progress,
+    );
     let changed_by_ocr = prepared.ocr_signature.is_some() && memory.last_ocr.is_some();
     let changed = match (&prepared.ocr_signature, &memory.last_ocr) {
         (Some(current), Some(previous)) => current != previous,
@@ -397,9 +559,16 @@ async fn capture(
         prepared.ocr_signature,
         captured_at,
     )?;
-    memory.frames.extend(frames);
-    memory.last_accepted = Some(memory.last_capture);
-    memory.directories.push(directory);
+    let accepted_at = memory.last_capture;
+    memory.enqueue_capture_set(PendingCaptureSetInput {
+        target: "fullscreen".to_owned(),
+        scope_generation,
+        config_revision: config.revision,
+        user_input_sequence,
+        frames,
+        directory,
+        accepted_at,
+    });
     let next_send =
         chrono::Utc::now() + chrono::Duration::milliseconds(config.watch.send_debounce_ms as i64);
     state
@@ -409,7 +578,7 @@ async fn capture(
                 captured_at: captured_at.to_rfc3339(),
                 trigger,
                 front_app: memory.front_app.clone(),
-                frame_count: memory.frames.len(),
+                frame_count: memory.pending_frame_count(),
                 next_send: next_send.to_rfc3339(),
             },
         )
@@ -426,6 +595,24 @@ fn ensure_capture_active(cancellation: &CancellationToken) -> Result<()> {
 
 fn should_skip_self_application(front_app: Option<&str>, tutorial_watch: bool) -> bool {
     !tutorial_watch && front_app.is_some_and(is_self_application)
+}
+
+fn pending_capture_batch_is_current(
+    state: &DesktopState,
+    config_revision: u64,
+    scope_generation: u64,
+    user_input_sequence: u64,
+    frames: &[ObservationFrameInput],
+) -> bool {
+    let config = state.runtime_config();
+    let runtime = state.core_runtime();
+    config.revision == config_revision
+        && runtime.watch_scope_generation() == scope_generation
+        && runtime.user_input_sequence() == user_input_sequence
+        && frames.iter().all(|frame| {
+            frame.scope_generation == scope_generation
+                && frame_target_is_enabled(&config, &frame.target)
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -570,26 +757,76 @@ fn notify_tutorial_observation(state: &Arc<DesktopState>) {
 
 async fn flush_if_due(
     state: &Arc<DesktopState>,
-    config: &Config,
+    _config: &Config,
     memory: &mut WatchMemory,
     generation: u64,
     cancellation: CancellationToken,
 ) -> Result<()> {
     let latest_config = state.runtime_config();
-    retain_enabled_frames(&latest_config, &mut memory.frames);
-    if memory.frames.is_empty() {
-        memory.directories.clear();
-        memory.last_accepted = None;
+    let runtime = state.core_runtime();
+    let current_scope_generation = runtime.watch_scope_generation();
+    let user_input_sequence = runtime.user_input_sequence();
+    memory.retain_current_capture_sets(
+        &latest_config,
+        current_scope_generation,
+        latest_config.revision,
+        user_input_sequence,
+    );
+    let mut completed_work = false;
+    if memory
+        .active_work
+        .as_ref()
+        .is_some_and(|work| work.is_finished())
+    {
+        let work = memory.active_work.take().expect("finished watch work");
+        match work.await {
+            Ok(WatchWorkCompletion::Observation { observation, error }) => {
+                if observation.is_some() {
+                    memory.last_observation = Instant::now();
+                }
+                memory.window_start = Instant::now();
+                if let Some(error) = error {
+                    return Err(error);
+                }
+            }
+            Ok(WatchWorkCompletion::Mailbox(result)) => result?,
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("観察ワーク task"));
+            }
+        }
+        completed_work = true;
     }
-    let Some(accepted) = memory.last_accepted else {
-        process_mailbox_if_possible(state, cancellation, "flush").await?;
+
+    if memory.active_work.is_some() {
+        return Ok(());
+    }
+
+    let accepted = memory.last_accepted_capture();
+    if !memory.has_pending_capture_sets() {
+        if !completed_work {
+            let state = state.clone();
+            let cancellation = cancellation.clone();
+            let started = memory.start_work(async move {
+                WatchWorkCompletion::Mailbox(
+                    process_mailbox_if_possible(&state, cancellation, "flush").await,
+                )
+            });
+            debug_assert!(
+                started,
+                "watch work slot was checked before starting mailbox work"
+            );
+        }
+        return Ok(());
+    }
+
+    let tutorial_watch = state.tutorial_current_step().await == Some(TutorialStep::Watch);
+    let Some(accepted) = accepted else {
         return Ok(());
     };
-    let tutorial_watch = state.tutorial_current_step().await == Some(TutorialStep::Watch);
     let due = tutorial_watch
         || watch_send_due(
-            config,
-            memory.frames.len(),
+            &latest_config,
+            memory.pending_frame_count(),
             accepted.elapsed().as_millis() as u64,
             memory.window_start.elapsed().as_millis() as u64,
         );
@@ -599,52 +836,123 @@ async fn flush_if_due(
     state
         .publish_watch_view(generation, WatchResult::ObservationStarted)
         .await;
-    if tutorial_watch {
-        tokio::select! {
-            () = cancellation.cancelled() => return Ok(()),
-            () = tokio::time::sleep(Duration::from_secs(1)) => {}
-        }
+    let current_config = state.runtime_config();
+    let runtime = state.core_runtime();
+    let current_scope_generation = runtime.watch_scope_generation();
+    let user_input_sequence = runtime.user_input_sequence();
+    memory.retain_current_capture_sets(
+        &current_config,
+        current_scope_generation,
+        current_config.revision,
+        user_input_sequence,
+    );
+    if !memory.has_pending_capture_sets() {
+        state
+            .publish_watch_view(generation, WatchResult::NotDelivered)
+            .await;
+        memory.window_start = Instant::now();
+        return Ok(());
     }
-    let frames = std::mem::take(&mut memory.frames);
-    match state
-        .core_runtime()
-        .observe(frames.clone(), cancellation.clone())
-        .await
-    {
-        Ok(observation) => {
-            memory.directories.clear();
-            memory.last_accepted = None;
-            memory.window_start = Instant::now();
-            memory.last_observation = memory.window_start;
-            let calls = coosenpai_core::usage::today_observer_usage(&state.paths.usage)
-                .map(|usage| usage.ai_calls)
-                .unwrap_or(0);
-            state
-                .publish_watch_view(generation, WatchResult::Observed { observation, calls })
-                .await;
-            if tutorial_watch {
-                notify_tutorial_observation(state);
+    let batch_config_revision = current_config.revision;
+    let batch_scope_generation = current_scope_generation;
+    let batch_user_input_sequence = user_input_sequence;
+    let (frames, directories) = memory.take_pending_capture_sets();
+    memory.window_start = Instant::now();
+    let state = state.clone();
+    let cancellation_for_work = cancellation.clone();
+    let started = memory.start_work(async move {
+        let _directories = directories;
+        if tutorial_watch {
+            tokio::select! {
+                () = cancellation_for_work.cancelled() => {
+                    return WatchWorkCompletion::Observation { observation: None, error: None };
+                }
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
         }
-        Err(
-            coosenpai_core::runtime::RuntimeError::StaleWatchScope
-            | coosenpai_core::runtime::RuntimeError::ObservationCancelled,
-        ) => {
-            memory.directories.clear();
-            memory.last_accepted = None;
-            memory.window_start = Instant::now();
+        if !pending_capture_batch_is_current(
+            &state,
+            batch_config_revision,
+            batch_scope_generation,
+            batch_user_input_sequence,
+            &frames,
+        ) {
             state
                 .publish_watch_view(generation, WatchResult::NotDelivered)
                 .await;
+            return WatchWorkCompletion::Observation {
+                observation: None,
+                error: None,
+            };
         }
-        Err(error) => {
-            memory.frames = frames;
-            return Err(anyhow::Error::new(error).context("Manager の観察 ACK"));
+        match state
+            .core_runtime()
+            .observe_at_user_input_sequence(
+                frames,
+                cancellation_for_work.clone(),
+                batch_user_input_sequence,
+            )
+            .await
+        {
+            Ok(observation) => {
+                let calls = coosenpai_core::usage::today_observer_usage(&state.paths.usage)
+                    .map(|usage| usage.ai_calls)
+                    .unwrap_or(0);
+                state
+                    .publish_watch_view(
+                        generation,
+                        WatchResult::Observed {
+                            observation: observation.clone(),
+                            calls,
+                        },
+                    )
+                    .await;
+                if tutorial_watch {
+                    notify_tutorial_observation(&state);
+                }
+                let error =
+                    process_mailbox_if_possible(&state, cancellation_for_work, "observation")
+                        .await
+                        .err();
+                if error.is_none() {
+                    state.refresh_conversation().await;
+                }
+                WatchWorkCompletion::Observation {
+                    observation: Some(Box::new(observation)),
+                    error,
+                }
+            }
+            Err(
+                coosenpai_core::runtime::RuntimeError::StaleWatchScope
+                | coosenpai_core::runtime::RuntimeError::ObservationCancelled,
+            ) => {
+                state
+                    .publish_watch_view(generation, WatchResult::NotDelivered)
+                    .await;
+                WatchWorkCompletion::Observation {
+                    observation: None,
+                    error: None,
+                }
+            }
+            Err(error) => WatchWorkCompletion::Observation {
+                observation: None,
+                error: Some(anyhow::Error::new(error).context("Manager の観察 ACK")),
+            },
         }
-    }
-    process_mailbox_if_possible(state, cancellation, "observation").await?;
-    state.refresh_conversation().await;
+    });
+    debug_assert!(
+        started,
+        "watch work slot was checked before starting observation work"
+    );
     Ok(())
+}
+
+enum WatchWorkCompletion {
+    Observation {
+        observation: Option<Box<ObservationRecord>>,
+        error: Option<anyhow::Error>,
+    },
+    Mailbox(Result<()>),
 }
 
 pub(crate) fn trigger_name(trigger: ActivityTriggerKind) -> &'static str {

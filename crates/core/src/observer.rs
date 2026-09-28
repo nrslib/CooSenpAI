@@ -6,14 +6,14 @@ use crate::outbox::{DurableOutbox, OutboxError};
 use crate::persistence::{prune_daily_jsonl_at, JsonlStore, PersistenceError};
 use crate::ports::{Clock, RuntimeLogger, SystemClock};
 use crate::prompts::{
-    build_observer_prompt, observer_schema, observer_system_prompt, ObserverPromptFrame,
+    build_observer_prompt, observer_schema, observer_system_prompt_for_call, ObserverPromptFrame,
     PromptAudioSegment,
 };
 use crate::provider::{
     ProviderCall, ProviderClient, ProviderError, ProviderErrorKind, ProviderResult,
     ProviderSession, SessionRequest,
 };
-use crate::speaker_id::is_valid_speaker_id;
+use crate::speaker_id::{is_valid_speaker_id, PromptSpeakerIdResolver};
 use crate::state::{
     parse_observation, parse_visual_observation, ActivityTriggerKind, AudioObservation,
     ObservationFrame, ObservationLimits, ObservationRecord, VisualObservation,
@@ -21,7 +21,6 @@ use crate::state::{
 use crate::usage::{try_reserve_observer_role, ObserverCallKind, UsageError};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
@@ -30,10 +29,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const MAX_OBSERVER_ATTEMPTS: usize = 3;
+pub(crate) const MAX_OBSERVER_ATTEMPTS: usize = 3;
 // 観察 prompt は毎回現在の比較データを再構成するため、長期 session の履歴だけが判断へ残り続けないようにする。
 const OBSERVER_SESSION_MAX_CALLS: usize = 60;
 
@@ -98,49 +98,22 @@ pub(crate) fn load_speaker_aliases(
     Ok(index)
 }
 
-pub(crate) fn canonical_prompt_speaker_id(id: &str, aliases: &BTreeMap<String, String>) -> String {
-    let mut current = id.to_owned();
-    let mut visited = HashSet::new();
-    while let Some(next) = aliases.get(&current) {
-        if !visited.insert(current.clone()) {
-            break;
-        }
-        current = next.clone();
-    }
-    current
-}
-
-fn namespaced_prompt_speaker_id(registry_id: &str, id: &str) -> Option<String> {
-    let namespace = speaker_registry_namespace(registry_id)?;
-    let prefix = format!("{namespace}/");
-    if let Some(raw_id) = id.strip_prefix(&prefix) {
-        return is_valid_speaker_id(raw_id).then(|| id.to_owned());
-    }
-    is_valid_speaker_id(id).then(|| format!("{namespace}/{id}"))
-}
-
-fn speaker_registry_namespace(registry_id: &str) -> Option<String> {
-    let uuid = Uuid::parse_str(registry_id).ok()?;
-    let digest = Sha256::digest(uuid.as_bytes());
-    Some(format!(
-        "r-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7]
-    ))
-}
-
-fn prompt_speaker_id(record: &AudioObservation, aliases: &SpeakerAliasIndex) -> Option<String> {
+fn prompt_speaker_id(
+    record: &AudioObservation,
+    resolver: &PromptSpeakerIdResolver,
+) -> Option<String> {
     if record.source != crate::state::AudioObservationSource::Speaker
         || record.speaker_status != Some(crate::state::SpeakerIdentificationStatus::Identified)
     {
         return None;
     }
     let id = record.speaker_id.as_deref()?;
-    resolve_prompt_speaker_id(Some(id), record.speaker_registry_id.as_deref(), aliases)
+    resolve_prompt_speaker_id(Some(id), record.speaker_registry_id.as_deref(), resolver)
 }
 
 fn prompt_speaker_id_for_segment(
     segment: &crate::ports::HearingSpeakerSegment,
-    aliases: &SpeakerAliasIndex,
+    resolver: &PromptSpeakerIdResolver,
 ) -> Option<String> {
     if segment.status != crate::state::SpeakerIdentificationStatus::Identified {
         return None;
@@ -148,24 +121,21 @@ fn prompt_speaker_id_for_segment(
     resolve_prompt_speaker_id(
         segment.speaker_id.as_deref(),
         segment.speaker_registry_id.as_deref(),
-        aliases,
+        resolver,
     )
 }
 
 fn resolve_prompt_speaker_id(
     id: Option<&str>,
     registry_id: Option<&str>,
-    aliases: &SpeakerAliasIndex,
+    resolver: &PromptSpeakerIdResolver,
 ) -> Option<String> {
-    let id = id?;
-    if registry_id == Some(aliases.registry_id.as_str()) {
-        is_valid_speaker_id(id).then(|| canonical_prompt_speaker_id(id, &aliases.aliases))
-    } else {
-        namespaced_prompt_speaker_id(registry_id?, id)
-    }
+    resolver
+        .resolve(registry_id?, id?)
+        .map(|resolved| resolved.prompt_id)
 }
 
-fn sanitize_previous_audio(value: &Value, aliases: &SpeakerAliasIndex) -> Value {
+fn sanitize_previous_audio(value: &Value, resolver: &PromptSpeakerIdResolver) -> Value {
     let mut sanitized = value.clone();
     let Some(segments) = sanitized
         .get_mut("audioSegments")
@@ -188,14 +158,9 @@ fn sanitize_previous_audio(value: &Value, aliases: &SpeakerAliasIndex) -> Value 
             for speaker_key in ["speakerTag", "speakerId"] {
                 if let Some(value) = object.get(speaker_key) {
                     let replacement = value.as_str().and_then(|id| {
-                        if registry_id.as_deref() == Some(aliases.registry_id.as_str()) {
-                            is_valid_speaker_id(id)
-                                .then(|| canonical_prompt_speaker_id(id, &aliases.aliases))
-                        } else {
-                            registry_id
-                                .as_deref()
-                                .and_then(|registry| namespaced_prompt_speaker_id(registry, id))
-                        }
+                        resolver
+                            .resolve(registry_id.as_deref()?, id)
+                            .map(|resolved| resolved.prompt_id)
                     });
                     if let Some(replacement) = replacement {
                         replacements.push((speaker_key, replacement));
@@ -235,6 +200,13 @@ fn require_active_observation(cancellation: &CancellationToken) -> Result<(), Ob
     Ok(())
 }
 
+fn observer_timeout_error() -> ProviderError {
+    ProviderError {
+        kind: ProviderErrorKind::Timeout,
+        message: "observer の batch 期限を超過しました".to_owned(),
+    }
+}
+
 fn session_mode(session: &SessionRequest) -> &'static str {
     match session {
         SessionRequest::New => "new",
@@ -272,6 +244,7 @@ pub struct ObservationFrameInput {
     pub target: String,
     pub ocr_text: Option<String>,
     pub focus: Option<crate::ports::FocusElement>,
+    pub own_window_context: Option<crate::ports::OwnWindowContext>,
     pub image_path: PathBuf,
 }
 
@@ -356,6 +329,19 @@ pub struct ObserverAgent {
     transcript_reconciliation_pending: bool,
     microphone_command_prompt: Option<MicrophoneCommandPrompt>,
     classified_microphone_command_ids: Vec<String>,
+    execution_reporter: Option<ObserverExecutionReporter>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ObserverExecutionAttempt {
+    pub execution_id: String,
+    pub attempt: u8,
+    pub acknowledged: tokio::sync::oneshot::Sender<()>,
+}
+
+struct ObserverExecutionReporter {
+    execution_id: String,
+    sender: mpsc::UnboundedSender<ObserverExecutionAttempt>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,6 +358,21 @@ impl ObserverAgent {
 
     pub(crate) fn take_microphone_command_ids(&mut self) -> Vec<String> {
         std::mem::take(&mut self.classified_microphone_command_ids)
+    }
+
+    pub(crate) fn set_execution_reporter(
+        &mut self,
+        execution_id: String,
+        sender: mpsc::UnboundedSender<ObserverExecutionAttempt>,
+    ) {
+        self.execution_reporter = Some(ObserverExecutionReporter {
+            execution_id,
+            sender,
+        });
+    }
+
+    pub(crate) fn clear_execution_reporter(&mut self) {
+        self.execution_reporter = None;
     }
 
     pub fn new<C>(provider: Arc<dyn ProviderClient>, config: C) -> Self
@@ -418,6 +419,7 @@ impl ObserverAgent {
             transcript_reconciliation_pending: false,
             microphone_command_prompt: None,
             classified_microphone_command_ids: Vec::new(),
+            execution_reporter: None,
         }
     }
 
@@ -642,10 +644,14 @@ impl ObserverAgent {
                 aliases: BTreeMap::new(),
             },
         };
+        let speaker_id_resolver = PromptSpeakerIdResolver::new(
+            speaker_aliases.registry_id.clone(),
+            speaker_aliases.aliases.clone(),
+        );
         let previous_for_prompt = self
             .previous
             .as_ref()
-            .map(|value| sanitize_previous_audio(value, &speaker_aliases));
+            .map(|value| sanitize_previous_audio(value, &speaker_id_resolver));
         let mut source_frame_paths = BTreeMap::new();
         if let Some(frame_buffer) = &self.frame_buffer {
             frame_buffer
@@ -676,6 +682,7 @@ impl ObserverAgent {
                 target: frame.target.clone(),
                 ocr_text: frame.ocr_text.clone(),
                 focus: frame.focus.clone(),
+                own_window_context: frame.own_window_context.clone(),
             })
             .collect::<Vec<_>>();
         let mut prompt = build_observer_prompt(
@@ -703,7 +710,7 @@ impl ObserverAgent {
                         time: record.created_at.clone(),
                         source: record.source,
                         transcript_path,
-                        speaker_tag: prompt_speaker_id(record, &speaker_aliases),
+                        speaker_tag: prompt_speaker_id(record, &speaker_id_resolver),
                         speaker_registry_id: record.speaker_registry_id.clone(),
                         speaker_status: record.speaker_status,
                         audio_start_ms: None,
@@ -714,11 +721,15 @@ impl ObserverAgent {
                     .speaker_segments
                     .iter()
                     .map(|segment| crate::state::AudioSegmentReference {
-                        id: crate::state::audio_segment_period_id(&record.id, segment.start_ms),
+                        id: crate::state::audio_segment_period_id(
+                            &record.id,
+                            segment.start_ms,
+                            segment.end_ms,
+                        ),
                         time: record.created_at.clone(),
                         source: record.source,
                         transcript_path: transcript_path.clone(),
-                        speaker_tag: prompt_speaker_id_for_segment(segment, &speaker_aliases),
+                        speaker_tag: prompt_speaker_id_for_segment(segment, &speaker_id_resolver),
                         speaker_registry_id: segment.speaker_registry_id.clone(),
                         speaker_status: Some(segment.status),
                         audio_start_ms: Some(segment.start_ms),
@@ -744,7 +755,7 @@ impl ObserverAgent {
                             window_end: Some(record.window_end.clone()),
                             source: record.source,
                             text: record.text.clone(),
-                            speaker_id: prompt_speaker_id(record, &speaker_aliases),
+                            speaker_id: prompt_speaker_id(record, &speaker_id_resolver),
                             speaker_status: record.speaker_status,
                         }];
                     }
@@ -760,7 +771,10 @@ impl ObserverAgent {
                             window_end: Some(record.window_end.clone()),
                             source: record.source,
                             text: segment.text.clone().unwrap_or_default(),
-                            speaker_id: prompt_speaker_id_for_segment(segment, &speaker_aliases),
+                            speaker_id: prompt_speaker_id_for_segment(
+                                segment,
+                                &speaker_id_resolver,
+                            ),
                             speaker_status: Some(segment.status),
                         })
                         .collect()
@@ -772,15 +786,10 @@ impl ObserverAgent {
             .iter()
             .map(|frame| frame.image_path.clone())
             .collect();
-        let mut system_prompt = observer_system_prompt();
-        if !audio.is_empty() {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(
-                crate::prompts::BUILTIN_OBSERVER_AUDIO_INSTRUCTIONS.trim_end_matches('\n'),
-            );
-        }
+        let system_prompt =
+            observer_system_prompt_for_call(!audio.is_empty(), microphone_command_prompt.is_some());
         let output_schema = if let Some(commands) = &microphone_command_prompt {
-            commands.append(&mut system_prompt, &mut prompt);
+            commands.append_context(&mut prompt);
             commands.schema()
         } else {
             observer_schema()
@@ -1063,8 +1072,13 @@ impl ObserverAgent {
     ) -> Result<ProviderResult, ObserverError> {
         let mut session = self.next_session_request();
         let mut last_error = None;
+        let timeout_budget = Duration::from_millis(self.config.timeout_ms);
+        let mut batch_started: Option<Instant> = None;
         for attempt in 0..MAX_OBSERVER_ATTEMPTS {
             require_active_observation(&cancellation)?;
+            if batch_started.is_some_and(|started| started.elapsed() >= timeout_budget) {
+                return Err(observer_timeout_error().into());
+            }
             if let Some(path) = &self.usage_path {
                 let date = local_date_at(self.clock.now());
                 let role = match self.active_role {
@@ -1080,12 +1094,45 @@ impl ObserverAgent {
             let mode = session_mode(&session);
             let started = Instant::now();
             self.log_call_start(mode)?;
+            if let Some(reporter) = &self.execution_reporter {
+                let (acknowledged, acknowledgement) = tokio::sync::oneshot::channel();
+                if reporter
+                    .sender
+                    .send(ObserverExecutionAttempt {
+                        execution_id: reporter.execution_id.clone(),
+                        attempt: u8::try_from(attempt + 1)
+                            .expect("observer attempt count fits in u8"),
+                        acknowledged,
+                    })
+                    .is_ok()
+                {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => require_active_observation(&cancellation)?,
+                        _ = acknowledgement => {}
+                    }
+                }
+            }
+            require_active_observation(&cancellation)?;
+            let provider_started = *batch_started.get_or_insert_with(Instant::now);
+            let remaining = timeout_budget.saturating_sub(provider_started.elapsed());
+            if remaining.is_zero() {
+                return Err(observer_timeout_error().into());
+            }
             let provider = self.provider.clone();
             let cancellation_must_complete = provider.cancellation_must_complete();
+            let configured_stall = Duration::from_millis(self.config.stall_timeout_ms);
+            let stall_timeout =
+                if self.active_role == ObserverRole::Vision && self.config.effort == "max" {
+                    remaining
+                } else {
+                    configured_stall.min(remaining)
+                };
             let mut provider_call = Box::pin(provider.call(
                 ProviderCall {
                     system_prompt: system_prompt.to_owned(),
                     prompt: prompt.to_owned(),
+                    allowed_transcript_paths: None,
                     images: image_paths.iter().cloned().map(Into::into).collect(),
                     tools_disabled: true,
                     web_search_enabled: false,
@@ -1095,8 +1142,8 @@ impl ObserverAgent {
                     model: Some(self.config.model.clone()),
                     effort: Some(self.config.effort.clone()),
                     allow_session_model_change: false,
-                    stall_timeout: Duration::from_millis(self.config.stall_timeout_ms),
-                    timeout: Duration::from_millis(self.config.timeout_ms),
+                    stall_timeout,
+                    timeout: remaining,
                     tutorial_response_key: None,
                 },
                 cancellation.clone(),
@@ -1121,6 +1168,11 @@ impl ObserverAgent {
                 self.log_call_cancelled();
                 return Err(error);
             }
+            let result = if provider_started.elapsed() >= timeout_budget {
+                Err(observer_timeout_error())
+            } else {
+                result
+            };
             match result {
                 Ok(result) => {
                     self.log_call_end(mode, started.elapsed().as_millis())?;
@@ -1131,13 +1183,6 @@ impl ObserverAgent {
                             ProviderErrorKind::InvalidOutput,
                             Some(&detail),
                         );
-                        if matches!(session, SessionRequest::Resume(_))
-                            && !cancellation.is_cancelled()
-                        {
-                            self.reset_session();
-                            session = SessionRequest::New;
-                            continue;
-                        }
                         return Err(error);
                     }
                     return Ok(result);
@@ -1161,19 +1206,31 @@ impl ObserverAgent {
                             self.log_debug_failure("observer-error");
                         }
                     }
-                    if matches!(session, SessionRequest::Resume(_)) {
+                    if error.kind == ProviderErrorKind::Timeout {
+                        return Err(error.into());
+                    }
+                    if matches!(session, SessionRequest::Resume(_)) && error.kind.is_retryable() {
                         self.reset_session();
                         session = SessionRequest::New;
                         continue;
                     }
                     if error.kind.is_retryable() && attempt + 1 < MAX_OBSERVER_ATTEMPTS {
                         last_error = Some(error);
+                        let remaining = timeout_budget.saturating_sub(provider_started.elapsed());
+                        if remaining.is_zero() {
+                            return Err(observer_timeout_error().into());
+                        }
+                        let delay =
+                            Duration::from_millis(200 * (attempt as u64 + 1)).min(remaining);
                         tokio::select! {
                             _ = cancellation.cancelled() => return Err(ProviderError {
                                 kind: ProviderErrorKind::Retryable,
                                 message: "observer がキャンセルされました".to_owned(),
                             }.into()),
-                            _ = tokio::time::sleep(Duration::from_millis(200 * (attempt as u64 + 1))) => {}
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                        if provider_started.elapsed() >= timeout_budget {
+                            return Err(observer_timeout_error().into());
                         }
                     } else {
                         return Err(error.into());

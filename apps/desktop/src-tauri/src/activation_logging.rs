@@ -99,4 +99,3 @@ pub(super) fn result_label(
     }
     "ok"
 }
-

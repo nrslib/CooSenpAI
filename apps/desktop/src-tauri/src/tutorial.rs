@@ -768,4 +768,3 @@ impl TutorialController {
         self.watch_capture_presenting = false;
     }
 }
-

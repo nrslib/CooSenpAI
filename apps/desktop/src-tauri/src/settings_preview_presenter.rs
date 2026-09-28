@@ -37,4 +37,3 @@ impl SettingsPreviewPresenter {
         vec![UiEffect::Spawn(UiTask::SettingsPreview(preview))]
     }
 }
-

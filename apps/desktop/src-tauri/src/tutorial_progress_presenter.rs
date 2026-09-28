@@ -467,4 +467,3 @@ pub(crate) fn step_intro_key(step: TutorialStep) -> Option<&'static str> {
         TutorialStep::Chat => None,
     }
 }
-

@@ -593,7 +593,7 @@ fn parse_watch(
     let result = WatchConfig {
         enabled: boolean(object, "enabled", false, "watch.enabled", issues),
         fullscreen: boolean(object, "fullscreen", false, "watch.fullscreen", issues),
-        focus_element: boolean(object, "focusElement", false, "watch.focusElement", issues),
+        focus_element: boolean(object, "focusElement", true, "watch.focusElement", issues),
         apps: parse_watch_apps(object.get("apps"), issues),
         send_debounce_ms: positive_u64(
             object,

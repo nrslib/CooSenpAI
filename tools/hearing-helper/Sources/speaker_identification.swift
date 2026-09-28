@@ -9,8 +9,10 @@ import Security
 let speakerIdentificationModelIdentifier = "wespeaker-voxceleb-resnet34-LM"
 let speakerIdentificationModelWeightSHA256 = "25ac42cda3fca8a8093d862da90aa3746c93110ea5e3058b292a5bf8df093821"
 let speakerIdentificationPreprocessingVersion = "wespeaker-kaldi-fbank-snip-edges-true-200fr-2015ms-resample-trim-v4"
-let speakerIdentificationDecisionVersion = "speaker-cosine-ledger-v8"
-private let speakerPreviousDecisionVersions = ["speaker-cosine-ledger-v6", "speaker-cosine-ledger-v7"]
+let speakerIdentificationDecisionVersion = "speaker-cosine-ledger-v9"
+private let speakerPreviousDecisionVersions = [
+    "speaker-cosine-ledger-v6", "speaker-cosine-ledger-v7", "speaker-cosine-ledger-v8",
+]
 
 private let speakerIdentificationModelPackageFiles = [
     (path: "Manifest.json", sha256: "b8c0b0d83caef37e7fe6d4ad8006085c16e916145c1e705d6079eefdc1c78af7"),
@@ -192,6 +194,7 @@ struct SpeakerIdentificationPeriod {
     let registryID: String?
     let status: SpeakerIdentificationStatusValue
     var decisionDetails: [SpeakerDecisionDetails] = []
+    var decisionSpeakerIDs: [String?] = []
 }
 
 struct SpeakerIdentificationResult {
@@ -246,6 +249,32 @@ struct SpeakerRecentComparison: Codable, Equatable {
     let score: Float
 }
 
+struct SpeakerRecentDecisionDiagnostics: Equatable {
+    let expiredCandidateCount: Int
+    let pendingCandidateCount: Int
+    let comparableCandidateCount: Int
+    let independentCandidateCount: Int
+    let trustedIndependentCandidateCount: Int
+    let directIDCount: Int
+    let directMargin: Float?
+    let representativeSampleCount: Int
+    let representativeIDCount: Int
+    let representativeDirectIDCount: Int
+    let representativeMargin: Float?
+    let independentPriorCandidatePairCount: Int
+    let isDuplicate: Bool
+    let isNovel: Bool
+    let consensusCheckApplicable: Bool
+    let mutualConsensusPairCount: Int
+    let speechEligibleConsensusPairCount: Int
+    let directSupportEligibleConsensusPairCount: Int
+}
+
+func speakerConsensusPairSupportsDirectID(directID: String?, supportingIDs: [String]) -> Bool {
+    guard let directID else { return false }
+    return supportingIDs.contains(directID)
+}
+
 // 公開するのは実判定時の数値と根拠の参照だけ。声紋・PCMは含めない。
 struct SpeakerDecisionDetails: Codable, Equatable {
     let startMs: UInt64
@@ -268,6 +297,10 @@ struct SpeakerDecisionDetails: Codable, Equatable {
     var recentMatchCount: Int? = nil
     var recentBestScore: Float? = nil
     var recentComparisons: [SpeakerRecentComparison]? = nil
+    var representativeSampleCount: Int? = nil
+    var representativeIDCount: Int? = nil
+    var representativeDirectIDCount: Int? = nil
+    var representativeMargin: Float? = nil
 
     var eventFields: [String: Any] {
         var fields: [String: Any] = [
@@ -293,6 +326,10 @@ struct SpeakerDecisionDetails: Codable, Equatable {
                 ["segmentId": $0.segmentId, "startMs": $0.startMs, "endMs": $0.endMs, "score": $0.score] as [String: Any]
             }
         }
+        if let representativeSampleCount { fields["representativeSampleCount"] = representativeSampleCount }
+        if let representativeIDCount { fields["representativeIDCount"] = representativeIDCount }
+        if let representativeDirectIDCount { fields["representativeDirectIDCount"] = representativeDirectIDCount }
+        if let representativeMargin { fields["representativeMargin"] = representativeMargin }
         return fields
     }
 }
@@ -1085,18 +1122,63 @@ private struct TrustedSpeakerSample: Codable, Equatable {
     let registryID: String
     let modelPackageDigest: String
     let anchorID: String
+    let sessionID: String
     let reference: PendingSpeakerEvidenceReference
     let embedding: [Float]
     let anchorScore: Float
     let observedAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case registryID
+        case modelPackageDigest
+        case anchorID
+        case sessionID
+        case reference
+        case embedding
+        case anchorScore
+        case observedAt
+    }
+
+    init(
+        registryID: String,
+        modelPackageDigest: String,
+        anchorID: String,
+        sessionID: String,
+        reference: PendingSpeakerEvidenceReference,
+        embedding: [Float],
+        anchorScore: Float,
+        observedAt: Date
+    ) {
+        self.registryID = registryID
+        self.modelPackageDigest = modelPackageDigest
+        self.anchorID = anchorID
+        self.sessionID = sessionID
+        self.reference = reference
+        self.embedding = embedding
+        self.anchorScore = anchorScore
+        self.observedAt = observedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        registryID = try container.decode(String.self, forKey: .registryID)
+        modelPackageDigest = try container.decode(String.self, forKey: .modelPackageDigest)
+        anchorID = try container.decode(String.self, forKey: .anchorID)
+        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID) ?? ""
+        reference = try container.decode(PendingSpeakerEvidenceReference.self, forKey: .reference)
+        embedding = try container.decode([Float].self, forKey: .embedding)
+        anchorScore = try container.decode(Float.self, forKey: .anchorScore)
+        observedAt = try container.decode(Date.self, forKey: .observedAt)
+    }
 }
 
 private struct SpeakerRegistryDocument: Codable {
-    let schemaVersion: Int
+    var schemaVersion: Int
     let registryID: String
     let modelIdentifier: String
     let modelPackageDigest: String
     let preprocessingVersion: String
+    var sessionID: String
     var decisionVersion: String
     var profiles: [SpeakerProfile]
     var aliases: [String: String]
@@ -1112,6 +1194,7 @@ private struct SpeakerRegistryDocument: Codable {
         case modelIdentifier
         case modelPackageDigest
         case preprocessingVersion
+        case sessionID
         case decisionVersion
         case profiles
         case aliases
@@ -1128,6 +1211,7 @@ private struct SpeakerRegistryDocument: Codable {
         modelIdentifier: String,
         modelPackageDigest: String,
         preprocessingVersion: String,
+        sessionID: String,
         decisionVersion: String,
         profiles: [SpeakerProfile],
         aliases: [String: String],
@@ -1141,6 +1225,7 @@ private struct SpeakerRegistryDocument: Codable {
         self.modelIdentifier = modelIdentifier
         self.modelPackageDigest = modelPackageDigest
         self.preprocessingVersion = preprocessingVersion
+        self.sessionID = sessionID
         self.decisionVersion = decisionVersion
         self.profiles = profiles
         self.aliases = aliases
@@ -1157,6 +1242,7 @@ private struct SpeakerRegistryDocument: Codable {
         modelIdentifier = try container.decode(String.self, forKey: .modelIdentifier)
         modelPackageDigest = try container.decode(String.self, forKey: .modelPackageDigest)
         preprocessingVersion = try container.decode(String.self, forKey: .preprocessingVersion)
+        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID) ?? ""
         decisionVersion = try container.decode(String.self, forKey: .decisionVersion)
         profiles = try container.decode([SpeakerProfile].self, forKey: .profiles)
         aliases = try container.decode([String: String].self, forKey: .aliases)
@@ -1183,6 +1269,7 @@ private struct SpeakerRegistryDocument: Codable {
         try container.encode(modelIdentifier, forKey: .modelIdentifier)
         try container.encode(modelPackageDigest, forKey: .modelPackageDigest)
         try container.encode(preprocessingVersion, forKey: .preprocessingVersion)
+        try container.encode(sessionID, forKey: .sessionID)
         try container.encode(decisionVersion, forKey: .decisionVersion)
         try container.encode(profiles, forKey: .profiles)
         try container.encode(aliases, forKey: .aliases)
@@ -1558,6 +1645,7 @@ private final class SpeakerKeychain: SpeakerKeyStore {
 final class SpeakerLedger {
     private let path: URL
     private let keyStore: SpeakerKeyStore
+    private let sessionID: String
     private var expectedModelPackageDigest: String?
     private let beforePersistence: () -> Void
     private let afterPersistenceBegan: () -> Void
@@ -1575,12 +1663,14 @@ final class SpeakerLedger {
         afterPersistenceBegan: @escaping () -> Void = {},
         afterCommitReserved: @escaping () -> Void = {},
         shouldFailAliasWrite: @escaping () -> Bool = { false },
-        clock: @escaping () -> Date = { Date() }
+        clock: @escaping () -> Date = { Date() },
+        sessionID: String? = nil
     ) throws {
         try self.init(
             path: path,
             keyStore: keyStore,
             modelPackageDigest: modelPackageDigest,
+            sessionID: sessionID ?? UUID().uuidString.lowercased(),
             beforePersistence: beforePersistence,
             afterPersistenceBegan: afterPersistenceBegan,
             afterCommitReserved: afterCommitReserved,
@@ -1594,6 +1684,7 @@ final class SpeakerLedger {
         path: String,
         keyStore: SpeakerKeyStore?,
         modelPackageDigest: String?,
+        sessionID: String,
         beforePersistence: @escaping () -> Void,
         afterPersistenceBegan: @escaping () -> Void,
         afterCommitReserved: @escaping () -> Void,
@@ -1602,8 +1693,10 @@ final class SpeakerLedger {
         loadExistingDocument: Bool
     ) throws {
         guard !path.isEmpty else { throw SpeakerIdentificationFailure.ledgerPathMissing }
+        guard validSpeakerID(sessionID) else { throw SpeakerIdentificationFailure.ledgerCorrupt }
         self.path = URL(fileURLWithPath: path)
         self.keyStore = keyStore ?? SpeakerKeychain(path: self.path)
+        self.sessionID = sessionID
         if let modelPackageDigest, !validSHA256(modelPackageDigest) {
             throw SpeakerIdentificationFailure.modelPackageMismatch
         }
@@ -1635,12 +1728,14 @@ final class SpeakerLedger {
 
     convenience init(
         forDiagnosisAt path: String,
-        modelPackageDigest: String
+        modelPackageDigest: String,
+        sessionID: String? = nil
     ) throws {
         try self.init(
             path: path,
             keyStore: SpeakerDiagnosisKeyStore(),
-            modelPackageDigest: modelPackageDigest
+            modelPackageDigest: modelPackageDigest,
+            sessionID: sessionID
         )
     }
 
@@ -1925,7 +2020,8 @@ final class SpeakerLedger {
         canCommit: () -> Bool = { true },
         authorizeCommit: SpeakerLedgerCommitAuthorizer? = nil,
         segmentID: String? = nil,
-        segmentStartMilliseconds: UInt64? = nil
+        segmentStartMilliseconds: UInt64? = nil,
+        includeRecentDiagnostics: Bool = false
     ) throws -> SpeakerPeriodIdentification {
         if let identificationFailure {
             throw identificationFailure
@@ -1963,7 +2059,8 @@ final class SpeakerLedger {
                     generation: generation,
                     canCommit: canCommit,
                     authorizeCommit: authorizeCommit,
-                    evidenceReference: evidenceReference
+                    evidenceReference: evidenceReference,
+                    includeRecentDiagnostics: includeRecentDiagnostics
                 )
                 corrections.append(contentsOf: decision.corrections)
                 segmentEmbedding = analysis.segmentEmbedding
@@ -2003,7 +2100,11 @@ final class SpeakerLedger {
                     recentCandidateCount: decision.recentCandidateCount,
                     recentMatchCount: decision.recentMatchCount,
                     recentBestScore: decision.recentBestScore,
-                    recentComparisons: decision.recentComparisons
+                    recentComparisons: decision.recentComparisons,
+                    representativeSampleCount: decision.representativeSampleCount,
+                    representativeIDCount: decision.representativeIDCount,
+                    representativeDirectIDCount: decision.representativeDirectIDCount,
+                    representativeMargin: decision.representativeMargin
                 )]
             } else { details = [] }
             periods.append(
@@ -2019,35 +2120,13 @@ final class SpeakerLedger {
                     evidenceWindowCount: evidenceWindowCount,
                     candidateScores: candidateScores,
                     canEnroll: canEnroll,
-                    decisionDetails: details
+                    decisionDetails: details,
+                    decisionSpeakerIDs: details.isEmpty ? [] : [decision.speakerID],
+                    recentDiagnosticsByDecision: details.isEmpty ? [] : [decision.recentDiagnostics]
                 )
             )
         }
-        var merged: [SpeakerIdentifiedWindowPeriod] = []
-        for period in periods {
-            if let previous = merged.last,
-               previous.status == .identified,
-               period.status == .identified,
-               previous.speakerID == period.speakerID {
-                merged[merged.count - 1] = SpeakerIdentifiedWindowPeriod(
-                    startSample: previous.startSample,
-                    endSample: period.endSample,
-                    speakerID: previous.speakerID,
-                    registryID: previous.registryID,
-                    status: previous.status,
-                    segmentEmbedding: previous.segmentEmbedding,
-                    decisionReason: previous.decisionReason,
-                    windowCount: previous.windowCount + period.windowCount,
-                    evidenceWindowCount: previous.evidenceWindowCount
-                        + period.evidenceWindowCount,
-                    candidateScores: previous.candidateScores,
-                    canEnroll: previous.canEnroll,
-                    decisionDetails: previous.decisionDetails + period.decisionDetails
-                )
-            } else {
-                merged.append(period)
-            }
-        }
+        let merged = mergeAdjacentSpeakerPeriods(periods)
         guard merged.count > 1 else {
             let only = merged.first
             return SpeakerPeriodIdentification(
@@ -2240,7 +2319,8 @@ final class SpeakerLedger {
         generation: Int,
         canCommit: () -> Bool = { true },
         authorizeCommit: SpeakerLedgerCommitAuthorizer? = nil,
-        evidenceReference: PendingSpeakerEvidenceReference? = nil
+        evidenceReference: PendingSpeakerEvidenceReference? = nil,
+        includeRecentDiagnostics: Bool = false
     ) throws -> SpeakerIdentificationDecision {
         if let reference = evidenceReference,
            let previous = document?.pendingCandidates.first(where: { $0.references == [reference] }),
@@ -2266,7 +2346,8 @@ final class SpeakerLedger {
         let decision = try identifyRecentCandidate(
             analysis: analysis, generation: generation,
             canCommit: canCommit, authorizeCommit: authorizeCommit,
-            evidenceReference: evidenceReference
+            evidenceReference: evidenceReference,
+            includeDiagnostics: includeRecentDiagnostics
         )
         if decision.status == .unknown {
             try rememberBackfillEvidence(
@@ -2311,19 +2392,6 @@ final class SpeakerLedger {
         }
         var document = try writableDocument()
         document.aliases[source] = canonicalTarget
-        let targetSamples = document.trustedSamples.filter { canonicalID($0.anchorID) == canonicalTarget }
-        if targetSamples.isEmpty, let targetProfile = document.profiles.first(where: { $0.id == canonicalTarget }) {
-            document.trustedSamples = document.trustedSamples.map { sample in
-                guard sample.anchorID == source else { return sample }
-                return TrustedSpeakerSample(
-                    registryID: sample.registryID, modelPackageDigest: sample.modelPackageDigest,
-                    anchorID: canonicalTarget, reference: sample.reference, embedding: sample.embedding,
-                    anchorScore: cosineSimilarity(sample.embedding, targetProfile.anchor), observedAt: sample.observedAt
-                )
-            }
-        } else {
-            document.trustedSamples.removeAll { $0.anchorID == source }
-        }
         if let sourceIndex = document.profiles.firstIndex(where: { $0.id == source }) {
             document.profiles[sourceIndex].updateCount = 0
         }
@@ -2395,7 +2463,16 @@ final class SpeakerLedger {
             throw SpeakerIdentificationFailure.decisionVersionMismatch
         }
         // v6のID・固定anchor・別名・保留証拠を維持し、次の通常保存で移行する。
+        let beginsNewSession = decoded.schemaVersion < 3 || decoded.sessionID != sessionID
+        decoded.schemaVersion = 3
         decoded.decisionVersion = speakerIdentificationDecisionVersion
+        decoded.sessionID = sessionID
+        if beginsNewSession {
+            decoded.pendingCandidates.removeAll()
+            decoded.trustedSamples.removeAll()
+        } else {
+            decoded.trustedSamples.removeAll { $0.sessionID != sessionID }
+        }
         document = decoded
         do {
             try rebuildAliasIndex(from: decoded)
@@ -2470,6 +2547,39 @@ final class SpeakerLedger {
         )
     }
 
+    static func managementLedger(
+        path: String,
+        keyStore: SpeakerKeyStore? = nil
+    ) throws -> SpeakerLedger {
+        guard !path.isEmpty else { throw SpeakerIdentificationFailure.ledgerPathMissing }
+        let ledgerURL = URL(fileURLWithPath: path)
+        let store = keyStore ?? SpeakerKeychain(path: ledgerURL)
+        guard Self.fileExists(at: ledgerURL) else {
+            if try store.readExisting() != nil {
+                throw SpeakerIdentificationFailure.ledgerMissing
+            }
+            return try SpeakerLedger(path: path, keyStore: store)
+        }
+        let decoded = try loadEncryptedDocument(at: ledgerURL, keyStore: store)
+        guard decoded.modelIdentifier == speakerIdentificationModelIdentifier,
+              decoded.preprocessingVersion == speakerIdentificationPreprocessingVersion else {
+            throw SpeakerIdentificationFailure.ledgerCorrupt
+        }
+        guard ([speakerIdentificationDecisionVersion] + speakerPreviousDecisionVersions)
+            .contains(decoded.decisionVersion) else {
+            throw SpeakerIdentificationFailure.decisionVersionMismatch
+        }
+        let sessionID = decoded.schemaVersion >= 3
+            ? decoded.sessionID
+            : UUID().uuidString.lowercased()
+        return try SpeakerLedger(
+            path: path,
+            keyStore: store,
+            modelPackageDigest: decoded.modelPackageDigest,
+            sessionID: sessionID
+        )
+    }
+
     // 判定版の不一致で拒否された台帳を、明示的な全削除操作のために
     // 空の現行版へ置き換える。有効な暗号化台帳であることを検証し、
     // 台帳 ID は保持する。破損・鍵欠落・モデル不一致の台帳は
@@ -2484,6 +2594,7 @@ final class SpeakerLedger {
                 path: path,
                 keyStore: keyStore,
                 modelPackageDigest: nil,
+                sessionID: UUID().uuidString.lowercased(),
                 beforePersistence: {},
                 afterPersistenceBegan: {},
                 afterCommitReserved: {},
@@ -2515,11 +2626,12 @@ final class SpeakerLedger {
             return
         }
         document = SpeakerRegistryDocument(
-            schemaVersion: 2,
+            schemaVersion: 3,
             registryID: decoded.registryID,
             modelIdentifier: decoded.modelIdentifier,
             modelPackageDigest: decoded.modelPackageDigest,
             preprocessingVersion: decoded.preprocessingVersion,
+            sessionID: sessionID,
             decisionVersion: speakerIdentificationDecisionVersion,
             profiles: [],
             aliases: [:],
@@ -2564,8 +2676,9 @@ final class SpeakerLedger {
 
     private static func validate(_ document: SpeakerRegistryDocument) throws {
         var profileIDs = Set<String>()
-        guard document.schemaVersion == 2,
+        guard (document.schemaVersion == 2 || document.schemaVersion == 3),
               UUID(uuidString: document.registryID) != nil,
+              (document.schemaVersion == 2 || validSpeakerID(document.sessionID)),
               validSHA256(document.modelPackageDigest),
               document.profiles.count <= speakerMaximumProfiles,
               document.pendingCandidates.count <= speakerMaximumPendingCandidates,
@@ -2641,6 +2754,8 @@ final class SpeakerLedger {
         guard document.trustedSamples.allSatisfy({ sample in
             sample.registryID == document.registryID
                 && sample.modelPackageDigest == document.modelPackageDigest
+                && (document.schemaVersion == 2 || sample.sessionID == document.sessionID)
+                && (document.schemaVersion == 2 || validSpeakerID(sample.sessionID))
                 && document.profiles.contains { $0.id == sample.anchorID && $0.state == "active" }
                 && UUID(uuidString: sample.reference.segmentID) != nil
                 && sample.reference.audioEndMilliseconds > sample.reference.audioStartMilliseconds
@@ -2648,6 +2763,13 @@ final class SpeakerLedger {
                 && sample.anchorScore.isFinite && abs(sample.anchorScore) <= 1.001
                 && sample.observedAt.timeIntervalSinceReferenceDate.isFinite
         }) else { throw SpeakerIdentificationFailure.ledgerCorrupt }
+        let representativesBySpeaker = Dictionary(grouping: document.trustedSamples, by: \.anchorID)
+        guard representativesBySpeaker.values.allSatisfy({ samples in
+            samples.count <= speakerMaximumTrustedSamplesPerID
+                && Set(samples.map { $0.reference.segmentID }).count == samples.count
+        }) else {
+            throw SpeakerIdentificationFailure.ledgerCorrupt
+        }
         let backfillKeys = document.backfillEvidence.map { evidence in
             "\(evidence.registryID):\(evidence.segmentID):\(evidence.audioStartMilliseconds):\(evidence.audioEndMilliseconds)"
         }
@@ -2835,11 +2957,12 @@ final class SpeakerLedger {
         }
         let now = clock()
         var updated = document ?? SpeakerRegistryDocument(
-            schemaVersion: 2,
+            schemaVersion: 3,
             registryID: UUID().uuidString.lowercased(),
             modelIdentifier: speakerIdentificationModelIdentifier,
             modelPackageDigest: modelPackageDigest,
             preprocessingVersion: speakerIdentificationPreprocessingVersion,
+            sessionID: sessionID,
             decisionVersion: speakerIdentificationDecisionVersion,
             profiles: [],
             aliases: [:],
@@ -3043,11 +3166,12 @@ final class SpeakerLedger {
             throw SpeakerIdentificationFailure.modelPackageMismatch
         }
         var updated = document ?? SpeakerRegistryDocument(
-            schemaVersion: 2,
+            schemaVersion: 3,
             registryID: UUID().uuidString.lowercased(),
             modelIdentifier: speakerIdentificationModelIdentifier,
             modelPackageDigest: modelPackageDigest,
             preprocessingVersion: speakerIdentificationPreprocessingVersion,
+            sessionID: sessionID,
             decisionVersion: speakerIdentificationDecisionVersion,
             profiles: [],
             aliases: [:],
@@ -3060,6 +3184,7 @@ final class SpeakerLedger {
             throw SpeakerIdentificationFailure.modelPackageMismatch
         }
         updated.pendingCandidates = Array(candidates.prefix(maximumCount))
+        pruneBackfillEvidence(in: &updated, now: clock())
         updated.revision &+= 1
         try save(
             updated,
@@ -3097,7 +3222,8 @@ final class SpeakerLedger {
         generation: Int,
         canCommit: () -> Bool,
         authorizeCommit: SpeakerLedgerCommitAuthorizer?,
-        evidenceReference: PendingSpeakerEvidenceReference?
+        evidenceReference: PendingSpeakerEvidenceReference?,
+        includeDiagnostics: Bool
     ) throws -> SpeakerIdentificationDecision {
         guard canCommit() else { throw SpeakerIdentificationFailure.deadlineExceeded }
         let now = clock()
@@ -3105,6 +3231,9 @@ final class SpeakerLedger {
         let activeIDs = Set((document?.profiles ?? []).filter { $0.state == "active" }.map {
             canonicalID($0.id)
         })
+        let expiredCandidateCount = (document?.pendingCandidates ?? []).filter {
+            now.timeIntervalSince($0.observedAt) > speakerRecentCandidateLifetimeSeconds
+        }.count
         let recentPendingCandidates = (document?.pendingCandidates ?? []).filter {
             now.timeIntervalSince($0.observedAt) >= 0
                 && now.timeIntervalSince($0.observedAt) <= speakerRecentCandidateLifetimeSeconds
@@ -3131,7 +3260,6 @@ final class SpeakerLedger {
         let comparisons = comparable.map { prior in
             (candidate: prior, score: cosineSimilarity(prior.embedding, candidate.embedding))
         }
-        let similar = comparisons.filter { $0.score >= speakerTrustedSampleSimilarity }.map { $0.candidate }
         let recentComparisons = comparisons.compactMap { comparison -> SpeakerRecentComparison? in
             guard let reference = comparison.candidate.references.first else { return nil }
             return SpeakerRecentComparison(
@@ -3170,41 +3298,159 @@ final class SpeakerLedger {
             if $0.score != $1.score { return $0.score > $1.score }
             return $0.id < $1.id
         }
-        let directIDs = Set(rankedRecentIDs.filter {
+        let recentDirectIDs = Set(rankedRecentIDs.filter {
             $0.score >= speakerRecentDirectSimilarityThreshold
         }.map(\.id))
+        let recentDirectMargin = rankedRecentIDs.count > 1
+            ? rankedRecentIDs[0].score - rankedRecentIDs[1].score
+            : nil
         let recentCandidateCount = comparable.count
         let recentMatchCount = comparisons.filter {
             $0.score >= speakerRecentDirectSimilarityThreshold
         }.count
-        if directIDs.count > 1 {
+        let eligibleRepresentatives = (document?.trustedSamples ?? []).filter { sample in
+            sample.registryID == document?.registryID
+                && sample.modelPackageDigest == document?.modelPackageDigest
+                && sample.sessionID == sessionID
+                && activeIDs.contains(canonicalID(sample.anchorID))
+                && !(evidenceReference.map { overlapsWithinSegment(sample.reference, $0) } ?? false)
+        }
+        var trustedRepresentatives: [TrustedSpeakerSample] = []
+        let representativeIDs = Set(eligibleRepresentatives.map { canonicalID($0.anchorID) })
+        for id in representativeIDs.sorted() {
+            let candidates = eligibleRepresentatives.filter { canonicalID($0.anchorID) == id }.sorted {
+                let leftIsCanonical = $0.anchorID == id
+                let rightIsCanonical = $1.anchorID == id
+                if leftIsCanonical != rightIsCanonical { return leftIsCanonical }
+                if $0.observedAt != $1.observedAt { return $0.observedAt < $1.observedAt }
+                return $0.reference.segmentID < $1.reference.segmentID
+            }
+            var representedSegments = Set<String>()
+            for sample in candidates where representedSegments.count < speakerMaximumTrustedSamplesPerID {
+                guard representedSegments.insert(sample.reference.segmentID).inserted else { continue }
+                trustedRepresentatives.append(sample)
+            }
+        }
+        var bestRepresentativeByID: [String: (score: Float, sample: TrustedSpeakerSample)] = [:]
+        for sample in trustedRepresentatives {
+            let id = canonicalID(sample.anchorID)
+            let score = cosineSimilarity(sample.embedding, candidate.embedding)
+            if bestRepresentativeByID[id].map({ $0.score >= score }) ?? false { continue }
+            bestRepresentativeByID[id] = (score, sample)
+        }
+        let rankedRepresentatives = bestRepresentativeByID.map {
+            (id: $0.key, score: $0.value.score, sample: $0.value.sample)
+        }.sorted {
+            if $0.score != $1.score { return $0.score > $1.score }
+            return $0.id < $1.id
+        }
+        let directIDs = Set(rankedRepresentatives.filter {
+            $0.score >= speakerRecentDirectSimilarityThreshold
+        }.map(\.id))
+        let representativeMargin = rankedRepresentatives.count > 1
+            ? rankedRepresentatives[0].score - rankedRepresentatives[1].score
+            : nil
+        let representativeCandidateScores = rankedRepresentatives.map {
+            SpeakerCandidateScore(speakerId: $0.id, score: $0.score)
+        }
+        let directMatch: (id: String, score: Float, sample: TrustedSpeakerSample)?
+        if let direct = rankedRepresentatives.first,
+           direct.score >= speakerRecentDirectSimilarityThreshold,
+           (rankedRepresentatives.count == 1
+               || direct.score - rankedRepresentatives[1].score >= speakerRecentDirectMarginThreshold) {
+            directMatch = (direct.id, direct.score, direct.sample)
+        } else {
+            directMatch = nil
+        }
+        let representativeAmbiguous = rankedRepresentatives.first.map {
+            $0.score >= speakerRecentDirectSimilarityThreshold
+        } == true && directMatch == nil
+
+        let isNovelComparedWithRecent = comparisons.isEmpty || comparisons.allSatisfy {
+            $0.score <= analysis.newSpeakerSimilarityThreshold
+        }
+        let independentRecentCandidates = comparable.filter {
+            independentCandidates($0, candidate)
+        }
+        let consensusCandidates = comparisons.compactMap { comparison -> PendingSpeakerCandidate? in
+            guard comparison.score >= speakerTrustedSampleSimilarity else { return nil }
+            let confirmedID = comparison.candidate.confirmedSpeakerID.map(canonicalID)
+            guard confirmedID == nil || confirmedID == directMatch?.id else { return nil }
+            return comparison.candidate
+        }
+        let trustedIndependentCandidates = consensusCandidates.filter {
+            independentCandidates($0, candidate)
+        }
+        var independentPriorCandidatePairCount = 0
+        var mutualConsensusPairCount = 0
+        var speechEligibleConsensusPairCount = 0
+        var directSupportEligibleConsensusPairCount = 0
+        let consensusCheckApplicable = !duplicate && !representativeAmbiguous
+        if includeDiagnostics && consensusCheckApplicable {
+            for (index, left) in trustedIndependentCandidates.enumerated() {
+                for right in trustedIndependentCandidates.dropFirst(index + 1) {
+                    guard independentCandidates(left, right) else { continue }
+                    independentPriorCandidatePairCount += 1
+                    guard cosineSimilarity(left.embedding, right.embedding)
+                        >= speakerTrustedSampleSimilarity else { continue }
+                    mutualConsensusPairCount += 1
+                    guard (left.voicedFrameCount + right.voicedFrameCount + candidate.voicedFrameCount)
+                        * speakerFrameShiftSampleCount >= speakerEnrollmentMinimumSpeechSamples else {
+                        continue
+                    }
+                    speechEligibleConsensusPairCount += 1
+                    let supportingIDs = [left, right].compactMap { observation in
+                        observation.confirmedSpeakerID.map(canonicalID)
+                    }
+                    guard speakerConsensusPairSupportsDirectID(
+                        directID: directMatch?.id,
+                        supportingIDs: supportingIDs
+                    ) else { continue }
+                    directSupportEligibleConsensusPairCount += 1
+                }
+            }
+        }
+        let recentDiagnostics = includeDiagnostics
+            ? SpeakerRecentDecisionDiagnostics(
+                expiredCandidateCount: expiredCandidateCount,
+                pendingCandidateCount: recentPendingCandidates.count,
+                comparableCandidateCount: recentCandidateCount,
+                independentCandidateCount: independentRecentCandidates.count,
+                trustedIndependentCandidateCount: trustedIndependentCandidates.count,
+                directIDCount: recentDirectIDs.count,
+                directMargin: recentDirectMargin,
+                representativeSampleCount: trustedRepresentatives.count,
+                representativeIDCount: rankedRepresentatives.count,
+                representativeDirectIDCount: directIDs.count,
+                representativeMargin: representativeMargin,
+                independentPriorCandidatePairCount: independentPriorCandidatePairCount,
+                isDuplicate: duplicate,
+                isNovel: isNovelComparedWithRecent,
+                consensusCheckApplicable: consensusCheckApplicable,
+                mutualConsensusPairCount: mutualConsensusPairCount,
+                speechEligibleConsensusPairCount: speechEligibleConsensusPairCount,
+                directSupportEligibleConsensusPairCount: directSupportEligibleConsensusPairCount
+            )
+            : nil
+        if representativeAmbiguous {
             if !duplicate { pending.append(candidate) }
             if pending.count > speakerMaximumPendingCandidates {
                 pending.removeFirst(pending.count - speakerMaximumPendingCandidates)
             }
             try savePendingCandidates(pending, canCommit: canCommit, authorizeCommit: authorizeCommit)
             return SpeakerIdentificationDecision(
-                speakerID: nil, registryID: nil, status: .mixed, reason: .mixedClusters, corrections: [],
-                candidateScores: [], recentCandidateCount: recentCandidateCount,
+                speakerID: nil, registryID: nil, status: .unknown, reason: .ambiguousRepresentatives, corrections: [],
+                candidateScores: representativeCandidateScores, recentCandidateCount: recentCandidateCount,
                 recentMatchCount: recentMatchCount, recentBestScore: recentBestScore,
-                recentComparisons: recentComparisons
+                recentComparisons: recentComparisons, recentDiagnostics: recentDiagnostics,
+                representativeSampleCount: trustedRepresentatives.count,
+                representativeIDCount: rankedRepresentatives.count,
+                representativeDirectIDCount: directIDs.count,
+                representativeMargin: representativeMargin
             )
         }
-        let directMatch: (id: String, score: Float, candidate: PendingSpeakerCandidate)?
-        if directIDs.count == 1,
-           let direct = rankedRecentIDs.first,
-           direct.score >= speakerRecentDirectSimilarityThreshold,
-           (rankedRecentIDs.count == 1
-               || direct.score - rankedRecentIDs[1].score >= speakerRecentDirectMarginThreshold) {
-            directMatch = direct
-        } else {
-            directMatch = nil
-        }
-
-        let isNovelComparedWithRecent = comparisons.isEmpty || comparisons.allSatisfy {
-            $0.score <= analysis.newSpeakerSimilarityThreshold
-        }
-        if directMatch == nil && !duplicate && analysis.canEnroll && isNovelComparedWithRecent {
+        if directMatch == nil && !representativeAmbiguous && !duplicate
+            && analysis.canEnroll && isNovelComparedWithRecent {
             let id = try registerLegacyProfile(
                 embedding: analysis.segmentEmbedding,
                 canCommit: canCommit,
@@ -3215,23 +3461,32 @@ final class SpeakerLedger {
             )
             return SpeakerIdentificationDecision(
                 speakerID: id, registryID: document?.registryID, status: .identified,
-                reason: .enrolledNew, corrections: [], candidateScores: [],
+                reason: .enrolledNew, corrections: [], candidateScores: representativeCandidateScores,
                 recentCandidateCount: recentCandidateCount, recentMatchCount: recentMatchCount,
-                recentBestScore: recentBestScore, recentComparisons: recentComparisons
+                recentBestScore: recentBestScore, recentComparisons: recentComparisons,
+                recentDiagnostics: recentDiagnostics,
+                representativeSampleCount: trustedRepresentatives.count,
+                representativeIDCount: rankedRepresentatives.count,
+                representativeDirectIDCount: directIDs.count,
+                representativeMargin: representativeMargin
             )
         }
 
         let decision = SpeakerIdentificationDecision(
             speakerID: nil, registryID: nil, status: .unknown, reason: .pendingCandidate, corrections: [],
-            candidateScores: [], recentCandidateCount: recentCandidateCount,
+            candidateScores: representativeCandidateScores, recentCandidateCount: recentCandidateCount,
             recentMatchCount: recentMatchCount, recentBestScore: recentBestScore,
-            recentComparisons: recentComparisons
+            recentComparisons: recentComparisons, recentDiagnostics: recentDiagnostics,
+            representativeSampleCount: trustedRepresentatives.count,
+            representativeIDCount: rankedRepresentatives.count,
+            representativeDirectIDCount: directIDs.count,
+            representativeMargin: representativeMargin
         )
         var cluster: [PendingSpeakerCandidate] = []
         if !duplicate {
-            for (index, left) in similar.enumerated() {
+            for (index, left) in consensusCandidates.enumerated() {
                 guard cluster.isEmpty else { break }
-                for right in similar.dropFirst(index + 1) {
+                for right in consensusCandidates.dropFirst(index + 1) {
                     guard independentCandidates(left, right),
                           independentCandidates(left, candidate),
                           independentCandidates(right, candidate),
@@ -3257,105 +3512,77 @@ final class SpeakerLedger {
         guard !cluster.isEmpty else {
             try savePendingCandidates(pending, canCommit: canCommit, authorizeCommit: authorizeCommit)
             if let direct = directMatch {
-                let supportingSamples = direct.candidate.references.first.map { reference in
-                    [SpeakerSupportingSample(
-                        segmentId: reference.segmentID,
-                        startMs: reference.audioStartMilliseconds,
-                        endMs: reference.audioEndMilliseconds,
-                        anchorId: direct.id,
-                        anchorScore: direct.score,
-                        score: direct.score
-                    )]
-                } ?? []
+                let reference = direct.sample.reference
+                let supportingSamples = [SpeakerSupportingSample(
+                    segmentId: reference.segmentID,
+                    startMs: reference.audioStartMilliseconds,
+                    endMs: reference.audioEndMilliseconds,
+                    anchorId: direct.id,
+                    anchorScore: direct.sample.anchorScore,
+                    score: direct.score
+                )]
                 return SpeakerIdentificationDecision(
                     speakerID: direct.id, registryID: document?.registryID, status: .identified,
-                    reason: .matchedSamples, corrections: [], candidateScores: [],
+                    reason: .matchedSamples, corrections: [], candidateScores: representativeCandidateScores,
                     supportingSamples: supportingSamples, recentCandidateCount: recentCandidateCount,
                     recentMatchCount: recentMatchCount, recentBestScore: recentBestScore,
-                    recentComparisons: recentComparisons
+                    recentComparisons: recentComparisons, recentDiagnostics: recentDiagnostics,
+                    representativeSampleCount: trustedRepresentatives.count,
+                    representativeIDCount: rankedRepresentatives.count,
+                    representativeDirectIDCount: directIDs.count,
+                    representativeMargin: representativeMargin
                 )
             }
             return decision
         }
+        if let direct = directMatch {
+            // 三者群が既存IDを直接支持する場合は、そのIDの通常一致として扱う。
+            // 群は新規ID登録の根拠ではなく、固定代表の更新にも使わない。
+            try savePendingCandidates(pending, canCommit: canCommit, authorizeCommit: authorizeCommit)
+            let reference = direct.sample.reference
+            let supportingSamples = [SpeakerSupportingSample(
+                segmentId: reference.segmentID,
+                startMs: reference.audioStartMilliseconds,
+                endMs: reference.audioEndMilliseconds,
+                anchorId: direct.id,
+                anchorScore: direct.sample.anchorScore,
+                score: direct.score
+            )]
+            return SpeakerIdentificationDecision(
+                speakerID: direct.id, registryID: document?.registryID, status: .identified,
+                reason: .matchedSamples, corrections: [], candidateScores: representativeCandidateScores,
+                supportingSamples: supportingSamples, recentCandidateCount: recentCandidateCount,
+                recentMatchCount: recentMatchCount, recentBestScore: recentBestScore,
+                recentComparisons: recentComparisons, recentDiagnostics: recentDiagnostics,
+                representativeSampleCount: trustedRepresentatives.count,
+                representativeIDCount: rankedRepresentatives.count,
+                representativeDirectIDCount: directIDs.count,
+                representativeMargin: representativeMargin
+            )
+        }
         var updated = try writableDocument()
         pruneBackfillEvidence(in: &updated, now: now)
 
-        let selectedRecentObservations = cluster.dropLast()
-        let recentSupportScores = selectedRecentObservations.reduce(into: [String: [Float]]()) { scores, observation in
-            guard let confirmedSpeakerID = observation.confirmedSpeakerID else { return }
-            scores[canonicalID(confirmedSpeakerID), default: []].append(
-                cosineSimilarity(candidate.embedding, observation.embedding)
-            )
-        }
-        var directlySupportedRecentIDs = Set(recentSupportScores.keys)
-        // 新規群がまだIDを持たない場合は、選択群の外側にあるIDを混ぜない。
-        // 既存ID群を直接支持する群を選んだ場合だけ、別のactive ID群にも
-        // 独立した直接支持が2件以上ある競合をmixedとして扱う。
-        if !directlySupportedRecentIDs.isEmpty {
-            let selectedReferences = Set(selectedRecentObservations.flatMap(\.references))
-            let outsideSupport = similar.reduce(into: [String: [PendingSpeakerCandidate]]()) { support, observation in
-                guard let confirmedSpeakerID = observation.confirmedSpeakerID,
-                      let reference = observation.references.first,
-                      !selectedReferences.contains(reference) else { return }
-                support[canonicalID(confirmedSpeakerID), default: []].append(observation)
-            }
-            directlySupportedRecentIDs.formUnion(
-                outsideSupport.compactMap { id, observations in
-                    let segmentIDs = Set(observations.compactMap { $0.references.first?.segmentID })
-                    return segmentIDs.count >= 2 ? id : nil
-                }
-            )
-        }
-        // 再登録・削除済みのIDは管理上の履歴であり、現行群への直接支持として
-        // 競合させない。activeな直近確定IDだけが再利用候補になる。
-        let recentConfirmedIDs = Set(directlySupportedRecentIDs.filter { confirmedID in
-            updated.profiles.contains {
-                $0.state == "active" && canonicalID($0.id) == confirmedID
-            }
-        })
-        if recentConfirmedIDs.count > 1 {
-            try savePendingCandidates(pending, canCommit: canCommit, authorizeCommit: authorizeCommit)
-            return SpeakerIdentificationDecision(
-                speakerID: nil, registryID: nil, status: .mixed, reason: .mixedClusters, corrections: [],
-                recentCandidateCount: recentCandidateCount, recentMatchCount: recentMatchCount,
-                recentBestScore: comparisons.map { $0.score }.max(), recentComparisons: recentComparisons
-            )
-        }
-
-        // IDの再利用は、直近比較で直接支持された確定群だけを根拠にする。
-        // profileのanchorやtrustedSamplesは、現在の候補の裁定には使わない。
-        let matchedID = recentConfirmedIDs.first.flatMap { confirmedID in
-            updated.profiles.first {
-                $0.state == "active" && canonicalID($0.id) == confirmedID
-            }.map { canonicalID($0.id) }
-        }
         let clusterEmbedding = try normalizedEmbedding(
             weightedAverage(cluster.map(pendingCandidateEmbedding))
         )
-        let id: String
-        if let matchedID {
-            id = matchedID
-        } else {
-            guard updated.profiles.count < speakerMaximumProfiles else {
-                throw SpeakerIdentificationFailure.ledgerWrite("話者台帳の上限に達しました")
-            }
-            id = UUID().uuidString.lowercased()
-            updated.profiles.append(SpeakerProfile(
-                id: id, anchor: clusterEmbedding, centroid: clusterEmbedding,
-                updateCount: 0, state: "active"
-            ))
+        guard updated.profiles.count < speakerMaximumProfiles else {
+            throw SpeakerIdentificationFailure.ledgerWrite("話者台帳の上限に達しました")
         }
-        if let index = updated.profiles.firstIndex(where: { $0.id == id }),
-           cluster.allSatisfy({ $0.references.count == 1 }) {
-            updated.trustedSamples.removeAll { canonicalID($0.anchorID) == id }
+        let id = UUID().uuidString.lowercased()
+        updated.profiles.append(SpeakerProfile(
+            id: id, anchor: clusterEmbedding, centroid: clusterEmbedding,
+            updateCount: 0, state: "active"
+        ))
+        if cluster.allSatisfy({ $0.references.count == 1 }) {
             updated.trustedSamples.append(contentsOf: cluster.map {
                 TrustedSpeakerSample(
                     registryID: updated.registryID, modelPackageDigest: updated.modelPackageDigest,
-                    anchorID: id, reference: $0.references[0], embedding: $0.embedding,
+                    anchorID: id, sessionID: updated.sessionID,
+                    reference: $0.references[0], embedding: $0.embedding,
                     anchorScore: cosineSimilarity($0.embedding, clusterEmbedding), observedAt: $0.observedAt
                 )
             })
-            updated.profiles[index].updateCount &+= 1
         }
         // 相互一致とID裁定を通った群全体を、バックフィルだけの救済と区別する。
         let confirmedReferences = Set(cluster.flatMap(\.references))
@@ -3394,8 +3621,7 @@ final class SpeakerLedger {
         updated.revision &+= 1
         try save(updated, canCommit: canCommit, authorizeCommit: authorizeCommit)
         document = updated
-        // 訂正の根拠も、今回の直近窓内にある直接一致だけに限定する。
-        // 保存済みbackfillEvidenceや過去trusted sampleは、現行経路で再照合しない。
+        // 今回の直近群だけを新規IDの根拠にする。保存済み証拠は通常判定へ戻さない。
         let support = cluster.dropLast().compactMap { observation -> SpeakerSupportingSample? in
             guard let reference = observation.references.first else { return nil }
             return SpeakerSupportingSample(
@@ -3406,10 +3632,16 @@ final class SpeakerLedger {
         }
         return SpeakerIdentificationDecision(
             speakerID: id, registryID: updated.registryID, status: .identified,
-            reason: matchedID == nil ? .enrolledPending : .matchedSamples, corrections: corrections,
-            candidateScores: [], supportingSamples: support,
+            reason: .enrolledPending, corrections: corrections,
+            candidateScores: representativeCandidateScores,
+            supportingSamples: support,
             recentCandidateCount: recentCandidateCount, recentMatchCount: recentMatchCount,
-            recentBestScore: comparisons.map { $0.score }.max(), recentComparisons: recentComparisons
+            recentBestScore: comparisons.map { $0.score }.max(), recentComparisons: recentComparisons,
+            recentDiagnostics: recentDiagnostics,
+            representativeSampleCount: trustedRepresentatives.count,
+            representativeIDCount: rankedRepresentatives.count,
+            representativeDirectIDCount: directIDs.count,
+            representativeMargin: representativeMargin
         )
     }
 
@@ -3686,11 +3918,12 @@ final class SpeakerLedger {
             throw SpeakerIdentificationFailure.modelPackageMismatch
         }
         var document = document ?? SpeakerRegistryDocument(
-            schemaVersion: 2,
+            schemaVersion: 3,
             registryID: UUID().uuidString.lowercased(),
             modelIdentifier: speakerIdentificationModelIdentifier,
             modelPackageDigest: modelPackageDigest,
             preprocessingVersion: speakerIdentificationPreprocessingVersion,
+            sessionID: sessionID,
             decisionVersion: speakerIdentificationDecisionVersion,
             profiles: [],
             aliases: [:],
@@ -3732,6 +3965,19 @@ final class SpeakerLedger {
             document.pendingCandidates = Array(
                 (retainedCandidates + [confirmedSeed]).suffix(pendingCandidateLimit)
             )
+            if let reference = seedCandidate.references.first,
+               seedCandidate.references.count == 1 {
+                document.trustedSamples.append(TrustedSpeakerSample(
+                    registryID: document.registryID,
+                    modelPackageDigest: document.modelPackageDigest,
+                    anchorID: id,
+                    sessionID: sessionID,
+                    reference: reference,
+                    embedding: seedCandidate.embedding,
+                    anchorScore: cosineSimilarity(seedCandidate.embedding, embedding),
+                    observedAt: seedCandidate.observedAt
+                ))
+            }
         } else if let pendingCandidates {
             document.pendingCandidates = Array(
                 pendingCandidates.prefix(pendingCandidateLimit)
@@ -3945,6 +4191,41 @@ struct SpeakerIdentifiedWindowPeriod {
     let candidateScores: [(id: String, score: Float)]
     let canEnroll: Bool
     var decisionDetails: [SpeakerDecisionDetails] = []
+    var decisionSpeakerIDs: [String?] = []
+    var recentDiagnosticsByDecision: [SpeakerRecentDecisionDiagnostics?] = []
+}
+
+func mergeAdjacentSpeakerPeriods(
+    _ periods: [SpeakerIdentifiedWindowPeriod]
+) -> [SpeakerIdentifiedWindowPeriod] {
+    var merged: [SpeakerIdentifiedWindowPeriod] = []
+    for period in periods {
+        if let previous = merged.last,
+           previous.status == .identified,
+           period.status == .identified,
+           previous.speakerID == period.speakerID {
+            merged[merged.count - 1] = SpeakerIdentifiedWindowPeriod(
+                startSample: previous.startSample,
+                endSample: period.endSample,
+                speakerID: previous.speakerID,
+                registryID: previous.registryID,
+                status: previous.status,
+                segmentEmbedding: previous.segmentEmbedding,
+                decisionReason: previous.decisionReason,
+                windowCount: previous.windowCount + period.windowCount,
+                evidenceWindowCount: previous.evidenceWindowCount + period.evidenceWindowCount,
+                candidateScores: previous.candidateScores,
+                canEnroll: previous.canEnroll,
+                decisionDetails: previous.decisionDetails + period.decisionDetails,
+                decisionSpeakerIDs: previous.decisionSpeakerIDs + period.decisionSpeakerIDs,
+                recentDiagnosticsByDecision: previous.recentDiagnosticsByDecision
+                    + period.recentDiagnosticsByDecision
+            )
+        } else {
+            merged.append(period)
+        }
+    }
+    return merged
 }
 
 struct SpeakerIdentificationDecision {
@@ -3959,6 +4240,11 @@ struct SpeakerIdentificationDecision {
     var recentMatchCount: Int? = nil
     var recentBestScore: Float? = nil
     var recentComparisons: [SpeakerRecentComparison]? = nil
+    var recentDiagnostics: SpeakerRecentDecisionDiagnostics? = nil
+    var representativeSampleCount: Int? = nil
+    var representativeIDCount: Int? = nil
+    var representativeDirectIDCount: Int? = nil
+    var representativeMargin: Float? = nil
 }
 
 struct SpeakerPeriodIdentification {
@@ -4282,6 +4568,7 @@ final class SpeakerIdentificationCoordinator {
         persistenceBegan: @escaping () -> Void = {},
         commitReserved: @escaping () -> Void = {},
         shouldFailAliasWrite: @escaping () -> Bool = { false },
+        sessionID: String? = nil,
         log: @escaping (String) -> Void = { _ in }
     ) throws {
         ledger = try SpeakerLedger(
@@ -4301,7 +4588,8 @@ final class SpeakerIdentificationCoordinator {
                 }
             },
             afterCommitReserved: commitReserved,
-            shouldFailAliasWrite: shouldFailAliasWrite
+            shouldFailAliasWrite: shouldFailAliasWrite,
+            sessionID: sessionID
         )
         self.log = log
         preparationStatus = { _ in }
@@ -4635,7 +4923,8 @@ final class SpeakerIdentificationCoordinator {
                             speakerID: period.speakerID,
                             registryID: period.registryID,
                             status: period.status,
-                            decisionDetails: period.decisionDetails
+                            decisionDetails: period.decisionDetails,
+                            decisionSpeakerIDs: period.decisionSpeakerIDs
                         )
                     },
                     corrections: decision.corrections
@@ -4968,7 +5257,7 @@ private func greatestCommonDivisor(_ left: Int, _ right: Int) -> Int {
 }
 
 func speakerManagementLedger(path: String) throws -> SpeakerLedger {
-    try SpeakerLedger(path: path)
+    try SpeakerLedger.managementLedger(path: path)
 }
 
 private let speakerManagementOutputLock = NSLock()
@@ -5309,6 +5598,207 @@ private func readSpeakerDiagnosticAudio(at url: URL) throws -> SpeakerDiagnostic
     return SpeakerDiagnosticAudio(samples: samples, sampleRate: sampleRate)
 }
 
+struct SpeakerPCMRepeatComparison {
+    let commonSampleCount: Int
+    let exact: Bool
+    let correlation: Float?
+    let lagSamples: Int
+}
+
+func speakerPCMRepeatComparison(
+    _ left: [Float],
+    _ right: [Float],
+    sampleRate: Double = 16_000,
+    minimumOverlapSeconds: Double = 0
+) -> SpeakerPCMRepeatComparison {
+    let commonCount = min(left.count, right.count)
+    guard sampleRate.isFinite, sampleRate > 0,
+          minimumOverlapSeconds.isFinite, minimumOverlapSeconds >= 0,
+          left.allSatisfy(\.isFinite), right.allSatisfy(\.isFinite) else {
+        return SpeakerPCMRepeatComparison(
+            commonSampleCount: commonCount,
+            exact: false,
+            correlation: nil,
+            lagSamples: 0
+        )
+    }
+    let exact = left.count == right.count && zip(left, right).allSatisfy { $0.0 == $0.1 }
+    if exact {
+        return SpeakerPCMRepeatComparison(
+            commonSampleCount: left.count,
+            exact: true,
+            correlation: 1,
+            lagSamples: 0
+        )
+    }
+    let minimumOverlap = max(1, Int((sampleRate * minimumOverlapSeconds).rounded(.up)))
+    guard left.count >= minimumOverlap, right.count >= minimumOverlap else {
+        return SpeakerPCMRepeatComparison(
+            commonSampleCount: commonCount,
+            exact: false,
+            correlation: nil,
+            lagSamples: 0
+        )
+    }
+
+    func alignedRange(lag: Int) -> (leftStart: Int, rightStart: Int, count: Int)? {
+        let leftStart = max(0, -lag)
+        let rightStart = max(0, lag)
+        let count = min(left.count - leftStart, right.count - rightStart)
+        guard count >= minimumOverlap else { return nil }
+        return (leftStart, rightStart, count)
+    }
+
+    func normalizedCorrelation(
+        leftStart: Int,
+        rightStart: Int,
+        count: Int,
+        step: Int
+    ) -> Float? {
+        var leftSum = 0.0
+        var rightSum = 0.0
+        var sampledCount = 0
+        for offset in stride(from: 0, to: count, by: step) {
+            leftSum += Double(left[leftStart + offset])
+            rightSum += Double(right[rightStart + offset])
+            sampledCount += 1
+        }
+        guard sampledCount > 0 else { return nil }
+        let leftMean = leftSum / Double(sampledCount)
+        let rightMean = rightSum / Double(sampledCount)
+        var covariance = 0.0
+        var leftVariance = 0.0
+        var rightVariance = 0.0
+        for offset in stride(from: 0, to: count, by: step) {
+            let leftCentered = Double(left[leftStart + offset]) - leftMean
+            let rightCentered = Double(right[rightStart + offset]) - rightMean
+            covariance += leftCentered * rightCentered
+            leftVariance += leftCentered * leftCentered
+            rightVariance += rightCentered * rightCentered
+        }
+        let denominator = sqrt(leftVariance * rightVariance)
+        guard denominator > 0 else { return nil }
+        return Float(covariance / denominator)
+    }
+
+    let frameSampleCount = max(1, Int((sampleRate * 0.01).rounded()))
+    func energyEnvelope(_ samples: [Float]) -> [Float] {
+        stride(from: 0, to: samples.count, by: frameSampleCount).map { start in
+            let end = min(start + frameSampleCount, samples.count)
+            let energy = samples[start..<end].reduce(0.0) { $0 + Double($1 * $1) }
+            return Float(sqrt(energy / Double(end - start)))
+        }
+    }
+    let leftEnvelope = energyEnvelope(left)
+    let rightEnvelope = energyEnvelope(right)
+    let minimumEnvelopeOverlap = max(1, Int((minimumOverlapSeconds / 0.01).rounded(.up)))
+    var bestEnvelopeLags: [(lag: Int, score: Float)] = []
+    let envelopeMinimumLag = -(leftEnvelope.count - minimumEnvelopeOverlap)
+    let envelopeMaximumLag = rightEnvelope.count - minimumEnvelopeOverlap
+    if envelopeMinimumLag <= envelopeMaximumLag {
+        for lag in envelopeMinimumLag...envelopeMaximumLag {
+            let leftStart = max(0, -lag)
+            let rightStart = max(0, lag)
+            let count = min(leftEnvelope.count - leftStart, rightEnvelope.count - rightStart)
+            guard count >= minimumEnvelopeOverlap,
+                  let score = normalizedCorrelation(
+                      leftStart: leftStart,
+                      rightStart: rightStart,
+                      count: count,
+                      step: 1
+                  ) else { continue }
+            bestEnvelopeLags.append((lag, score))
+        }
+    }
+    bestEnvelopeLags.sort { $0.score > $1.score }
+
+    var bestScore: Float?
+    var bestLagSamples = 0
+    var bestOverlap = 0
+    let rawLagStep = max(1, Int((sampleRate / 4_000).rounded()))
+    let fineSearchRadius = frameSampleCount
+    for envelopeCandidate in bestEnvelopeLags.prefix(32) {
+        let centerLag = envelopeCandidate.lag * frameSampleCount
+        for lag in stride(
+            from: centerLag - fineSearchRadius,
+            through: centerLag + fineSearchRadius,
+            by: rawLagStep
+        ) {
+            guard let range = alignedRange(lag: lag),
+                  let score = normalizedCorrelation(
+                      leftStart: range.leftStart,
+                      rightStart: range.rightStart,
+                      count: range.count,
+                      step: rawLagStep
+                  ) else { continue }
+            if bestScore.map({ score > $0 }) ?? true {
+                bestScore = score
+                bestLagSamples = lag
+                bestOverlap = range.count
+            }
+        }
+    }
+    return SpeakerPCMRepeatComparison(
+        commonSampleCount: bestOverlap,
+        exact: exact,
+        correlation: bestScore,
+        lagSamples: bestLagSamples
+    )
+}
+
+private func emitSpeakerDiagnosticRepeatPairComparisons(_ files: [URL]) {
+    var filesByDirectory: [String: [Int: URL]] = [:]
+    for file in files {
+        let name = file.deletingPathExtension().lastPathComponent
+        guard name.hasPrefix("segment-speaker-"),
+              let number = Int(name.dropFirst("segment-speaker-".count)) else {
+            continue
+        }
+        filesByDirectory[file.deletingLastPathComponent().path, default: [:]][number] = file
+    }
+    for directory in filesByDirectory.keys.sorted() {
+        guard let filesByNumber = filesByDirectory[directory] else { continue }
+        for number in filesByNumber.keys.sorted() where filesByNumber[number + 123] != nil {
+            guard let leftURL = filesByNumber[number],
+                  let rightURL = filesByNumber[number + 123] else { continue }
+            let leftName = leftURL.lastPathComponent
+            let rightName = rightURL.lastPathComponent
+            do {
+                let left = try readSpeakerDiagnosticAudio(at: leftURL)
+                let right = try readSpeakerDiagnosticAudio(at: rightURL)
+                guard abs(left.sampleRate - right.sampleRate) < 0.01 else {
+                    emitSpeakerDiagnostic(
+                        "speaker-diagnose-repeat-pair left=\(leftName) right=\(rightName) "
+                            + "comparison=unavailable reason=sample-rate-mismatch"
+                    )
+                    continue
+                }
+                let comparison = speakerPCMRepeatComparison(
+                    left.samples,
+                    right.samples,
+                    sampleRate: left.sampleRate,
+                    minimumOverlapSeconds: 1
+                )
+                let verified = comparison.exact || (comparison.correlation ?? -1) >= 0.999
+                emitSpeakerDiagnostic(
+                    "speaker-diagnose-repeat-pair left=\(leftName) right=\(rightName) "
+                    + "left-samples=\(left.samples.count) right-samples=\(right.samples.count) "
+                    + "overlap-samples=\(comparison.commonSampleCount) "
+                    + "lag-samples=\(comparison.lagSamples) "
+                        + "exact-pcm=\(comparison.exact ? "yes" : "no") "
+                        + "correlation=\(speakerDiagnosticValue(comparison.correlation)) "
+                        + "verified-repeat=\(verified ? "yes" : "no")"
+                )
+            } catch {
+                emitSpeakerDiagnostic(
+                    "speaker-diagnose-repeat-pair left=\(leftName) right=\(rightName) "
+                        + "comparison=unavailable reason=read-error"
+                )
+            }
+        }
+    }
+}
+
 private func speakerDiagnosticNumber(_ value: Float) -> String {
     String(
         format: "%.6f",
@@ -5584,6 +6074,145 @@ private func speakerDiagnosticSegmentSimilarities(
     return similarities
 }
 
+struct SpeakerDiagnosticIdentifiedPeriod {
+    let speakerID: String
+    let file: String
+    let index: Int
+    let startMilliseconds: UInt64
+    let endMilliseconds: UInt64
+    let embedding: [Float]
+}
+
+struct SpeakerDiagnosticPeriodPair {
+    let leftIndex: Int
+    let rightIndex: Int
+    let cosine: Float
+    let sameID: Bool
+}
+
+private let speakerDiagnosticLabelRequestPairLimit = 24
+private let speakerDiagnosticDifferentIDPairTarget = 16
+private let speakerDiagnosticSameIDPairTarget = 8
+
+func speakerDiagnosticLabelRequestPairs(
+    _ periods: [SpeakerDiagnosticIdentifiedPeriod]
+) -> [SpeakerDiagnosticPeriodPair] {
+    guard periods.count > 1 else { return [] }
+    var differentIDPairs: [SpeakerDiagnosticPeriodPair] = []
+    var sameIDPairs: [SpeakerDiagnosticPeriodPair] = []
+    for leftIndex in 0..<(periods.count - 1) {
+        for rightIndex in (leftIndex + 1)..<periods.count {
+            let sameID = periods[leftIndex].speakerID == periods[rightIndex].speakerID
+            let pair = SpeakerDiagnosticPeriodPair(
+                leftIndex: leftIndex,
+                rightIndex: rightIndex,
+                cosine: cosineSimilarity(
+                    periods[leftIndex].embedding,
+                    periods[rightIndex].embedding
+                ),
+                sameID: sameID
+            )
+            if sameID {
+                sameIDPairs.append(pair)
+            } else {
+                differentIDPairs.append(pair)
+            }
+        }
+    }
+
+    differentIDPairs.sort { left, right in
+        if left.cosine != right.cosine { return left.cosine > right.cosine }
+        let leftPeriod = periods[left.leftIndex]
+        let rightPeriod = periods[right.leftIndex]
+        if leftPeriod.file != rightPeriod.file { return leftPeriod.file < rightPeriod.file }
+        if leftPeriod.startMilliseconds != rightPeriod.startMilliseconds {
+            return leftPeriod.startMilliseconds < rightPeriod.startMilliseconds
+        }
+        if leftPeriod.endMilliseconds != rightPeriod.endMilliseconds {
+            return leftPeriod.endMilliseconds < rightPeriod.endMilliseconds
+        }
+        if leftPeriod.index != rightPeriod.index { return leftPeriod.index < rightPeriod.index }
+        let leftSecond = periods[left.rightIndex]
+        let rightSecond = periods[right.rightIndex]
+        if leftSecond.file != rightSecond.file { return leftSecond.file < rightSecond.file }
+        if leftSecond.startMilliseconds != rightSecond.startMilliseconds {
+            return leftSecond.startMilliseconds < rightSecond.startMilliseconds
+        }
+        if leftSecond.endMilliseconds != rightSecond.endMilliseconds {
+            return leftSecond.endMilliseconds < rightSecond.endMilliseconds
+        }
+        return leftSecond.index < rightSecond.index
+    }
+    sameIDPairs.sort { left, right in
+        if left.cosine != right.cosine { return left.cosine < right.cosine }
+        let leftPeriod = periods[left.leftIndex]
+        let rightPeriod = periods[right.leftIndex]
+        if leftPeriod.file != rightPeriod.file { return leftPeriod.file < rightPeriod.file }
+        if leftPeriod.startMilliseconds != rightPeriod.startMilliseconds {
+            return leftPeriod.startMilliseconds < rightPeriod.startMilliseconds
+        }
+        if leftPeriod.index != rightPeriod.index { return leftPeriod.index < rightPeriod.index }
+        let leftSecond = periods[left.rightIndex]
+        let rightSecond = periods[right.rightIndex]
+        if leftSecond.file != rightSecond.file { return leftSecond.file < rightSecond.file }
+        if leftSecond.startMilliseconds != rightSecond.startMilliseconds {
+            return leftSecond.startMilliseconds < rightSecond.startMilliseconds
+        }
+        return leftSecond.index < rightSecond.index
+    }
+
+    var selected: [SpeakerDiagnosticPeriodPair] = []
+    var usedPeriodIndices = Set<Int>()
+    var representedIDs = Set<String>()
+    func append(_ pair: SpeakerDiagnosticPeriodPair) {
+        selected.append(pair)
+        usedPeriodIndices.insert(pair.leftIndex)
+        usedPeriodIndices.insert(pair.rightIndex)
+        representedIDs.insert(periods[pair.leftIndex].speakerID)
+        representedIDs.insert(periods[pair.rightIndex].speakerID)
+    }
+
+    let allIDs = Set(periods.map(\.speakerID))
+    while representedIDs != allIDs,
+          selected.count < speakerDiagnosticDifferentIDPairTarget {
+        let next = differentIDPairs
+            .filter { !usedPeriodIndices.contains($0.leftIndex) && !usedPeriodIndices.contains($0.rightIndex) }
+            .max { left, right in
+                let leftNewIDs = (representedIDs.contains(periods[left.leftIndex].speakerID) ? 0 : 1)
+                    + (representedIDs.contains(periods[left.rightIndex].speakerID) ? 0 : 1)
+                let rightNewIDs = (representedIDs.contains(periods[right.leftIndex].speakerID) ? 0 : 1)
+                    + (representedIDs.contains(periods[right.rightIndex].speakerID) ? 0 : 1)
+                if leftNewIDs != rightNewIDs { return leftNewIDs < rightNewIDs }
+                if left.cosine != right.cosine { return left.cosine < right.cosine }
+                return left.leftIndex > right.leftIndex
+            }
+        guard let next else { break }
+        append(next)
+    }
+
+    for pair in differentIDPairs where selected.filter({ !$0.sameID }).count < speakerDiagnosticDifferentIDPairTarget {
+        guard !usedPeriodIndices.contains(pair.leftIndex), !usedPeriodIndices.contains(pair.rightIndex) else {
+            continue
+        }
+        append(pair)
+    }
+    for pair in sameIDPairs where selected.filter(\.sameID).count < speakerDiagnosticSameIDPairTarget {
+        guard !usedPeriodIndices.contains(pair.leftIndex), !usedPeriodIndices.contains(pair.rightIndex) else {
+            continue
+        }
+        append(pair)
+    }
+    if selected.count < speakerDiagnosticLabelRequestPairLimit {
+        for pair in differentIDPairs where selected.count < speakerDiagnosticLabelRequestPairLimit {
+            guard !usedPeriodIndices.contains(pair.leftIndex), !usedPeriodIndices.contains(pair.rightIndex) else {
+                continue
+            }
+            append(pair)
+        }
+    }
+    return selected
+}
+
 private func emitSpeakerDiagnosticPolicySummary(
     label: String,
     summary: SpeakerDiagnosticPolicySummary,
@@ -5767,8 +6396,8 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
           thresholdOverride.enrollWindowCount == nil,
           thresholdOverride.marginThreshold == nil else {
         emitSpeakerDiagnostic(
-            "speaker-diagnose error=unsupported-v8-threshold-override "
-                + "v8では旧anchor用のknown/new/enroll-windows/marginの上書きは使用できません。"
+            "speaker-diagnose error=unsupported-v9-threshold-override "
+                + "v9では旧anchor用のknown/new/enroll-windows/marginの上書きは使用できません。"
                 + "品質・境界の調査には--speaker-window-thresholdと--speaker-period-thresholdを使用してください。"
         )
         exit(2)
@@ -5778,6 +6407,7 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
     var modelPath: String?
     var referencePath: String?
     var microphone = false
+    var repeatPairsOnly = false
     let centroidAutoUpdateStatus = speakerCentroidAutoUpdateEnabled
         ? "enabled"
         : "disabled-until-labeled-calibration"
@@ -5799,6 +6429,13 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
                 exit(2)
             }
             microphone = true
+            index += 1
+        case "--speaker-diagnose-repeat-pairs-only":
+            guard !repeatPairsOnly else {
+                emitSpeakerDiagnostic("speaker-diagnose error=--speaker-diagnose-repeat-pairs-only は一度だけ指定してください")
+                exit(2)
+            }
+            repeatPairsOnly = true
             index += 1
         case "--speaker-model":
             guard modelPath == nil,
@@ -5829,8 +6466,12 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
         emitSpeakerDiagnostic("speaker-diagnose error=入力パスがありません")
         exit(2)
     }
-    guard let modelPath else {
+    guard repeatPairsOnly || modelPath != nil else {
         emitSpeakerDiagnostic("speaker-diagnose error=--speaker-model <path> が必要です")
+        exit(2)
+    }
+    guard !repeatPairsOnly || (!microphone && modelPath == nil && referencePath == nil) else {
+        emitSpeakerDiagnostic("speaker-diagnose error=repeat-pairs-only はspeaker WAVだけで指定してください")
         exit(2)
     }
     if referencePath != nil && inputPaths.count != 1 {
@@ -5856,6 +6497,9 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
         let files = try inputPaths.flatMap {
             try speakerDiagnosticInputFiles(at: $0, microphone: microphone)
         }
+        emitSpeakerDiagnosticRepeatPairComparisons(files)
+        if repeatPairsOnly { return true }
+        guard let modelPath else { throw SpeakerIdentificationFailure.modelPathMissing }
         try FileManager.default.createDirectory(
             at: diagnosisLedgerDirectory,
             withIntermediateDirectories: true,
@@ -5898,8 +6542,12 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
         var periodStatusCounts: [SpeakerIdentificationStatusValue: Int] = [:]
         var periodLevelStatusCounts: [SpeakerIdentificationStatusValue: Int] = [:]
         var periodReasonCounts: [SpeakerIdentificationDecisionReason: Int] = [:]
+        var decisionReasonCounts: [String: Int] = [:]
+        var decisionStatusCounts: [SpeakerIdentificationStatusValue: Int] = [:]
         var periodDurations: [Float] = []
         var periodIdentifiedEmbeddings: [(id: String, embedding: [Float])] = []
+        var identifiedDiagnosticPeriods: [SpeakerDiagnosticIdentifiedPeriod] = []
+        var emittedCorrectionKeys = Set<String>()
         var windowInferenceMilliseconds: [Float] = []
         windowInferenceMilliseconds.reserveCapacity(files.count)
         var diagnosisAudioMilliseconds: UInt64 = 0
@@ -5932,22 +6580,42 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
                 generation: index + 1,
                 rule: currentRule
             )
+            let diagnosticSegmentID = UUID().uuidString.lowercased()
             let periods = try periodsLedger.identifyPeriods(
                 windows: windows,
                 boundaryThreshold: periodBoundaryThreshold,
                 rule: currentRule,
                 generation: index + 1,
-                segmentID: UUID().uuidString.lowercased(),
-                segmentStartMilliseconds: diagnosisSegmentStart
+                segmentID: diagnosticSegmentID,
+                segmentStartMilliseconds: diagnosisSegmentStart,
+                includeRecentDiagnostics: true
+            )
+            let displayPath = speakerDiagnosticDisplayPath(
+                file,
+                inputPaths: inputPaths
             )
             periodStatusCounts[periods.status, default: 0] += 1
-            for period in periods.periods {
+            for (periodIndex, period) in periods.periods.enumerated() {
                 periodLevelStatusCounts[period.status, default: 0] += 1
                 periodDurations.append(
                     Float(period.endSample - period.startSample) / Float(speakerSampleRate)
                 )
                 if let id = period.speakerID, let embedding = period.segmentEmbedding {
                     periodIdentifiedEmbeddings.append((id: id, embedding: embedding))
+                    identifiedDiagnosticPeriods.append(
+                        SpeakerDiagnosticIdentifiedPeriod(
+                            speakerID: id,
+                            file: displayPath,
+                            index: periodIndex,
+                            startMilliseconds: UInt64(
+                                (Double(period.startSample) * 1_000 / Double(speakerSampleRate)).rounded()
+                            ),
+                            endMilliseconds: UInt64(
+                                (Double(period.endSample) * 1_000 / Double(speakerSampleRate)).rounded()
+                            ),
+                            embedding: embedding
+                        )
+                    )
                 }
             }
             allPairwiseSimilarities.append(contentsOf: legacy.diagnostic.pairwiseSimilarities)
@@ -5955,10 +6623,6 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
             currentSummary.append(current)
             let pairDistribution = speakerDiagnosticDistribution(
                 legacy.diagnostic.pairwiseSimilarities
-            )
-            let displayPath = speakerDiagnosticDisplayPath(
-                file,
-                inputPaths: inputPaths
             )
             emitSpeakerDiagnostic(
                 "speaker-diagnose file=\(displayPath) "
@@ -5987,16 +6651,37 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
             }.joined(separator: ",")
             emitSpeakerDiagnostic(
                 "speaker-diagnose-periods file=\(displayPath) "
+                    + "segment-id=\(diagnosticSegmentID) "
                     + "count=\(periods.periods.count) "
                     + "overall=\(periods.status.rawValue) "
                     + "overall-speaker=\(periods.speakerID ?? "none") "
                     + "corrections=\(periods.corrections.count) "
                     + "periods=\(periodDetails.isEmpty ? "none" : periodDetails)"
             )
+            for correction in periods.corrections {
+                let correctionKey = [
+                    correction.segmentID,
+                    String(correction.audioStartMilliseconds),
+                    String(correction.audioEndMilliseconds),
+                    correction.speakerID,
+                ].joined(separator: ":")
+                guard emittedCorrectionKeys.insert(correctionKey).inserted else { continue }
+                emitSpeakerDiagnostic(
+                    "speaker-diagnose-correction file=\(displayPath) "
+                        + "target-segment-id=\(correction.segmentID) "
+                        + "start-ms=\(correction.audioStartMilliseconds) "
+                        + "end-ms=\(correction.audioEndMilliseconds) "
+                        + "speaker=\(correction.speakerID)"
+                )
+            }
             for (periodIndex, period) in periods.periods.enumerated() {
                 periodReasonCounts[period.decisionReason, default: 0] += 1
                 let best = period.candidateScores.first
                 let second = period.candidateScores.dropFirst().first
+                let voicedFrameCount = period.decisionDetails.reduce(0) {
+                    $0 + $1.voicedFrameCount
+                }
+                let decisionCount = period.decisionDetails.count
                 let margin = best.flatMap { first in
                     second.map { first.score - $0.score }
                 }
@@ -6007,17 +6692,86 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
                         + "end=\(speakerDiagnosticNumber(Float(period.endSample) / Float(speakerSampleRate))) "
                         + "windows=\(period.windowCount) "
                         + "evidence-windows=\(period.evidenceWindowCount) "
+                        + "source-decisions=\(decisionCount) "
                         + "status=\(period.status.rawValue) "
                         + "speaker=\(period.speakerID ?? "none") "
                         + "best=\(best.map { "\($0.id):\(speakerDiagnosticNumber($0.score))" } ?? "none") "
                         + "second=\(second.map { "\($0.id):\(speakerDiagnosticNumber($0.score))" } ?? "none") "
                         + "margin=\(speakerDiagnosticValue(margin)) "
                         + "can-enroll=\(period.canEnroll ? "yes" : "no") "
-                        + "reason=\(period.decisionReason.rawValue) "
-                        + "recent-candidates=\(period.decisionDetails.first?.recentCandidateCount ?? 0) "
-                        + "recent-matches=\(period.decisionDetails.first?.recentMatchCount ?? 0) "
+                        + "voiced-frames=\(voicedFrameCount) "
+                        + "voiced-samples=\(voicedFrameCount * speakerFrameShiftSampleCount) "
+                        + "reason=\(decisionCount == 1 ? period.decisionReason.rawValue : "merged") "
                         + "recent-best=\(speakerDiagnosticValue(period.decisionDetails.first?.recentBestScore))"
                 )
+                for (sourceIndex, details) in period.decisionDetails.enumerated() {
+                    let diagnostics = period.recentDiagnosticsByDecision.indices.contains(sourceIndex)
+                        ? period.recentDiagnosticsByDecision[sourceIndex]
+                        : nil
+                    let sourceBest = details.candidates.first
+                    let sourceSecond = details.candidates.dropFirst().first
+                    let sourceSpeakerID = period.decisionSpeakerIDs.indices.contains(sourceIndex)
+                        ? period.decisionSpeakerIDs[sourceIndex]
+                        : nil
+                    let sourceMargin = sourceBest.flatMap { first in
+                        sourceSecond.map { first.score - $0.score }
+                    }
+                    let sourceStart = max(
+                        0,
+                        (Double(details.startMs) - Double(diagnosisSegmentStart)) / 1_000
+                    )
+                    let sourceEnd = max(
+                        sourceStart,
+                        (Double(details.endMs) - Double(diagnosisSegmentStart)) / 1_000
+                    )
+                    let sourceRecentThresholdCount = details.recentComparisons?
+                        .filter { $0.score >= speakerTrustedSampleSimilarity }
+                        .count ?? 0
+                    decisionReasonCounts[details.reason, default: 0] += 1
+                    decisionStatusCounts[details.status, default: 0] += 1
+                    emitSpeakerDiagnostic(
+                        "speaker-diagnose-period-decision file=\(displayPath) "
+                            + "segment-id=\(diagnosticSegmentID) "
+                            + "period-index=\(periodIndex) "
+                            + "source-index=\(sourceIndex) "
+                            + "start-ms=\(details.startMs) "
+                            + "end-ms=\(details.endMs) "
+                            + "start=\(speakerDiagnosticNumber(Float(sourceStart))) "
+                            + "end=\(speakerDiagnosticNumber(Float(sourceEnd))) "
+                            + "status=\(details.status.rawValue) "
+                            + "speaker=\(sourceSpeakerID ?? "none") "
+                            + "best=\(sourceBest.map { "\($0.speakerId):\(speakerDiagnosticNumber($0.score))" } ?? "none") "
+                            + "second=\(sourceSecond.map { "\($0.speakerId):\(speakerDiagnosticNumber($0.score))" } ?? "none") "
+                            + "margin=\(speakerDiagnosticValue(sourceMargin)) "
+                            + "evidence-windows=\(details.evidenceWindowCount) "
+                            + "voiced-frames=\(details.voicedFrameCount) "
+                            + "voiced-samples=\(details.voicedFrameCount * speakerFrameShiftSampleCount) "
+                            + "reason=\(details.reason) "
+                            + "recent-candidates=\(details.recentCandidateCount ?? 0) "
+                            + "recent-matches=\(details.recentMatchCount ?? 0) "
+                            + "recent-comparisons-ge-trusted-threshold=\(sourceRecentThresholdCount) "
+                            + "analysis-mixed=\(details.reason == "mixed-clusters" && diagnostics == nil ? "yes" : "no") "
+                            + "recent-expired-count=\(diagnostics.map { String($0.expiredCandidateCount) } ?? "na") "
+                            + "recent-pending-count=\(diagnostics.map { String($0.pendingCandidateCount) } ?? "na") "
+                            + "recent-comparable-count=\(diagnostics.map { String($0.comparableCandidateCount) } ?? "na") "
+                            + "recent-independent-count=\(diagnostics.map { String($0.independentCandidateCount) } ?? "na") "
+                            + "recent-trusted-independent-count=\(diagnostics.map { String($0.trustedIndependentCandidateCount) } ?? "na") "
+                            + "recent-direct-id-count=\(diagnostics.map { String($0.directIDCount) } ?? "na") "
+                            + "recent-direct-margin=\(speakerDiagnosticValue(diagnostics?.directMargin)) "
+                            + "recent-duplicate=\(diagnostics.map { $0.isDuplicate ? "yes" : "no" } ?? "na") "
+                            + "recent-novel=\(diagnostics.map { $0.isNovel ? "yes" : "no" } ?? "na") "
+                            + "recent-consensus-applicable=\(diagnostics.map { $0.consensusCheckApplicable ? "yes" : "no" } ?? "na") "
+                            + "recent-consensus-independent-prior-pairs=\(diagnostics.map { String($0.independentPriorCandidatePairCount) } ?? "na") "
+                            + "recent-consensus-mutual-pairs=\(diagnostics.map { String($0.mutualConsensusPairCount) } ?? "na") "
+                            + "recent-consensus-speech-eligible=\(diagnostics.map { String($0.speechEligibleConsensusPairCount) } ?? "na") "
+                            + "recent-consensus-id-supported=\(diagnostics.map { String($0.directSupportEligibleConsensusPairCount) } ?? "na") "
+                            + "representative-sample-count=\(diagnostics.map { String($0.representativeSampleCount) } ?? "na") "
+                            + "representative-id-count=\(diagnostics.map { String($0.representativeIDCount) } ?? "na") "
+                            + "representative-direct-id-count=\(diagnostics.map { String($0.representativeDirectIDCount) } ?? "na") "
+                            + "representative-margin=\(speakerDiagnosticValue(diagnostics?.representativeMargin)) "
+                            + "recent-best=\(speakerDiagnosticValue(details.recentBestScore))"
+                    )
+                }
             }
         }
         let pairDistribution = speakerDiagnosticDistribution(allPairwiseSimilarities)
@@ -6059,13 +6813,18 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
                 + "period-boundary-threshold=\(speakerDiagnosticNumber(periodBoundaryThreshold)) "
                 + "recent-window-seconds=\(speakerDiagnosticNumber(Float(speakerRecentCandidateLifetimeSeconds))) "
                 + "recent-capacity=\(speakerMaximumPendingCandidates) "
+                + "recent-enrollment-minimum-speech-samples=\(speakerEnrollmentMinimumSpeechSamples) "
                 + "recent-threshold=\(speakerDiagnosticNumber(speakerTrustedSampleSimilarity)) "
                 + "recent-margin=unused "
                 + "stored-backfill-window-seconds=\(speakerDiagnosticNumber(Float(speakerBackfillEvidenceLifetimeSeconds))) "
                 + "stored-backfill-capacity=\(speakerMaximumBackfillEvidence) "
                 + "backfill-diagnostic-margin=\(speakerDiagnosticNumber(speakerTrustedSampleMargin)) "
                 + "backfill=legacy-all-pairwise-only "
-                + "matching=recent-independent-consensus"
+                + "recent-direct-threshold=\(speakerDiagnosticNumber(speakerRecentDirectSimilarityThreshold)) "
+                + "recent-direct-margin=\(speakerDiagnosticNumber(speakerRecentDirectMarginThreshold)) "
+                + "representative-direct-threshold=\(speakerDiagnosticNumber(speakerRecentDirectSimilarityThreshold)) "
+                + "representative-direct-margin=\(speakerDiagnosticNumber(speakerRecentDirectMarginThreshold)) "
+                + "matching=session-representatives-plus-recent-new-speaker-consensus"
         )
         emitSpeakerDiagnosticPolicySummary(
             label: "legacy",
@@ -6081,6 +6840,9 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
         let periodReasonSummary = SpeakerIdentificationDecisionReason.allCases.map {
             "reason-\($0.rawValue)=\(periodReasonCounts[$0, default: 0])"
         }.joined(separator: " ")
+        let decisionReasonSummary = SpeakerIdentificationDecisionReason.allCases.map {
+            "decision-reason-\($0.rawValue)=\(decisionReasonCounts[$0.rawValue, default: 0])"
+        }.joined(separator: " ")
         emitSpeakerDiagnostic(
             "speaker-diagnose-periods-summary "
                 + "identified=\(periodStatusCounts[.identified, default: 0]) "
@@ -6090,8 +6852,12 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
                 + "period-identified=\(periodLevelStatusCounts[.identified, default: 0]) "
                 + "period-unknown=\(periodLevelStatusCounts[.unknown, default: 0]) "
                 + "period-mixed=\(periodLevelStatusCounts[.mixed, default: 0]) "
+                + "decision-identified=\(decisionStatusCounts[.identified, default: 0]) "
+                + "decision-unknown=\(decisionStatusCounts[.unknown, default: 0]) "
+                + "decision-mixed=\(decisionStatusCounts[.mixed, default: 0]) "
                 + "registered-speakers=\(periodsLedger.activeProfileCount) "
                 + periodReasonSummary
+                + " " + decisionReasonSummary
         )
         emitSpeakerDiagnostic(
             "speaker-diagnose-periods-duration-seconds "
@@ -6127,6 +6893,24 @@ func runSpeakerDiagnosisCommandIfRequested() -> Bool {
                 + "p75=\(speakerDiagnosticValue(periodDifferentID.p75)) "
                 + "max=\(speakerDiagnosticValue(periodDifferentID.maximum))"
         )
+        var diagnosticIDLabels: [String: String] = [:]
+        for period in identifiedDiagnosticPeriods where diagnosticIDLabels[period.speakerID] == nil {
+            diagnosticIDLabels[period.speakerID] = "ID-\(diagnosticIDLabels.count + 1)"
+        }
+        for (rank, pair) in speakerDiagnosticLabelRequestPairs(identifiedDiagnosticPeriods).enumerated() {
+            let left = identifiedDiagnosticPeriods[pair.leftIndex]
+            let right = identifiedDiagnosticPeriods[pair.rightIndex]
+            guard let leftIDLabel = diagnosticIDLabels[left.speakerID],
+                  let rightIDLabel = diagnosticIDLabels[right.speakerID] else {
+                preconditionFailure("identified diagnostic periods must have anonymized labels")
+            }
+            emitSpeakerDiagnostic(
+                "speaker-diagnose-label-pair rank=\(rank + 1) relation=\(pair.sameID ? "same-id" : "different-id") "
+                    + "cosine=\(speakerDiagnosticNumber(pair.cosine)) "
+                    + "left=\(left.file)#\(left.index):\(left.startMilliseconds)-\(left.endMilliseconds):\(leftIDLabel) "
+                    + "right=\(right.file)#\(right.index):\(right.startMilliseconds)-\(right.endMilliseconds):\(rightIDLabel)"
+            )
+        }
         let inferenceDistribution = speakerDiagnosticDistribution(windowInferenceMilliseconds)
         emitSpeakerDiagnostic(
             "speaker-diagnose-window-inference-milliseconds "

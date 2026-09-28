@@ -447,10 +447,13 @@ impl DesktopState {
             tauri::async_runtime::spawn(async move { task.wait().await });
             let _ = self.logger.write("INFO", "見守りを停止しました。");
         }
+        let runtime = self.runtime_snapshot();
         let snapshot = self
             .publish_event(crate::snapshot_presenter::SnapshotEvent::Watch {
                 generation: control.generation,
-                event: WatchResult::Stopped,
+                event: WatchResult::Stopped {
+                    runtime: Box::new(runtime),
+                },
             })
             .await;
         drop(control);
@@ -506,10 +509,13 @@ impl DesktopState {
         if matches!(control.lifecycle, WatchLifecycle::Stopping) {
             control.lifecycle = WatchLifecycle::Stopped;
         }
+        let runtime = self.runtime_snapshot();
         let snapshot = self
             .publish_event(crate::snapshot_presenter::SnapshotEvent::Watch {
                 generation: control.generation,
-                event: WatchResult::Stopped,
+                event: WatchResult::Stopped {
+                    runtime: Box::new(runtime),
+                },
             })
             .await;
         drop(control);

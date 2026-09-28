@@ -29,9 +29,6 @@ impl crate::selection_session::SelectionSessionPort for NativeSelectionPort {
             shortcut,
             count,
             contents,
-            windows: crate::platform::screenshot_selection_windows()
-                .map_err(|error| error.to_string())?
-                .onscreen_window_ids,
         })
     }
     async fn post_image(

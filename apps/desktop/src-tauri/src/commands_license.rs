@@ -61,4 +61,3 @@ pub async fn license_document_open(
     )
     .await)
 }
-

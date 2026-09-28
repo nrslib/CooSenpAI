@@ -32,4 +32,3 @@ pub(crate) fn log_stage(logger: &dyn RuntimeLogger, generation: u64, stage: Spee
         &format!("音声入力: generation={generation} stage={detail}"),
     );
 }
-

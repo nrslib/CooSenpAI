@@ -348,9 +348,13 @@ impl RuntimeActor {
                 }
             }
         }
+        self.user_input_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.user_work_pending = true;
         if let Some(operation) = running_observer.as_mut() {
-            self.preempt_operation_for_user(operation);
+            if self.preempt_operation_for_user(operation) && operation.is_observer() {
+                self.observer_execution = None;
+            }
         }
         if let Some(operation) = running_coo.as_mut() {
             if self.preempt_operation_for_user(operation) {

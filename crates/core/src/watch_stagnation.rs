@@ -535,4 +535,3 @@ fn snapshot_from_state(state: WatchStagnationState, now: DateTime<Utc>) -> Stagn
         fingerprints: state.fingerprints,
     }
 }
-

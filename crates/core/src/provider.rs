@@ -90,6 +90,9 @@ pub struct ProviderMidTurnInput {
 pub struct ProviderCall {
     pub system_prompt: String,
     pub prompt: String,
+    /// `None` は従来の観察 directory 許可、`Some` は話者名照会の transcript 許可集合。
+    /// 空の `Some` は transcript を一切許可しない。
+    pub allowed_transcript_paths: Option<Vec<String>>,
     pub images: Vec<ProviderImageAttachment>,
     pub tools_disabled: bool,
     pub web_search_enabled: bool,
@@ -441,4 +444,3 @@ fn is_executable(path: &Path) -> bool {
         }
     }
 }
-

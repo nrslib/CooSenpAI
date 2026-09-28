@@ -74,6 +74,8 @@ pub struct AppSnapshot {
     pub companion_draft: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_companion_thought: Option<String>,
+    #[serde(skip)]
+    pub(crate) latest_companion_thought_generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_companion_decision: Option<coosenpai_core::runtime::CompanionDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,6 +240,8 @@ impl AudioObservationView {
 #[serde(rename_all = "camelCase")]
 pub struct ObserverView {
     pub phase: ObserverViewPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<coosenpai_core::runtime::ObserverExecution>,
     pub ai_calls_today: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_captured_at: Option<String>,
@@ -259,24 +263,68 @@ pub struct ObserverView {
     pub battery_multiplier: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_occurred_at: Option<String>,
+    #[serde(skip)]
+    pub(crate) error_identity: Option<ObserverErrorIdentity>,
     pub targets: Vec<WatchTargetView>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ObserverErrorIdentity {
+    kind: ObserverErrorKind,
+    cause: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ObserverErrorKind {
+    WatchOperation,
+    Unknown,
+}
+
+impl ObserverErrorIdentity {
+    pub(crate) fn watch_operation(cause: impl Into<String>) -> Self {
+        Self {
+            kind: ObserverErrorKind::WatchOperation,
+            cause: cause.into(),
+        }
+    }
+
+    pub(crate) fn unknown() -> Self {
+        Self {
+            kind: ObserverErrorKind::Unknown,
+            cause: String::new(),
+        }
+    }
+}
+
 impl ObserverView {
-    pub(crate) fn record_error(&mut self, message: String) {
+    pub(crate) fn record_error(&mut self, message: String, identity: ObserverErrorIdentity) {
         self.phase = ObserverViewPhase::Error;
         self.pending_frame_count = 0;
         self.next_send_at = None;
+        self.error_occurred_at =
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
         self.error_message = Some(message);
+        self.error_identity = Some(identity);
     }
 
-    pub(crate) fn record_recoverable_error(&mut self, message: String) {
+    pub(crate) fn record_recoverable_error(
+        &mut self,
+        message: String,
+        identity: ObserverErrorIdentity,
+    ) {
         self.phase = ObserverViewPhase::Idle;
+        self.error_occurred_at =
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
         self.error_message = Some(message);
+        self.error_identity = Some(identity);
     }
 
     pub(crate) fn clear_error(&mut self) {
         self.error_message = None;
+        self.error_occurred_at = None;
+        self.error_identity = None;
     }
 
     pub(crate) fn record_observation(&mut self, observation: ObservationRecord) {
@@ -376,6 +424,7 @@ impl AppSnapshot {
             watch_intent_active: false,
             observer: ObserverView {
                 phase: ObserverViewPhase::Stopped,
+                execution: None,
                 ai_calls_today: observer_calls,
                 last_captured_at: None,
                 last_trigger: None,
@@ -389,6 +438,8 @@ impl AppSnapshot {
                 activity_signals_enabled: true,
                 battery_multiplier: 1.0,
                 error_message: None,
+                error_occurred_at: None,
+                error_identity: None,
                 targets: target_views(&config),
             },
             companion: CompanionView {
@@ -428,6 +479,7 @@ impl AppSnapshot {
             cancelled_user_message_ids: Vec::new(),
             companion_draft: None,
             latest_companion_thought: None,
+            latest_companion_thought_generation: None,
             latest_companion_decision: None,
             latest_judge_decision: None,
             latest_user_interruption: None,
@@ -493,6 +545,7 @@ impl AppSnapshot {
         self.cancelled_user_message_ids = runtime.cancelled_user_message_ids.clone();
         self.companion_draft = runtime.companion_draft.clone();
         self.latest_companion_thought = runtime.latest_companion_thought.clone();
+        self.latest_companion_thought_generation = runtime.latest_companion_thought_generation;
         self.latest_companion_decision = runtime.latest_companion_decision.clone();
         self.latest_judge_decision = runtime.latest_judge_decision.clone();
         self.latest_user_interruption = runtime.latest_user_interruption.clone();
@@ -502,6 +555,7 @@ impl AppSnapshot {
             self.companion_emotions_revision = runtime.revision;
         }
         self.provider_usage = runtime.provider_usage.clone();
+        self.observer.execution = runtime.observer_execution.clone();
         let companion_has_global_error = self
             .last_error
             .as_ref()
@@ -521,7 +575,11 @@ impl AppSnapshot {
             runtime.phase,
             coosenpai_core::runtime::RuntimePhase::Observing
         ) {
-            self.observer.phase = ObserverViewPhase::Thinking;
+            if runtime.observer_execution.is_some() {
+                self.observer.phase = ObserverViewPhase::Thinking;
+            } else if self.observer.phase == ObserverViewPhase::Thinking {
+                self.observer.phase = ObserverViewPhase::Idle;
+            }
         } else if self.observer_running && self.observer.phase == ObserverViewPhase::Thinking {
             self.observer.phase = ObserverViewPhase::Idle;
         }
@@ -648,4 +706,3 @@ fn provider_label(value: &str) -> String {
     }
     .to_owned()
 }
-

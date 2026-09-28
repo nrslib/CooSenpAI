@@ -222,4 +222,3 @@ async fn receive_signal(signals: &mut EarlySignals) {
         _ = signals.terminate.recv() => {}
     }
 }
-

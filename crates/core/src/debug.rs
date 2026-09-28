@@ -662,4 +662,3 @@ fn prune_to_size(root: &Path, maximum: u64) -> io::Result<()> {
     }
     Ok(())
 }
-

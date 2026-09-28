@@ -23,15 +23,15 @@ export function companionThought(snapshot: AppSnapshot, locale: Locale = "ja"): 
 export type NowLineView = {
   readonly mode: "error";
   readonly errorMessage: string;
+  readonly occurrence: number;
 } | {
   readonly mode: "resting" | "watching" | "application";
   readonly frontApp?: string;
   readonly lastCapturedAt?: string;
 };
 
-export function nowLineView(snapshot: AppSnapshot, locale: Locale = "ja"): NowLineView {
-  const observerError = observerErrorMessage(snapshot, locale);
-  if (observerError !== undefined) return { mode: "error", errorMessage: observerError };
+export function nowLineView(snapshot: AppSnapshot, observerError: { readonly message: string; readonly occurrence: number } | null): NowLineView {
+  if (observerError !== null) return { mode: "error", errorMessage: observerError.message, occurrence: observerError.occurrence };
   return {
     mode: !snapshot.observerRunning
       ? "resting"
@@ -43,9 +43,12 @@ export function nowLineView(snapshot: AppSnapshot, locale: Locale = "ja"): NowLi
   };
 }
 
-export function nowLine(snapshot: AppSnapshot, now = Date.now(), locale: Locale = "ja"): string {
-  const view = nowLineView(snapshot, locale);
-  if (view.mode === "error") return t(locale, "view.nowError", { message: view.errorMessage });
+export function nowLine(snapshot: AppSnapshot, now: number, locale: Locale, observerError: { readonly message: string; readonly occurrence: number } | null): string {
+  const view = nowLineView(snapshot, observerError);
+  if (view.mode === "error") return t(locale, "view.nowError", {
+    message: view.errorMessage,
+    occurrence: t(locale, "view.observerErrorOccurrence", { count: view.occurrence }),
+  });
   const app = view.mode === "resting"
     ? t(locale, "view.resting")
     : view.mode === "watching"
@@ -143,10 +146,30 @@ export function observerStatus(snapshot: AppSnapshot, now = Date.now(), locale: 
     case "stopped": return t(locale, "view.stopped");
     case "idle": return t(locale, "view.observing");
     case "capturing": return t(locale, "view.capturing");
-    case "thinking": return t(locale, "view.visualChecking");
+    case "thinking": {
+      const execution = observer.execution;
+      if (execution === undefined) return t(locale, "view.visualChecking");
+      const startedAt = Date.parse(execution.startedAt);
+      if (!Number.isFinite(startedAt)) return t(locale, "view.visualChecking");
+      const elapsed = formatObserverElapsed(Math.max(0, Math.floor((now - startedAt) / 1_000)), locale);
+      const attempt = execution.attempt > 1
+        ? t(locale, "view.observerAttempt", { attempt: execution.attempt, maxAttempts: execution.maxAttempts })
+        : "";
+      const role = t(locale, execution.role === "hearing" ? "view.hearingAi" : "view.visionAi");
+      return `${t(locale, "view.observerCheckingExecution", { role, elapsed, effort: execution.effort })}${attempt}`;
+    }
     case "suspended": return t(locale, "view.suspended");
     case "error": return t(locale, "view.error");
   }
+}
+
+function formatObserverElapsed(totalSeconds: number, locale: Locale): string {
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return t(locale, "view.observerElapsedHours", { hours, minutes, seconds });
+  if (minutes > 0) return t(locale, "view.observerElapsedMinutes", { minutes, seconds });
+  return t(locale, "view.observerElapsedSeconds", { seconds });
 }
 
 export function companionStatus(snapshot: AppSnapshot, locale: Locale = "ja"): string {

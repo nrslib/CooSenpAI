@@ -58,4 +58,3 @@ fn copy_latest_reply(
         .map_err(|error| error.to_string())?;
     Ok(true)
 }
-

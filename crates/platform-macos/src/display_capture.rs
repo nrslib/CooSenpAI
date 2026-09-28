@@ -901,4 +901,3 @@ fn cg_image_png(image: &CGImage) -> Result<Vec<u8>> {
     .context("画面画像を PNG へ変換できませんでした")?;
     Ok(png.to_vec())
 }
-

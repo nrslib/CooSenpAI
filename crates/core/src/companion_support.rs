@@ -29,6 +29,7 @@ pub(super) struct ProviderInvocation<'a> {
     pub events: Option<Arc<dyn ProviderEventSink>>,
     pub additional_inputs: Option<mpsc::UnboundedReceiver<ProviderMidTurnInput>>,
     pub tutorial_response_key: Option<&'a str>,
+    pub allowed_transcript_paths: Option<Vec<String>>,
 }
 
 pub(super) struct CompanionTurn {
@@ -148,10 +149,84 @@ pub(super) fn session_mode(session: &SessionRequest) -> &'static str {
     }
 }
 
-pub(super) fn parse_response(result: &ProviderResult) -> Result<CompanionResponse, CompanionError> {
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionProviderFields {
+    #[serde(default)]
+    work_request: Option<crate::work::WorkProposal>,
+    #[serde(default, deserialize_with = "crate::emotion::optional_delta")]
+    emotion_delta: Option<crate::emotion::EmotionDelta>,
+    emit: bool,
+    message: Option<String>,
+    message_kind: String,
+    notification_priority: String,
+    #[serde(default)]
+    fact_candidates: Vec<serde_json::Value>,
+    #[serde(default)]
+    fact_updates: Vec<serde_json::Value>,
+    #[serde(default)]
+    speaker_name_proposals: Vec<crate::speaker_name_proposals::SpeakerNameProposalCandidate>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObservationCompanionEnvelope {
+    #[serde(flatten)]
+    fields: CompanionProviderFields,
+    thought: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserCompanionEnvelope {
+    #[serde(flatten)]
+    fields: CompanionProviderFields,
+}
+
+impl CompanionProviderFields {
+    fn into_response(self, thought: Option<String>) -> CompanionResponse {
+        CompanionResponse {
+            work_request: self.work_request,
+            emotion_delta: self.emotion_delta,
+            emit: self.emit,
+            message: self.message,
+            message_kind: self.message_kind,
+            notification_priority: self.notification_priority,
+            thought,
+            fact_candidates: self.fact_candidates,
+            fact_updates: self.fact_updates,
+            speaker_name_proposals: self.speaker_name_proposals,
+        }
+    }
+}
+
+pub(super) fn parse_response(
+    result: &ProviderResult,
+    user_response: bool,
+) -> Result<CompanionResponse, CompanionError> {
     let value = result.value.clone().ok_or(CompanionError::Output)?;
-    let response: CompanionResponse =
-        serde_json::from_value(value).map_err(|_| CompanionError::Output)?;
+    let response = if user_response {
+        if value
+            .as_object()
+            .is_some_and(|object| object.contains_key("thought"))
+        {
+            return Err(CompanionError::Output);
+        }
+        let envelope: UserCompanionEnvelope =
+            serde_json::from_value(value).map_err(|_| CompanionError::Output)?;
+        envelope.fields.into_response(None)
+    } else {
+        let envelope: ObservationCompanionEnvelope =
+            serde_json::from_value(value).map_err(|_| CompanionError::Output)?;
+        if envelope.thought.trim().is_empty()
+            || envelope.thought.chars().count() > 500
+            || envelope.thought.contains('\n')
+            || envelope.thought.contains('\r')
+        {
+            return Err(CompanionError::Output);
+        }
+        envelope.fields.into_response(Some(envelope.thought))
+    };
     if !matches!(
         response.notification_priority.as_str(),
         "none" | "info" | "warning" | "critical"
@@ -159,12 +234,6 @@ pub(super) fn parse_response(result: &ProviderResult) -> Result<CompanionRespons
         response.message_kind.as_str(),
         "advice" | "encouragement" | "nudge" | "celebration" | "summary" | "chat"
     ) || (response.emit && response.message.as_deref().unwrap_or("").is_empty())
-        || response.thought.as_deref().is_some_and(|value| {
-            value.trim().is_empty()
-                || value.chars().count() > 500
-                || value.contains('\n')
-                || value.contains('\r')
-        })
     {
         return Err(CompanionError::Output);
     }
@@ -196,6 +265,7 @@ pub(crate) fn silent_response() -> CompanionResponse {
         thought: None,
         fact_candidates: Vec::new(),
         fact_updates: Vec::new(),
+        speaker_name_proposals: Vec::new(),
     }
 }
 

@@ -330,4 +330,3 @@ pub(crate) async fn run(
     };
     UiEvent::WorkApproval(event)
 }
-

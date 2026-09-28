@@ -12,6 +12,7 @@ pub(crate) enum CaptureEffect {
     CloseSelection {
         generation: u64,
         shutdown: bool,
+        supersede: bool,
     },
     LoadPopup {
         generation: u64,

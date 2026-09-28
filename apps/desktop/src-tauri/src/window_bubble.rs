@@ -199,4 +199,3 @@ fn bubble_origin(monitor: MonitorArea, width: f64, height: f64, position: &str) 
         },
     }
 }
-

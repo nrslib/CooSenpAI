@@ -224,6 +224,10 @@ impl BubbleState {
         self.conversation_generation
     }
 
+    pub(crate) fn contains_record(&self, id: &str) -> bool {
+        self.entries.iter().any(|entry| entry.record.id == id)
+    }
+
     pub(crate) fn set_latest_coo_speech(&mut self, mut record: Option<BubbleRecord>) {
         if let (Some(previous), Some(next)) = (self.latest_coo_speech.as_ref(), record.as_mut()) {
             if previous.id == next.id

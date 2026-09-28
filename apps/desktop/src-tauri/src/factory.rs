@@ -918,6 +918,7 @@ async fn run_connection_check(
             ProviderCall {
                 system_prompt: "接続確認です。ユーザーの指示に短く答えてください。".to_owned(),
                 prompt: "Return OK".to_owned(),
+                allowed_transcript_paths: None,
                 images: Vec::new(),
                 tools_disabled: true,
                 web_search_enabled: false,

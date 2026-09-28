@@ -81,4 +81,3 @@ impl Drop for ApplicationActivationMonitor {
 fn is_other_application(process_id: i32, self_pid: i32) -> bool {
     process_id > 0 && process_id != self_pid
 }
-

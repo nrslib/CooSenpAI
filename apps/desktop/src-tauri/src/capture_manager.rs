@@ -262,7 +262,8 @@ pub(crate) trait CapturePort: Send + Sync + 'static {
 }
 
 enum SelectionOperation {
-    Open,
+    Opening,
+    Opened,
     Close,
     Reopen,
 }
@@ -929,6 +930,17 @@ impl CapturePresenter {
             } => {
                 if generation != self.generation {
                     self.log(&format!("capture: generation={generation} event=Opened ignored=true reason=stale-generation"));
+                } else if let CaptureState::Selecting {
+                    kind,
+                    generation: current_generation,
+                    operation: SelectionOperation::Opening,
+                } = &self.state
+                {
+                    self.set_state(CaptureState::Selecting {
+                        kind: *kind,
+                        generation: *current_generation,
+                        operation: SelectionOperation::Opened,
+                    });
                 }
             }
             CaptureEvent::VoiceReleaseObserved { generation } => match self.state {
@@ -1250,7 +1262,7 @@ impl CapturePresenter {
         self.set_state(CaptureState::Selecting {
             kind,
             generation: self.generation,
-            operation: SelectionOperation::Open,
+            operation: SelectionOperation::Opening,
         });
     }
 
@@ -1260,6 +1272,7 @@ impl CapturePresenter {
 
     fn close_selection(&mut self, reopen: Option<CaptureKind>) {
         if let CaptureState::Selecting { kind, .. } = self.state {
+            let supersede = reopen == Some(kind);
             let kind = reopen.unwrap_or(kind);
             self.generation += 1;
             self.set_state(CaptureState::Selecting {
@@ -1278,6 +1291,7 @@ impl CapturePresenter {
                 CaptureEffect::CloseSelection {
                     generation: self.generation,
                     shutdown: self.closing,
+                    supersede,
                 },
                 CaptureTask::Selection(self.generation),
             );
@@ -1657,12 +1671,12 @@ impl CapturePresenter {
             (CaptureState::Idle, CaptureEvent::Shortcut(kind)) => self.start_selection(kind),
             (
                 current @ CaptureState::Selecting {
-                    kind: CaptureKind::Image,
-                    ..
+                    kind: active_kind,
+                    generation,
+                    operation: SelectionOperation::Opened,
                 },
-                CaptureEvent::Shortcut(CaptureKind::Image),
-            ) => {
-                let generation = current.view().generation;
+                CaptureEvent::Shortcut(requested_kind),
+            ) if active_kind == requested_kind => {
                 self.set_state(current);
                 self.log(&format!("範囲選択: 再押下を無視 generation={generation}"));
                 ignored = true;
@@ -1712,7 +1726,10 @@ impl CapturePresenter {
                     SelectionEvent::Failed(error) => Err(error),
                     SelectionEvent::Opened => unreachable!("opened handled above"),
                 };
-                let cancelled = !matches!(operation, SelectionOperation::Open);
+                let cancelled = matches!(
+                    operation,
+                    SelectionOperation::Close | SelectionOperation::Reopen
+                );
                 if cancelled {
                     let completion = Ok(());
                     self.set_state(CaptureState::Idle);

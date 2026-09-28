@@ -473,4 +473,3 @@ pub fn speaker_requires_screen_recording() -> bool {
         patchVersion: 0,
     })
 }
-

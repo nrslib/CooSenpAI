@@ -101,4 +101,3 @@ pub fn reply_to_termination_request() {
     };
     NSApplication::sharedApplication(marker).replyToApplicationShouldTerminate(true);
 }
-

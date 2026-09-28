@@ -429,4 +429,3 @@ impl PendingDelivery {
         })
     }
 }
-

@@ -127,6 +127,7 @@ pub mod test_support {
     use std::time::Duration;
 
     pub const PROCESS_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+    const HELPER_PROCESS_LOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
     pub struct HelperProcessLock {
         file: File,
@@ -150,7 +151,7 @@ pub mod test_support {
                 .write(true)
                 .open(path)
                 .expect("helper process test lock");
-            let deadline = std::time::Instant::now() + PROCESS_TEST_TIMEOUT;
+            let deadline = std::time::Instant::now() + HELPER_PROCESS_LOCK_TIMEOUT;
             loop {
                 let result =
                     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };

@@ -228,4 +228,3 @@ fn clamp_selection(text: &str, selection: Selection) -> Selection {
         end: selection.end.max(start).min(length),
     }
 }
-

@@ -335,4 +335,3 @@ fn stable_release_version(tag: &str) -> Option<Version> {
     let version = Version::parse(version_text).ok()?;
     version.pre.is_empty().then_some(version)
 }
-

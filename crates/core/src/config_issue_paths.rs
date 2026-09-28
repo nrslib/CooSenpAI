@@ -281,4 +281,3 @@ fn normalize_array_indices(path: &str) -> String {
     }
     normalized
 }
-

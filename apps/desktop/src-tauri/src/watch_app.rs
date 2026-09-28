@@ -1,6 +1,6 @@
 use super::{
     capture_is_allowed, capture_trigger, ensure_capture_active, record_gate, trigger_name,
-    CaptureDisposition, WatchMemory,
+    CaptureDisposition, PendingCaptureSetInput, WatchMemory,
 };
 use crate::state::DesktopState;
 use crate::watch_presenter::WatchResult;
@@ -144,6 +144,15 @@ impl ApplicationWatchSet {
                 target.last_capture.elapsed().as_millis() as u64,
                 config.watch.triggers.min_spacing_ms,
             ) {
+                let pending_frame_count = memory.pending_frame_count();
+                let next_send_at = memory.last_accepted_capture().map(|accepted| {
+                    let remaining_ms = config
+                        .watch
+                        .send_debounce_ms
+                        .saturating_sub(accepted.elapsed().as_millis() as u64);
+                    (chrono::Utc::now() + chrono::Duration::milliseconds(remaining_ms as i64))
+                        .to_rfc3339()
+                });
                 record_gate(
                     state,
                     config,
@@ -161,8 +170,8 @@ impl ApplicationWatchSet {
                     trigger,
                     CaptureDisposition::MinSpacing,
                     None,
-                    0,
-                    None,
+                    pending_frame_count,
+                    next_send_at,
                 )
                 .await;
                 continue;
@@ -183,6 +192,15 @@ impl ApplicationWatchSet {
                 cancellation.clone(),
             )
             .await?;
+            let pending_frame_count = memory.pending_frame_count();
+            let next_send_at = memory.last_accepted_capture().map(|accepted| {
+                let remaining_ms = config
+                    .watch
+                    .send_debounce_ms
+                    .saturating_sub(accepted.elapsed().as_millis() as u64);
+                (chrono::Utc::now() + chrono::Duration::milliseconds(remaining_ms as i64))
+                    .to_rfc3339()
+            });
             update_target_result(
                 state,
                 generation,
@@ -190,8 +208,8 @@ impl ApplicationWatchSet {
                 trigger,
                 result.0,
                 result.1,
-                result.2,
-                result.3,
+                pending_frame_count,
+                next_send_at,
             )
             .await;
         }
@@ -218,7 +236,9 @@ async fn capture_application(
     state
         .publish_watch_view(generation, WatchResult::CaptureStarted)
         .await;
-    let scope_generation = state.core_runtime().watch_scope_generation();
+    let runtime = state.core_runtime();
+    let scope_generation = runtime.watch_scope_generation();
+    let user_input_sequence = runtime.user_input_sequence();
     ensure_capture_active(&cancellation)?;
     let directory = tempfile::tempdir()?;
     let source_directory = directory.path().join("captures");
@@ -534,6 +554,14 @@ async fn capture_application(
     if let Some(change) = pending_change.as_ref() {
         directories.extend(change.directories());
     }
+    let mut queued_capture = Some((
+        frame_target.clone(),
+        scope_generation,
+        config.revision,
+        user_input_sequence,
+        frames,
+        directory,
+    ));
     let mut publication_started = false;
     let publication =
         memory
@@ -568,9 +596,6 @@ async fn capture_application(
                     target.last_hash = Some(comparison_hash.clone());
                     target.last_ocr = ocr_signature.clone();
                     target.last_capture = captured_at_instant;
-                    memory.frames.extend(frames);
-                    memory.last_accepted = Some(target.last_capture);
-                    memory.directories.push(directory);
                     Ok::<(), anyhow::Error>(())
                 })();
                 match result {
@@ -594,6 +619,25 @@ async fn capture_application(
             fingerprint_change.as_mut(),
             pending_change.as_mut(),
         ));
+    }
+    if let Some((
+        target,
+        scope_generation,
+        config_revision,
+        user_input_sequence,
+        frames,
+        directory,
+    )) = queued_capture.take()
+    {
+        memory.enqueue_capture_set(PendingCaptureSetInput {
+            target,
+            scope_generation,
+            config_revision,
+            user_input_sequence,
+            frames,
+            directory,
+            accepted_at: captured_at_instant,
+        });
     }
     if let Err(error) = prune_store.prune(captured_at) {
         let _ = state

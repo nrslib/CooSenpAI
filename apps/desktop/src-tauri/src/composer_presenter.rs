@@ -583,4 +583,3 @@ pub(crate) async fn run(
     };
     UiEvent::Composer(event)
 }
-

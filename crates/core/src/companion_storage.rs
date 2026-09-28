@@ -399,6 +399,36 @@ impl CompanionStorage {
         )
     }
 
+    pub fn existing_conversation_entry_ids(
+        &self,
+        expected_ids: &HashSet<String>,
+    ) -> Result<HashSet<String>, PersistenceError> {
+        Ok(self
+            .existing_conversation_entry_generations(expected_ids)?
+            .into_keys()
+            .collect())
+    }
+
+    pub fn existing_conversation_entry_generations(
+        &self,
+        expected_ids: &HashSet<String>,
+    ) -> Result<HashMap<String, (u64, String)>, PersistenceError> {
+        if expected_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let directories = self.conversation_directories()?;
+        let mut existing_ids = HashMap::new();
+        for (generation, entry) in load_conversation_entries_with_generations(&directories)? {
+            if expected_ids.contains(&entry.id) {
+                existing_ids.insert(entry.id, (generation, entry.created_at));
+                if existing_ids.len() == expected_ids.len() {
+                    break;
+                }
+            }
+        }
+        Ok(existing_ids)
+    }
+
     pub fn load_recent_observations(
         &self,
         now: chrono::DateTime<chrono::Utc>,
@@ -494,6 +524,15 @@ impl CompanionStorage {
         self.append_conversation_once_at_with_pruning(entry, now, true)
     }
 
+    pub fn append_conversation_once_at_generation(
+        &self,
+        entry: &ConversationEntry,
+        generation: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, PersistenceError> {
+        self.append_conversation_once_at_with_generation(entry, generation, now, true)
+    }
+
     pub(crate) fn append_conversation_once_at_without_pruning(
         &self,
         entry: &ConversationEntry,
@@ -508,10 +547,25 @@ impl CompanionStorage {
         now: chrono::DateTime<chrono::Utc>,
         prune_conversation: bool,
     ) -> Result<bool, PersistenceError> {
+        self.append_conversation_once_at_with_generation(
+            entry,
+            self.conversation_generation()?,
+            now,
+            prune_conversation,
+        )
+    }
+
+    fn append_conversation_once_at_with_generation(
+        &self,
+        entry: &ConversationEntry,
+        generation: u64,
+        now: chrono::DateTime<chrono::Utc>,
+        prune_conversation: bool,
+    ) -> Result<bool, PersistenceError> {
         validate_conversation_entry(entry)?;
         let date = conversation_local_date(entry)?;
         let path = self.conversation_directory.join(format!("{date}.jsonl"));
-        let value = conversation_storage_value(entry, self.conversation_generation()?)?;
+        let value = conversation_storage_value(entry, generation)?;
         let appended = crate::persistence::JsonlStore::new(path).append_unique(
             &value,
             |existing: &Value| {
@@ -585,7 +639,7 @@ impl CompanionStorage {
         )
     }
 
-    fn config_paths(&self) -> Result<ConfigPaths, PersistenceError> {
+    pub(crate) fn config_paths(&self) -> Result<ConfigPaths, PersistenceError> {
         let root = self
             .state_directory
             .parent()

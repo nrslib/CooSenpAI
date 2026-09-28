@@ -360,4 +360,3 @@ pub enum PersonaStoreError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
-

@@ -36,6 +36,12 @@ export function safeProviderError(error: unknown): BridgeError {
     });
   }
   const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("unknown system error -88")) {
+    return new BridgeError("unsupported", error instanceof Error ? error.message : "Unknown system error -88", {
+      cause: error,
+      detail: `process-spawn-executable-error; ${diagnosticDetail(error)}`,
+    });
+  }
   if (message.includes("timeout") || message.includes("timed out")) {
     return classifiedError("timeout", "provider の呼び出しが timeout しました", error);
   }

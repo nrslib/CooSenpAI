@@ -178,4 +178,3 @@ pub fn build_prompt(request: &WorkRequest) -> String {
     prompt.push('\n');
     prompt
 }
-

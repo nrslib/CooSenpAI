@@ -122,4 +122,3 @@ fn set_known_value(document: &mut Value, key: &str, value: Value) -> Result<()> 
     object.insert((*last).to_owned(), value);
     Ok(())
 }
-

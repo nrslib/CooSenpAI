@@ -999,4 +999,3 @@ pub(crate) fn start(state: Arc<DesktopState>) {
         }
     });
 }
-

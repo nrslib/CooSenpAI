@@ -103,4 +103,3 @@ async fn present_empty_clipboard(
         NoticeTarget::Bubble => port.show_bubble(message, NOTICE_DURATION_MS).await,
     }
 }
-

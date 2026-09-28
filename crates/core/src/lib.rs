@@ -60,4 +60,5 @@ pub mod work;
 pub mod screen_frames;
 pub mod speaker_decision;
 pub mod speaker_id;
+pub mod speaker_name_proposals;
 pub mod speaker_names;

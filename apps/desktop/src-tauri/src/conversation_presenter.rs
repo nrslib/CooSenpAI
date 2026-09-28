@@ -318,7 +318,11 @@ impl ConversationPresenter {
                 }
                 ConversationInput::Mounted | ConversationInput::Opened => self.scroll(),
                 ConversationInput::Layout if !self.user_scrolled_up => {
-                    self.view.scroll_request += 1
+                    if self.tutorial_notice && self.view.target != "entry-center" {
+                        self.view.target = "entry-start";
+                        self.view.entry_id = self.newest.clone();
+                    }
+                    self.view.scroll_request += 1;
                 }
                 ConversationInput::Wheel { delta } => {
                     if delta < 0.0 {
@@ -713,4 +717,3 @@ pub(crate) async fn run(state: Arc<crate::state::DesktopState>, task: Conversati
         result,
     })
 }
-

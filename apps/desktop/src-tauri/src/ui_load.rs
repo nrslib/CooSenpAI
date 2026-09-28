@@ -182,4 +182,3 @@ async fn prepare_settings(state: &Arc<DesktopState>) -> Result<(), String> {
     }
     Ok(())
 }
-

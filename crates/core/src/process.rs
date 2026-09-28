@@ -392,4 +392,3 @@ async fn wait_for_process_group_exit(pid: Pid, timeout: Duration) -> bool {
         tokio::time::sleep(PROCESS_GROUP_POLL).await;
     }
 }
-

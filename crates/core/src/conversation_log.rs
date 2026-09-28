@@ -1,9 +1,8 @@
 use crate::config::ConfigPaths;
-use crate::observer::{
-    canonical_prompt_speaker_id, load_speaker_aliases, prepare_audio_migration_deletion,
-};
+use crate::observer::{load_speaker_aliases, prepare_audio_migration_deletion};
 use crate::persistence::{restore_file_snapshots, FileSnapshot, JsonlStore, PersistenceError};
-use crate::speaker_names::{load_speaker_name_index, speaker_name_for};
+use crate::speaker_id::PromptSpeakerIdResolver;
+use crate::speaker_names::{load_speaker_name_index, speaker_name_for_prompt_id};
 use crate::state::{
     parse_observation, ConversationEntry, ObservationRecord, SpeakerIdentificationStatus,
     TranscriptRecord, UserScreenContext, DEFAULT_OBSERVATION_LIMITS,
@@ -117,6 +116,8 @@ pub fn read_conversation_log(
     // 統合は過去の記録を書き換えず別名索引へ残るため、表示用の話者 ID は観察 prompt と同じ索引で統合先へ解決する。
     let aliases = load_speaker_aliases(paths)
         .map_err(|error| PersistenceError::Invalid(error.to_string()))?;
+    let speaker_id_resolver =
+        PromptSpeakerIdResolver::new(aliases.registry_id.clone(), aliases.aliases.clone());
     // 表示名も台帳・記録を書き換えず、現在の registry の索引から表示時に解決する。
     let names = load_speaker_name_index(paths)?;
     let mut entries = Vec::new();
@@ -141,13 +142,13 @@ pub fn read_conversation_log(
                     .iter()
                     .filter_map(|candidate| {
                         let registry = decision.registry_id.as_deref();
-                        let id = if registry == Some(aliases.registry_id.as_str()) {
-                            canonical_prompt_speaker_id(&candidate.speaker_id, &aliases.aliases)
-                        } else {
-                            candidate.speaker_id.clone()
-                        };
-                        speaker_name_for(&names, registry, &id)
-                            .map(|name| (candidate.speaker_id.clone(), name.to_owned()))
+                        speaker_name_for_prompt_id(
+                            &names,
+                            registry,
+                            &candidate.speaker_id,
+                            &speaker_id_resolver,
+                        )
+                        .map(|name| (candidate.speaker_id.clone(), name.to_owned()))
                     })
                     .collect();
                 let recent_comparison_sources =
@@ -184,17 +185,22 @@ pub fn read_conversation_log(
         let tag = record
             .speaker_tag
             .or_else(|| observed.and_then(|info| info.tag.clone()));
-        let current_registry = registry_id.as_deref() == Some(aliases.registry_id.as_str());
         let tag = tag.map(|tag| {
-            if current_registry {
-                canonical_prompt_speaker_id(&tag, &aliases.aliases)
-            } else {
-                tag
-            }
+            registry_id
+                .as_deref()
+                .and_then(|registry| speaker_id_resolver.resolve(registry, &tag))
+                .map_or(tag.clone(), |resolved| resolved.canonical_id)
         });
         let speaker_name = tag
             .as_deref()
-            .and_then(|tag| speaker_name_for(&names, registry_id.as_deref(), tag))
+            .and_then(|tag| {
+                speaker_name_for_prompt_id(
+                    &names,
+                    registry_id.as_deref(),
+                    tag,
+                    &speaker_id_resolver,
+                )
+            })
             .map(str::to_owned);
         entries.push(ConversationLogEntry {
             observation_id: record.observation_id.clone(),

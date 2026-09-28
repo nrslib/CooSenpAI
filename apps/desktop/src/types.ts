@@ -509,6 +509,7 @@ export interface AppSnapshot {
   readonly watchIntentActive: boolean;
   readonly observer: {
     readonly phase: "stopped" | "idle" | "capturing" | "thinking" | "suspended" | "error";
+    readonly execution?: { readonly id: string; readonly startedAt: string; readonly role: "vision" | "hearing"; readonly effort: string; readonly attempt: number; readonly maxAttempts: number };
     readonly aiCallsToday: number;
     readonly lastCapturedAt?: string;
     readonly lastTrigger?: "typing-paused" | "app-switched" | "timer";

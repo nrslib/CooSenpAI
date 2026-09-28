@@ -139,4 +139,3 @@ pub(super) fn observation_forbidden_reasons(value: &Value, expected: &Value) -> 
         .map(|word| format!("観察内容が「{word}」に触れてはいけない"))
         .collect()
 }
-

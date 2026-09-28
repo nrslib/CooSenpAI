@@ -308,4 +308,3 @@ fn string_attribute(
     ensure_time_remaining(deadline)?;
     Ok(Some(value))
 }
-

@@ -19,4 +19,3 @@ pub async fn read_focused_element(
         result = &mut read => result.ok().and_then(Result::ok).flatten().map(FocusElement::bounded),
     }
 }
-

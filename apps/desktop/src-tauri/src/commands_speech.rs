@@ -245,4 +245,3 @@ fn speech_settings_pane_for_locale(
         _ => Err(text(TextKey::SpeechSettingsKindInvalid, locale)),
     }
 }
-

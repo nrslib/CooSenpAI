@@ -56,7 +56,7 @@ impl OwnWindowBoundsPort for MacOwnWindowBounds {
         Ok(OwnWindowBounds {
             revision: 0,
             captured_at: chrono::Utc::now(),
-            bounds: Vec::new(),
+            windows: Vec::new(),
         })
     }
 }
@@ -544,4 +544,3 @@ end run"#;
         }
     }
 }
-

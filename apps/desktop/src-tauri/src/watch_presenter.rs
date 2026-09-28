@@ -1,4 +1,4 @@
-use crate::snapshot::{AppSnapshot, ObserverViewPhase};
+use crate::snapshot::{AppSnapshot, ObserverErrorIdentity, ObserverViewPhase};
 use crate::ui_events::{UiEffect, UiEvent, UiTask};
 use crate::watch::{trigger_name, CaptureDisposition};
 use coosenpai_core::locale::{localize_error_message, Locale, TextKey};
@@ -8,7 +8,9 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub(crate) enum WatchResult {
     Started,
-    Stopped,
+    Stopped {
+        runtime: Box<coosenpai_core::runtime::RuntimeSnapshot>,
+    },
     Finished {
         failed: bool,
     },
@@ -96,11 +98,14 @@ impl WatchPresenter {
                 let failed = generation == self.generation && self.active && !tutorial;
                 if failed {
                     self.clear_pending_error();
-                    snapshot.observer.record_error(localize_error_message(
+                    let message = localize_error_message(
                         &detail,
                         TextKey::WatchOperationFailed,
                         Locale::from_config(&snapshot.config.ui.language),
-                    ));
+                    );
+                    snapshot
+                        .observer
+                        .record_error(message, ObserverErrorIdentity::watch_operation(detail));
                 }
                 let _ = reply.send(failed);
                 return failed;
@@ -115,10 +120,10 @@ impl WatchPresenter {
                 snapshot.observer_running = true;
                 snapshot.watch_intent_active = true;
                 snapshot.observer.phase = ObserverViewPhase::Idle;
-                snapshot.observer.error_message = None;
+                snapshot.observer.clear_error();
                 return true;
             }
-            WatchResult::Stopped => {
+            WatchResult::Stopped { runtime } => {
                 if generation < self.generation {
                     return false;
                 }
@@ -127,7 +132,18 @@ impl WatchPresenter {
                 self.active = false;
                 snapshot.observer_running = false;
                 snapshot.watch_intent_active = false;
-                snapshot.observer.phase = ObserverViewPhase::Stopped;
+                let hearing_is_active =
+                    runtime
+                        .observer_execution
+                        .as_ref()
+                        .is_some_and(|execution| {
+                            execution.role
+                                == coosenpai_core::runtime::ObserverExecutionRole::Hearing
+                        });
+                if !hearing_is_active {
+                    snapshot.observer.phase = ObserverViewPhase::Stopped;
+                    snapshot.observer.execution = None;
+                }
                 snapshot.observer.pending_frame_count = 0;
                 snapshot.observer.next_send_at = None;
                 return true;
@@ -149,8 +165,16 @@ impl WatchPresenter {
                 self.active = false;
                 snapshot.finish_watch(failed);
             }
-            WatchResult::CaptureStarted => view.phase = ObserverViewPhase::Capturing,
-            WatchResult::CaptureSkipped => view.phase = ObserverViewPhase::Idle,
+            WatchResult::CaptureStarted => {
+                if view.phase != ObserverViewPhase::Thinking {
+                    view.phase = ObserverViewPhase::Capturing;
+                }
+            }
+            WatchResult::CaptureSkipped => {
+                if view.phase != ObserverViewPhase::Thinking {
+                    view.phase = ObserverViewPhase::Idle;
+                }
+            }
             WatchResult::Buffered {
                 captured_at,
                 trigger,
@@ -158,7 +182,9 @@ impl WatchPresenter {
                 frame_count,
                 next_send,
             } => {
-                view.phase = ObserverViewPhase::Idle;
+                if view.phase != ObserverViewPhase::Thinking {
+                    view.phase = ObserverViewPhase::Idle;
+                }
                 view.last_captured_at = Some(captured_at);
                 view.last_trigger = Some(trigger_name(trigger).to_owned());
                 view.front_app = front_app;
@@ -175,20 +201,20 @@ impl WatchPresenter {
                 view.last_capture_disposition =
                     Some(disposition.display_for_locale(locale).to_owned());
             }
-            WatchResult::ObservationStarted => view.phase = ObserverViewPhase::Thinking,
-            WatchResult::Observed { observation, calls } => {
-                view.phase = ObserverViewPhase::Idle;
-                view.error_message = None;
+            WatchResult::ObservationStarted => {
+                view.phase = ObserverViewPhase::Thinking;
                 view.pending_frame_count = 0;
                 view.next_send_at = None;
+            }
+            WatchResult::Observed { observation, calls } => {
+                view.phase = ObserverViewPhase::Idle;
+                view.clear_error();
                 view.record_observation(observation);
                 view.ai_calls_today = calls;
             }
             WatchResult::NotDelivered => {
                 view.phase = ObserverViewPhase::Idle;
-                view.error_message = None;
-                view.pending_frame_count = 0;
-                view.next_send_at = None;
+                view.clear_error();
             }
             WatchResult::TargetForeground {
                 bundle_id,
@@ -210,14 +236,14 @@ impl WatchPresenter {
                 frame_count,
                 next_send_at,
             } => {
-                view.phase = ObserverViewPhase::Idle;
+                if view.phase != ObserverViewPhase::Thinking {
+                    view.phase = ObserverViewPhase::Idle;
+                }
                 view.last_trigger = Some(trigger_name(trigger).to_owned());
                 view.last_capture_disposition =
                     Some(disposition.display_for_locale(locale).to_owned());
-                if disposition == CaptureDisposition::Accepted {
-                    view.pending_frame_count = view.pending_frame_count.saturating_add(frame_count);
-                    view.next_send_at = next_send_at;
-                }
+                view.pending_frame_count = frame_count;
+                view.next_send_at = next_send_at;
                 if captured_at.is_some() {
                     view.last_captured_at = captured_at.clone();
                 }
@@ -244,11 +270,12 @@ impl WatchPresenter {
                 }
                 if attempt >= 3 {
                     self.clear_pending_error();
-                    view.record_recoverable_error(localize_error_message(
-                        &detail,
-                        TextKey::WatchOperationFailed,
-                        locale,
-                    ));
+                    let message =
+                        localize_error_message(&detail, TextKey::WatchOperationFailed, locale);
+                    view.record_recoverable_error(
+                        message,
+                        ObserverErrorIdentity::watch_operation(detail),
+                    );
                 } else {
                     if let Some((latest, _)) = &mut self.pending_error {
                         *latest = detail;
@@ -278,11 +305,12 @@ impl WatchPresenter {
                 if cancellation.is_cancelled() {
                     return false;
                 }
-                view.record_recoverable_error(localize_error_message(
-                    &detail,
-                    TextKey::WatchOperationFailed,
-                    locale,
-                ));
+                let message =
+                    localize_error_message(&detail, TextKey::WatchOperationFailed, locale);
+                view.record_recoverable_error(
+                    message,
+                    ObserverErrorIdentity::watch_operation(detail),
+                );
             }
             WatchResult::Recovered => {
                 self.clear_pending_error();
@@ -292,9 +320,10 @@ impl WatchPresenter {
                 unreachable!("exit result was handled before generation filtering")
             }
             WatchResult::OcrConfigured(enabled) => view.ocr_gate_enabled = enabled,
-            WatchResult::Started | WatchResult::Stopped | WatchResult::Suspended => return false,
+            WatchResult::Started | WatchResult::Stopped { .. } | WatchResult::Suspended => {
+                return false
+            }
         }
         true
     }
 }
-

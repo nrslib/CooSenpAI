@@ -88,6 +88,7 @@ impl CompanionAgent {
         user: bool,
         source_ids: &[String],
     ) -> Result<(), CompanionError> {
+        data.recent_proactive_utterances = self.confirmed_recent_proactive_utterances();
         if self.needs_session_context {
             data.previous_summary = self.previous_summary.clone();
             data.recent_conversation_jsonl = self.conversation_jsonl_excluding(source_ids)?;
@@ -110,6 +111,39 @@ impl CompanionAgent {
         };
         Ok(())
     }
+
+    fn confirmed_recent_proactive_utterances(
+        &self,
+    ) -> Vec<crate::prompts::RecentProactiveUtterance> {
+        let pending_unconfirmed_ids = self
+            .pending_remarks
+            .iter()
+            .filter(|pending| !pending.delivery.enqueued)
+            .map(|pending| pending.delivery.remark_id.as_str())
+            .collect::<HashSet<_>>();
+        let utterances = self
+            .conversation
+            .iter()
+            .filter(|entry| {
+                entry.is_normal_speech()
+                    && entry.message_kind != Some(crate::state::ConversationMessageKind::Chat)
+                    && !entry.caused_by_ids.is_empty()
+                    && !pending_unconfirmed_ids.contains(entry.id.as_str())
+                    && !entry.is_response_failure()
+            })
+            .filter_map(|entry| {
+                let message_kind = entry.message_kind?;
+                Some(crate::prompts::RecentProactiveUtterance {
+                    id: entry.id.clone(),
+                    created_at: entry.created_at.clone(),
+                    message_kind: message_kind.as_wire().to_owned(),
+                    message: entry.message.clone(),
+                    observation_ids: entry.caused_by_ids.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        crate::prompts::bound_recent_proactive_utterances(&utterances)
+    }
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
@@ -129,4 +163,3 @@ fn context_user_ids(jsonl: Option<&str>) -> Vec<String> {
         .map(|entry| entry.id)
         .collect()
 }
-

@@ -61,4 +61,3 @@ pub fn effective_interval_ms(
 pub fn remaining_seconds(remaining_ms: u64) -> u64 {
     remaining_ms.saturating_add(999) / 1_000
 }
-

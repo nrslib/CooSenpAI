@@ -291,4 +291,3 @@ fn remove_abandoned_file(path: &Path) -> io::Result<()> {
         Err(fs::TryLockError::Error(error)) => Err(error),
     }
 }
-

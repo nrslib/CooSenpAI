@@ -9,6 +9,18 @@ use crate::ui_presenters::{BubblePresenter, ChatPresenter, WindowPresenter};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
+pub(crate) trait MonotonicClock: Send + Sync + 'static {
+    fn now(&self) -> std::time::Instant;
+}
+
+pub(crate) struct SystemMonotonicClock;
+
+impl MonotonicClock for SystemMonotonicClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+}
+
 pub(crate) fn application_input(app: &tauri::AppHandle, event: UiEvent) {
     use tauri::Manager;
     if let Some(state) = app.try_state::<Arc<crate::state::DesktopState>>() {
@@ -102,6 +114,7 @@ struct ActiveOperation {
 }
 
 pub(crate) struct UiRoot<P: UiPort> {
+    monotonic_clock: Arc<dyn MonotonicClock>,
     model: UiModel,
     event_counts: std::collections::BTreeMap<String, u64>,
     diagnostics_at: tokio::time::Instant,
@@ -114,6 +127,9 @@ pub(crate) struct UiRoot<P: UiPort> {
     avatar: crate::avatar_presenter::AvatarPresenter,
     bubble: BubblePresenter,
     windows: Vec<(PresenterId, WindowPresenter)>,
+    observer_display_generation: u64,
+    observer_display_execution_id: Option<String>,
+    observer_display_timer_scheduled: bool,
     port: Arc<P>,
     operation_busy: bool,
     feedback_busy: bool,
@@ -122,7 +138,9 @@ pub(crate) struct UiRoot<P: UiPort> {
     receiver: mpsc::UnboundedReceiver<RootMessage>,
 }
 
-pub(crate) fn channel() -> (
+pub(crate) fn channel(
+    monotonic_clock: Arc<dyn MonotonicClock>,
+) -> (
     UiHandle,
     impl FnOnce(
             Arc<crate::state::DesktopState>,
@@ -148,12 +166,16 @@ pub(crate) fn channel() -> (
                 crate::ui_port::DesktopUiPort::new(state.clone(), popup),
                 receiver,
                 activation,
+                monotonic_clock,
             );
-            root.snapshot = Some(crate::snapshot_presenter::SnapshotPresenter::new(
-                state.snapshot.clone(),
-                state.speech.lifecycle.clone(),
-                state.shortcut_coordinator.clone(),
-            ));
+            root.snapshot = Some(
+                crate::snapshot_presenter::SnapshotPresenter::with_monotonic_clock(
+                    state.snapshot.clone(),
+                    state.speech.lifecycle.clone(),
+                    state.shortcut_coordinator.clone(),
+                    root.monotonic_clock.clone(),
+                ),
+            );
             root.capture = capture;
             root.bubble = BubblePresenter::new(config, initial.selected_conversation_generation);
             root.bubble.tutorial = Some(state.tutorial.clone());
@@ -173,6 +195,7 @@ impl<P: UiPort> UiRoot<P> {
         port: P,
         receiver: mpsc::UnboundedReceiver<RootMessage>,
         activation: crate::activation_policy::ActivationPolicy,
+        monotonic_clock: Arc<dyn MonotonicClock>,
     ) -> Self {
         let windows = [
             PresenterId::Details,
@@ -183,6 +206,7 @@ impl<P: UiPort> UiRoot<P> {
         .map(|id| (id, WindowPresenter::new(id)))
         .collect();
         Self {
+            monotonic_clock,
             model: UiModel::default(),
             event_counts: Default::default(),
             diagnostics_at: tokio::time::Instant::now() + std::time::Duration::from_secs(60),
@@ -195,6 +219,9 @@ impl<P: UiPort> UiRoot<P> {
             avatar: crate::avatar_presenter::AvatarPresenter::default(),
             bubble: BubblePresenter::default(),
             windows,
+            observer_display_generation: 0,
+            observer_display_execution_id: None,
+            observer_display_timer_scheduled: false,
             port: Arc::new(port),
             receiver,
             operation_busy: false,
@@ -541,7 +568,7 @@ impl<P: UiPort> UiRoot<P> {
             };
             let source = presenter;
             let mut notices = Vec::new();
-            let effects = loop {
+            let mut effects = loop {
                 let label = event.label();
                 let kind = match &event {
                     UiEvent::SnapshotResult(input) => {
@@ -612,6 +639,7 @@ impl<P: UiPort> UiRoot<P> {
                     }
                 }
             };
+            effects.extend(self.sync_observer_display_timer());
             for effect in notices
                 .into_iter()
                 .chain(effects)
@@ -627,6 +655,113 @@ impl<P: UiPort> UiRoot<P> {
         }
         let value = pipeline.value.take();
         Some((pipeline, Ok(value)))
+    }
+
+    fn sync_observer_display_timer(&mut self) -> Vec<UiEffect> {
+        let details_visible = self
+            .windows
+            .iter()
+            .find(|(id, _)| *id == PresenterId::Details)
+            .is_some_and(|(_, presenter)| presenter.is_visible());
+        let observer = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.current().observer);
+        let observer_active = observer.as_ref().is_some_and(|observer| {
+            observer.phase == crate::snapshot::ObserverViewPhase::Thinking
+                && observer.execution.is_some()
+        });
+        let execution_id = if details_visible && observer_active {
+            observer.as_ref().and_then(|observer| {
+                observer
+                    .execution
+                    .as_ref()
+                    .map(|execution| execution.id.clone())
+            })
+        } else {
+            None
+        };
+        self.schedule_observer_display_timer(details_visible, observer_active, execution_id)
+    }
+
+    fn schedule_observer_display_timer(
+        &mut self,
+        details_visible: bool,
+        observer_active: bool,
+        execution_id: Option<String>,
+    ) -> Vec<UiEffect> {
+        let execution_id = if details_visible && observer_active {
+            execution_id
+        } else {
+            None
+        };
+        if self.observer_display_timer_scheduled
+            && self.observer_display_execution_id == execution_id
+        {
+            return Vec::new();
+        }
+
+        if !self.observer_display_timer_scheduled
+            && self.observer_display_execution_id.is_none()
+            && execution_id.is_none()
+        {
+            return Vec::new();
+        }
+
+        self.observer_display_generation = self.observer_display_generation.saturating_add(1);
+        self.observer_display_timer_scheduled = false;
+        self.observer_display_execution_id = None;
+        let Some(execution_id) = execution_id else {
+            return Vec::new();
+        };
+
+        self.observer_display_timer_scheduled = true;
+        self.observer_display_execution_id = Some(execution_id.clone());
+        vec![UiEffect::Spawn(UiTask::Delay {
+            duration: std::time::Duration::from_secs(5),
+            event: UiEvent::ObserverDisplayTick {
+                generation: self.observer_display_generation,
+                execution_id,
+            },
+        })]
+    }
+
+    fn observer_display_tick(&mut self, generation: u64, execution_id: String) -> Vec<UiEffect> {
+        if generation != self.observer_display_generation {
+            return Vec::new();
+        }
+        self.observer_display_timer_scheduled = false;
+        self.observer_display_execution_id = None;
+
+        let details_visible = self
+            .windows
+            .iter()
+            .find(|(id, _)| *id == PresenterId::Details)
+            .is_some_and(|(_, presenter)| presenter.is_visible());
+        let current_observer = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.current().observer);
+        let observer_active = current_observer.as_ref().is_some_and(|observer| {
+            observer.phase == crate::snapshot::ObserverViewPhase::Thinking
+                && observer.execution.is_some()
+        });
+        let current_execution_id = current_observer
+            .as_ref()
+            .and_then(|observer| observer.execution.as_ref().map(|value| value.id.clone()));
+        if !details_visible
+            || !observer_active
+            || current_execution_id.as_deref() != Some(execution_id.as_str())
+        {
+            return Vec::new();
+        }
+
+        vec![UiEffect::Deliver {
+            child: PresenterId::Root,
+            event: UiEvent::SnapshotCompleted(Box::new(
+                crate::snapshot_presenter::SnapshotEvent::ObserverDisplayTick,
+            )),
+        }]
     }
 
     fn start_capture(
@@ -711,6 +846,10 @@ impl<P: UiPort> UiRoot<P> {
                 .as_mut()
                 .expect("snapshot presenter is initialized before accepting input")
                 .complete(*event),
+            UiEvent::ObserverDisplayTick {
+                generation,
+                execution_id,
+            } => self.observer_display_tick(generation, execution_id),
             UiEvent::SnapshotResult(input) => self
                 .snapshot
                 .as_mut()
@@ -1082,7 +1221,17 @@ impl<P: UiPort> UiRoot<P> {
                 if !visible {
                     self.model.main_focused = false;
                 }
-                vec![UiEffect::MainFocus(self.model.main_focused)]
+                vec![
+                    UiEffect::MainFocus(self.model.main_focused),
+                    UiEffect::Deliver {
+                        child: PresenterId::Bubble,
+                        event: UiEvent::MainVisibility(visible),
+                    },
+                    UiEffect::Deliver {
+                        child: PresenterId::Chat,
+                        event: UiEvent::MainVisibility(visible),
+                    },
+                ]
             }
             UiEvent::MainFocused(focused) => {
                 self.model.main_focused = focused;
@@ -1092,6 +1241,30 @@ impl<P: UiPort> UiRoot<P> {
                 }
                 effects
             }
+            UiEvent::MainWindowGeometryChanged(geometry) => vec![UiEffect::Deliver {
+                child: PresenterId::Chat,
+                event: UiEvent::MainWindowGeometryChanged(geometry),
+            }],
+            UiEvent::MainActiveSpaceChanged(active) => vec![
+                UiEffect::Deliver {
+                    child: PresenterId::Bubble,
+                    event: UiEvent::MainActiveSpaceChanged(active),
+                },
+                UiEffect::Deliver {
+                    child: PresenterId::Chat,
+                    event: UiEvent::MainActiveSpaceChanged(active),
+                },
+            ],
+            UiEvent::ThoughtWindowOperationCompleted { operation, result } => {
+                vec![UiEffect::Deliver {
+                    child: PresenterId::Chat,
+                    event: UiEvent::ThoughtWindowOperationCompleted { operation, result },
+                }]
+            }
+            UiEvent::ThoughtWindowStateObserved(result) => vec![UiEffect::Deliver {
+                child: PresenterId::Chat,
+                event: UiEvent::ThoughtWindowStateObserved(result),
+            }],
             UiEvent::SnapshotUpdated(snapshot) => {
                 if snapshot.revision < self.model.snapshot_revision {
                     return Handling::Handled(vec![UiEffect::Log(format!(

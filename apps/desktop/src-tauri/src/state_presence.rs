@@ -339,4 +339,3 @@ fn presence_memory_allowed(config: &MemoryConfig) -> bool {
 fn commit_error(error: impl ToString) -> ConfigCommitError {
     ConfigCommitError::Runtime(RuntimeError::Factory(error.to_string()))
 }
-

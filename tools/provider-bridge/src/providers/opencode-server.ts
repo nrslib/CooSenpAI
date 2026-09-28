@@ -17,7 +17,7 @@ export interface ServerRecord {
   close(): Promise<void>;
 }
 
-export type OpenCodeServerStarter = (executable: string) => Promise<ServerRecord>;
+export type OpenCodeServerStarter = (executable: string, readableObservationDirectories?: readonly string[]) => Promise<ServerRecord>;
 
 export function openCodeObservationPermissions(readableObservationDirectories: readonly string[]) {
   const observationPermission = readableObservationDirectories.length === 0
@@ -74,10 +74,12 @@ function stopChild(child: ChildProcess): Promise<void> {
   });
 }
 
-async function start(executable: string): Promise<ServerRecord> {
+async function start(
+  executable: string,
+  readableDirectories: readonly string[] = observationDirectories(),
+): Promise<ServerRecord> {
   const port = await freePort();
-  const readableObservationDirectories = observationDirectories();
-  const permissions = openCodeObservationPermissions(readableObservationDirectories);
+  const permissions = openCodeObservationPermissions(readableDirectories);
   const config = {
     mcp: {},
     permission: permissions,
@@ -159,6 +161,21 @@ export class OpenCodeServerOwner {
       return server.client;
     }
     return (await waitWithAbort(this.readyServer(executable), signal)).client;
+  }
+
+  async scopedClient(
+    executable: string,
+    signal: AbortSignal,
+    readableObservationDirectories: readonly string[],
+  ): Promise<{ client: OpencodeClient; close(): Promise<void> }> {
+    const starting = this.starter(executable, readableObservationDirectories);
+    try {
+      const server = await waitWithAbort(starting, signal);
+      return { client: server.client, close: () => server.close() };
+    } catch (error) {
+      void starting.then((server) => server.close()).catch(() => undefined);
+      throw error;
+    }
   }
 
   async createSession(

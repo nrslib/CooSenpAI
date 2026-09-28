@@ -56,4 +56,3 @@ impl Drop for WindowKeyMonitor {
         }
     }
 }
-

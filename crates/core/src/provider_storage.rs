@@ -361,4 +361,3 @@ fn remove_file(path: &Path) -> Result<Option<u64>, PersistenceError> {
         Err(error) => Err(error.into()),
     }
 }
-

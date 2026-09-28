@@ -403,4 +403,3 @@ fn validate_keys(object: &Map<String, Value>, allowed: &[&str]) -> Result<(), Ob
         Ok(())
     }
 }
-

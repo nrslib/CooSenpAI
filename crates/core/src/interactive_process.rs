@@ -501,4 +501,3 @@ async fn send_process_event(
         _ = termination_requested.cancelled() => false,
     }
 }
-

@@ -55,4 +55,3 @@ fn validate_fixture(fixture: &Path, artifacts: &Path, root: &Path) -> Result<Pat
     }
     Ok(fixture)
 }
-

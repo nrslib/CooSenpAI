@@ -16,7 +16,7 @@ import type { EffortSelection, ProviderAgent, ProviderAppendInput, ProviderCallO
 import { AsyncInput } from "./async-input.js";
 import { claudeContent } from "./inputs.js";
 import { resolveStructuredOutput } from "../structured-output.js";
-import { observationDirectories } from "./observation-frame-directory.js";
+import { prepareObservationAccess } from "./observation-frame-directory.js";
 
 async function userMessage(
   message: string,
@@ -94,6 +94,29 @@ function model(value: string | undefined): string | undefined {
   return value === undefined || value === "default" ? undefined : value;
 }
 
+function isRetryableSpawnFailure(error: unknown): boolean {
+  let current: unknown = error;
+  while (current !== null && typeof current === "object") {
+    const value = current as { cause?: unknown; code?: unknown; errno?: unknown; message?: unknown; syscall?: unknown };
+    const spawn = value.syscall === "spawn"
+      || (typeof value.message === "string" && /\bspawn\b/iu.test(value.message));
+    if (spawn && (
+      value.code === "EAGAIN"
+      || value.code === "EMFILE"
+      || value.code === "ENFILE"
+      || (typeof value.message === "string" && /\bEAGAIN\b|\bEMFILE\b|\bENFILE\b/iu.test(value.message))
+    )) {
+      return true;
+    }
+    current = value.cause;
+  }
+  return false;
+}
+
+function waitBeforeSpawnRetry(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, attempt * 250));
+}
+
 function readOnlyToolHooks(options: ProviderCallOptions): NonNullable<Options["hooks"]> {
   return {
     PostToolUse: [{
@@ -125,13 +148,15 @@ export class ClaudeAgent implements ProviderAgent {
     if (options.session.mode === "resume" && options.session.id === undefined) {
       throw new BridgeError("protocol", "resume session ID がありません");
     }
+    const selectedModel = model(options.model);
+    const selectedEffort = effort(options.effort);
+    const observationAccess = await prepareObservationAccess(options);
+    options = observationAccess.options;
     const controller = new AbortController();
     const abort = (): void => controller.abort(options.signal.reason);
     if (options.signal.aborted) abort();
     else options.signal.addEventListener("abort", abort, { once: true });
-    const selectedModel = model(options.model);
-    const selectedEffort = effort(options.effort);
-    const readableObservationDirectories = options.isolateTools === true ? [] : observationDirectories();
+    const readableObservationDirectories = options.isolateTools === true ? [] : observationAccess.readableDirectories;
     const readTools = options.isolateTools === true ? [] : [
       ...(readableObservationDirectories.length === 0 ? [] : ["Read"]),
       ...(options.webSearchEnabled === true ? ["WebSearch"] : []),
@@ -141,7 +166,7 @@ export class ClaudeAgent implements ProviderAgent {
       cwd: options.cwd,
       ...(readableObservationDirectories.length === 0
         ? {}
-        : { additionalDirectories: readableObservationDirectories }),
+        : { additionalDirectories: [...readableObservationDirectories] }),
       systemPrompt: options.systemPrompt,
       tools: readTools,
       allowedTools: readTools,
@@ -171,14 +196,25 @@ export class ClaudeAgent implements ProviderAgent {
     let sessionId = options.session.id;
     let value: unknown;
     let providerUsage: ProviderUsage | undefined;
-    const input = new AsyncInput<SDKUserMessage>();
+    let input = new AsyncInput<SDKUserMessage>();
     try {
       const initial = await userMessage(options.message, options.images);
-      void input.push(initial);
-      const stream = this.createQuery({
-        prompt: input,
-        options: sdkOptions,
-      });
+      let stream: Query | undefined;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        input = new AsyncInput<SDKUserMessage>();
+        void input.push(initial);
+        try {
+          stream = this.createQuery({ prompt: input, options: sdkOptions });
+          break;
+        } catch (error) {
+          input.close();
+          if (attempt === 3 || !isRetryableSpawnFailure(error)) throw error;
+          await waitBeforeSpawnRetry(attempt);
+        }
+      }
+      if (stream === undefined) {
+        throw new BridgeError("retryable", "Claude SDK subprocess を起動できませんでした");
+      }
       const active: ActiveClaudeQuery = { stream, input };
       this.activeQueries.set(options.requestId, active);
       for await (const message of stream as AsyncIterable<SDKMessage>) {
@@ -231,6 +267,7 @@ export class ClaudeAgent implements ProviderAgent {
       input.close();
       this.activeQueries.delete(options.requestId);
       options.signal.removeEventListener("abort", abort);
+      await observationAccess.cleanup();
     }
   }
 

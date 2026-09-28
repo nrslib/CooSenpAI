@@ -156,4 +156,3 @@ fn unanswered_user_entries(conversation: &[ConversationEntry]) -> Vec<&Conversat
         })
         .collect()
 }
-

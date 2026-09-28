@@ -117,4 +117,3 @@ fn remove_file_if_exists(path: &Path) -> io::Result<()> {
         Err(error) => Err(error),
     }
 }
-

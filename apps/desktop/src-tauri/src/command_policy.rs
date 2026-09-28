@@ -96,6 +96,7 @@ pub(crate) fn permit_class(command: DesktopCommand) -> PermitClass {
         | DesktopCommand::MemoryRejectUpdate
         | DesktopCommand::MemoryDelete
         | DesktopCommand::MemoryConsolidate
+        | DesktopCommand::SpeakerNameProposal
         | DesktopCommand::ConversationResetDismiss
         | DesktopCommand::CompanionEmotionsReset
         | DesktopCommand::BubbleDismiss
@@ -442,6 +443,7 @@ fn command_class(command: DesktopCommand) -> CommandClass {
         | DesktopCommand::MemoryRejectUpdate
         | DesktopCommand::MemoryDelete
         | DesktopCommand::MemoryConsolidate => CommandClass::Memory,
+        DesktopCommand::SpeakerNameProposal => CommandClass::Memory,
         DesktopCommand::ConversationReset => CommandClass::ConversationReset,
         DesktopCommand::ConversationSelect => CommandClass::ConversationSelect,
         DesktopCommand::CompanionEmotionsReset => CommandClass::EmotionsReset,
@@ -520,6 +522,7 @@ fn requires_runtime(command: DesktopCommand) -> bool {
         | DesktopCommand::MemoryConfirmUpdate
         | DesktopCommand::MemoryRejectUpdate
         | DesktopCommand::MemoryDelete
+        | DesktopCommand::SpeakerNameProposal
         | DesktopCommand::ConversationReset
         | DesktopCommand::ConversationSelect
         | DesktopCommand::ConversationResetDismiss

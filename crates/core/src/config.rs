@@ -316,7 +316,7 @@ impl Default for WatchConfig {
         Self {
             enabled: false,
             fullscreen: false,
-            focus_element: false,
+            focus_element: true,
             apps: Vec::new(),
             send_debounce_ms: default_send_debounce(),
             frames_per_send: default_frames_per_send(),
@@ -1142,4 +1142,3 @@ where
 {
     now.with_timezone(timezone).format("%Y-%m-%d").to_string()
 }
-

@@ -514,4 +514,3 @@ impl coosenpai_core::work::ChatWorkExecutor for DesktopChatWork {
         recorded_result(record)
     }
 }
-

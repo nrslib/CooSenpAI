@@ -27,4 +27,3 @@ fn script(event: &str, payload: &impl Serialize) -> serde_json::Result<String> {
         "(()=>{{const [name,detail]=JSON.parse({literal});window.dispatchEvent(new CustomEvent(name,{{detail}}));}})();"
     ))
 }
-

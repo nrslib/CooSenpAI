@@ -131,6 +131,7 @@ impl MemoryService {
             ProviderCall {
                 system_prompt: system_prompt_for_call,
                 prompt,
+                allowed_transcript_paths: None,
                 images: Vec::new(),
                 tools_disabled: true,
                 web_search_enabled: false,

@@ -8,7 +8,6 @@ import { createHeaderMenuItems, Header } from "./components/Header.js";
 import { NowLine } from "./components/NowLine.js";
 import { StatusBanner } from "./components/StatusBanner.js";
 import { FinishRecoveryScreen, StartupRecoveryScreen } from "./components/RecoveryScreen.js";
-import { ThoughtBubble } from "./components/ThoughtBubble.js";
 import { CloseIcon } from "./components/LineIcons.js";
 import { ConfirmationDialog } from "./components/ConfirmationDialog.js";
 import { avatarApi, desktopApi, setIpcLocale } from "./ipc.js";
@@ -127,20 +126,23 @@ export function App(): ReactElement {
       menuOpen={view.menuOpen} onMenuToggle={() => send({ type: "menuToggle" })} onMenuDismiss={() => send({ type: "menuDismiss" })}
       watchIntentActive={currentSnapshot.watchIntentActive}
       watchChanging={view.watchChanging}
+      watchPendingTarget={view.watchPendingTarget}
+      watchDelayed={view.watchDelayed}
       onToggleWatch={toggleWatch}
       audioEnabled={currentSnapshot.config.audio.enabled}
       audioChanging={view.audioChanging}
+      audioPendingTarget={view.audioPendingTarget}
+      audioDelayed={view.audioDelayed}
       onToggleAudio={toggleAudio}
       onOpenSettings={requestSettings}
       historyOpen={view.historyOpen}
       onToggleHistory={() => send({ type: "toggleHistory" })}
       menuItems={headerMenuItems}
     />
-    <NowLine snapshot={currentSnapshot} onOpenDetails={() => { void handle(desktopApi.openDetails()); }} onAssertiveness={(value) => { void handle(desktopApi.setAssertiveness(value)); }} />
+    <NowLine snapshot={currentSnapshot} observerError={status?.observerError ?? null} onOpenDetails={() => { void handle(desktopApi.openDetails()); }} onAssertiveness={(value) => { void handle(desktopApi.setAssertiveness(value)); }} />
     <AppUpdatePanel enabled={currentSnapshot.config.app.checkForUpdates} showCheck={false} />
     <VoiceOutputPanel enabled={currentSnapshot.config.voiceOutput.enabled} showTest={false} />
     <StatusBanner view={status?.banner ?? null} onRecover={() => send({ type: "recover" })} onDismiss={() => send({ type: "dismissBanner" })} />
-    <ThoughtBubble view={status?.thought ?? null} />
     {view.tutorial === null ? null : <div className="tutorial-controls" role="status"><span>{text(view.tutorial.message)}</span>
       {view.tutorial.next === null ? null : <button type="button" onClick={() => send({ type: "tutorialNext" })}>{t(locale, view.tutorial.next === "retry" ? "app.tutorialRetry" : "app.tutorialNext")}</button>}
       <button type="button" disabled={view.finishBusy} onClick={() => send({ type: "tutorialFinish" })}>{text(view.tutorial.finishLabel)}</button></div>}

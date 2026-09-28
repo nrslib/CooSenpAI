@@ -18,6 +18,7 @@ impl CompanionAgent {
             tutorial_response_key,
         } = turn;
         let prompt = work_prompt(build_companion_prompt(data), work_result);
+        let allowed_transcript_paths = crate::prompts::companion_transcript_read_allowlist(data);
         let request = self
             .session
             .clone()
@@ -35,6 +36,7 @@ impl CompanionAgent {
                         events,
                         additional_inputs,
                         tutorial_response_key,
+                        allowed_transcript_paths: allowed_transcript_paths.clone(),
                     },
                     cancellation,
                 )
@@ -55,6 +57,7 @@ impl CompanionAgent {
                     events: events.clone(),
                     additional_inputs: None,
                     tutorial_response_key,
+                    allowed_transcript_paths: allowed_transcript_paths.clone(),
                 },
                 cancellation.clone(),
             )
@@ -88,6 +91,7 @@ impl CompanionAgent {
                         events,
                         additional_inputs: None,
                         tutorial_response_key,
+                        allowed_transcript_paths,
                     },
                     cancellation,
                 )
@@ -116,6 +120,7 @@ impl CompanionAgent {
             events,
             additional_inputs,
             tutorial_response_key,
+            allowed_transcript_paths,
         } = invocation;
         let kind = if user {
             CompanionCallKind::User
@@ -148,6 +153,7 @@ impl CompanionAgent {
             session.clone(),
             tutorial_response_key,
         );
+        call.allowed_transcript_paths = allowed_transcript_paths;
         let model = call.model.as_deref().ok_or(CompanionError::Output)?;
         let effort = call.effort.as_deref().ok_or(CompanionError::Output)?;
         self.log_call_start(
@@ -247,12 +253,16 @@ impl CompanionAgent {
         }
         self.log_call_end(mode, started.elapsed().as_millis())?;
         if let (Some(store), Some(value)) = (&self.debug_store, result.value.as_ref()) {
+            let mut value = value.clone();
+            if let Some(object) = value.as_object_mut() {
+                object.remove("speakerNameProposals");
+            }
             if store
                 .record_companion_call(
                     &debug_call_id,
                     source_ids.to_vec(),
                     prompt,
-                    value,
+                    &value,
                     self.clock.now(),
                 )
                 .is_err()
@@ -260,13 +270,16 @@ impl CompanionAgent {
                 self.log_debug_failure();
             }
         }
-        let response = match parse_response(&result) {
+        let mut response = match parse_response(&result, user) {
             Ok(response) => response,
             Err(error) => {
                 self.log_call_failure(mode, ProviderErrorKind::InvalidOutput, None);
                 return Err(error);
             }
         };
+        if !user {
+            response.speaker_name_proposals.clear();
+        }
         if response.work_request.is_some() && !can_request_work {
             return Err(CompanionError::Output);
         }
@@ -308,6 +321,7 @@ impl CompanionAgent {
             stall_timeout: Duration::from_millis(self.config.stall_timeout_ms),
             timeout: Duration::from_millis(self.config.timeout_ms),
             tutorial_response_key: tutorial_response_key.map(str::to_owned),
+            allowed_transcript_paths: None,
             allow_session_model_change: true,
         }
     }

@@ -170,11 +170,13 @@ pub struct AudioSegmentReference {
     pub audio_end_ms: Option<u64>,
 }
 
-/// 期間参照の id は観察 id に期間開始時刻を付けて一意にする。
-/// `parse_visual_observation` は参照 id の重複を拒否するため、
-/// 1観察が複数の期間参照を持つ場合もこの形で書き分ける。
-pub fn audio_segment_period_id(observation_id: &str, audio_start_ms: u64) -> String {
-    format!("{observation_id}:p{audio_start_ms}")
+/// 期間参照の id は契約どおり開始・終了時刻を含めて一意にする。
+pub fn audio_segment_period_id(
+    observation_id: &str,
+    audio_start_ms: u64,
+    audio_end_ms: u64,
+) -> String {
+    format!("{observation_id}:p{audio_start_ms}-{audio_end_ms}")
 }
 
 /// 期間参照の id から観察 id を取り出す。期間でない参照の id はそのまま返す。
@@ -893,4 +895,3 @@ pub fn truncate_bytes(value: &str, limit: usize) -> String {
     }
     format!("{}\u{2026}", &value[..end])
 }
-

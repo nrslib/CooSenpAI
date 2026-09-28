@@ -234,4 +234,3 @@ pub(crate) fn final_outcome(
         SpeechSource::Shortcut => FinalOutcome::Send,
     }
 }
-

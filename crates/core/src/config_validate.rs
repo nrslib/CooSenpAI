@@ -945,4 +945,3 @@ fn validate_judge(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
         }
     }
 }
-

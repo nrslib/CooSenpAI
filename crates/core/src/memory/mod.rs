@@ -29,4 +29,3 @@ pub use schedule::{select_schedule, MemorySchedule, ScheduleInput};
 pub use service::{MemoryErrorKind, MemoryService, MemoryServiceError, MemoryStatus};
 pub use store::{memory_job_kind_for_period, MemoryStore, MemoryStoreError};
 pub use types::{CanonicalRecord, SourceSnapshot};
-

@@ -79,6 +79,8 @@ export interface ProviderCallOptions {
   readonly effort?: EffortSelection;
   readonly systemPrompt: string;
   readonly message: string;
+  /** Undefined preserves normal observation access; [] denies every transcript. */
+  readonly allowedTranscriptPaths?: readonly string[];
   readonly images: readonly ProviderImageAttachment[];
   readonly schema?: Record<string, unknown>;
   readonly executable?: string;

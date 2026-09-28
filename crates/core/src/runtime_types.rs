@@ -19,6 +19,8 @@ pub struct RuntimeSnapshot {
     pub companion_emotions: crate::emotion::EmotionState,
     pub revision: u64,
     pub phase: RuntimePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observer_execution: Option<ObserverExecution>,
     pub pending_observations: usize,
     pub last_error: Option<RuntimeLastError>,
     pub companion_retry_in_seconds: Option<u64>,
@@ -43,6 +45,24 @@ pub struct RuntimeSnapshot {
     pub latest_user_interruption: Option<UserInterruption>,
     pub latest_companion_thought_generation: Option<u64>,
     pub provider_usage: ProviderUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ObserverExecution {
+    pub id: String,
+    pub started_at: String,
+    pub role: ObserverExecutionRole,
+    pub effort: String,
+    pub attempt: u8,
+    pub max_attempts: u8,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ObserverExecutionRole {
+    Vision,
+    Hearing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

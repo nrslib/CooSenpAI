@@ -177,4 +177,3 @@ fn set_private_file_mode(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
-

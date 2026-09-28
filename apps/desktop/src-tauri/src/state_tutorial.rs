@@ -15,6 +15,22 @@ use coosenpai_core::state::ConversationRole;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+fn boxed_candidate_task(
+    factory: Arc<crate::factory::DesktopRuntimeFactory>,
+    config: Config,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    Box<coosenpai_core::runtime::RuntimeAgents>,
+                    crate::factory::DesktopFactoryError,
+                >,
+            > + Send,
+    >,
+> {
+    Box::pin(async move { factory.build_candidate(&config).await.map(Box::new) })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TutorialFinishEntry {
     Automatic,
@@ -394,11 +410,14 @@ impl DesktopState {
                 None => {
                     let factory = self.factory.clone();
                     let config = config.clone();
-                    // Provider construction is large; keep it off the UI command's call stack.
-                    tokio::spawn(async move { factory.build_candidate(&config).await })
+                    // Keep the large agent value on the heap across the task boundary.
+                    let candidate = boxed_candidate_task(factory, config);
+                    let candidate = tokio::spawn(candidate);
+                    let agents = candidate
                         .await
                         .map_err(|error| RuntimeError::Factory(error.to_string()))?
-                        .map_err(|error| RuntimeError::Factory(error.to_string()))?
+                        .map_err(|error| RuntimeError::Factory(error.to_string()))?;
+                    *agents
                 }
             }
         };
@@ -643,4 +662,3 @@ pub(crate) fn shortcut_label_for_locale(value: Option<&str>, locale: Locale) -> 
         },
     )
 }
-

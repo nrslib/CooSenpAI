@@ -28,6 +28,7 @@ export interface SendRequest extends RequestBase {
   readonly effort?: string;
   readonly systemPrompt: string;
   readonly message: string;
+  readonly allowedTranscriptPaths?: readonly string[];
   readonly images: readonly string[];
   readonly schema?: Record<string, unknown>;
   readonly executable?: string;
@@ -76,6 +77,7 @@ const SEND_KEYS = [
   "effort",
   "systemPrompt",
   "message",
+  "allowedTranscriptPaths",
   "images",
   "schema",
   "executable",
@@ -178,6 +180,16 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
   const model = optionalString(record, "model");
   const effort = optionalString(record, "effort");
   const executable = optionalString(record, "executable");
+  const allowedTranscriptPaths = record.allowedTranscriptPaths;
+  if (allowedTranscriptPaths !== undefined
+    && (!Array.isArray(allowedTranscriptPaths)
+      || allowedTranscriptPaths.length > 256
+      || allowedTranscriptPaths.some((path) => typeof path !== "string"
+        || path.length === 0
+        || Buffer.byteLength(path, "utf8") > 4096
+        || !isAbsolute(path)))) {
+    throw new BridgeError("protocol", "allowedTranscriptPaths must contain bounded absolute paths");
+  }
   if (!isAbsolute(cwd)) throw new BridgeError("protocol", "cwd must be absolute");
   return {
     id,
@@ -188,6 +200,7 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
     ...(effort === undefined ? {} : { effort }),
     systemPrompt: string(record, "systemPrompt"),
     message: string(record, "message"),
+    ...(allowedTranscriptPaths === undefined ? {} : { allowedTranscriptPaths: allowedTranscriptPaths as string[] }),
     images: images as string[],
     ...(schema === undefined ? {} : { schema: schema as Record<string, unknown> }),
     ...(executable === undefined ? {} : { executable }),

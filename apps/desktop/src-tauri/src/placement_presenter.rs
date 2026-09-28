@@ -75,4 +75,3 @@ pub(crate) async fn save(path: PathBuf, placement: MainWindowPlacement) -> Resul
     .await
     .map_err(|error| error.to_string())?
 }
-

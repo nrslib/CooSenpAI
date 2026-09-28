@@ -73,4 +73,3 @@ pub(crate) fn verify_for_locale(
         .map_err(|_| text(TextKey::UpdateSignatureVerificationFailed, locale).to_owned())?;
     Ok(VerifiedArchive(bytes))
 }
-

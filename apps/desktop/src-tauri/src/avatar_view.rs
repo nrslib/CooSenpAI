@@ -78,4 +78,3 @@ pub(crate) fn trailing_position(origin: i32, available: u32, size: u32, margin: 
     let offset = available.saturating_sub(size.saturating_add(margin));
     (i64::from(origin) + i64::from(offset)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
-

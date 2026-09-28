@@ -544,4 +544,3 @@ fn sync_tree_directories(path: &Path) -> Result<(), PersistenceError> {
 fn maybe_fail_after_archive(_paths: &ConfigPaths) -> Result<(), PersistenceError> {
     Ok(())
 }
-

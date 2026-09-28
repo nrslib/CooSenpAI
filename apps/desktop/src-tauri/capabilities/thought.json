@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "thought-window",
+  "description": "CooSenpAI thought bubble permissions",
+  "windows": ["thought"],
+  "permissions": ["core:default"]
+}

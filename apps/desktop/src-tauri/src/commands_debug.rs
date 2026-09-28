@@ -116,6 +116,7 @@ pub(crate) async fn run(
         target: "developer-selected-image".to_owned(),
         ocr_text: None,
         focus: None,
+        own_window_context: None,
         image_path,
     };
     let observation = state

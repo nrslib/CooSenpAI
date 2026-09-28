@@ -372,6 +372,7 @@ impl CommandFirewall {
             | DesktopCommand::MemoryRejectUpdate
             | DesktopCommand::MemoryDelete
             | DesktopCommand::MemoryConsolidate
+            | DesktopCommand::SpeakerNameProposal
             | DesktopCommand::ConversationResetDismiss
             | DesktopCommand::CompanionEmotionsReset
             | DesktopCommand::BubbleDismiss

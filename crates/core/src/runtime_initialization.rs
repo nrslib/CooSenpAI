@@ -305,6 +305,7 @@ impl RuntimeActor {
                 }),
             revision: self.revision,
             phase: self.phase,
+            observer_execution: self.observer_execution.clone(),
             pending_observations: self.pending_observations.len(),
             last_error: self.last_error.clone(),
             companion_retry_in_seconds: self

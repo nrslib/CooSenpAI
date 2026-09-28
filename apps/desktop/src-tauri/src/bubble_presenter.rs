@@ -35,6 +35,8 @@ pub(crate) struct BubblePresenter {
     onboarding_disables_edge_recall: bool,
     conversation_generation: u64,
     main_focused: bool,
+    main_visible: bool,
+    main_on_active_space: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -92,6 +94,7 @@ impl BubblePresenter {
         main_focused: bool,
         main_visible: bool,
     ) -> Handling {
+        self.main_visible = main_visible;
         if main_focused && !self.main_focused {
             self.reset_edge_recall();
         }
@@ -334,6 +337,9 @@ impl BubblePresenter {
                     BubbleQuery::ConversationGeneration(reply) => {
                         let _ = reply.send(model.conversation_generation());
                     }
+                    BubbleQuery::ContainsRecord { id, reply } => {
+                        let _ = reply.send(model.contains_record(&id));
+                    }
                     BubbleQuery::AcceptsInteraction {
                         id,
                         action,
@@ -487,6 +493,22 @@ impl BubblePresenter {
                 self.thought.clear(conversation_switch);
                 Handling::Handled(Vec::new())
             }
+            UiEvent::MainVisibility(visible) => {
+                self.main_visible = visible;
+                if visible && self.main_on_active_space.unwrap_or(true) {
+                    self.clear_thought_records().await
+                } else {
+                    Handling::Handled(Vec::new())
+                }
+            }
+            UiEvent::MainActiveSpaceChanged(active) => {
+                self.main_on_active_space = Some(active);
+                if active && self.main_visible {
+                    self.clear_thought_records().await
+                } else {
+                    Handling::Handled(Vec::new())
+                }
+            }
             UiEvent::ThoughtRequested {
                 generation,
                 message,
@@ -499,6 +521,8 @@ impl BubblePresenter {
                         config.ui.thought_bubble,
                         context.input_active,
                         main_focused,
+                        main_visible,
+                        self.main_on_active_space.unwrap_or(true),
                     )
                 {
                     self.thought.clear(false);
@@ -661,6 +685,14 @@ impl BubblePresenter {
                 Handling::Handled(effects)
             }
             event => self.handle(event),
+        }
+    }
+
+    async fn clear_thought_records(&mut self) -> Handling {
+        if self.model.lock().await.clear_thought_bubbles() {
+            self.refresh().await
+        } else {
+            Handling::Handled(Vec::new())
         }
     }
 

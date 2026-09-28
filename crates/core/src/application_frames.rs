@@ -124,6 +124,7 @@ impl PreparedApplicationFrame {
             target,
             ocr_text: self.ocr.as_ref().map(|ocr| ocr.text.clone()),
             focus,
+            own_window_context: None,
             image_path: self.provider_path.clone(),
         }
     }
@@ -241,4 +242,3 @@ fn ensure_active(cancellation: &CancellationToken) -> Result<()> {
     );
     Ok(())
 }
-

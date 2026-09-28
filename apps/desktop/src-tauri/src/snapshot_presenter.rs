@@ -12,6 +12,81 @@ pub(crate) fn runtime_view_changed(previous: &RuntimeSnapshot, next: &RuntimeSna
     previous != *next
 }
 
+fn runtime_requires_conversation_refresh(
+    previous: Option<&RuntimeSnapshot>,
+    runtime: &RuntimeSnapshot,
+    initial: bool,
+) -> bool {
+    initial
+        || previous.is_none_or(|previous| {
+            (previous.phase != runtime.phase
+                && previous.phase != coosenpai_core::runtime::RuntimePhase::Idle)
+                || previous.active_user_message_id != runtime.active_user_message_id
+                || previous.conversation_revision != runtime.conversation_revision
+                || previous.cancelled_user_message_ids != runtime.cancelled_user_message_ids
+                || previous.latest_companion_decision != runtime.latest_companion_decision
+                || previous.latest_judge_decision != runtime.latest_judge_decision
+                || previous.pending_deliveries != runtime.pending_deliveries
+                || previous.last_error != runtime.last_error
+        })
+}
+
+fn runtime_thought_changed(
+    previous: Option<&RuntimeSnapshot>,
+    runtime: &RuntimeSnapshot,
+    initial: bool,
+) -> bool {
+    initial
+        || previous.is_none_or(|previous| {
+            previous.latest_companion_thought != runtime.latest_companion_thought
+                || previous.latest_companion_thought_generation
+                    != runtime.latest_companion_thought_generation
+        })
+}
+
+fn apply_runtime_projection(
+    snapshot: &mut AppSnapshot,
+    runtime: &RuntimeSnapshot,
+    revision_floor: Option<u64>,
+    stopped_execution_id: Option<&str>,
+    tombstoned_execution_id: Option<&str>,
+) {
+    let previous_observer_phase = snapshot.observer.phase;
+    let has_hearing_execution = runtime
+        .observer_execution
+        .as_ref()
+        .is_some_and(|execution| {
+            execution.role == coosenpai_core::runtime::ObserverExecutionRole::Hearing
+        });
+    let preserve_stopped_observer = snapshot.observer.phase
+        == crate::snapshot::ObserverViewPhase::Stopped
+        && !has_hearing_execution
+        && (revision_floor == Some(runtime.revision)
+            || stopped_execution_id.is_some_and(|stopped_id| {
+                runtime
+                    .observer_execution
+                    .as_ref()
+                    .is_some_and(|execution| execution.id == stopped_id)
+            }));
+    let suppress_tombstoned_execution = tombstoned_execution_id.is_some_and(|stopped_id| {
+        runtime
+            .observer_execution
+            .as_ref()
+            .is_some_and(|execution| {
+                execution.role == coosenpai_core::runtime::ObserverExecutionRole::Vision
+                    && execution.id == stopped_id
+            })
+    });
+    snapshot.apply_runtime(runtime);
+    if preserve_stopped_observer {
+        snapshot.observer.phase = crate::snapshot::ObserverViewPhase::Stopped;
+        snapshot.observer.execution = None;
+    } else if suppress_tombstoned_execution {
+        snapshot.observer.phase = previous_observer_phase;
+        snapshot.observer.execution = None;
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SnapshotInput {
     pub event: SnapshotEvent,
@@ -72,6 +147,7 @@ pub(crate) enum SnapshotEvent {
         event: crate::speech_presenter::SpeechResult,
     },
     Runtime(coosenpai_core::runtime::RuntimeSnapshot),
+    ObserverDisplayTick,
     ConversationLoaded {
         conversation: Vec<coosenpai_core::state::ConversationEntry>,
         generations: Vec<coosenpai_core::conversation_archive::ConversationGenerationSummary>,
@@ -98,24 +174,82 @@ pub(crate) struct SnapshotPresenter {
     avatar_generation: u64,
     speech: crate::speech_presenter::SpeechPresenter,
     runtime: Option<RuntimeSnapshot>,
+    runtime_revision_floor: Option<u64>,
+    stopped_observer_execution_id: Option<String>,
+    tombstoned_observer_execution_id: Option<String>,
     snapshot: Arc<Mutex<AppSnapshot>>,
 }
 
 impl SnapshotPresenter {
-    pub(crate) fn new(
+
+    pub(crate) fn with_monotonic_clock(
         snapshot: Arc<Mutex<AppSnapshot>>,
         lifecycle: Arc<Mutex<crate::speech_lifecycle::SpeechLifecycle>>,
         coordinator: Arc<crate::capture::ShortcutCoordinator>,
+        monotonic_clock: Arc<dyn crate::ui_root::MonotonicClock>,
     ) -> Self {
         Self {
             publications: Default::default(),
-            shortcut: crate::capture::ShortcutErrorPresenter::new(coordinator, lifecycle.clone()),
+            shortcut: crate::capture::ShortcutErrorPresenter::with_monotonic_clock(
+                coordinator,
+                lifecycle.clone(),
+                monotonic_clock,
+            ),
             watch: Default::default(),
             avatar_generation: 0,
             snapshot,
             speech: crate::speech_presenter::SpeechPresenter::new(lifecycle),
             runtime: None,
+            runtime_revision_floor: None,
+            stopped_observer_execution_id: None,
+            tombstoned_observer_execution_id: None,
         }
+    }
+
+    fn rejects_runtime(
+        revision_floor: Option<u64>,
+        previous: Option<&RuntimeSnapshot>,
+        runtime: &RuntimeSnapshot,
+        initial: bool,
+    ) -> bool {
+        if previous.is_some_and(|previous| previous.revision > runtime.revision)
+            || revision_floor.is_some_and(|floor| runtime.revision < floor)
+        {
+            return true;
+        }
+        !initial
+            && previous.is_some_and(|previous| {
+                previous.revision == runtime.revision && previous == runtime
+            })
+    }
+
+    fn should_release_stopped_execution_boundary_for_new_execution(
+        revision_floor: Option<u64>,
+        stopped_execution_id: Option<&str>,
+        runtime: &RuntimeSnapshot,
+    ) -> bool {
+        let newer_than_stop = revision_floor.is_none_or(|floor| runtime.revision > floor);
+        let different_execution = stopped_execution_id
+            .zip(
+                runtime
+                    .observer_execution
+                    .as_ref()
+                    .map(|execution| execution.id.as_str()),
+            )
+            .is_some_and(|(stopped_id, current_id)| stopped_id != current_id);
+        newer_than_stop && different_execution
+    }
+
+    fn runtime_invalidates_tombstoned_execution(
+        tombstoned_execution_id: Option<&str>,
+        runtime: &RuntimeSnapshot,
+    ) -> bool {
+        tombstoned_execution_id.is_some_and(|tombstoned_id| {
+            runtime
+                .observer_execution
+                .as_ref()
+                .is_none_or(|execution| execution.id != tombstoned_id)
+        })
     }
 
     pub(crate) fn input_started(&mut self) {
@@ -154,6 +288,7 @@ impl SnapshotPresenter {
         event: SnapshotEvent,
         metadata: Option<(u64, coosenpai_core::work::WorkConfig)>,
     ) -> Vec<UiEffect> {
+        let force_publish = matches!(&event, SnapshotEvent::ObserverDisplayTick);
         let count = self.publications.entry(event.source()).or_default();
         count.attempted += 1;
         let mut snapshot = self.snapshot.lock().expect("snapshot lock");
@@ -164,27 +299,38 @@ impl SnapshotPresenter {
         let mut effects = Vec::new();
         match event {
             SnapshotEvent::RuntimeObserved { runtime, initial } => {
-                let refresh = initial
-                    || self.runtime.as_ref().is_none_or(|previous| {
-                        (previous.phase != runtime.phase
-                            && previous.phase != coosenpai_core::runtime::RuntimePhase::Idle)
-                            || previous.active_user_message_id != runtime.active_user_message_id
-                            || previous.conversation_revision != runtime.conversation_revision
-                            || previous.cancelled_user_message_ids
-                                != runtime.cancelled_user_message_ids
-                            || previous.latest_companion_decision
-                                != runtime.latest_companion_decision
-                            || previous.latest_judge_decision != runtime.latest_judge_decision
-                            || previous.pending_deliveries != runtime.pending_deliveries
-                            || previous.last_error != runtime.last_error
-                    });
-                let thought_changed = initial
-                    || self.runtime.as_ref().is_none_or(|previous| {
-                        previous.latest_companion_thought != runtime.latest_companion_thought
-                            || previous.latest_companion_thought_generation
-                                != runtime.latest_companion_thought_generation
-                    });
-                snapshot.apply_runtime(&runtime);
+                if Self::rejects_runtime(
+                    self.runtime_revision_floor,
+                    self.runtime.as_ref(),
+                    &runtime,
+                    initial,
+                ) {
+                    return effects;
+                }
+                let refresh =
+                    runtime_requires_conversation_refresh(self.runtime.as_ref(), &runtime, initial);
+                let thought_changed =
+                    runtime_thought_changed(self.runtime.as_ref(), &runtime, initial);
+                apply_runtime_projection(
+                    &mut snapshot,
+                    &runtime,
+                    self.runtime_revision_floor,
+                    self.stopped_observer_execution_id.as_deref(),
+                    self.tombstoned_observer_execution_id.as_deref(),
+                );
+                if Self::should_release_stopped_execution_boundary_for_new_execution(
+                    self.runtime_revision_floor,
+                    self.stopped_observer_execution_id.as_deref(),
+                    &runtime,
+                ) {
+                    self.stopped_observer_execution_id = None;
+                }
+                if Self::runtime_invalidates_tombstoned_execution(
+                    self.tombstoned_observer_execution_id.as_deref(),
+                    &runtime,
+                ) {
+                    self.tombstoned_observer_execution_id = None;
+                }
                 self.runtime = Some(runtime.clone());
                 if thought_changed {
                     effects.push(UiEffect::Deliver {
@@ -276,23 +422,128 @@ impl SnapshotPresenter {
                 effects.extend(shortcut_effects);
             }
             SnapshotEvent::Watch { generation, event } => {
+                let started = matches!(&event, crate::watch_presenter::WatchResult::Started);
+                let stopped_runtime = match &event {
+                    crate::watch_presenter::WatchResult::Stopped { runtime } => {
+                        Some(runtime.as_ref().clone())
+                    }
+                    _ => None,
+                };
                 let changed = self.watch.adopt(&mut snapshot, generation, event);
                 effects.extend(self.watch.take_effects());
                 if !changed {
                     return effects;
                 }
+                if started {
+                    self.stopped_observer_execution_id = None;
+                }
+                if let Some(runtime) = stopped_runtime {
+                    let stopped_vision_execution_id = runtime
+                        .observer_execution
+                        .as_ref()
+                        .filter(|execution| {
+                            execution.role == coosenpai_core::runtime::ObserverExecutionRole::Vision
+                        })
+                        .map(|execution| execution.id.clone());
+                    if let Some(execution_id) = stopped_vision_execution_id {
+                        self.stopped_observer_execution_id = Some(execution_id.clone());
+                        self.tombstoned_observer_execution_id = Some(execution_id);
+                    }
+                    self.runtime_revision_floor = Some(
+                        self.runtime_revision_floor
+                            .map_or(runtime.revision, |floor| floor.max(runtime.revision)),
+                    );
+                    if self
+                        .runtime
+                        .as_ref()
+                        .is_none_or(|previous| previous.revision <= runtime.revision)
+                    {
+                        let refresh = runtime_requires_conversation_refresh(
+                            self.runtime.as_ref(),
+                            &runtime,
+                            false,
+                        );
+                        let thought_changed =
+                            runtime_thought_changed(self.runtime.as_ref(), &runtime, false);
+                        apply_runtime_projection(
+                            &mut snapshot,
+                            &runtime,
+                            self.runtime_revision_floor,
+                            self.stopped_observer_execution_id.as_deref(),
+                            self.tombstoned_observer_execution_id.as_deref(),
+                        );
+                        if Self::should_release_stopped_execution_boundary_for_new_execution(
+                            self.runtime_revision_floor,
+                            self.stopped_observer_execution_id.as_deref(),
+                            &runtime,
+                        ) {
+                            self.stopped_observer_execution_id = None;
+                        }
+                        if Self::runtime_invalidates_tombstoned_execution(
+                            self.tombstoned_observer_execution_id.as_deref(),
+                            &runtime,
+                        ) {
+                            self.tombstoned_observer_execution_id = None;
+                        }
+                        self.runtime = Some(runtime.clone());
+                        if thought_changed {
+                            effects.push(UiEffect::Deliver {
+                                child: PresenterId::Root,
+                                event: UiEvent::ThoughtObserved {
+                                    runtime: Box::new(runtime),
+                                    initial: false,
+                                },
+                            });
+                        }
+                        if refresh {
+                            effects.push(UiEffect::Spawn(if snapshot.onboarding.tutorial_active {
+                                UiTask::RuntimeFollowup
+                            } else {
+                                UiTask::RefreshConversation
+                            }));
+                        }
+                    } else if let Some(current_runtime) = self.runtime.clone() {
+                        // WatchPresenter may have cleared an execution from its older stop snapshot.
+                        // Re-project the newer accepted runtime so an independent Hearing call remains visible.
+                        apply_runtime_projection(
+                            &mut snapshot,
+                            &current_runtime,
+                            self.runtime_revision_floor,
+                            self.stopped_observer_execution_id.as_deref(),
+                            self.tombstoned_observer_execution_id.as_deref(),
+                        );
+                        if Self::should_release_stopped_execution_boundary_for_new_execution(
+                            self.runtime_revision_floor,
+                            self.stopped_observer_execution_id.as_deref(),
+                            &current_runtime,
+                        ) {
+                            self.stopped_observer_execution_id = None;
+                        }
+                        if Self::runtime_invalidates_tombstoned_execution(
+                            self.tombstoned_observer_execution_id.as_deref(),
+                            &current_runtime,
+                        ) {
+                            self.tombstoned_observer_execution_id = None;
+                        }
+                    }
+                }
             }
             SnapshotEvent::ConfigLoaded(config) => {
-                snapshot.apply_config(config);
+                if snapshot.apply_config(config) {
+                    self.stopped_observer_execution_id = None;
+                }
             }
             SnapshotEvent::ConfigSaved(config) => {
-                snapshot.apply_saved_config(config);
+                if snapshot.apply_saved_config(config) {
+                    self.stopped_observer_execution_id = None;
+                }
             }
             SnapshotEvent::CompanionStopped => {
                 snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle
             }
             SnapshotEvent::CompanionReconfigured(config) => {
                 if snapshot.apply_config(config) {
+                    self.stopped_observer_execution_id = None;
                     snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle;
                 }
             }
@@ -324,7 +575,38 @@ impl SnapshotPresenter {
                 };
                 effects.extend(speech_effects);
             }
-            SnapshotEvent::Runtime(runtime) => snapshot.apply_runtime(&runtime),
+            SnapshotEvent::Runtime(runtime) => {
+                if Self::rejects_runtime(
+                    self.runtime_revision_floor,
+                    self.runtime.as_ref(),
+                    &runtime,
+                    false,
+                ) {
+                    return effects;
+                }
+                apply_runtime_projection(
+                    &mut snapshot,
+                    &runtime,
+                    self.runtime_revision_floor,
+                    self.stopped_observer_execution_id.as_deref(),
+                    self.tombstoned_observer_execution_id.as_deref(),
+                );
+                if Self::should_release_stopped_execution_boundary_for_new_execution(
+                    self.runtime_revision_floor,
+                    self.stopped_observer_execution_id.as_deref(),
+                    &runtime,
+                ) {
+                    self.stopped_observer_execution_id = None;
+                }
+                if Self::runtime_invalidates_tombstoned_execution(
+                    self.tombstoned_observer_execution_id.as_deref(),
+                    &runtime,
+                ) {
+                    self.tombstoned_observer_execution_id = None;
+                }
+                self.runtime = Some(runtime);
+            }
+            SnapshotEvent::ObserverDisplayTick => {}
             SnapshotEvent::ConversationLoaded {
                 conversation,
                 generations,
@@ -388,7 +670,9 @@ impl SnapshotPresenter {
                 snapshot.config_revision = revision;
             }
         }
-        if before == serde_json::to_value(&*snapshot).expect("snapshot serialization") {
+        if !force_publish
+            && before == serde_json::to_value(&*snapshot).expect("snapshot serialization")
+        {
             return effects;
         }
         count.published += 1;
@@ -446,6 +730,7 @@ impl SnapshotEvent {
         match self {
             Self::RuntimeObserved { .. } => "RuntimeObserved",
             Self::Runtime(_) => "Runtime",
+            Self::ObserverDisplayTick => "ObserverDisplayTick",
             Self::ConversationLoaded { .. } => "ConversationLoaded",
             Self::DebugLoaded(_) => "DebugLoaded",
             Self::Hearing(_) => "Hearing",

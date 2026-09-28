@@ -124,7 +124,10 @@ impl<P: SelectionSessionPort> SessionRuntime<P> {
                 }
             }
             Request::Close {
-                reply, shutdown, ..
+                reply,
+                shutdown,
+                supersede,
+                ..
             } => {
                 self.close_replies.push(reply);
                 if let Some(text) = &self.text {
@@ -136,7 +139,9 @@ impl<P: SelectionSessionPort> SessionRuntime<P> {
                     if let Some(image) = &mut self.image {
                         image.cancelled = true;
                     }
-                    self.input(if shutdown {
+                    self.input(if supersede {
+                        SessionInput::Supersede
+                    } else if shutdown {
                         SessionInput::Shutdown
                     } else {
                         SessionInput::Close
@@ -240,7 +245,6 @@ impl<P: SelectionSessionPort> SessionRuntime<P> {
         self.model.clipboard_baseline = setup.count;
         self.model.clipboard_changed = setup.count;
         self.model.image_captured = false;
-        self.model.baseline_windows = setup.windows;
         self.model.tracked_window = None;
         self.port.post_image(setup.shortcut).await
     }
@@ -276,15 +280,7 @@ impl<P: SelectionSessionPort> SessionRuntime<P> {
         let present = self
             .model
             .windows_present(&observed.windows, &observed.onscreen_window_ids);
-        if self.model.state == SessionState::AwaitingOpenToClose {
-            self.input(SessionInput::ClipboardChanged(observed.change_count))
-                .await;
-        }
-        if matches!(
-            self.model.state,
-            SessionState::Opening | SessionState::AwaitingOpenToClose
-        ) && present
-        {
+        if self.model.state == SessionState::Opening && present {
             let image = self.image.as_mut().expect("image session");
             image.pids = observed
                 .windows

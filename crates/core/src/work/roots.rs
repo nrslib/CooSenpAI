@@ -107,4 +107,3 @@ impl RootPolicy {
 fn real_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
-

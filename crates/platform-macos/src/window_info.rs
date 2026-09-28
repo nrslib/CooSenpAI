@@ -327,4 +327,3 @@ fn covers_display(window: WindowBounds, display: WindowBounds) -> bool {
         && window.x + window.width >= display.x + display.width - TOLERANCE
         && window.y + window.height >= display.y + display.height - TOLERANCE
 }
-

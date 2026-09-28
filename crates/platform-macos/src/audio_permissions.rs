@@ -66,4 +66,3 @@ fn map_microphone(status: AVAuthorizationStatus) -> SpeechPermissionKind {
         _ => SpeechPermissionKind::Unavailable,
     }
 }
-

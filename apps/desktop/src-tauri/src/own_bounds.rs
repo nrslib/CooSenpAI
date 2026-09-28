@@ -2,22 +2,16 @@ use async_trait::async_trait;
 #[cfg(not(target_os = "macos"))]
 use chrono::{DateTime, Utc};
 #[cfg(not(target_os = "macos"))]
+use coosenpai_core::ports::OwnWindowFrame;
+#[cfg(not(target_os = "macos"))]
 use coosenpai_core::ports::WindowBounds;
-use coosenpai_core::ports::{OwnWindowBounds, OwnWindowBoundsPort, PortError};
+use coosenpai_core::ports::{OwnWindowBounds, OwnWindowBoundsPort, OwnWindowKind, PortError};
+#[cfg(target_os = "macos")]
+use std::collections::HashMap;
 use tauri::AppHandle;
+use tauri::Manager;
 #[cfg(not(target_os = "macos"))]
-use tauri::{Manager, PhysicalPosition, PhysicalSize};
-
-#[cfg(not(target_os = "macos"))]
-const OWN_WINDOW_LABELS: [&str; 7] = [
-    "main",
-    "bubble",
-    "avatar",
-    "details",
-    "capture-popup",
-    "speech-popup",
-    "model-popup",
-];
+use tauri::{PhysicalPosition, PhysicalSize};
 
 #[cfg(not(target_os = "macos"))]
 #[derive(Clone, Copy)]
@@ -26,6 +20,7 @@ struct WindowSnapshot {
     scale_factor: f64,
     position: PhysicalPosition<i32>,
     size: PhysicalSize<u32>,
+    kind: OwnWindowKind,
 }
 
 #[derive(Clone)]
@@ -47,9 +42,20 @@ impl TauriOwnWindowBounds {
 
 #[cfg(target_os = "macos")]
 fn collect_bounds(
+    app: &AppHandle,
     changes: &coosenpai_platform_macos::OwnWindowChanges,
 ) -> Result<OwnWindowBounds, PortError> {
-    coosenpai_platform_macos::current_process_window_bounds(changes)
+    let kinds = app
+        .webview_windows()
+        .into_values()
+        .filter_map(|window| {
+            window
+                .ns_window()
+                .ok()
+                .map(|pointer| (pointer as usize, own_window_kind(window.label())))
+        })
+        .collect::<HashMap<_, _>>();
+    coosenpai_platform_macos::current_process_window_bounds(changes, &kinds)
         .map_err(|error| PortError::Unavailable(error.to_string()))
 }
 
@@ -57,12 +63,7 @@ fn collect_bounds(
 fn collect_bounds(app: &AppHandle) -> Result<OwnWindowBounds, PortError> {
     let captured_at = Utc::now();
     let mut snapshots = Vec::new();
-    for label in OWN_WINDOW_LABELS {
-        let Some(window) = app.get_webview_window(label) else {
-            return Err(PortError::Unavailable(format!(
-                "自ウィンドウ {label} を取得できません"
-            )));
-        };
+    for window in app.webview_windows().into_values() {
         if !window
             .is_visible()
             .map_err(|error| PortError::Unavailable(error.to_string()))?
@@ -71,6 +72,7 @@ fn collect_bounds(app: &AppHandle) -> Result<OwnWindowBounds, PortError> {
         }
         snapshots.push(WindowSnapshot {
             visible: true,
+            kind: own_window_kind(window.label()),
             scale_factor: window
                 .scale_factor()
                 .map_err(|error| PortError::Unavailable(error.to_string()))?,
@@ -106,18 +108,35 @@ fn collect_bounds_from(
         }
         let position = window.position.to_logical::<f64>(window.scale_factor);
         let size = window.size.to_logical::<f64>(window.scale_factor);
-        logical.push(WindowBounds {
-            x: position.x,
-            y: position.y,
-            width: size.width,
-            height: size.height,
+        logical.push(OwnWindowFrame {
+            bounds: WindowBounds {
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+            },
+            kind: window.kind,
         });
     }
     Ok(OwnWindowBounds {
         revision: 0,
         captured_at,
-        bounds: logical,
+        windows: logical,
     })
+}
+
+fn own_window_kind(label: &str) -> OwnWindowKind {
+    match label {
+        "main" => OwnWindowKind::Main,
+        "bubble" => OwnWindowKind::Bubble,
+        "avatar" => OwnWindowKind::Avatar,
+        "thought-bubble" | "thought" => OwnWindowKind::Thought,
+        "details" => OwnWindowKind::Details,
+        "capture-popup" => OwnWindowKind::CapturePopup,
+        "speech-popup" => OwnWindowKind::SpeechPopup,
+        "model-popup" => OwnWindowKind::ModelPopup,
+        _ => OwnWindowKind::Unknown,
+    }
 }
 
 #[async_trait]
@@ -127,11 +146,13 @@ impl OwnWindowBoundsPort for TauriOwnWindowBounds {
         let app = self.app.clone();
         #[cfg(target_os = "macos")]
         let changes = self.changes.clone();
+        #[cfg(target_os = "macos")]
+        let app = self.app.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.app
             .run_on_main_thread(move || {
                 #[cfg(target_os = "macos")]
-                let bounds = collect_bounds(&changes);
+                let bounds = collect_bounds(&app, &changes);
                 #[cfg(not(target_os = "macos"))]
                 let bounds = collect_bounds(&app);
                 let _ = tx.send(bounds);

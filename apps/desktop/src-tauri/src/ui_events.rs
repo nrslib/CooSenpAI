@@ -46,6 +46,7 @@ pub(crate) enum UiView {
     CapturePopup,
     SpeechPopup,
     Bubble,
+    Thought,
     Details,
     Settings,
     ModelPicker,
@@ -59,6 +60,7 @@ impl UiView {
             Self::Chat => PresenterId::Chat,
             Self::CapturePopup | Self::SpeechPopup => PresenterId::Capture,
             Self::Bubble => PresenterId::Bubble,
+            Self::Thought => PresenterId::Chat,
             Self::Details => PresenterId::Details,
             Self::Settings => PresenterId::Settings,
             Self::ModelPicker => PresenterId::ModelPicker,
@@ -103,6 +105,10 @@ pub(crate) enum ChatProjection {
 #[derive(Debug)]
 pub(crate) enum BubbleQuery {
     ConversationGeneration(tokio::sync::oneshot::Sender<u64>),
+    ContainsRecord {
+        id: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     AcceptsInteraction {
         id: String,
         action: String,
@@ -150,6 +156,10 @@ pub(crate) enum UiEvent {
     ThoughtObserved {
         runtime: Box<coosenpai_core::runtime::RuntimeSnapshot>,
         initial: bool,
+    },
+    ObserverDisplayTick {
+        generation: u64,
+        execution_id: String,
     },
     ThoughtFlushExpired(u64),
     ThoughtClear {
@@ -314,6 +324,13 @@ pub(crate) enum UiEvent {
     SubmitInput(ChatInput),
     MainVisibility(bool),
     MainFocused(bool),
+    MainWindowGeometryChanged(crate::window_thought::MainWindowGeometry),
+    MainActiveSpaceChanged(bool),
+    ThoughtWindowOperationCompleted {
+        operation: crate::window_thought::ThoughtWindowOperation,
+        result: Result<(), String>,
+    },
+    ThoughtWindowStateObserved(Result<crate::window_thought::ThoughtWindowNativeState, String>),
     CaptureCancel {
         generation: u64,
         source: crate::capture::CancelSource,
@@ -401,6 +418,11 @@ pub(crate) enum UiEffect {
     WorkApprovalRender(Box<crate::work_approval_presenter::WorkApprovalView>),
     AppRender(Box<crate::app_presenter::AppFrame>),
     StatusRender(Box<crate::status_presenter::StatusView>),
+    ThoughtRender(Box<crate::status_presenter::ThoughtWindowView>),
+    ThoughtWindowPosition(crate::window_thought::ThoughtPlacement),
+    ThoughtWindowShow,
+    ThoughtWindowHide,
+    ThoughtWindowInspect,
     PersonasRender(Vec<crate::factory::PersonaOption>),
     AvatarSceneRender(Box<crate::avatar_scene_presenter::AvatarSceneView>),
     MotionSettingsRender(Box<crate::motion_settings_presenter::MotionView>),
@@ -652,6 +674,19 @@ impl UiEvent {
             Self::SubmitChat(_) => "SubmitChat".into(),
             Self::MainVisibility(visible) => format!("MainVisibility({visible})"),
             Self::MainFocused(focused) => format!("MainFocused({focused})"),
+            Self::MainWindowGeometryChanged(_) => "MainWindowGeometryChanged".into(),
+            Self::MainActiveSpaceChanged(active) => {
+                format!("MainActiveSpaceChanged({active})")
+            }
+            Self::ThoughtWindowOperationCompleted { operation, result } => {
+                format!(
+                    "ThoughtWindowOperationCompleted({operation:?}, {})",
+                    result.is_ok()
+                )
+            }
+            Self::ThoughtWindowStateObserved(result) => {
+                format!("ThoughtWindowStateObserved({})", result.is_ok())
+            }
             Self::CaptureCancel { generation, .. } => {
                 format!("CaptureCancel(generation={generation})")
             }
@@ -666,6 +701,7 @@ impl UiEvent {
             Self::BubbleEdgePoll { at_edge, .. } => format!("BubbleEdgePoll({at_edge})"),
             Self::BubbleEdgeRecallReset => "BubbleEdgeRecallReset".to_owned(),
             Self::ThoughtObserved { .. } => "ThoughtObserved".to_owned(),
+            Self::ObserverDisplayTick { .. } => "ObserverDisplayTick".to_owned(),
             Self::ThoughtFlushExpired(epoch) => format!("ThoughtFlushExpired({epoch})"),
             Self::ThoughtClear { .. } => "ThoughtClear".to_owned(),
             Self::TrayReady(_) => "TrayReady".into(),

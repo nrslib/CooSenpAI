@@ -2378,4 +2378,3 @@ pub fn localize_config_issue_message(message: &str, locale: Locale) -> String {
     }
     text(TextKey::ConfigInvalidValue, locale).to_owned()
 }
-

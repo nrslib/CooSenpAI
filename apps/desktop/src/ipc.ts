@@ -72,6 +72,7 @@ export const desktopApi = {
   appSelectPersona: (persona: string): Promise<IpcResult<CooSenpaiConfig>> => call("app_select_persona", { persona }),
   subscribeAppView: (listener: (view: import("./app-view.js").AppView) => void) => subscribeLocal("coosenpai:app:view", listener),
   subscribeStatusView: (listener: (view: import("./app-view.js").StatusView) => void) => subscribeLocal("coosenpai:status:view", listener),
+  subscribeThoughtView: (listener: (view: import("./app-view.js").ThoughtWindowView) => void) => subscribeLocal("coosenpai:thought:view", listener),
   workApprovalInput: (payload: import("./work-approval-view.js").WorkApprovalInput): Promise<IpcResult<null>> => call("work_approval_input", { payload }),
   subscribeWorkApprovalView: (listener: (view: import("./work-approval-view.js").WorkApprovalView) => void) => subscribeLocal("coosenpai:work-approval:view", listener),
   composerInput: (payload: import("./composer-view.js").ComposerInput): Promise<IpcResult<null>> => call("composer_input", { payload }),

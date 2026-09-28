@@ -48,6 +48,7 @@ pub(crate) enum DesktopCommand {
     MemoryRejectUpdate,
     MemoryDelete,
     MemoryConsolidate,
+    SpeakerNameProposal,
     ConversationReset,
     ConversationSelect,
     CompanionEmotionsReset,

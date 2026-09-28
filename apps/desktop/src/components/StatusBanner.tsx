@@ -7,6 +7,6 @@ export function StatusBanner({ view, onRecover, onDismiss }: { readonly view: Ba
   return <div className={`status-banner tone-${view.tone}`} role={view.tone === "error" ? "alert" : "status"}>
     <span>{renderUiText(view.message, t)}</span>
     {view.actionLabel === null ? null : <button type="button" onClick={onRecover}>{renderUiText(view.actionLabel, t)}</button>}
-    {view.dismissible ? <button type="button" onClick={onDismiss}>{t("common.close")}</button> : null}
+    {view.dismissible ? <button className="icon-button status-banner-close" type="button" aria-label={t("common.close")} title={t("common.close")} onClick={onDismiss}>×</button> : null}
   </div>;
 }

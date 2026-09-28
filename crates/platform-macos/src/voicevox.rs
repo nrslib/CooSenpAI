@@ -346,4 +346,3 @@ fn localize_error(error: String, locale: Locale) -> String {
     };
     localized_text(key, locale).to_owned()
 }
-

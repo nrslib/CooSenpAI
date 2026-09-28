@@ -1,6 +1,8 @@
+use coosenpai_core::ports::OwnWindowKind;
+use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -8,9 +10,9 @@ use objc2_app_kit::{
     NSApplicationDidChangeScreenParametersNotification, NSApplicationWillHideNotification,
     NSApplicationWillUnhideNotification, NSWindowDidChangeOcclusionStateNotification,
     NSWindowDidChangeScreenNotification, NSWindowDidDeminiaturizeNotification,
-    NSWindowDidMoveNotification, NSWindowDidResizeNotification, NSWindowWillCloseNotification,
-    NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification,
-    NSWindowWillMiniaturizeNotification,
+    NSWindowDidExposeNotification, NSWindowDidMoveNotification, NSWindowDidResizeNotification,
+    NSWindowWillCloseNotification, NSWindowWillEnterFullScreenNotification,
+    NSWindowWillExitFullScreenNotification, NSWindowWillMiniaturizeNotification,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSNotificationName, NSObjectProtocol,
@@ -19,16 +21,18 @@ use objc2_foundation::{
 /// 自プロセスのウィンドウ変更を、元の位置へ戻った場合も含めて記録する。
 pub struct OwnWindowChanges {
     revision: Arc<AtomicU64>,
+    window_states: Mutex<Option<HashMap<usize, (OwnWindowKind, bool)>>>,
     center: Retained<NSNotificationCenter>,
     tokens: Vec<usize>,
 }
 
-fn change_notifications() -> [&'static NSNotificationName; 12] {
+fn change_notifications() -> [&'static NSNotificationName; 13] {
     // SAFETY: AppKit の通知名はプロセスの寿命中有効な定数。
     unsafe {
         [
             NSWindowDidMoveNotification,
             NSWindowDidResizeNotification,
+            NSWindowDidExposeNotification,
             NSWindowDidChangeOcclusionStateNotification,
             NSWindowWillCloseNotification,
             NSWindowWillMiniaturizeNotification,
@@ -74,6 +78,7 @@ impl OwnWindowChanges {
             .collect();
         Self {
             revision,
+            window_states: Mutex::new(None),
             center,
             tokens,
         }
@@ -81,6 +86,18 @@ impl OwnWindowChanges {
 
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
+    }
+
+    /// 種類や表示状態の差を、撮影中の一時変化も含めて世代へ反映する。
+    pub fn observe_window_states(&self, current: HashMap<usize, (OwnWindowKind, bool)>) {
+        let mut previous = self.window_states.lock().expect("window state lock");
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous != &current)
+        {
+            self.revision.fetch_add(1, Ordering::AcqRel);
+        }
+        *previous = Some(current);
     }
 }
 
@@ -96,4 +113,3 @@ impl Drop for OwnWindowChanges {
         }
     }
 }
-

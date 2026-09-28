@@ -136,7 +136,7 @@ pub(crate) async fn publish_speech_transient_shortcut_error(
         .await;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum ShortcutErrorEvent {
     RegistrationFailed {
         lifecycle_revision: Option<u64>,
@@ -153,22 +153,27 @@ pub(crate) enum ShortcutErrorEvent {
     Expired {
         token: ShortcutErrorToken,
         message: String,
+        expires_at: std::time::Instant,
     },
 }
 
 pub(crate) struct ShortcutErrorPresenter {
     coordinator: Arc<super::ShortcutCoordinator>,
     speech: Arc<std::sync::Mutex<crate::speech_lifecycle::SpeechLifecycle>>,
+    monotonic_clock: Arc<dyn crate::ui_root::MonotonicClock>,
 }
 
 impl ShortcutErrorPresenter {
-    pub(crate) fn new(
+
+    pub(crate) fn with_monotonic_clock(
         coordinator: Arc<super::ShortcutCoordinator>,
         speech: Arc<std::sync::Mutex<crate::speech_lifecycle::SpeechLifecycle>>,
+        monotonic_clock: Arc<dyn crate::ui_root::MonotonicClock>,
     ) -> Self {
         Self {
             coordinator,
             speech,
+            monotonic_clock,
         }
     }
 
@@ -227,16 +232,25 @@ impl ShortcutErrorPresenter {
                     localize_shortcut_message(&localize_capture_message(&message, locale), locale);
                 set_shortcut_error(snapshot, error_id, Some(message.clone()), speech_generation);
                 let token = shortcut_error_token(snapshot);
+                let expires_at = self.monotonic_clock.now() + std::time::Duration::from_secs(3);
                 effects.push(UiEffect::Spawn(UiTask::Delay {
                     duration: std::time::Duration::from_secs(3),
                     event: UiEvent::SnapshotCompleted(Box::new(
                         crate::snapshot_presenter::SnapshotEvent::Shortcut(
-                            ShortcutErrorEvent::Expired { token, message },
+                            ShortcutErrorEvent::Expired {
+                                token,
+                                message,
+                                expires_at,
+                            },
                         ),
                     )),
                 }));
             }
-            ShortcutErrorEvent::Expired { token, message } => {
+            ShortcutErrorEvent::Expired {
+                token,
+                message,
+                expires_at,
+            } => {
                 if !is_current_shortcut_error(
                     snapshot.capture_shortcut_error_id,
                     token.id,
@@ -246,6 +260,23 @@ impl ShortcutErrorPresenter {
                     &message,
                 ) {
                     return None;
+                }
+                let now = self.monotonic_clock.now();
+                if now < expires_at {
+                    let remaining = expires_at.duration_since(now);
+                    effects.push(UiEffect::Spawn(UiTask::Delay {
+                        duration: remaining,
+                        event: UiEvent::SnapshotCompleted(Box::new(
+                            crate::snapshot_presenter::SnapshotEvent::Shortcut(
+                                ShortcutErrorEvent::Expired {
+                                    token,
+                                    message,
+                                    expires_at,
+                                },
+                            ),
+                        )),
+                    }));
+                    return Some(effects);
                 }
                 set_shortcut_error(snapshot, error_id, None, None);
             }
@@ -314,4 +345,3 @@ fn is_current_shortcut_error(
                     == localize_capture_message(expected_message, Locale::Ja)
         })
 }
-

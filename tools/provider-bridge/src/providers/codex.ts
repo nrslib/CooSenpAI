@@ -8,7 +8,7 @@ import { validateImages } from "../images.js";
 import type { EffortSelection, ProviderAgent, ProviderCallOptions, ProviderCallResult, ProviderCompactSessionOptions, ProviderUsage } from "../types.js";
 import { codexProviderError } from "./codex-errors.js";
 import { codexInput, codexOutputSchema } from "./inputs.js";
-import { observationDirectories } from "./observation-frame-directory.js";
+import { prepareObservationAccess } from "./observation-frame-directory.js";
 
 function environment(): Record<string, string> {
   return Object.fromEntries(
@@ -114,9 +114,13 @@ export class CodexAgent implements ProviderAgent {
 
   async send(options: ProviderCallOptions): Promise<ProviderCallResult> {
     if (options.isolateTools === true) throw new BridgeError("unsupported", "Codex の作業用 tool 隔離は未対応です");
-    const ephemeral = options.session.mode === "ephemeral" ? await ephemeralEnvironment() : undefined;
+    let observationAccess: Awaited<ReturnType<typeof prepareObservationAccess>> | undefined;
+    let ephemeral: Awaited<ReturnType<typeof ephemeralEnvironment>> | undefined;
     let streamError: BridgeError | undefined;
     try {
+      observationAccess = await prepareObservationAccess(options);
+      options = observationAccess.options;
+      ephemeral = options.session.mode === "ephemeral" ? await ephemeralEnvironment() : undefined;
       const sdkEnvironment = ephemeral?.env ?? await persistentEnvironment();
       const config = {
         developer_instructions: options.systemPrompt,
@@ -129,7 +133,7 @@ export class CodexAgent implements ProviderAgent {
         ...(config === undefined ? {} : { config }),
         ...(options.executable === undefined ? {} : { codexPathOverride: options.executable }),
       });
-      const readableObservationDirectories = observationDirectories();
+      const readableObservationDirectories = observationAccess.readableDirectories;
       const reasoningEffort = effort(options.effort);
       const selectedModel = model(options.model);
       const threadOptions: ThreadOptions = {
@@ -141,7 +145,7 @@ export class CodexAgent implements ProviderAgent {
         webSearchMode: options.webSearchEnabled === true ? "live" : "disabled",
         ...(readableObservationDirectories.length === 0
           ? {}
-          : { additionalDirectories: readableObservationDirectories }),
+          : { additionalDirectories: [...readableObservationDirectories] }),
         ...(selectedModel === undefined ? {} : { model: selectedModel }),
         ...(reasoningEffort === undefined
           ? {}
@@ -223,6 +227,7 @@ export class CodexAgent implements ProviderAgent {
     } catch (error) {
       throw error instanceof BridgeError || options.signal.aborted ? codexProviderError(error) : streamError ?? codexProviderError(error);
     } finally {
+      await observationAccess?.cleanup();
       await ephemeral?.cleanup();
     }
   }

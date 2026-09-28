@@ -249,4 +249,3 @@ impl CompanionAgent {
         })
     }
 }
-

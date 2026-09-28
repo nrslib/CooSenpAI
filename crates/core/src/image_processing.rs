@@ -28,8 +28,9 @@ pub fn own_window_exclusions(
     if !own_windows.is_fresh_at(now) {
         return None;
     }
-    let mut exclusions = Vec::with_capacity(own_windows.bounds.len());
-    for bounds in own_windows.bounds.iter().copied() {
+    let mut exclusions = Vec::with_capacity(own_windows.windows.len());
+    for window in own_windows.windows.iter().copied() {
+        let bounds = window.bounds;
         if !bounds.x.is_finite()
             || !bounds.y.is_finite()
             || !bounds.width.is_finite()
@@ -312,4 +313,3 @@ pub fn hash_reduced_pixels(pixels: &[f64]) -> String {
     }
     format!("{REDUCED_WIDTH}x{REDUCED_HEIGHT}:{hash}")
 }
-

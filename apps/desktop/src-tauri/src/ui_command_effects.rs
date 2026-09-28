@@ -494,6 +494,9 @@ pub(crate) fn tutorial_advance_action(
 }
 
 pub(crate) fn bubble_interaction_command(action: &str) -> DesktopCommand {
+    if action.starts_with("speaker-name:") {
+        return DesktopCommand::SpeakerNameProposal;
+    }
     if crate::utterance_feedback::is_feedback_action(action) {
         return DesktopCommand::UtteranceFeedback;
     }
@@ -553,8 +556,15 @@ pub(crate) async fn dismiss_bubble_result(
                     ))),
                 }
             } else {
-                crate::bubbles::dismiss(&handler, &id).await;
-                IpcResult::success(())
+                match crate::commands_speaker::mark_speaker_name_proposal_card_dismissed(
+                    handler.clone(),
+                    id.clone(),
+                )
+                .await
+                {
+                    Ok(()) => IpcResult::success(()),
+                    Err(error) => IpcResult::failure(error),
+                }
             }
         },
     )

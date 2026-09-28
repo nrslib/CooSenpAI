@@ -141,10 +141,13 @@ export class BridgeHost {
     this.pending.set(request.id, active);
     let streamBytes = 0;
     const projector = new DeltaProjector(request.schema);
+    const absoluteDeadline = performance.now() + request.timeoutMs;
     let stallTimeout: ReturnType<typeof setTimeout> | undefined;
     const resetStallTimeout = (): void => {
       if (stallTimeout !== undefined) clearTimeout(stallTimeout);
       if (controller.signal.aborted) return;
+      const absoluteRemainingMs = absoluteDeadline - performance.now();
+      if (request.stallTimeoutMs >= absoluteRemainingMs) return;
       stallTimeout = setTimeout(
         () => controller.abort(new BridgeError("timeout", "provider request stalled")),
         request.stallTimeoutMs,
@@ -171,6 +174,7 @@ export class BridgeHost {
         ...(request.effort === undefined ? {} : { effort: classifyEffort(request.effort) }),
         systemPrompt: request.systemPrompt,
         message: request.message,
+        ...(request.allowedTranscriptPaths === undefined ? {} : { allowedTranscriptPaths: request.allowedTranscriptPaths }),
         images: request.images.map((path) => ({ path })),
         ...(request.schema === undefined ? {} : { schema: request.schema }),
         ...(request.executable === undefined ? {} : { executable: request.executable }),

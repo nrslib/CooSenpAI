@@ -6,6 +6,7 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
         CommandSource::IpcBubble => matches!(
             command,
             DesktopCommand::TutorialInteract
+                | DesktopCommand::SpeakerNameProposal
                 | DesktopCommand::TutorialAdvance
                 | DesktopCommand::BubbleFastForward
                 | DesktopCommand::BubbleNavigate
@@ -133,7 +134,7 @@ fn main_allows(command: DesktopCommand) -> bool {
         | DesktopCommand::CompanionPresence
         | DesktopCommand::CopyLastReply
         | DesktopCommand::BubbleDismiss
+        | DesktopCommand::SpeakerNameProposal
         | DesktopCommand::ConversationResetDismiss => false,
     }
 }
-

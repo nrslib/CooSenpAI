@@ -97,6 +97,8 @@ pub struct CompanionResponse {
     pub fact_candidates: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fact_updates: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speaker_name_proposals: Vec<crate::speaker_name_proposals::SpeakerNameProposalCandidate>,
 }
 
 #[derive(Debug, Error)]
@@ -442,6 +444,7 @@ impl CompanionAgent {
                 thought: None,
                 fact_candidates: Vec::new(),
                 fact_updates: Vec::new(),
+                speaker_name_proposals: Vec::new(),
             }))
     }
 
@@ -714,6 +717,20 @@ impl CompanionAgent {
         let (selected, omitted) =
             helpers::select_observations(&observations, self.config.wake_coalesce_max);
         let observation_log_directory = self.observation_log_directory()?;
+        let speaker_id_resolver = match self
+            .storage
+            .as_ref()
+            .map(CompanionStorage::prompt_speaker_id_resolver)
+            .transpose()
+        {
+            Ok(resolver) => resolver,
+            Err(error) => {
+                let error = CompanionError::Persistence(error);
+                self.restore_observations(&observations, &error)?;
+                self.restore_observations(&ignored, &error)?;
+                return Err(error);
+            }
+        };
         let mut data = match build_observation_prompt_data(
             &self.display_name,
             &selected,
@@ -730,6 +747,7 @@ impl CompanionAgent {
                 return Err(error);
             }
         };
+        data.speaker_id_resolver = speaker_id_resolver;
         let observation_frame_paths = self.observation_frame_paths(&observations)?;
         let image_paths = self.observation_image_paths(&observations, &observation_frame_paths);
         let (image_paths, attachment_ocr_text) = match self
@@ -1215,6 +1233,7 @@ impl CompanionAgent {
             ProviderCall {
                 system_prompt,
                 prompt: summary_prompt,
+                allowed_transcript_paths: None,
                 images: Vec::new(),
                 tools_disabled: true,
                 web_search_enabled: false,
@@ -1264,7 +1283,7 @@ impl CompanionAgent {
             return Err(CompanionError::Cancelled);
         }
         self.log_call_end(mode, started.elapsed().as_millis())?;
-        let response = match parse_response(&result) {
+        let response = match parse_response(&result, false) {
             Ok(response) => response,
             Err(error) => {
                 self.log_call_failure(mode, ProviderErrorKind::InvalidOutput, None);

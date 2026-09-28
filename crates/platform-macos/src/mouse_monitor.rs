@@ -136,4 +136,3 @@ unsafe fn screen_location(event: &NSEvent) -> NSPoint {
         None => location,
     }
 }
-

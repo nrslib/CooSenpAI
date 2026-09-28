@@ -1,6 +1,11 @@
 use super::*;
 
 impl RuntimeHandle {
+    pub fn user_input_sequence(&self) -> u64 {
+        self.user_input_sequence
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub async fn observe(
         &self,
         frames: Vec<ObservationFrameInput>,
@@ -14,8 +19,28 @@ impl RuntimeHandle {
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError> {
-        self.observe_cancellable_with_delivery(frames, cancellation, true)
-            .await
+        self.observe_cancellable_with_delivery_and_user_input_sequence(
+            frames,
+            cancellation,
+            true,
+            None,
+        )
+        .await
+    }
+
+    pub async fn observe_cancellable_at_user_input_sequence(
+        &self,
+        frames: Vec<ObservationFrameInput>,
+        cancellation: CancellationToken,
+        user_input_sequence: u64,
+    ) -> Result<ObservationRecord, RuntimeError> {
+        self.observe_cancellable_with_delivery_and_user_input_sequence(
+            frames,
+            cancellation,
+            true,
+            Some(user_input_sequence),
+        )
+        .await
     }
 
     pub async fn observe_without_companion_delivery(
@@ -23,15 +48,21 @@ impl RuntimeHandle {
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
     ) -> Result<ObservationRecord, RuntimeError> {
-        self.observe_cancellable_with_delivery(frames, cancellation, false)
-            .await
+        self.observe_cancellable_with_delivery_and_user_input_sequence(
+            frames,
+            cancellation,
+            false,
+            None,
+        )
+        .await
     }
 
-    async fn observe_cancellable_with_delivery(
+    async fn observe_cancellable_with_delivery_and_user_input_sequence(
         &self,
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
         allow_companion_delivery: bool,
+        user_input_sequence: Option<u64>,
     ) -> Result<ObservationRecord, RuntimeError> {
         self.ensure_open()?;
         let generation = self.watch_scope_generation();
@@ -46,6 +77,7 @@ impl RuntimeHandle {
             .send(ControlCommand::Observe(ObserveRequest {
                 frames,
                 audio: Vec::new(),
+                user_input_sequence,
                 allow_companion_delivery,
                 cancellation,
                 response,
@@ -143,6 +175,7 @@ impl RuntimeHandle {
             .send(ControlCommand::Observe(ObserveRequest {
                 frames: Vec::new(),
                 audio,
+                user_input_sequence: None,
                 allow_companion_delivery: true,
                 cancellation,
                 response,

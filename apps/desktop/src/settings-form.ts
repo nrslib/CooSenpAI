@@ -181,7 +181,7 @@ export type SettingsResetRequest =
   | { readonly scope: "all" };
 
 export const tuningHelp: Readonly<Record<string, { readonly defaultValue: string; readonly defaultValueKey?: TranslationKey; readonly descriptionKey: TranslationKey }>> = {
-  "watch.focusElement": { defaultValue: "disabled", defaultValueKey: "common.disabled", descriptionKey: "settings.tuning.focusElement" },
+  "watch.focusElement": { defaultValue: "enabled", defaultValueKey: "common.enabled", descriptionKey: "settings.tuning.focusElement" },
   "companion.dailyProactiveLimit": { defaultValue: "unlimited", defaultValueKey: "settings.tuning.unlimited", descriptionKey: "settings.tuning.dailyProactiveLimit" },
   "companion.assertiveness": { defaultValue: "normal", descriptionKey: "settings.tuning.assertiveness" },
 };

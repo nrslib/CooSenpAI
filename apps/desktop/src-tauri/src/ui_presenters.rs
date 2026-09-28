@@ -44,10 +44,29 @@ impl ChatPresenter {
                 Handling::Handled(self.app.handle(event, self.snapshot.as_ref()))
             }
             UiEvent::StatusDeadline(deadline) => Handling::Handled(self.app.deadline(deadline)),
+            UiEvent::Mounted(crate::ui_events::UiView::Thought) => {
+                Handling::Handled(self.app.thought_window_mounted())
+            }
             UiEvent::Mounted(_) => Handling::Handled(self.app.handle(
                 crate::app_presenter::AppEvent::Input(crate::app_presenter::AppInput::Mounted),
                 self.snapshot.as_ref(),
             )),
+            UiEvent::MainVisibility(visible) => {
+                Handling::Handled(self.app.main_visibility(visible))
+            }
+            UiEvent::MainActiveSpaceChanged(active) => {
+                Handling::Handled(self.app.main_active_space_changed(active))
+            }
+            UiEvent::MainWindowGeometryChanged(geometry) => {
+                Handling::Handled(self.app.main_geometry_changed(geometry))
+            }
+            UiEvent::ThoughtWindowOperationCompleted { operation, result } => Handling::Handled(
+                self.app
+                    .thought_window_operation_completed(operation, result),
+            ),
+            UiEvent::ThoughtWindowStateObserved(result) => {
+                Handling::Handled(self.app.thought_window_state_observed(result))
+            }
             UiEvent::Present(ViewCommand::FocusInput) => {
                 let mut effects = self.app.handle(
                     crate::app_presenter::AppEvent::FocusComposer,
@@ -304,6 +323,13 @@ impl WindowPresenter {
         }
     }
 
+    pub(crate) fn is_visible(&self) -> bool {
+        matches!(
+            self.presentation.state(),
+            PresentationState::Shown | PresentationState::CloseFailed
+        )
+    }
+
     pub(crate) fn handle(&mut self, event: UiEvent) -> Handling {
         let effects = match event {
             UiEvent::SettingsPreview { preview, reply } if self.id == PresenterId::Settings => {
@@ -544,4 +570,3 @@ impl WindowPresenter {
 }
 
 pub(crate) use crate::bubbles::presenter::BubblePresenter;
-

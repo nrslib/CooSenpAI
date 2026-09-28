@@ -222,7 +222,8 @@ pub(super) fn should_show_thought_bubble(
     enabled: bool,
     input_active: bool,
     main_focused: bool,
+    main_visible: bool,
+    main_on_active_space: bool,
 ) -> bool {
-    enabled && !input_active && !main_focused
+    enabled && !input_active && !main_focused && !(main_visible && main_on_active_space)
 }
-

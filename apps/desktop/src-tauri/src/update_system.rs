@@ -82,4 +82,3 @@ impl From<String> for UpdateError {
         Self::Failed(message)
     }
 }
-

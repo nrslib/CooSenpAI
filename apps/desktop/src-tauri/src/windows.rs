@@ -70,6 +70,10 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
     configure_full_screen_space_behavior(&bubble)?;
     bubble.set_ignore_cursor_events(true)?;
     crate::window_bubble::position(&bubble)?;
+    let thought = create_thought_window(app)?;
+    thought.set_focusable(false)?;
+    thought.set_ignore_cursor_events(true)?;
+    configure_thought_space_behavior(&thought)?;
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
@@ -103,10 +107,18 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
                 if let Some(path) = placement.as_ref() {
                     observe_main_window_placement(&app, path);
                 }
+                dispatch_main_geometry_changed(&app);
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                dispatch_main_geometry_changed(&app);
             }
             _ => {}
         }
     });
+    #[cfg(target_os = "macos")]
+    register_active_space_observer(app);
+    dispatch_main_geometry_changed(app.handle());
+    dispatch_main_active_space_changed(&main);
     let capture = app
         .get_webview_window("capture-popup")
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
@@ -178,6 +190,105 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn dispatch_main_geometry_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let (Some(state), Some(main)) = (
+        app.try_state::<Arc<DesktopState>>(),
+        app.get_webview_window("main"),
+    ) else {
+        return;
+    };
+    if let Ok(geometry) = crate::window_thought::main_geometry(&main) {
+        state.ui.input(
+            crate::ui_events::UiView::Application,
+            crate::ui_events::UiEvent::MainWindowGeometryChanged(geometry),
+        );
+    }
+}
+
+fn dispatch_main_active_space_changed(main: &tauri::WebviewWindow) {
+    let Ok(active) = crate::window_thought::is_on_active_space(main) else {
+        return;
+    };
+    if let Some(state) = main.app_handle().try_state::<Arc<DesktopState>>() {
+        state.ui.input(
+            crate::ui_events::UiView::Application,
+            crate::ui_events::UiEvent::MainActiveSpaceChanged(active),
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn register_active_space_observer(app: &mut App) {
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification};
+    use objc2_foundation::NSNotification;
+    use std::ptr::NonNull;
+
+    let app_handle = app.handle().clone();
+    let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
+        let Some(main) = app_handle.get_webview_window("main") else {
+            return;
+        };
+        dispatch_main_active_space_changed(&main);
+    });
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    // SAFETY: the notification name and block signature match NSWorkspace's API. The callback
+    // only reads the main window's active Space and enqueues a UI event.
+    let notification_name = unsafe { NSWorkspaceActiveSpaceDidChangeNotification };
+    let token = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(notification_name),
+            None,
+            None,
+            &block,
+        )
+    };
+    let address = Retained::into_raw(token) as usize;
+    app.manage(ActiveSpaceObserver(address));
+}
+
+#[cfg(target_os = "macos")]
+struct ActiveSpaceObserver(usize);
+
+#[cfg(target_os = "macos")]
+impl Drop for ActiveSpaceObserver {
+    fn drop(&mut self) {
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyObject, ProtocolObject};
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::NSObjectProtocol;
+
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        let observer = self.0 as *mut ProtocolObject<dyn NSObjectProtocol>;
+        // SAFETY: this is the token retained during registration and it is removed and released
+        // exactly once when the application drops the managed observer state.
+        unsafe {
+            center.removeObserver(&*observer.cast::<AnyObject>());
+            drop(Retained::from_raw(observer));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn configure_thought_space_behavior(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+    let native_window = window.ns_window()?;
+    // SAFETY: Tauri returns the live NSWindow associated with this WebviewWindow.
+    let native_window: &NSWindow = unsafe { &*native_window.cast() };
+    let behavior = native_window.collectionBehavior()
+        | NSWindowCollectionBehavior::MoveToActiveSpace
+        | NSWindowCollectionBehavior::FullScreenAuxiliary;
+    native_window.setCollectionBehavior(behavior);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_thought_space_behavior(_window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn configure_full_screen_space_behavior(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
@@ -233,6 +344,18 @@ pub(crate) fn create_bubble_window(app: &App) -> tauri::Result<tauri::WebviewWin
             }
         })
         .build()
+}
+
+pub(crate) fn create_thought_window(app: &App) -> tauri::Result<tauri::WebviewWindow> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == "thought")
+        .cloned()
+        .ok_or(tauri::Error::WindowNotFound)?;
+    WebviewWindowBuilder::from_config(app.handle(), &config)?.build()
 }
 
 /// ポップアップからの送信が受理・失敗・拒否のどれで終わっても、

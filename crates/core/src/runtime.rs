@@ -5,7 +5,9 @@ use crate::config::{validate_config, Config, ConfigPaths};
 use crate::judge::JudgeAgent;
 use crate::locale::{text, Locale, TextKey};
 use crate::memory::{MemoryService, MemoryStatus};
-use crate::observer::{ObservationFrameInput, ObserverAgent, ObserverError};
+use crate::observer::{
+    ObservationFrameInput, ObserverAgent, ObserverError, ObserverExecutionAttempt,
+};
 use crate::ports::RuntimeLogger;
 use crate::provider::ProviderUsage;
 use crate::state::ObservationRecord;
@@ -43,10 +45,10 @@ mod types;
 pub use crate::judge::JudgeDecision;
 pub use crate::judge::JudgeFeedApplyResult;
 pub use types::{
-    CompanionDecision, CompanionObservationResult, ObservationDelivery, RuntimeAgents,
-    RuntimeAttachmentOcrFailure, RuntimeError, RuntimeErrorKind, RuntimeErrorSource,
-    RuntimeFactory, RuntimeLastError, RuntimePhase, RuntimeSnapshot, RuntimeUserResponseFailure,
-    UserInterruption,
+    CompanionDecision, CompanionObservationResult, ObservationDelivery, ObserverExecution,
+    ObserverExecutionRole, RuntimeAgents, RuntimeAttachmentOcrFailure, RuntimeError,
+    RuntimeErrorKind, RuntimeErrorSource, RuntimeFactory, RuntimeLastError, RuntimePhase,
+    RuntimeSnapshot, RuntimeUserResponseFailure, UserInterruption,
 };
 #[path = "runtime_handle_types.rs"]
 mod handle_types;
@@ -357,6 +359,8 @@ pub struct RuntimeActor {
     pending_observations: Vec<ObservationRecord>,
     observation_delivery: ObservationDelivery,
     phase: RuntimePhase,
+    observer_execution: Option<ObserverExecution>,
+    observer_execution_tx: mpsc::UnboundedSender<ObserverExecutionAttempt>,
     factory: Option<std::sync::Arc<dyn RuntimeFactory>>,
     logger: Option<std::sync::Arc<dyn RuntimeLogger>>,
     initialization_retry_at: Option<Instant>,
@@ -370,6 +374,7 @@ pub struct RuntimeActor {
     memory_run_at: Option<Instant>,
     operation_cancellation: std::sync::Arc<OperationCancellation>,
     watch_scope_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    user_input_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     watch_scope_commit_lock: std::sync::Arc<std::sync::Mutex<()>>,
     turn_commit_lock: std::sync::Arc<std::sync::Mutex<()>>,
     companion_display_name: String,
@@ -401,6 +406,32 @@ pub struct RuntimeActor {
     user_commands_blocked: bool,
     user_cancel_recovery: Option<String>,
     agent_rebuild_pending: bool,
+}
+
+fn update_observer_execution_attempt(
+    execution: &mut Option<ObserverExecution>,
+    update: &ObserverExecutionAttempt,
+) -> bool {
+    let Some(execution) = execution
+        .as_mut()
+        .filter(|execution| execution.id == update.execution_id)
+    else {
+        return false;
+    };
+    if update.attempt <= execution.attempt {
+        return false;
+    }
+    execution.attempt = update.attempt;
+    true
+}
+
+impl RuntimeActor {
+    fn clear_observer_execution(&mut self, snapshot_tx: &watch::Sender<RuntimeSnapshot>) {
+        if self.observer_execution.take().is_some() {
+            self.revision = self.revision.saturating_add(1);
+            self.publish(snapshot_tx);
+        }
+    }
 }
 
 impl RuntimeActor {
@@ -590,6 +621,7 @@ impl RuntimeActor {
         let (priority_tx, mut priority_rx) = mpsc::channel::<PriorityCommand>(COMMAND_CAPACITY);
         let (user_tx, mut user_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+        let (observer_execution_tx, mut observer_execution_rx) = mpsc::unbounded_channel();
         let judge_feedback_store = companion
             .as_ref()
             .and_then(CompanionAgent::judge_feedback_store_path);
@@ -607,6 +639,7 @@ impl RuntimeActor {
             companion_emotions: crate::emotion::EmotionState::default(),
             revision: 0,
             phase: RuntimePhase::Idle,
+            observer_execution: None,
             pending_observations: 0,
             last_error: initial_error.clone(),
             companion_retry_in_seconds: None,
@@ -636,10 +669,12 @@ impl RuntimeActor {
         let operation_cancellation =
             std::sync::Arc::new(OperationCancellation::new(cancellation.clone()));
         let watch_scope_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let user_input_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let watch_scope_commit_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
         let turn_commit_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
         let actor_operation_cancellation = operation_cancellation.clone();
         let actor_watch_scope_generation = watch_scope_generation.clone();
+        let actor_user_input_sequence = user_input_sequence.clone();
         let actor_watch_scope_commit_lock = watch_scope_commit_lock.clone();
         let actor_turn_commit_lock = turn_commit_lock.clone();
         let actor_user_preparer = user_preparer.clone();
@@ -667,6 +702,8 @@ impl RuntimeActor {
                 pending_observations: Vec::new(),
                 observation_delivery,
                 phase: RuntimePhase::Idle,
+                observer_execution: None,
+                observer_execution_tx,
                 factory,
                 logger,
                 initialization_retry_at,
@@ -680,6 +717,7 @@ impl RuntimeActor {
                 memory,
                 operation_cancellation: actor_operation_cancellation,
                 watch_scope_generation: actor_watch_scope_generation,
+                user_input_sequence: actor_user_input_sequence,
                 watch_scope_commit_lock: actor_watch_scope_commit_lock,
                 turn_commit_lock: actor_turn_commit_lock,
                 companion_display_name,
@@ -898,10 +936,21 @@ impl RuntimeActor {
                     .unwrap_or_else(|| Instant::now() + Duration::from_secs(24 * 60 * 60));
                 let fairness_deadline = tokio::time::sleep(Duration::from_millis(1));
                 tokio::pin!(fairness_deadline);
+                let observer_cancellation = running_observer
+                    .as_ref()
+                    .map(|operation| operation.cancellation.clone());
+                let observer_cancellation_event = async move {
+                    match observer_cancellation {
+                        Some(cancellation) => cancellation.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::pin!(observer_cancellation_event);
                 tokio::select! {
                     biased;
                     _ = actor_cancellation.cancelled() => {
                         if let Some(operation) = running_observer.take() {
+                            actor.clear_observer_execution(&snapshot_tx);
                             let _ = operation.cancel_and_wait().await;
                             actor.operation_cancellation.renew_lane(OperationLane::Observer);
                         }
@@ -912,6 +961,9 @@ impl RuntimeActor {
                         actor.close_user_waiters();
                         actor.judge.shutdown().await;
                         break;
+                    }
+                    _ = &mut observer_cancellation_event, if actor.observer_execution.is_some() => {
+                        actor.clear_observer_execution(&snapshot_tx);
                     }
                     _ = &mut fairness_deadline, if user_commands_processed >= MAX_QUEUED_USER_COMMANDS_PER_TURN
                         || control_commands_processed >= MAX_QUEUED_CONTROL_COMMANDS_PER_TURN => {
@@ -1095,10 +1147,13 @@ impl RuntimeActor {
                                     if let Some(logger) = &actor.logger {
                                         let _ = logger.write("INFO", &format!("runtime 操作を中断しました: operation={} reason={}", operation.kind_label(), command.cancellation_reason()));
                                     }
+                                    actor.clear_observer_execution(&snapshot_tx);
                                     if let CancellationResult::Outcome(outcome) =
                                         operation.cancel_and_wait().await
                                     {
                                         actor.restore_cancelled_operation(outcome, &snapshot_tx);
+                                    } else {
+                                        actor.observer_execution = None;
                                     }
                                     actor.operation_cancellation.renew_lane(OperationLane::Observer);
                                 }
@@ -1181,6 +1236,17 @@ impl RuntimeActor {
                             actor.publish(&snapshot_tx);
                         }
                     }
+                    Some(update) = observer_execution_rx.recv() => {
+                        let changed = update_observer_execution_attempt(
+                            &mut actor.observer_execution,
+                            &update,
+                        );
+                        if changed {
+                            actor.revision = actor.revision.saturating_add(1);
+                            actor.publish(&snapshot_tx);
+                        }
+                        let _ = update.acknowledged.send(());
+                    }
                     _ = tokio::time::sleep_until(user_retry_deadline), if coo_idle && actor.user_retry_at.is_some() && !actor.operation_cancellation.provider_starts_blocked() => {
                         if let Some(input_id) = actor.user_cancel_recovery.clone() {
                             if actor.cancel_user_input_after_termination(&input_id).is_ok() {
@@ -1241,6 +1307,7 @@ impl RuntimeActor {
             cancellation,
             operation_cancellation,
             watch_scope_generation,
+            user_input_sequence,
             watch_scope_commit_lock,
             turn_commit_lock,
             snapshot_rx,

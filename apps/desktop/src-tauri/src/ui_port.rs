@@ -115,6 +115,156 @@ impl UiPort for NativeUiPort {
                 crate::webview_event::emit_to(&state.app, "main", "coosenpai:status:view", &view)
                     .map_err(|e| e.to_string())?
             }
+            UiEffect::ThoughtRender(view) => crate::webview_event::emit_to(
+                &state.app,
+                "thought",
+                "coosenpai:thought:view",
+                &view,
+            )
+            .map_err(|error| error.to_string())?,
+            UiEffect::ThoughtWindowPosition(position) => {
+                let operation = crate::window_thought::ThoughtWindowOperation::Position(position);
+                let operation_result = state
+                    .app
+                    .get_webview_window("thought")
+                    .ok_or_else(|| "思考吹き出しがありません".to_owned())
+                    .and_then(|thought| {
+                        crate::window_thought::set_position(&thought, position.position)
+                            .map_err(|error| error.to_string())?;
+                        let actual = thought
+                            .outer_position()
+                            .map_err(|error| error.to_string())?;
+                        if actual.x == position.position.x && actual.y == position.position.y {
+                            Ok(())
+                        } else {
+                            Err(format!(
+                                "思考吹き出しの配置を確認できません: expected=({}, {}) actual=({}, {})",
+                                position.position.x, position.position.y, actual.x, actual.y
+                            ))
+                        }
+                    });
+                result
+                    .events
+                    .push(UiEvent::ThoughtWindowOperationCompleted {
+                        operation,
+                        result: operation_result,
+                    });
+            }
+            UiEffect::ThoughtWindowShow => {
+                let operation = crate::window_thought::ThoughtWindowOperation::Show;
+                let operation_result = state
+                    .app
+                    .get_webview_window("thought")
+                    .ok_or_else(|| "思考吹き出しがありません".to_owned())
+                    .and_then(|thought| {
+                        let main = state
+                            .app
+                            .get_webview_window("main")
+                            .ok_or_else(|| "メインウィンドウがありません".to_owned())?;
+                        (|| {
+                            if !thought.is_visible().map_err(|error| error.to_string())? {
+                                thought.show().map_err(|error| error.to_string())?;
+                            }
+                            if !thought.is_visible().map_err(|error| error.to_string())? {
+                                return Err("思考吹き出しが表示されていません".to_owned());
+                            }
+                            crate::window_thought::attach_to_main_window(&main, &thought)
+                        })()
+                        .map_err(|error| {
+                            let hide_result =
+                                thought.hide().map_err(|hide_error| hide_error.to_string());
+                            let visibility_result =
+                                thought.is_visible().map_err(|visibility_error| {
+                                    visibility_error.to_string()
+                                });
+                            let rollback_detail = match (hide_result, visibility_result) {
+                                (Ok(()), Ok(false)) => String::new(),
+                                (Ok(()), Ok(true)) => {
+                                    "; 非表示化後も思考吹き出しが可視です".to_owned()
+                                }
+                                (Err(hide_error), Ok(true)) => format!(
+                                    "; 非表示に失敗しました: {hide_error}; 思考吹き出しは可視です"
+                                ),
+                                (Err(hide_error), Ok(false)) => {
+                                    format!("; 非表示に失敗しました: {hide_error}")
+                                }
+                                (Ok(()), Err(visibility_error)) => format!(
+                                    "; 非表示後の可視状態を確認できません: {visibility_error}"
+                                ),
+                                (Err(hide_error), Err(visibility_error)) => format!(
+                                    "; 非表示に失敗しました: {hide_error}; 可視状態も確認できません: {visibility_error}"
+                                ),
+                            };
+                            format!(
+                                "思考吹き出しの表示準備に失敗しました: {error}{rollback_detail}"
+                            )
+                        })
+                    });
+                match &operation_result {
+                    Ok(()) => {
+                        let _ = state.logger.write(
+                            "INFO",
+                            "思考吹き出しをメインウィンドウの子ウィンドウに接続しました",
+                        );
+                    }
+                    Err(error) => {
+                        let _ = state.logger.write(
+                            "WARN",
+                            &format!("思考吹き出しの子ウィンドウ化に失敗しました: {error}"),
+                        );
+                    }
+                }
+                result
+                    .events
+                    .push(UiEvent::ThoughtWindowOperationCompleted {
+                        operation,
+                        result: operation_result,
+                    });
+            }
+            UiEffect::ThoughtWindowHide => {
+                let operation = crate::window_thought::ThoughtWindowOperation::Hide;
+                let operation_result = state
+                    .app
+                    .get_webview_window("thought")
+                    .ok_or_else(|| "思考吹き出しがありません".to_owned())
+                    .and_then(|thought| {
+                        // 親の miniaturize で不可視になっていても、child の orderOut で親子関係を解除する。
+                        thought.hide().map_err(|error| error.to_string())?;
+                        if thought.is_visible().map_err(|error| error.to_string())? {
+                            Err("思考吹き出しが非表示になっていません".to_owned())
+                        } else {
+                            Ok(())
+                        }
+                    });
+                result
+                    .events
+                    .push(UiEvent::ThoughtWindowOperationCompleted {
+                        operation,
+                        result: operation_result,
+                    });
+            }
+            UiEffect::ThoughtWindowInspect => {
+                let state = state
+                    .app
+                    .get_webview_window("thought")
+                    .ok_or_else(|| "思考吹き出しがありません".to_owned())
+                    .and_then(|thought| {
+                        let visible = thought.is_visible().map_err(|error| error.to_string())?;
+                        let position = thought
+                            .outer_position()
+                            .map_err(|error| error.to_string())?;
+                        Ok(crate::window_thought::ThoughtWindowNativeState {
+                            visible,
+                            position: crate::window_thought::ScreenPoint {
+                                x: position.x,
+                                y: position.y,
+                            },
+                        })
+                    });
+                result
+                    .events
+                    .push(UiEvent::ThoughtWindowStateObserved(state));
+            }
             UiEffect::PersonasRender(personas) => crate::webview_event::emit_to(
                 &state.app,
                 "main",
@@ -269,6 +419,21 @@ impl UiPort for NativeUiPort {
             }
             UiEffect::View { view, command } => {
                 result = view_applied(view, command, self.apply_view(view, command).await)?;
+                if view == PresenterId::Chat
+                    && matches!(command, ViewCommand::Show | ViewCommand::Front)
+                {
+                    if let Some(main) = state.app.get_webview_window("main") {
+                        let mut main_events = Vec::new();
+                        if let Ok(geometry) = crate::window_thought::main_geometry(&main) {
+                            main_events.push(UiEvent::MainWindowGeometryChanged(geometry));
+                        }
+                        if let Ok(active) = crate::window_thought::is_on_active_space(&main) {
+                            main_events.push(UiEvent::MainActiveSpaceChanged(active));
+                        }
+                        main_events.append(&mut result.events);
+                        result.events = main_events;
+                    }
+                }
             }
             UiEffect::PanelUpdates { view, updates } => {
                 let label = match view {
@@ -398,7 +563,10 @@ impl UiPort for NativeUiPort {
             UiTask::Tutorial(task) => result.events.push(UiEvent::Tutorial(Box::new(
                 crate::tutorial_effects::run(state.clone(), task).await,
             ))),
-            UiTask::RefreshConversation => state.refresh_conversation().await,
+            UiTask::RefreshConversation => {
+                state.refresh_conversation().await;
+                crate::commands_speaker::schedule_speaker_name_proposal_bubble_sync(state.clone());
+            }
             UiTask::ReadFactCandidate(date) => result.events.push(UiEvent::FactCandidateLoaded(
                 state
                     .load_fact_candidate(date)
@@ -407,6 +575,7 @@ impl UiPort for NativeUiPort {
             )),
             UiTask::RuntimeFollowup => {
                 state.refresh_conversation().await;
+                crate::commands_speaker::schedule_speaker_name_proposal_bubble_sync(state.clone());
                 if state.snapshot().await.onboarding.tutorial_active {
                     result.events.push(UiEvent::Tutorial(Box::new(crate::tutorial_events::TutorialEvent::Response(crate::tutorial_response_presenter::ResponseEvent::RuntimeConversationLoaded))));
                 }

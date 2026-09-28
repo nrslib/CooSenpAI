@@ -15,11 +15,13 @@ fn main() -> io::Result<()> {
 
     let instructions = read_facet_directory(
         &facets_root.join("instructions"),
-        &["observer.md", "observer-audio.md"],
+        &["observer.md", "observer-audio.md", "microphone-commands.md"],
     )?;
     let observer_instructions = read_facet_file(&facets_root.join("instructions/observer.md"))?;
     let observer_audio_instructions =
         read_facet_file(&facets_root.join("instructions/observer-audio.md"))?;
+    let observer_microphone_instructions =
+        read_facet_file(&facets_root.join("instructions/microphone-commands.md"))?;
     let observer_output_contracts =
         read_facet_file(&facets_root.join("output-contracts/observer.md"))?;
     let companion_output_contracts =
@@ -27,15 +29,21 @@ fn main() -> io::Result<()> {
     let knowledge = read_facet_directory(&facets_root.join("knowledge"), &[])?;
     let observer_knowledge = read_facet_file(&facets_root.join("knowledge/observation.md"))?;
     let policy = read_facet_directory(&facets_root.join("policies"), &[])?;
+    let observer_policy = read_facet_directory(
+        &facets_root.join("policies"),
+        &["assertiveness.md", "speech.md"],
+    )?;
     let output = format!(
         "pub const BUILTIN_INSTRUCTIONS: &str = {instructions:?};\n\
 pub const BUILTIN_OBSERVER_INSTRUCTIONS: &str = {observer_instructions:?};\n\
 pub const BUILTIN_OBSERVER_AUDIO_INSTRUCTIONS: &str = {observer_audio_instructions:?};\n\
+pub const BUILTIN_OBSERVER_MICROPHONE_INSTRUCTIONS: &str = {observer_microphone_instructions:?};\n\
 pub const BUILTIN_OBSERVER_OUTPUT_CONTRACTS: &str = {observer_output_contracts:?};\n\
 pub const BUILTIN_COMPANION_OUTPUT_CONTRACTS: &str = {companion_output_contracts:?};\n\
 pub const BUILTIN_KNOWLEDGE: &str = {knowledge:?};\n\
 pub const BUILTIN_OBSERVER_KNOWLEDGE: &str = {observer_knowledge:?};\n\
-pub const BUILTIN_POLICY: &str = {policy:?};\n"
+pub const BUILTIN_POLICY: &str = {policy:?};\n\
+pub const BUILTIN_OBSERVER_POLICY: &str = {observer_policy:?};\n"
     );
 
     let output_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set by Cargo"))

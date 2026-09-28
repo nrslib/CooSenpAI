@@ -259,4 +259,3 @@ pub(super) fn default_voice_output_provider() -> String {
 pub(super) fn default_voice_output_rate() -> u32 {
     180
 }
-

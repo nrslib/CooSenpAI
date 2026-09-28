@@ -331,4 +331,3 @@ fn accepted(id: u64) -> UiEffect {
         event: UiEvent::MotionSettings(MotionEvent::PreviewAccepted(id)),
     }
 }
-

@@ -33,4 +33,3 @@ pub(crate) fn selection_complete(image: Option<&[u8]>) -> String {
         image.map_or(0, <[u8]>::len)
     )
 }
-

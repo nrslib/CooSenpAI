@@ -283,4 +283,3 @@ fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<()> {
     }
     Ok(())
 }
-

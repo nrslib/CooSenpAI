@@ -235,6 +235,27 @@ impl DesktopState {
         keychain: Arc<dyn ProviderApiKeyStore>,
         voice_output_provider: Arc<dyn coosenpai_core::voice_output::VoiceOutputProviderFactory>,
     ) -> Result<Arc<Self>> {
+        Self::initialize_with_ports_and_monotonic_clock(
+            app,
+            clipboard_reader,
+            clipboard_writer,
+            selected_text_copier,
+            keychain,
+            voice_output_provider,
+            Arc::new(crate::ui_root::SystemMonotonicClock),
+        )
+        .await
+    }
+
+    pub(crate) async fn initialize_with_ports_and_monotonic_clock(
+        app: AppHandle,
+        clipboard_reader: Arc<dyn ClipboardReader>,
+        clipboard_writer: Arc<dyn ClipboardWriter>,
+        selected_text_copier: Arc<dyn SelectedTextCopyPort>,
+        keychain: Arc<dyn ProviderApiKeyStore>,
+        voice_output_provider: Arc<dyn coosenpai_core::voice_output::VoiceOutputProviderFactory>,
+        monotonic_clock: Arc<dyn crate::ui_root::MonotonicClock>,
+    ) -> Result<Arc<Self>> {
         let paths = crate::desktop_startup::prepare_paths(
             std::env::var_os("HOME"),
             std::env::var_os("COOSENPAI_HOME"),
@@ -318,7 +339,7 @@ impl DesktopState {
         let initial_avatar =
             crate::avatar::load_with_status(&paths, config.ui.avatar_path.as_deref());
         let config_revision = config.revision;
-        let (ui, start_ui_root) = crate::ui_root::channel();
+        let (ui, start_ui_root) = crate::ui_root::channel(monotonic_clock);
         let (capture, capture_presenter) = crate::capture::channel(ui.clone());
         let (bubble_focus, _) = watch::channel(false);
         logger.write(

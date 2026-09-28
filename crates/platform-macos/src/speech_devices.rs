@@ -162,4 +162,3 @@ fn key_code(key: &str) -> Option<u16> {
         _ => return None,
     })
 }
-

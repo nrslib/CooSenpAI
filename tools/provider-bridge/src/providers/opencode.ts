@@ -6,6 +6,7 @@ import type { ProviderAgent, ProviderCallOptions, ProviderCallResult, ProviderCa
 import { OpenCodeServerOwner } from "./opencode-server.js";
 import { opencodeParts } from "./inputs.js";
 import { OpenCodeTextProjector } from "./opencode-text.js";
+import { prepareObservationAccess } from "./observation-frame-directory.js";
 
 function parseModel(model: string | undefined): { providerID: string; modelID: string } {
   if (model === undefined || model === "default") {
@@ -75,8 +76,19 @@ export class OpenCodeAgent implements ProviderAgent {
     const executable = options.executable ?? "opencode";
     const model = parseModel(options.model);
     let ephemeralSession: { client: OpencodeClient; id: string } | undefined;
+    let observationAccess: Awaited<ReturnType<typeof prepareObservationAccess>> | undefined;
+    let scopedServer: { client: OpencodeClient; close(): Promise<void> } | undefined;
     try {
-      const client = await this.owner.client(executable, options.signal);
+      const restricted = options.allowedTranscriptPaths !== undefined;
+      observationAccess = await prepareObservationAccess(options);
+      options = observationAccess.options;
+      const client = restricted
+        ? (scopedServer = await this.owner.scopedClient(
+          executable,
+          options.signal,
+          observationAccess.readableDirectories,
+        )).client
+        : await this.owner.client(executable, options.signal);
       const imageSupport = await this.owner.modelSupportsImages(
         client,
         model.providerID,
@@ -166,6 +178,8 @@ export class OpenCodeAgent implements ProviderAgent {
     } catch (error) {
       throw safeProviderError(error);
     } finally {
+      await scopedServer?.close();
+      await observationAccess?.cleanup();
       if (ephemeralSession !== undefined) {
         await ephemeralSession.client.session.delete({
           sessionID: ephemeralSession.id,

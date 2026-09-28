@@ -79,4 +79,3 @@ pub fn bridge_environment_with_api_key(
     }
     Ok(environment)
 }
-

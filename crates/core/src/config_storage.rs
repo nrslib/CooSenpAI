@@ -288,4 +288,3 @@ fn is_executable(path: &Path) -> bool {
         true
     }
 }
-

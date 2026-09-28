@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::image_processing::{png_dimensions, process_png, ExcludedBounds, ProcessedImage};
-use crate::ports::{CapturedScreen, OcrPort, ScreenDisplay};
+use crate::ports::{
+    CapturedScreen, OcrPort, OwnWindowContext, OwnWindowFrame, OwnWindowImageRect, ScreenDisplay,
+};
 use crate::watch_coordinator::{normalize_ocr_blocks, OcrText};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -10,12 +12,17 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+const MENU_BAR_HEIGHT: f64 = 28.0;
+
 pub struct PreparedScreenFrame {
     pub context_id: String,
     pub display: ScreenDisplay,
     pub image: ProcessedImage,
+    pub provider_width: u32,
+    pub provider_height: u32,
     pub provider_path: PathBuf,
     pub ocr: Option<OcrText>,
+    pub own_window_context: Option<OwnWindowContext>,
 }
 
 impl PreparedScreenFrame {
@@ -45,6 +52,7 @@ impl PreparedScreenFrame {
             target: "fullscreen".to_owned(),
             ocr_text: self.ocr.as_ref().map(|ocr| ocr.text.clone()),
             focus,
+            own_window_context: self.own_window_context.clone(),
             image_path: self.provider_path.clone(),
         }
     }
@@ -73,6 +81,95 @@ pub fn display_exclusions(
             height: bounds.height * scale_y,
         })
         .collect()
+}
+
+pub fn display_own_window_rectangles(
+    display: ScreenDisplay,
+    source_width: u32,
+    source_height: u32,
+    image_width: u32,
+    image_height: u32,
+    windows: &[OwnWindowFrame],
+) -> Vec<OwnWindowImageRect> {
+    let scale_x = f64::from(source_width) / display.bounds.width;
+    let scale_y = f64::from(source_height) / display.bounds.height;
+    let mut rectangles = Vec::new();
+    for window in windows {
+        let bounds = window.bounds;
+        let display_right = display.bounds.x + display.bounds.width;
+        let menu_bar_bottom = display.bounds.y + MENU_BAR_HEIGHT;
+        if bounds.x >= display.bounds.x
+            && bounds.x + bounds.width <= display_right
+            && bounds.y >= display.bounds.y
+            && bounds.y + bounds.height <= menu_bar_bottom
+        {
+            continue;
+        }
+        let left = ((bounds.x - display.bounds.x) * scale_x)
+            .floor()
+            .max(0.0)
+            .min(f64::from(source_width)) as u32;
+        let top = ((bounds.y - display.bounds.y) * scale_y)
+            .floor()
+            .max(0.0)
+            .min(f64::from(source_height)) as u32;
+        let right = ((bounds.x + bounds.width - display.bounds.x) * scale_x)
+            .ceil()
+            .max(0.0)
+            .min(f64::from(source_width)) as u32;
+        let bottom = ((bounds.y + bounds.height - display.bounds.y) * scale_y)
+            .ceil()
+            .max(0.0)
+            .min(f64::from(source_height)) as u32;
+        if right <= left || bottom <= top {
+            continue;
+        }
+        let image_left = ((f64::from(left) * f64::from(image_width) / f64::from(source_width))
+            .ceil() as u32)
+            .min(image_width);
+        let image_top = ((f64::from(top) * f64::from(image_height) / f64::from(source_height))
+            .ceil() as u32)
+            .min(image_height);
+        let image_right = ((f64::from(right) * f64::from(image_width) / f64::from(source_width))
+            .ceil() as u32)
+            .min(image_width);
+        let image_bottom =
+            ((f64::from(bottom) * f64::from(image_height) / f64::from(source_height)).ceil()
+                as u32)
+                .min(image_height);
+        if image_right > image_left && image_bottom > image_top {
+            rectangles.push(OwnWindowImageRect {
+                kind: window.kind,
+                x: image_left,
+                y: image_top,
+                width: image_right - image_left,
+                height: image_bottom - image_top,
+            });
+        }
+    }
+    rectangles
+}
+
+pub fn attach_own_window_context(
+    frames: &mut [PreparedScreenFrame],
+    windows: &[OwnWindowFrame],
+    user_response_in_progress: Option<bool>,
+) {
+    for frame in frames {
+        let own_windows = display_own_window_rectangles(
+            frame.display,
+            frame.image.width,
+            frame.image.height,
+            frame.provider_width,
+            frame.provider_height,
+            windows,
+        );
+        frame.own_window_context = (!own_windows.is_empty() || user_response_in_progress.is_some())
+            .then_some(OwnWindowContext {
+                windows: own_windows,
+                user_response_in_progress,
+            });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -113,7 +210,9 @@ pub async fn prepare_screen_frames(
         let bytes = tokio::fs::read(&capture.path).await?;
         let (width, height) = png_dimensions(&bytes).context("画面 PNG が不正です")?;
         let mut excluded = display_exclusions(capture.display, width, height, exclusions);
-        let ignored_top = (28.0 * f64::from(height) / bounds.height).round().max(1.0) as u32;
+        let ignored_top = (MENU_BAR_HEIGHT * f64::from(height) / bounds.height)
+            .round()
+            .max(1.0) as u32;
         excluded.push(ExcludedBounds {
             x: 0.0,
             y: 0.0,
@@ -128,6 +227,8 @@ pub async fn prepare_screen_frames(
             semaphore.clone(),
         )
         .await?;
+        let (provider_width, provider_height) =
+            png_dimensions(&image.provider_png).context("縮小後の画面 PNG が不正です")?;
         ensure_active(cancellation)?;
         let provider_path = directory.join(format!("provider-{}.png", capture.display.id));
         tokio::fs::write(&provider_path, &image.provider_png).await?;
@@ -164,8 +265,11 @@ pub async fn prepare_screen_frames(
             context_id: crate::debug::DebugStore::new_id(),
             display: capture.display,
             image,
+            provider_width,
+            provider_height,
             provider_path,
             ocr: ocr_text,
+            own_window_context: None,
         });
     }
     Ok(PreparedScreenFrames {
@@ -182,4 +286,3 @@ fn ensure_active(cancellation: &CancellationToken) -> Result<()> {
     );
     Ok(())
 }
-

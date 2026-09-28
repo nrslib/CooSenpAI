@@ -190,4 +190,3 @@ fn normalize_named_key(key: &str) -> Option<String> {
         _ => return None,
     })
 }
-

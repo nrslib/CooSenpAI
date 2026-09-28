@@ -129,6 +129,7 @@ export function ConversationLogPanel({ log, details, action, listRef, scrollGene
         <h3>{t("details.logSpeakerEditorTitle")}</h3>
         <span title={log.speakerEditor.speakerId}>{speakerDisplayName(log.speakerEditor.speakerId, null)}</span>
       </div>
+      <p className="field-help" role="note">{t("details.logSpeakerProviderDisclosure")}</p>
       <label className="log-speaker-editor-field">
         <span>{t("details.logSpeakerName")}</span>
         <input

@@ -168,9 +168,13 @@ async fn record_watch_failure_inner(
             "ERROR",
             &format!("見守りを停止しました: error-type=mailbox reason={} retryable=false action=stop error={detail}", mailbox_error.reason()),
         );
-        publisher
-            .observe_watch_exit(generation, detail, tutorial)
-            .await;
+        return WatchRecoveryDecision::Stop;
+    }
+    if is_observer_provider_failure(error) {
+        let _ = logger.write(
+            "ERROR",
+            &format!("見守りを停止しました: error-type=observer-provider retryable=false action=stop error={detail}"),
+        );
         return WatchRecoveryDecision::Stop;
     }
     let Some(delay) = recovery.next_delay() else {
@@ -178,9 +182,6 @@ async fn record_watch_failure_inner(
             "ERROR",
             &format!("見守りを停止しました: error-type=watch recovery-exhausted error={detail}"),
         );
-        publisher
-            .observe_watch_exit(generation, detail, tutorial)
-            .await;
         return WatchRecoveryDecision::Stop;
     };
     let attempt = recovery.consecutive_failures;
@@ -192,6 +193,17 @@ async fn record_watch_failure_inner(
         _ = cancellation.cancelled() => WatchRecoveryDecision::Cancelled,
         _ = tokio::time::sleep(delay) => WatchRecoveryDecision::Retry,
     }
+}
+
+fn is_observer_provider_failure(error: &Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<RuntimeError>().is_some_and(|error| {
+            matches!(
+                error,
+                RuntimeError::Observer(coosenpai_core::observer::ObserverError::Provider(_))
+            )
+        })
+    })
 }
 
 pub(super) async fn record_watch_exit<H: super::WatchHost>(

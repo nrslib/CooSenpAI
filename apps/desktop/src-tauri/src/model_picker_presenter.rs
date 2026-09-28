@@ -397,4 +397,3 @@ pub(crate) async fn run(state: Arc<crate::state::DesktopState>, task: ModelPicke
     };
     UiEvent::ModelPicker(event)
 }
-

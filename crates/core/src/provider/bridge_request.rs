@@ -24,6 +24,7 @@ pub(super) fn send_request_value(
         "effort": input.effort,
         "systemPrompt": input.system_prompt,
         "message": input.prompt,
+        "allowedTranscriptPaths": input.allowed_transcript_paths,
         "images": input.images.iter().map(|image| &image.path).collect::<Vec<_>>(),
         "schema": input.output_schema,
         "executable": executable,
@@ -88,4 +89,3 @@ pub(super) fn send_request_fits(input: &ProviderCall) -> bool {
     );
     serialize_request_line(&request).is_ok()
 }
-

@@ -424,4 +424,3 @@ pub(crate) async fn run(
     };
     UiEvent::MotionSettings(event)
 }
-

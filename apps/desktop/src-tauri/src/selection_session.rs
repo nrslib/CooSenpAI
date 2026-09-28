@@ -7,14 +7,13 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(50);
-const TRANSITION_TIMEOUT: Duration = Duration::from_secs(1);
+const CLOSING_TIMEOUT: Duration = Duration::from_secs(1);
 const DRAINING_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionState {
     Closed,
     Opening,
-    AwaitingOpenToClose,
     Open,
     Closing,
     Draining,
@@ -25,6 +24,7 @@ enum SessionInput {
     Open,
     Close,
     Shutdown,
+    Supersede,
     ShortcutPosted,
     EscapePosted,
     Windows(bool),
@@ -60,7 +60,6 @@ struct SelectionSession {
     timeouts_enabled: bool,
     deadline: Option<Instant>,
     next_poll: Option<Instant>,
-    baseline_windows: Vec<u32>,
     tracked_window: Option<u32>,
     clipboard_baseline: i64,
     clipboard_changed: i64,
@@ -74,7 +73,6 @@ impl Default for SelectionSession {
             timeouts_enabled: true,
             deadline: None,
             next_poll: None,
-            baseline_windows: Vec::new(),
             tracked_window: None,
             clipboard_baseline: 0,
             clipboard_changed: 0,
@@ -98,7 +96,7 @@ impl SelectionSession {
             {
                 return A::Ignore;
             }
-            (S::Opening | S::AwaitingOpenToClose | S::Closing, I::ClipboardChanged(count)) => {
+            (S::Opening | S::Closing, I::ClipboardChanged(count)) => {
                 self.clipboard_changed = count;
                 return A::TrackClipboard;
             }
@@ -114,32 +112,29 @@ impl SelectionSession {
                 self.clipboard_baseline = self.clipboard_changed;
                 return A::UpdateClipboardBaseline;
             }
-            (
-                S::Closed | S::Opening | S::AwaitingOpenToClose | S::Closing | S::Draining,
-                I::ImageRead(_),
-            ) => return A::Ignore,
+            (S::Closed | S::Opening | S::Closing | S::Draining, I::ImageRead(_)) => {
+                return A::Ignore
+            }
             (S::Closed | S::Draining, I::Open) => (S::Closed, A::Start),
             (_, I::Open) => return A::RejectOpen,
+            (S::Opening, I::Supersede) => (S::Closed, A::Cancelled),
+            (S::Draining, I::Supersede) => (S::Closed, A::CloseAccepted),
+            (S::Closing, I::Supersede) => (self.state, A::CloseAccepted),
+            (S::Open, I::Supersede) => (S::Closed, A::Cancelled),
             (S::Closed, I::Close | I::Shutdown) => (S::Closed, A::Closed),
-            (S::Opening | S::AwaitingOpenToClose | S::Open, I::Shutdown) => (S::Closing, A::Escape),
+            (S::Open, I::Shutdown) => (S::Closing, A::Escape),
             (S::Closing | S::Draining, I::Close | I::Shutdown) => (self.state, A::CloseAccepted),
+            (S::Closed, I::Supersede) => (S::Closed, A::CloseAccepted),
             (S::Closing, I::EscapePosted) => (S::Draining, A::Cancelled),
-            (S::Opening, I::Close) => (S::AwaitingOpenToClose, A::Observe),
+            (S::Opening, I::Close | I::Shutdown) => (S::Closed, A::Cancelled),
             (S::Open, I::Close) => (S::Closing, A::Escape),
-            (S::AwaitingOpenToClose, I::Close) => return A::Ignore,
             (S::Closed, I::ShortcutPosted) => (S::Opening, A::Observe),
             (S::Opening, I::Windows(true)) => (S::Open, A::Opened),
-            (S::AwaitingOpenToClose, I::Windows(true)) => (S::Closing, A::Escape),
             (S::Open | S::Closing, I::Windows(false)) => (S::Closed, A::Closed),
             (S::Draining, I::Windows(false)) => (S::Closed, A::Drained),
-            (
-                S::Opening | S::AwaitingOpenToClose | S::Open | S::Closing | S::Draining,
-                I::Windows(_),
-            ) => (self.state, A::Observe),
-            (S::Opening | S::AwaitingOpenToClose, I::Timeout) => (
-                S::Closed,
-                A::Failed("選択窓の表示を1秒以内に確認できませんでした".into()),
-            ),
+            (S::Opening | S::Open | S::Closing | S::Draining, I::Windows(_)) => {
+                (self.state, A::Observe)
+            }
             (S::Closing, I::Timeout) => (
                 S::Closed,
                 A::Failed("選択窓への Esc 送出が完了しませんでした".into()),
@@ -148,28 +143,20 @@ impl SelectionSession {
                 S::Closed,
                 A::Failed("選択窓の後始末を6秒以内に確認できませんでした".into()),
             ),
-            (
-                S::Opening | S::AwaitingOpenToClose | S::Open | S::Closing | S::Draining,
-                I::ObservationFailed(error),
-            ) => (S::Closed, A::Failed(error)),
+            (S::Opening | S::Open | S::Closing | S::Draining, I::ObservationFailed(error)) => {
+                (S::Closed, A::Failed(error))
+            }
             (S::Closed, I::ObservationFailed(_)) => return A::Ignore,
             (_, I::Failed(error)) => (S::Closed, A::Failed(error)),
-            (
-                S::Opening | S::AwaitingOpenToClose | S::Open | S::Closing | S::Draining,
-                I::ShortcutPosted,
-            )
-            | (
-                S::Closed | S::Opening | S::AwaitingOpenToClose | S::Open | S::Draining,
-                I::EscapePosted,
-            )
-            | (S::Closed | S::Open, I::Timeout)
+            (S::Opening | S::Open | S::Closing | S::Draining, I::ShortcutPosted)
+            | (S::Closed | S::Opening | S::Open | S::Draining, I::EscapePosted)
+            | (S::Closed | S::Opening | S::Open, I::Timeout)
             | (S::Closed, I::Windows(_)) => return A::Ignore,
         };
-        if state != self.state && state != S::AwaitingOpenToClose {
+        if state != self.state {
             self.deadline = match state {
                 _ if !self.timeouts_enabled => None,
-                S::Opening => Some(now + TRANSITION_TIMEOUT),
-                S::Closing => Some(now + TRANSITION_TIMEOUT),
+                S::Closing => Some(now + CLOSING_TIMEOUT),
                 S::Draining => Some(now + DRAINING_TIMEOUT),
                 _ => None,
             };
@@ -185,16 +172,9 @@ impl SelectionSession {
         onscreen_window_ids: &[u32],
     ) -> bool {
         if self.tracked_window.is_none()
-            && matches!(
-                self.state,
-                SessionState::Opening | SessionState::AwaitingOpenToClose | SessionState::Closing
-            )
+            && matches!(self.state, SessionState::Opening | SessionState::Closing)
         {
-            self.tracked_window = windows
-                .iter()
-                .map(|window| window.id)
-                .filter(|id| !self.baseline_windows.contains(id))
-                .max();
+            self.tracked_window = windows.iter().map(|window| window.id).max();
         }
         // 選択窓は表示中に bounds が変わるため、Opened 後は同じ id の存続だけを見る。
         let present = self
@@ -220,7 +200,6 @@ struct ImageSetup {
     pub shortcut: ScreenshotShortcut,
     pub count: i64,
     pub contents: Option<ClipboardContents>,
-    pub windows: Vec<u32>,
 }
 
 struct SessionObservation {
@@ -292,6 +271,7 @@ enum Request {
     Close {
         generation: u64,
         shutdown: bool,
+        supersede: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
 }
@@ -339,11 +319,25 @@ impl SelectionSessionHandle {
     }
 
     pub(crate) async fn close(&self, generation: u64, shutdown: bool) -> Result<(), String> {
+        self.close_with_reason(generation, shutdown, false).await
+    }
+
+    pub(crate) async fn supersede(&self, generation: u64) -> Result<(), String> {
+        self.close_with_reason(generation, false, true).await
+    }
+
+    async fn close_with_reason(
+        &self,
+        generation: u64,
+        shutdown: bool,
+        supersede: bool,
+    ) -> Result<(), String> {
         let (reply, result) = oneshot::channel();
         self.sender
             .send(Request::Close {
                 generation,
                 shutdown,
+                supersede,
                 reply,
             })
             .map_err(|_| "選択セッションが終了しました".to_owned())?;

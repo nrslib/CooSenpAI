@@ -117,8 +117,8 @@ impl DesktopWatchWorker {
         let initial_interval = effective_max_interval_ms(&state.runtime_config(), on_battery);
         let memory = WatchMemory {
             publication,
-            frames: Vec::new(),
-            directories: Vec::new(),
+            pending: Default::default(),
+            active_work: None,
             last_hash: stagnation_snapshot
                 .fingerprints
                 .get("fullscreen")
@@ -132,7 +132,6 @@ impl DesktopWatchWorker {
                 .unwrap_or(now),
             last_observation: now,
             window_start: now,
-            last_accepted: None,
             front_app: initial.as_ref().and_then(|value| value.front_app.clone()),
             stagnation: StagnationTracker::resume(
                 now,
@@ -332,5 +331,13 @@ impl WatchWorker for DesktopWatchWorker {
         .await
         .context("見守り heartbeat")?;
         Ok(ControlFlow::Continue(()))
+    }
+
+    async fn shutdown(&mut self) {
+        self.cancellation.cancel();
+        self.memory.pending.clear();
+        if let Some(work) = self.memory.active_work.take() {
+            let _ = work.await;
+        }
     }
 }

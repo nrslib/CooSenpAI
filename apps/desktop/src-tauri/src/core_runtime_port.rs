@@ -60,6 +60,7 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
     ) -> Result<CompanionObservationResult, RuntimeError>;
     fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot>;
     fn watch_scope_generation(&self) -> u64;
+    fn user_input_sequence(&self) -> u64;
     async fn begin_hearing_session(
         &self,
         generation: u64,
@@ -89,10 +90,11 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
         &self,
         contexts: Vec<PendingFrameContext>,
     ) -> Result<Option<coosenpai_core::companion_storage::PendingFrameContextChange>, RuntimeError>;
-    async fn observe(
+    async fn observe_at_user_input_sequence(
         &self,
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
+        user_input_sequence: u64,
     ) -> Result<ObservationRecord, RuntimeError>;
     async fn observe_without_companion_delivery(
         &self,
@@ -247,6 +249,10 @@ impl CoreRuntimePort for RuntimeHandle {
         RuntimeHandle::watch_scope_generation(self)
     }
 
+    fn user_input_sequence(&self) -> u64 {
+        RuntimeHandle::user_input_sequence(self)
+    }
+
     fn register_pending_frame_context(
         &self,
         context: PendingFrameContext,
@@ -263,12 +269,19 @@ impl CoreRuntimePort for RuntimeHandle {
         RuntimeHandle::prepare_pending_frame_contexts(self, contexts)
     }
 
-    async fn observe(
+    async fn observe_at_user_input_sequence(
         &self,
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
+        user_input_sequence: u64,
     ) -> Result<ObservationRecord, RuntimeError> {
-        self.observe_cancellable(frames, cancellation).await
+        RuntimeHandle::observe_cancellable_at_user_input_sequence(
+            self,
+            frames,
+            cancellation,
+            user_input_sequence,
+        )
+        .await
     }
 
     async fn observe_without_companion_delivery(

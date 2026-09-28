@@ -94,4 +94,3 @@ fn map_recognition(status: SFSpeechRecognizerAuthorizationStatus) -> SpeechPermi
         _ => SpeechPermissionKind::Unavailable,
     }
 }
-

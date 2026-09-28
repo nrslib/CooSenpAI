@@ -36,6 +36,9 @@ pub(super) fn build_observation_prompt_data(
         observation_frame_paths: std::collections::HashMap::new(),
         observation_log_directory,
         audio_log_index: None,
+        speaker_name_context: None,
+        speaker_id_resolver: None,
+        pending_speaker_name_conflict_selection: false,
         omitted_observations: Some(
             omitted
                 .iter()
@@ -60,6 +63,7 @@ pub(super) fn build_observation_prompt_data(
         repeated_error_count: helpers::repeated_error_count(observations),
         previous_summary,
         recent_conversation_jsonl: None,
+        recent_proactive_utterances: Vec::new(),
         user_message: None,
         user_message_id: None,
         user_attachment: false,

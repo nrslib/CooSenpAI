@@ -7,11 +7,7 @@ pub(crate) struct MicrophoneCommandPrompt {
 }
 
 impl MicrophoneCommandPrompt {
-    pub(crate) fn append(&self, system: &mut String, prompt: &mut String) {
-        system.push_str("\n\n");
-        system.push_str(include_str!(
-            "../../../builtins/prompts/facets/instructions/microphone-commands.md"
-        ));
+    pub(crate) fn append_context(&self, prompt: &mut String) {
         prompt.push_str("\nマイク指示の判定対象（hostが現在の許可と入力源を確認したID）:\n");
         prompt.push_str(&crate::prompts::ordered_json_string(&json!({
             "companionDisplayName": self.companion_name,

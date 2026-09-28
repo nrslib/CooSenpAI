@@ -66,4 +66,3 @@ pub(super) fn complete(
     // Tauri は setup の Err を Cocoa コールバック内で panic にするため、終了要求後も Ok を返す。
     Ok(())
 }
-

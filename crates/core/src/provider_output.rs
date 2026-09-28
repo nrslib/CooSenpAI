@@ -126,4 +126,3 @@ fn json_type_matches(value: &Value, kind: &str) -> bool {
         _ => false,
     }
 }
-

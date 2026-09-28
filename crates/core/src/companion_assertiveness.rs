@@ -52,4 +52,3 @@ impl TemporaryAssertiveness {
         false
     }
 }
-

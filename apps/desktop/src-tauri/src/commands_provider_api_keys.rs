@@ -126,4 +126,3 @@ fn validate_api_key_for_locale(value: &str, locale: Locale) -> Result<(), String
     }
     Ok(())
 }
-

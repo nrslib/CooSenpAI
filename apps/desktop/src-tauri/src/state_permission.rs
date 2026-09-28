@@ -221,4 +221,3 @@ fn resolve_screen_permission(
     };
     (permission, source)
 }
-

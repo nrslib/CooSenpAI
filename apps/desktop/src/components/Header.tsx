@@ -70,9 +70,13 @@ interface Props {
   readonly avatarImagePng?: readonly number[];
   readonly watchIntentActive: boolean;
   readonly watchChanging: boolean;
+  readonly watchPendingTarget: boolean | null;
+  readonly watchDelayed?: boolean;
   readonly onToggleWatch: () => void;
   readonly audioEnabled?: boolean;
   readonly audioChanging?: boolean;
+  readonly audioPendingTarget: boolean | null;
+  readonly audioDelayed?: boolean;
   readonly onToggleAudio?: () => void;
   readonly onOpenSettings: () => void;
   readonly historyOpen: boolean;
@@ -80,7 +84,7 @@ interface Props {
   readonly menuItems: readonly HeaderMenuItem[];
 }
 
-export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, avatarColor: configuredColor, avatarImagePng, watchIntentActive, watchChanging, onToggleWatch, audioEnabled = false, audioChanging = false, onToggleAudio, onOpenSettings, historyOpen, onToggleHistory, menuItems }: Props): ReactElement {
+export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, avatarColor: configuredColor, avatarImagePng, watchIntentActive, watchChanging, watchPendingTarget, watchDelayed = false, onToggleWatch, audioEnabled = false, audioChanging = false, audioPendingTarget, audioDelayed = false, onToggleAudio, onOpenSettings, historyOpen, onToggleHistory, menuItems }: Props): ReactElement {
   const { t } = useI18n();
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -100,6 +104,12 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, avatar
   }, [menuOpen, onMenuDismiss]);
   const color = avatarColor(configuredColor);
   const cooAwake = watchIntentActive || audioEnabled;
+  const watchProgress = watchPendingTarget == null
+    ? undefined
+    : t(watchDelayed ? "header.takingLonger" : watchPendingTarget ? "header.starting" : "header.stopping");
+  const audioProgress = audioPendingTarget == null
+    ? undefined
+    : t(audioDelayed ? "header.takingLonger" : audioPendingTarget ? "header.starting" : "header.stopping");
   return <header className="presence-header">
     <div className="presence-identity">
       <div className={`presence-avatar presence-${presence.mode}`}>
@@ -117,7 +127,7 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, avatar
           disabled={watchChanging}
           onClick={onToggleWatch}
         >
-          <span>{t("header.vision")}</span>
+          {watchProgress === undefined ? <span>{t("header.vision")}</span> : <span className="toggle-progress" aria-live="polite"><span className="toggle-spinner" aria-hidden="true" />{watchProgress}</span>}
         </button>
         {onToggleAudio === undefined ? null : <button
           className={`watch-switch hearing-switch${audioEnabled ? " is-on" : ""}${audioChanging ? " is-changing" : ""}`}
@@ -130,7 +140,7 @@ export function Header({ presence, menuOpen, onMenuToggle, onMenuDismiss, avatar
           disabled={audioChanging}
           onClick={onToggleAudio}
         >
-          <span>{t("header.hearing")}</span>
+          {audioProgress === undefined ? <span>{t("header.hearing")}</span> : <span className="toggle-progress" aria-live="polite"><span className="toggle-spinner" aria-hidden="true" />{audioProgress}</span>}
         </button>}
       </div>
     </div>

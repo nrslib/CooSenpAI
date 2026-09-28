@@ -155,4 +155,3 @@ fn conversation_persistence_error(error: PersistenceError, locale: Locale) -> Ru
         text(TextKey::ConversationGenerationOperationFailed, locale).replace("{error}", detail),
     )
 }
-

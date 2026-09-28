@@ -117,4 +117,3 @@ fn tutorial_skip_interaction_for_locale(key: &str, locale: Locale) -> Option<Bub
         technical_detail: None,
     })
 }
-

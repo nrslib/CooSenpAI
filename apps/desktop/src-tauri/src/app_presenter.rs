@@ -9,6 +9,9 @@ use coosenpai_core::ports::RuntimeLogger;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
+
+const TOGGLE_DELAY_HINT_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
@@ -50,6 +53,9 @@ pub(crate) enum AppEvent {
     Completed {
         token: u64,
         result: Result<Arc<AppSnapshot>, String>,
+    },
+    ToggleDelayHint {
+        token: u64,
     },
     SelectPersona {
         persona: String,
@@ -108,6 +114,10 @@ pub(crate) struct AppView {
     pub can_reset: bool,
     pub watch_changing: bool,
     pub audio_changing: bool,
+    pub watch_pending_target: Option<bool>,
+    pub audio_pending_target: Option<bool>,
+    pub watch_delayed: bool,
+    pub audio_delayed: bool,
     pub tutorial: Option<crate::tutorial_ui::TutorialUi>,
 }
 // 配信専用の描画フレーム。snapshot は観測値の投影で、Presenter は保持しない。
@@ -128,6 +138,10 @@ struct ToggleIntent {
     desired: Option<QueuedToggle>,
     running: bool,
     running_target: Option<bool>,
+    pending_token: Option<u64>,
+    pending_target: Option<bool>,
+    delayed: bool,
+    suppress_snapshot_transition: bool,
 }
 pub(crate) struct AppPresenter {
     view: AppView,
@@ -160,6 +174,10 @@ impl Default for AppPresenter {
                 can_reset: false,
                 watch_changing: false,
                 audio_changing: false,
+                watch_pending_target: None,
+                audio_pending_target: None,
+                watch_delayed: false,
+                audio_delayed: false,
                 tutorial: None,
             },
             status: Default::default(),
@@ -191,6 +209,35 @@ impl AppPresenter {
         deadline: crate::status_presenter::StatusDeadline,
     ) -> Vec<UiEffect> {
         self.status.deadline(deadline)
+    }
+    pub(crate) fn thought_window_mounted(&mut self) -> Vec<UiEffect> {
+        self.status.thought_window_mounted()
+    }
+    pub(crate) fn main_visibility(&mut self, visible: bool) -> Vec<UiEffect> {
+        self.status.main_visibility(visible)
+    }
+    pub(crate) fn main_active_space_changed(&mut self, active: bool) -> Vec<UiEffect> {
+        self.status.main_active_space_changed(active)
+    }
+    pub(crate) fn main_geometry_changed(
+        &mut self,
+        geometry: crate::window_thought::MainWindowGeometry,
+    ) -> Vec<UiEffect> {
+        self.status.main_geometry_changed(geometry)
+    }
+    pub(crate) fn thought_window_operation_completed(
+        &mut self,
+        operation: crate::window_thought::ThoughtWindowOperation,
+        result: Result<(), String>,
+    ) -> Vec<UiEffect> {
+        self.status
+            .thought_window_operation_completed(operation, result)
+    }
+    pub(crate) fn thought_window_state_observed(
+        &mut self,
+        result: Result<crate::window_thought::ThoughtWindowNativeState, String>,
+    ) -> Vec<UiEffect> {
+        self.status.thought_window_state_observed(result)
     }
     pub(crate) fn handle(
         &mut self,
@@ -284,8 +331,32 @@ impl AppPresenter {
                             } else {
                                 &mut self.audio
                             };
+                            if !watch && result.is_err() {
+                                lane.suppress_snapshot_transition = true;
+                            }
+                            let target = lane.running_target;
                             lane.running = false;
                             lane.running_target = None;
+                            let audio_still_transitioning = !watch
+                                && target.is_some_and(|target| {
+                                    let latest = match &result {
+                                        Ok(completed) => match snapshot {
+                                            Some(current)
+                                                if current.revision > completed.revision =>
+                                            {
+                                                current.as_ref()
+                                            }
+                                            _ => completed.as_ref(),
+                                        },
+                                        Err(_) => return false,
+                                    };
+                                    audio_toggle_pending(latest, target)
+                                });
+                            if !audio_still_transitioning {
+                                lane.pending_token = None;
+                                lane.pending_target = None;
+                                lane.delayed = false;
+                            }
                             lane.desired.take()
                         };
                         if let Some(next) = desired {
@@ -298,7 +369,7 @@ impl AppPresenter {
                                         _ => completed.as_ref(),
                                     };
                                     match can_start_queued_toggle(watch, next, latest) {
-                                        Ok(()) => effects.push(self.start_toggle(
+                                        Ok(()) => effects.extend(self.start_toggle(
                                             watch,
                                             next.target,
                                             next.base_config_revision,
@@ -326,6 +397,28 @@ impl AppPresenter {
                     _ => {}
                 }
                 effects
+            }
+            AppEvent::ToggleDelayHint { token } => {
+                let lane = if self.watch.pending_token == Some(token) {
+                    Some((&mut self.watch, true))
+                } else if self.audio.pending_token == Some(token) {
+                    Some((&mut self.audio, false))
+                } else {
+                    None
+                };
+                let Some((lane, watch)) = lane else {
+                    return vec![];
+                };
+                let still_pending = lane.running
+                    || (!watch
+                        && lane.pending_target.is_some_and(|target| {
+                            snapshot.is_some_and(|snapshot| audio_toggle_pending(snapshot, target))
+                        }));
+                if !still_pending {
+                    return vec![];
+                }
+                lane.delayed = true;
+                return self.render(snapshot);
             }
             AppEvent::SelectPersona { persona, reply } => {
                 let Some(snapshot) = snapshot else {
@@ -521,9 +614,9 @@ impl AppPresenter {
             });
             return vec![];
         }
-        vec![self.start_toggle(watch, target, base_config_revision)]
+        self.start_toggle(watch, target, base_config_revision)
     }
-    fn start_toggle(&mut self, watch: bool, target: bool, config_revision: u64) -> UiEffect {
+    fn start_toggle(&mut self, watch: bool, target: bool, config_revision: u64) -> Vec<UiEffect> {
         let lane = if watch {
             &mut self.watch
         } else {
@@ -531,15 +624,30 @@ impl AppPresenter {
         };
         lane.running = true;
         lane.running_target = Some(target);
+        lane.pending_target = Some(target);
         lane.desired = None;
-        self.operation(
-            if watch {
-                AppOperation::Watch(target)
-            } else {
-                AppOperation::Audio(target)
-            },
-            config_revision,
-        )
+        self.next_token += 1;
+        let token = self.next_token;
+        lane.pending_token = Some(token);
+        lane.delayed = false;
+        lane.suppress_snapshot_transition = false;
+        let operation = if watch {
+            AppOperation::Watch(target)
+        } else {
+            AppOperation::Audio(target)
+        };
+        self.operations.insert(token, operation);
+        vec![
+            spawn(AppTask::Operation {
+                token,
+                operation,
+                config_revision,
+            }),
+            UiEffect::Spawn(UiTask::Delay {
+                duration: TOGGLE_DELAY_HINT_AFTER,
+                event: UiEvent::App(AppEvent::ToggleDelayHint { token }),
+            }),
+        ]
     }
     fn operation(&mut self, operation: AppOperation, config_revision: u64) -> UiEffect {
         self.next_token += 1;
@@ -554,9 +662,30 @@ impl AppPresenter {
         if !self.mounted {
             return vec![];
         }
-        self.view.watch_changing = self.watch.running;
-        self.view.audio_changing = self.audio.running
-            || snapshot.is_some_and(|snapshot| snapshot.audio.phase == "starting");
+        if self.audio.suppress_snapshot_transition
+            && snapshot.is_some_and(|snapshot| audio_transition_target(snapshot).is_none())
+        {
+            self.audio.suppress_snapshot_transition = false;
+        }
+        if !self.audio.running
+            && self.audio.pending_target.is_some_and(|target| {
+                snapshot.is_some_and(|snapshot| !audio_toggle_pending(snapshot, target))
+            })
+        {
+            self.audio.pending_target = None;
+            self.audio.pending_token = None;
+            self.audio.delayed = false;
+        }
+        self.view.watch_pending_target = self.watch.pending_target;
+        self.view.audio_pending_target = self.audio.pending_target.or_else(|| {
+            (!self.audio.suppress_snapshot_transition)
+                .then(|| snapshot.and_then(|snapshot| audio_transition_target(snapshot)))
+                .flatten()
+        });
+        self.view.watch_delayed = self.watch.delayed && self.view.watch_pending_target.is_some();
+        self.view.audio_delayed = self.audio.delayed && self.view.audio_pending_target.is_some();
+        self.view.watch_changing = self.view.watch_pending_target.is_some();
+        self.view.audio_changing = self.view.audio_pending_target.is_some();
         let mut effects = vec![];
         if let Some(snapshot) = snapshot {
             let snapshot = snapshot.as_ref();
@@ -619,6 +748,10 @@ impl AppPresenter {
             can_reset: self.view.can_reset,
             watch_changing: self.view.watch_changing,
             audio_changing: self.view.audio_changing,
+            watch_pending_target: self.view.watch_pending_target,
+            audio_pending_target: self.view.audio_pending_target,
+            watch_delayed: self.view.watch_delayed,
+            audio_delayed: self.view.audio_delayed,
             tutorial: self.view.tutorial.clone(),
         }
     }
@@ -631,6 +764,21 @@ fn confirmed_toggle_target(snapshot: &AppSnapshot, watch: bool) -> bool {
         snapshot.watch_intent_active
     } else {
         snapshot.config.audio.enabled
+    }
+}
+fn audio_transition_target(snapshot: &AppSnapshot) -> Option<bool> {
+    match snapshot.audio.phase.as_str() {
+        "starting" => Some(true),
+        "stopping" => Some(false),
+        _ => None,
+    }
+}
+fn audio_toggle_pending(snapshot: &AppSnapshot, target: bool) -> bool {
+    match snapshot.audio.phase.as_str() {
+        "starting" | "stopping" => true,
+        "off" => target && snapshot.config.audio.enabled,
+        "listening" => !target && !snapshot.config.audio.enabled,
+        _ => false,
     }
 }
 fn can_start_queued_toggle(
@@ -799,4 +947,3 @@ async fn operation_result(
     }
     Ok(Arc::new(state.snapshot().await))
 }
-

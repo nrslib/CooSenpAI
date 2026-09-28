@@ -146,4 +146,3 @@ fn atomic_swap(parent: &File, stage: &File) -> io::Result<()> {
         Err(io::Error::last_os_error())
     }
 }
-

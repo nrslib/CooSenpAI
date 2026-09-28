@@ -479,13 +479,17 @@ impl RuntimeActor {
     ) -> PendingUserDrain {
         let append_restart_requested = operation.append_restart_requested();
         let preempted_for_user = operation.was_preempted_for_user();
+        let observer_operation = operation.is_observer();
         let operation_cancelled = operation.cancellation.is_cancelled();
-        let observer_cancelled = operation.is_observer() && operation_cancelled;
-        let coo_cancelled = !operation.is_observer() && operation_cancelled;
+        let observer_cancelled = observer_operation && operation_cancelled;
+        let coo_cancelled = !observer_operation && operation_cancelled;
         let config_update_cancelled = operation_cancelled
             && operation.cancellation_reason() == Some(OperationCancellationReason::ConfigUpdate);
         let user_input_ids = operation.user_input_ids().to_vec();
         let reply = operation.reply;
+        if observer_operation {
+            self.observer_execution = None;
+        }
         if let Some(stop) = operation.relay_stop {
             stop.cancel();
         }
@@ -549,7 +553,10 @@ impl RuntimeActor {
     ) {
         match *outcome {
             OperationOutcome::Observe { observer, .. } => {
-                self.observer = Some(*observer);
+                let mut observer = *observer;
+                observer.clear_execution_reporter();
+                self.observer = Some(observer);
+                self.observer_execution = None;
             }
             OperationOutcome::CompanionObservations {
                 companion, result, ..
@@ -608,10 +615,20 @@ impl RuntimeActor {
         let super::handle_types::ObserveRequest {
             frames,
             audio,
+            user_input_sequence,
             allow_companion_delivery,
             cancellation: request_cancellation,
             response,
         } = request;
+        if user_input_sequence.is_some_and(|sequence| {
+            self.user_input_sequence
+                .load(std::sync::atomic::Ordering::Acquire)
+                != sequence
+        }) || request_cancellation.is_cancelled()
+        {
+            let _ = response.send(Err(RuntimeError::ObservationCancelled));
+            return StartResult::Completed;
+        }
         if !frames.is_empty() && !self.accepts_watch_scope(&frames) {
             let _ = response.send(Err(RuntimeError::StaleWatchScope));
             return StartResult::Completed;
@@ -632,6 +649,32 @@ impl RuntimeActor {
             self.publish(snapshot_tx);
             return StartResult::Completed;
         };
+        self.observer_execution = if !frames.is_empty() || !audio.is_empty() {
+            let role = if frames.is_empty() {
+                ObserverExecutionRole::Hearing
+            } else {
+                ObserverExecutionRole::Vision
+            };
+            let execution = ObserverExecution {
+                id: uuid::Uuid::new_v4().to_string(),
+                started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                role,
+                effort: match role {
+                    ObserverExecutionRole::Vision => self.config.observer.vision.effort.clone(),
+                    ObserverExecutionRole::Hearing => self.config.observer.hearing.effort.clone(),
+                },
+                attempt: 1,
+                max_attempts: u8::try_from(crate::observer::MAX_OBSERVER_ATTEMPTS)
+                    .expect("observer attempt limit fits in u8"),
+            };
+            observer
+                .set_execution_reporter(execution.id.clone(), self.observer_execution_tx.clone());
+            Some(execution)
+        } else {
+            None
+        };
+        self.revision = self.revision.saturating_add(1);
+        self.publish(snapshot_tx);
         let (cancellation, relay_stop) = linked_cancellation(
             runtime_cancellation.token.clone(),
             request_cancellation,
@@ -1016,6 +1059,7 @@ impl RuntimeActor {
                 companion_delivery,
             } => {
                 let mut observer = *observer;
+                observer.clear_execution_reporter();
                 if let Some(batch) = &mut microphone_commands {
                     batch.selected_ids = observer.take_microphone_command_ids();
                 }

@@ -404,4 +404,3 @@ pub(crate) async fn app_update_install(
     updater.install(state.inner()).await?;
     Ok(IpcResult::success(updater.snapshot.borrow().clone()))
 }
-

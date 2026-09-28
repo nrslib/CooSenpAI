@@ -1175,13 +1175,47 @@ pub struct WindowBounds {
     pub height: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnWindowKind {
+    Main,
+    Bubble,
+    Avatar,
+    Thought,
+    Details,
+    CapturePopup,
+    SpeechPopup,
+    ModelPopup,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OwnWindowFrame {
+    pub bounds: WindowBounds,
+    pub kind: OwnWindowKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnWindowImageRect {
+    pub kind: OwnWindowKind,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnWindowContext {
+    pub windows: Vec<OwnWindowImageRect>,
+    pub user_response_in_progress: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnWindowBounds {
     /// ウィンドウの位置・寸法・表示状態が変わるたびに進む世代。
     pub revision: u64,
     pub captured_at: DateTime<Utc>,
     /// ディスプレイ倍率に依存しない、デスクトップ全体の論理座標系の矩形。
-    pub bounds: Vec<WindowBounds>,
+    pub windows: Vec<OwnWindowFrame>,
 }
 
 impl OwnWindowBounds {
@@ -1255,4 +1289,3 @@ pub trait NotificationPort: Send + Sync {
 pub trait RuntimeLogger: Send + Sync {
     fn write(&self, level: &str, message: &str) -> Result<(), std::io::Error>;
 }
-

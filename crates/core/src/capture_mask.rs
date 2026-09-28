@@ -1,11 +1,12 @@
 use crate::image_processing::{own_window_exclusions, ExcludedBounds};
-use crate::ports::{CapturedScreen, OwnWindowBoundsPort, PortError};
+use crate::ports::{CapturedScreen, OwnWindowBoundsPort, OwnWindowFrame, PortError};
 use chrono::{DateTime, Utc};
 use std::future::Future;
 
 pub struct StableScreenCapture {
     pub screens: Vec<CapturedScreen>,
     pub exclusions: Vec<ExcludedBounds>,
+    pub own_windows: Vec<OwnWindowFrame>,
     pub captured_at: DateTime<Utc>,
 }
 
@@ -33,7 +34,7 @@ pub async fn capture_with_window_mask(
         .await
         .map_err(|_| CaptureWithMaskError::OwnWindows)?;
     if before.revision != after.revision
-        || before.bounds != after.bounds
+        || before.windows != after.windows
         || !after.is_fresh_at(Utc::now())
     {
         return Err(CaptureWithMaskError::OwnWindows);
@@ -41,7 +42,7 @@ pub async fn capture_with_window_mask(
     Ok(StableScreenCapture {
         screens,
         exclusions,
+        own_windows: before.windows,
         captured_at,
     })
 }
-

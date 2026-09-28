@@ -41,4 +41,3 @@ pub fn parse_persona(id: &str, document: &str) -> Result<PersonaProfile, Persona
         body: document.to_owned(),
     })
 }
-

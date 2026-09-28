@@ -46,8 +46,13 @@ impl CapturePort for DesktopCapturePort {
                 CaptureEffect::CloseSelection {
                     generation,
                     shutdown,
+                    supersede,
                 } => {
-                    port.session.close(generation, shutdown).await?;
+                    if supersede {
+                        port.session.supersede(generation).await?;
+                    } else {
+                        port.session.close(generation, shutdown).await?;
+                    }
                     return Ok(CaptureResult::Selected(None));
                 }
                 CaptureEffect::Send { content, message } => {

@@ -68,6 +68,22 @@ pub struct SpeakerDecisionDetails {
     pub recent_best_score: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent_comparisons: Option<Vec<SpeakerRecentComparison>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub representative_sample_count: Option<usize>,
+    #[serde(
+        rename = "representativeIDCount",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub representative_id_count: Option<usize>,
+    #[serde(
+        rename = "representativeDirectIDCount",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub representative_direct_id_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub representative_margin: Option<Number>,
 }
 
 fn score_in(value: &Number, min: f64, max: f64) -> bool {
@@ -97,6 +113,7 @@ impl SpeakerDecisionDetails {
                 "speaker-cosine-ledger-v6"
                     | "speaker-cosine-ledger-v7"
                     | "speaker-cosine-ledger-v8"
+                    | "speaker-cosine-ledger-v9"
             ),
             "decision.version"
         );
@@ -270,6 +287,111 @@ impl SpeakerDecisionDetails {
             };
             if !counts_valid {
                 return Some("decision.recent-counts");
+            }
+            if self.decision_version == "speaker-cosine-ledger-v9"
+                && self.status == SpeakerIdentificationStatus::Mixed
+                && (self.recent_candidate_count.is_some()
+                    || self.recent_match_count.is_some()
+                    || self.recent_best_score.is_some()
+                    || self.recent_comparisons.is_some()
+                    || self.representative_sample_count.is_some()
+                    || self.representative_id_count.is_some()
+                    || self.representative_direct_id_count.is_some()
+                    || self.representative_margin.is_some())
+            {
+                return Some("decision.mixed-source");
+            }
+            if self.decision_version == "speaker-cosine-ledger-v9"
+                && self.reason != "recent-consensus"
+                && !(matches!(self.reason.as_str(), "mixed-clusters" | "no-evidence")
+                    && self.representative_sample_count.is_none()
+                    && self.representative_id_count.is_none()
+                    && self.representative_direct_id_count.is_none()
+                    && self.representative_margin.is_none())
+            {
+                let representative_counts_valid = match (
+                    self.representative_sample_count,
+                    self.representative_id_count,
+                    self.representative_direct_id_count,
+                ) {
+                    (Some(samples), Some(ids), Some(matches)) => {
+                        samples <= 3_000
+                            && ids <= 1_000
+                            && matches <= ids
+                            && ids == self.candidate_count
+                            && samples >= ids
+                            && self
+                                .representative_margin
+                                .as_ref()
+                                .is_some_and(|margin| score_in(margin, -2.000_001, 2.000_001))
+                                == (ids > 1)
+                            && (ids > 1 || self.representative_margin.is_none())
+                            && (self.candidate_count > 3
+                                || self
+                                    .candidates
+                                    .iter()
+                                    .filter(|candidate| {
+                                        candidate.score.as_f64().unwrap_or(2.0)
+                                            >= self.known_threshold.as_f64().unwrap_or(2.0)
+                                    })
+                                    .count()
+                                    == matches)
+                    }
+                    _ => false,
+                };
+                if !representative_counts_valid {
+                    return Some("decision.representative-counts");
+                }
+                if !matches!(self.reason.as_str(), "recent-consensus")
+                    && (!self
+                        .known_threshold
+                        .as_f64()
+                        .is_some_and(|value| (value - 0.30).abs() < 0.000_001)
+                        || !self
+                            .margin_threshold
+                            .as_f64()
+                            .is_some_and(|value| (value - 0.10).abs() < 0.000_001))
+                {
+                    return Some("decision.representative-threshold");
+                }
+                if self.reason == "matched-samples" {
+                    let top_score = self
+                        .candidates
+                        .first()
+                        .and_then(|candidate| candidate.score.as_f64());
+                    let sufficient_margin = self.representative_id_count == Some(1)
+                        || self
+                            .representative_margin
+                            .as_ref()
+                            .and_then(Number::as_f64)
+                            .is_some_and(|margin| margin >= 0.10);
+                    if !top_score.is_some_and(|score| score >= 0.30) || !sufficient_margin {
+                        return Some("decision.representative-match");
+                    }
+                }
+                if self.reason == "ambiguous-representatives" {
+                    let top_score = self
+                        .candidates
+                        .first()
+                        .and_then(|candidate| candidate.score.as_f64());
+                    if !top_score.is_some_and(|score| score >= 0.30)
+                        || self.representative_direct_id_count.unwrap_or(0) < 1
+                        || !self
+                            .representative_margin
+                            .as_ref()
+                            .and_then(Number::as_f64)
+                            .is_some_and(|margin| margin < 0.10)
+                    {
+                        return Some("decision.representative-ambiguity");
+                    }
+                }
+            } else if self.decision_version == "speaker-cosine-ledger-v9"
+                && (self.representative_sample_count.is_some()
+                    || self.representative_id_count.is_some()
+                    || self.representative_direct_id_count.is_some()
+                    || self.representative_margin.is_some())
+            {
+                return Some("decision.representative-fields");
             }
             if self.status != SpeakerIdentificationStatus::Identified {
                 return if self.supporting_samples.is_empty()

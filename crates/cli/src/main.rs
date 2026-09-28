@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use coosenpai_core::config::{Config, ConfigPaths};
 use coosenpai_core::locale::Locale;
@@ -318,6 +318,7 @@ async fn eval(paths: &ConfigPaths, config: Config, args: EvalArgs) -> Result<()>
                     },
                     &case_directory,
                     &input,
+                    &paths.transcripts,
                 )
                 .await,
             );
@@ -356,6 +357,154 @@ async fn eval(paths: &ConfigPaths, config: Config, args: EvalArgs) -> Result<()>
     Ok(())
 }
 
+fn companion_prompt_data_for_eval(
+    companion_name: &str,
+    emotions_enabled: bool,
+    stuck_after_ms: u64,
+    user_attachment: bool,
+    input: &Value,
+    transcript_fixture_root: &Path,
+) -> anyhow::Result<CompanionPromptData> {
+    let transcript_fixture_root = transcript_fixture_root.canonicalize().with_context(|| {
+        format!(
+            "transcript fixture root を確認できません: {}",
+            transcript_fixture_root.display()
+        )
+    })?;
+    let mut observations = input
+        .get("observations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for observation in &mut observations {
+        resolve_eval_transcript_paths(observation, &transcript_fixture_root)?;
+    }
+    let mut audio_log_index = input.get("audioLogIndex").cloned();
+    if let Some(value) = &mut audio_log_index {
+        resolve_eval_transcript_paths(value, &transcript_fixture_root)?;
+    }
+    let mut speaker_name_context_value = input.get("speakerNameContext").cloned();
+    if let Some(value) = &mut speaker_name_context_value {
+        resolve_eval_transcript_paths(value, &transcript_fixture_root)?;
+    }
+    let speaker_name_context = speaker_name_context_value
+        .map(serde_json::from_value)
+        .transpose()
+        .context("invalid speakerNameContext")?;
+    let previous_conversation = input
+        .get("previousConversation")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(coosenpai_core::prompts::ordered_json_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+    let companion_emotions = if emotions_enabled {
+        optional_eval_field(input, "companionEmotions")?
+    } else {
+        None
+    };
+
+    let mut data = CompanionPromptData::default();
+    data.companion_name = companion_name.to_owned();
+    data.companion_emotions = companion_emotions;
+    data.observations = observations.clone();
+    data.omitted_observations = Some(Vec::new());
+    data.compact_observations = false;
+    data.last_observation = observations.last().cloned();
+    data.elapsed_ms = input
+        .get("elapsedSinceMeaningfulChangeMs")
+        .and_then(Value::as_u64);
+    data.stuck_after_ms = Some(stuck_after_ms);
+    data.repeated_error_count = input
+        .get("repeatedErrorCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    data.previous_summary = input
+        .get("previousSummary")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    data.recent_conversation_jsonl = previous_conversation;
+    data.recent_proactive_utterances =
+        optional_eval_field(input, "recentProactiveUtterances")?.unwrap_or_default();
+    data.user_message = input
+        .get("userMessage")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    data.user_message_id = input
+        .get("userMessageId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    data.user_attachment = user_attachment;
+    data.memory_block = input
+        .get("memoryBlock")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    data.context_notice = input
+        .get("contextNotice")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    data.set_speaker_name_prompt_data(
+        audio_log_index,
+        speaker_name_context,
+        optional_eval_field(input, "speakerIdResolver")?,
+    );
+    Ok(data)
+}
+
+fn resolve_eval_transcript_paths(value: &mut Value, fixture_root: &Path) -> anyhow::Result<()> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                resolve_eval_transcript_paths(value, fixture_root)?;
+            }
+        }
+        Value::Object(object) => {
+            for (key, value) in object {
+                if key == "transcriptPath" {
+                    let path = value
+                        .as_str()
+                        .context("transcriptPath は文字列である必要があります")?;
+                    let path = Path::new(path);
+                    let candidate = if path.is_absolute() {
+                        path.to_owned()
+                    } else {
+                        fixture_root.join(path)
+                    };
+                    let resolved = candidate.canonicalize().with_context(|| {
+                        format!("評価 transcript を解決できません: {}", candidate.display())
+                    })?;
+                    if !resolved.starts_with(fixture_root) || !resolved.is_file() {
+                        anyhow::bail!(
+                            "評価 transcript は fixture root 内の file である必要があります: {}",
+                            resolved.display()
+                        );
+                    }
+                    *value = Value::String(resolved.to_string_lossy().into_owned());
+                } else {
+                    resolve_eval_transcript_paths(value, fixture_root)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn optional_eval_field<T>(input: &Value, field: &str) -> anyhow::Result<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    input
+        .get(field)
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("invalid {field}: {error}"))
+}
+
 #[derive(Debug)]
 struct EvalResult {
     elapsed_ms: u128,
@@ -379,7 +528,12 @@ struct EvalCase<'a> {
     config: &'a Config,
 }
 
-async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value) -> EvalResult {
+async fn run_eval_case(
+    case: EvalCase<'_>,
+    case_directory: &Path,
+    input: &Value,
+    transcript_fixture_root: &Path,
+) -> EvalResult {
     let started = Instant::now();
     let result: Result<Value, ProviderError> = match case.agent {
         EvalAgent::Observer => {
@@ -406,6 +560,7 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                         .to_owned(),
                     ocr_text: None,
                     focus: None,
+                    own_window_context: None,
                 })
                 .collect::<Vec<_>>();
             let previous = input.get("previousObservation");
@@ -424,6 +579,7 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                     ProviderCall {
                         system_prompt: observer_system_prompt(),
                         prompt,
+                        allowed_transcript_paths: None,
                         images: images.into_iter().map(Into::into).collect(),
                         tools_disabled: true,
                         web_search_enabled: false,
@@ -479,77 +635,16 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                     Err(error) => return eval_error(started, error.to_string()),
                 },
             };
-            let observations = input
-                .get("observations")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let previous_conversation = input
-                .get("previousConversation")
-                .and_then(Value::as_array)
-                .map(|entries| {
-                    entries
-                        .iter()
-                        .map(coosenpai_core::prompts::ordered_json_string)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                });
-            let data = CompanionPromptData {
-                companion_name: case.config.companion.display_name.clone(),
-                companion_emotions: if case.config.companion.emotions_enabled {
-                    match input
-                        .get("companionEmotions")
-                        .cloned()
-                        .map(serde_json::from_value)
-                        .transpose()
-                    {
-                        Ok(value) => value,
-                        Err(error) => return eval_error(started, error.to_string()),
-                    }
-                } else {
-                    None
-                },
-                observations: observations.clone(),
-                observation_log_directory: None,
-                audio_log_index: None,
-                omitted_observations: Some(Vec::new()),
-                compact_observations: false,
-                omitted_summary: None,
-                omitted_ids: Vec::new(),
-                last_observation: observations.last().cloned(),
-                observation_frame_paths: std::collections::HashMap::new(),
-                elapsed_ms: input
-                    .get("elapsedSinceMeaningfulChangeMs")
-                    .and_then(Value::as_u64),
-                stuck_after_ms: Some(case.config.companion.stuck_after_ms),
-                repeated_error_count: input
-                    .get("repeatedErrorCount")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize,
-                previous_summary: input
-                    .get("previousSummary")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                recent_conversation_jsonl: previous_conversation,
-                user_message: input
-                    .get("userMessage")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                user_message_id: input
-                    .get("userMessageId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                user_attachment: !images.is_empty(),
-                attachment_ocr_text: None,
-                pending_frame_context: None,
-                memory_block: input
-                    .get("memoryBlock")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                context_notice: input
-                    .get("contextNotice")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+            let data = match companion_prompt_data_for_eval(
+                &case.config.companion.display_name,
+                case.config.companion.emotions_enabled,
+                case.config.companion.stuck_after_ms,
+                !images.is_empty(),
+                input,
+                transcript_fixture_root,
+            ) {
+                Ok(value) => value,
+                Err(error) => return eval_error(started, error.to_string()),
             };
             let system_prompt = coosenpai_core::prompts::companion_system_prompt_for_locale(
                 &case.config.companion.assertiveness,
@@ -562,6 +657,8 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                     ProviderCall {
                         system_prompt,
                         prompt: build_companion_prompt(&data),
+                        allowed_transcript_paths:
+                            coosenpai_core::prompts::companion_transcript_read_allowlist(&data),
                         images: images.into_iter().map(Into::into).collect(),
                         tools_disabled: true,
                         web_search_enabled: data.user_message.is_some(),
@@ -610,6 +707,7 @@ async fn run_eval_case(case: EvalCase<'_>, case_directory: &Path, input: &Value)
                         ProviderCall {
                             system_prompt: "あなたは CooSenpAI の記憶を整理します。指定された JSON だけを返してください。".to_owned(),
                             prompt,
+                            allowed_transcript_paths: None,
                             images: Vec::new(),
                             tools_disabled: true,
                             web_search_enabled: false,
@@ -794,4 +892,3 @@ fn invalid_output(message: &str) -> ProviderError {
         message: message.to_owned(),
     }
 }
-

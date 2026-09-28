@@ -43,4 +43,3 @@ fn apply_model_catalog(values: &mut [ProviderModelOptions], catalog: &ModelCatal
         }
     }
 }
-

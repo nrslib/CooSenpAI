@@ -72,4 +72,3 @@ pub(crate) fn highlighted_sections(onboarding: &crate::snapshot::OnboardingView)
         _ => vec![],
     }
 }
-

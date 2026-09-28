@@ -16,6 +16,7 @@ pub(crate) async fn ui_view_mounted<R: tauri::Runtime>(
         "details" => UiView::Details,
         "model-popup" => UiView::ModelPicker,
         "bubble" => UiView::Bubble,
+        "thought" => UiView::Thought,
         "avatar" => UiView::Avatar,
         _ => return Err("未登録のViewです".to_owned()),
     };

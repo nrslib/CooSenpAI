@@ -129,6 +129,18 @@ impl DesktopState {
                 .handle_utterance_feedback_interaction(permit, id, action, value)
                 .await;
         }
+        if action.starts_with("speaker-name:") {
+            return Box::pin(
+                crate::commands_speaker::handle_speaker_name_proposal_action(
+                    self.clone(),
+                    id,
+                    action,
+                    value,
+                ),
+            )
+            .await
+            .map_err(|error| ConfigCommitError::Runtime(RuntimeError::Factory(error)));
+        }
         match action {
             TUTORIAL_SKIP_ACTION => {
                 let step = self.tutorial_current_step().await.ok_or_else(|| {

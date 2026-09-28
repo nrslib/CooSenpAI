@@ -127,4 +127,3 @@ fn activate_running_application(
     }
     Ok(())
 }
-

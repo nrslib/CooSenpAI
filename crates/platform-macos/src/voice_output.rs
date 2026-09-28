@@ -59,4 +59,3 @@ impl VoiceOutputProvider for MacSystemVoiceProvider {
         }
     }
 }
-

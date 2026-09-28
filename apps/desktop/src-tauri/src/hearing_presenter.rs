@@ -214,4 +214,3 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
     }
     true
 }
-

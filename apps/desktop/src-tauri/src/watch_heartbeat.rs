@@ -48,7 +48,8 @@ pub(super) async fn heartbeat_if_due(
     generation: u64,
     cancellation: CancellationToken,
 ) -> Result<()> {
-    if !memory.frames.is_empty()
+    if memory.pending_frame_count() > 0
+        || memory.active_work.is_some()
         || (memory.last_observation.elapsed().as_millis() as u64) < max_interval_ms
     {
         return Ok(());

@@ -294,4 +294,3 @@ fn coalesce_startup_events(date: &str, mut events: Vec<PresenceEvent>) -> Option
         }
     }
 }
-

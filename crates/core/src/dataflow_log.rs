@@ -93,4 +93,3 @@ fn read_transcript_tail(
     }
     Ok(transcripts)
 }
-

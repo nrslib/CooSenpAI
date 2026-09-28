@@ -115,6 +115,19 @@ fn preferred_keys(value: &serde_json::Map<String, Value>) -> &'static [&'static 
         &["type", "detail"]
     } else if value.contains_key("role") && value.contains_key("message") {
         &["role", "message"]
+    } else if value.contains_key("id")
+        && value.contains_key("createdAt")
+        && value.contains_key("messageKind")
+        && value.contains_key("message")
+        && value.contains_key("observationIds")
+    {
+        &[
+            "id",
+            "createdAt",
+            "messageKind",
+            "message",
+            "observationIds",
+        ]
     } else {
         &[]
     }

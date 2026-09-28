@@ -253,4 +253,3 @@ impl AvatarPresenter {
         UiEffect::AvatarRender(self.state.clone())
     }
 }
-
