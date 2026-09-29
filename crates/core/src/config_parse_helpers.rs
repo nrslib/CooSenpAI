@@ -317,7 +317,7 @@ fn parse_speaker_identification(
 ) -> SpeakerIdentificationConfig {
     issues.extend(unknown_keys(
         object,
-        &["enabled"],
+        &["enabled", "modelPath"],
         "audio.speakerIdentification",
     ));
     SpeakerIdentificationConfig {
@@ -328,6 +328,19 @@ fn parse_speaker_identification(
             "audio.speakerIdentification.enabled",
             issues,
         ),
+        model_path: match object.get("modelPath") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) if std::path::Path::new(value).is_absolute() => {
+                Some(value.clone())
+            }
+            Some(_) => {
+                issues.push(issue(
+                    "audio.speakerIdentification.modelPath",
+                    "モデルは絶対パスまたは null で指定してください。",
+                ));
+                None
+            }
+        },
     }
 }
 

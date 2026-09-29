@@ -19,6 +19,9 @@ fn license_document_file_name(document: &str) -> Option<&'static str> {
         "license" => Some("LICENSE"),
         "eula" => Some("EULA.md"),
         "eula-en" => Some("EULA.en.md"),
+        "third-party-notices" => Some("THIRD-PARTY-NOTICES.md"),
+        "cc-by-4.0" => Some("CC-BY-4.0-legalcode.txt"),
+        "wespeaker-apache-2.0" => Some("WeSpeaker-Apache-2.0.txt"),
         _ => None,
     }
 }

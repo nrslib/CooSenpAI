@@ -1198,6 +1198,10 @@ export const ja = {
       openLicense: "LICENSE を開く",
       openEula: "EULA を開く",
       openEulaEn: "EULA（英語）を開く",
+      thirdPartyDescription: "話者識別モデル WeSpeaker voxceleb ResNet34-LM には CC BY 4.0、WeSpeaker のコードには Apache 2.0 が適用されます。",
+      openThirdPartyNotices: "第三者ライセンス表記を開く",
+      openCcByLicense: "CC BY 4.0 本文を開く",
+      openWeSpeakerLicense: "WeSpeaker Apache 2.0 本文を開く",
     },
   },
   language: {

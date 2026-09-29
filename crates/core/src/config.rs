@@ -360,11 +360,16 @@ pub struct AudioConfig {
 pub struct SpeakerIdentificationConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub model_path: Option<String>,
 }
 
 impl Default for SpeakerIdentificationConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            model_path: None,
+        }
     }
 }
 

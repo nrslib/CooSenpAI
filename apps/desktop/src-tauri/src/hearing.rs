@@ -12,7 +12,9 @@ use coosenpai_core::ports::{
     SpeechPermissionPort,
 };
 use coosenpai_core::state::{AudioObservation, AudioObservationSource, ObservationRecord};
+use std::path::Path;
 use std::sync::Arc;
+use tauri::Manager;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -244,7 +246,11 @@ impl HearingController {
         }
         let _projection = self.projection.lock().await;
         let config = state.runtime_config();
-        let settings = hearing_session_settings_for_state(&config, &state.paths);
+        let (settings, model_source) = hearing_session_settings_for_state(&config, &state);
+        let _ = state.logger.write(
+            "INFO",
+            &format!("hearing-speaker-model: source={model_source}"),
+        );
         if !config.audio.enabled || !state.is_runtime_active() || state.voice_output.is_active() {
             *self.restart_attempts.lock().await = 0;
             self.stop_locked(&state).await;
@@ -1053,7 +1059,7 @@ impl HearingController {
                         return;
                     }
                     let config = state.runtime_config();
-                    let current = hearing_session_settings_for_state(&config, &state.paths);
+                    let (current, _) = hearing_session_settings_for_state(&config, &state);
                     if !config.audio.enabled || current != settings {
                         return;
                     }
@@ -1358,19 +1364,51 @@ pub(crate) fn hearing_session_settings(
 
 fn hearing_session_settings_for_state(
     config: &coosenpai_core::config::Config,
-    paths: &ConfigPaths,
-) -> HearingSessionSettings {
-    hearing_session_settings(config).with_speaker_identification(
-        config.audio.speaker_identification.enabled,
+    state: &DesktopState,
+) -> (HearingSessionSettings, &'static str) {
+    let resource_directory = state.app.path().resource_dir().ok();
+    let (model_path, source) = resolve_speaker_model_path(
         std::env::var("COOSENPAI_SPEAKER_MODEL").ok(),
-        Some(
-            paths
-                .speakers
-                .join("registry.enc")
-                .to_string_lossy()
-                .into_owned(),
+        config.audio.speaker_identification.model_path.as_deref(),
+        resource_directory.as_deref(),
+    );
+    (
+        hearing_session_settings(config).with_speaker_identification(
+            config.audio.speaker_identification.enabled,
+            model_path,
+            Some(
+                state
+                    .paths
+                    .speakers
+                    .join("registry.enc")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         ),
+        source,
     )
+}
+
+const SPEAKER_MODEL_RESOURCE_PATH: &str = "models/speaker-id/WespeakerResNet34LM.mlpackage";
+
+fn resolve_speaker_model_path(
+    environment_path: Option<String>,
+    configured_path: Option<&str>,
+    resource_directory: Option<&Path>,
+) -> (Option<String>, &'static str) {
+    if let Some(path) = environment_path.filter(|path| !path.is_empty()) {
+        return (Some(path), "env");
+    }
+    if let Some(path) = configured_path {
+        return (Some(path.to_owned()), "config");
+    }
+    let bundled_path = resource_directory
+        .map(|directory| directory.join(SPEAKER_MODEL_RESOURCE_PATH))
+        .filter(|path| path.is_dir());
+    if let Some(path) = bundled_path {
+        return (Some(path.to_string_lossy().into_owned()), "bundled");
+    }
+    (None, "none")
 }
 
 async fn publish_audio_listening(state: &DesktopState, generation: u64) {

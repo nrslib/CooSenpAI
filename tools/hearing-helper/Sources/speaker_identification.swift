@@ -105,10 +105,30 @@ private let speakerMaximumTrustedSamplesPerID = 3
 private let speakerLedgerLockStaleSeconds = 120.0
 private let speakerLedgerCommitSafetyNanoseconds: UInt64 = 50_000_000
 
+enum SpeakerModelFailureKind: String {
+    case unsupportedFormat = "unsupported-format"
+    case hashMismatch = "hash-mismatch"
+    case packageEnumerationFailed = "package-enumeration-failed"
+    case packageMetadataReadFailed = "package-metadata-read-failed"
+    case packageSymlinkUnsupported = "package-symlink-unsupported"
+    case packagePathInvalid = "package-path-invalid"
+    case packageFileReadFailed = "package-file-read-failed"
+    case packageEmpty = "package-empty"
+    case compileLockSyncFailed = "compile-lock-sync-failed"
+    case compileLockAcquireFailed = "compile-lock-acquire-failed"
+    case compileLockTimeout = "compile-lock-timeout"
+    case coreMLCompileFailed = "coreml-compile-failed"
+    case compiledModelCacheWriteFailed = "compiled-model-cache-write-failed"
+    case cacheDirectoryPrepareFailed = "cache-directory-prepare-failed"
+    case modelValidationFailed = "model-validation-failed"
+    case coreMLLoadFailed = "coreml-load-failed"
+    case coreMLPredictionFailed = "coreml-prediction-failed"
+}
+
 enum SpeakerIdentificationFailure: LocalizedError {
     case modelPathMissing
     case modelFileMissing(String)
-    case modelLoad(String)
+    case modelLoad(SpeakerModelFailureKind)
     case modelPackageMismatch
     case modelInputUnavailable
     case modelOutputInvalid
@@ -139,10 +159,11 @@ enum SpeakerIdentificationFailure: LocalizedError {
         switch self {
         case .modelPathMissing:
             return "話者識別モデルの場所が指定されていません"
-        case let .modelFileMissing(path):
-            return "話者識別モデルが見つかりません: \(path)"
-        case let .modelLoad(details):
-            return "話者識別モデルを読み込めません: \(details)"
+        case let .modelFileMissing(fileName):
+            let safeFileName = URL(fileURLWithPath: fileName).lastPathComponent
+            return "話者識別モデルを読み込めません (kind=file-missing, file=\(safeFileName))"
+        case let .modelLoad(kind):
+            return "話者識別モデルを読み込めません (kind=\(kind.rawValue))"
         case .modelPackageMismatch:
             return "話者識別モデルが台帳作成時と異なります。照合を停止し、話者を再登録してください"
         case .modelInputUnavailable:
@@ -562,12 +583,10 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
         guard !path.isEmpty else { throw SpeakerIdentificationFailure.modelPathMissing }
         let url = URL(fileURLWithPath: path, isDirectory: path.hasSuffix(".mlpackage"))
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw SpeakerIdentificationFailure.modelFileMissing(url.path)
+            throw SpeakerIdentificationFailure.modelFileMissing(url.lastPathComponent)
         }
         guard url.pathExtension == "mlpackage" else {
-            throw SpeakerIdentificationFailure.modelLoad(
-                "検証済みの Core ML .mlpackage だけを指定できます"
-            )
+            throw SpeakerIdentificationFailure.modelLoad(.unsupportedFormat)
         }
         let packageHash = try Self.validateModelPackage(at: url)
         let packageURL = url
@@ -593,7 +612,7 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
             loadedModel = candidate
         } catch {
             guard cacheHit else {
-                throw SpeakerIdentificationFailure.modelLoad(error.localizedDescription)
+                throw SpeakerIdentificationFailure.modelLoad(.coreMLLoadFailed)
             }
             // A cache directory can survive an interrupted copy or an OS update. Remove only
             // this hash-keyed entry and compile it again; other model versions remain intact.
@@ -610,7 +629,7 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
                 compiledURL = rebuilt
                 cacheHit = false
             } catch {
-                throw SpeakerIdentificationFailure.modelLoad(error.localizedDescription)
+                throw SpeakerIdentificationFailure.modelLoad(.coreMLLoadFailed)
             }
         }
         model = loadedModel
@@ -626,20 +645,16 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
 
     private static func validateModelPackage(at url: URL) throws -> String {
         guard url.pathExtension == "mlpackage" else {
-            throw SpeakerIdentificationFailure.modelLoad(
-                "検証済みの Core ML .mlpackage だけを指定できます"
-            )
+            throw SpeakerIdentificationFailure.modelLoad(.unsupportedFormat)
         }
         for file in speakerIdentificationModelPackageFiles {
             let fileURL = url.appendingPathComponent(file.path)
             guard let data = try? Data(contentsOf: fileURL) else {
-                throw SpeakerIdentificationFailure.modelFileMissing(fileURL.path)
+                throw SpeakerIdentificationFailure.modelFileMissing(fileURL.lastPathComponent)
             }
             let digest = sha256Hex(data)
             guard digest == file.sha256 else {
-                throw SpeakerIdentificationFailure.modelLoad(
-                    "Core ML モデルのハッシュが一致しません: \(file.path)"
-                )
+                throw SpeakerIdentificationFailure.modelLoad(.hashMismatch)
             }
         }
         let packagePath = url.standardizedFileURL.path
@@ -647,7 +662,7 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
             at: url,
             includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
         ) else {
-            throw SpeakerIdentificationFailure.modelLoad("Core ML package を列挙できません")
+            throw SpeakerIdentificationFailure.modelLoad(.packageEnumerationFailed)
         }
         var files: [(path: String, data: Data)] = []
         for case let fileURL as URL in enumerator {
@@ -655,32 +670,26 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
             do {
                 values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
             } catch {
-                throw SpeakerIdentificationFailure.modelLoad(
-                    "Core ML package の属性を読めません: \(error.localizedDescription)"
-                )
+                throw SpeakerIdentificationFailure.modelLoad(.packageMetadataReadFailed)
             }
             guard values.isSymbolicLink != true else {
-                throw SpeakerIdentificationFailure.modelLoad(
-                    "Core ML package にシンボリックリンクは指定できません"
-                )
+                throw SpeakerIdentificationFailure.modelLoad(.packageSymlinkUnsupported)
             }
             guard values.isRegularFile == true else { continue }
             let filePath = fileURL.standardizedFileURL.path
             guard filePath.hasPrefix(packagePath + "/") else {
-                throw SpeakerIdentificationFailure.modelLoad("Core ML package のパスが不正です")
+                throw SpeakerIdentificationFailure.modelLoad(.packagePathInvalid)
             }
             let relativePath = String(filePath.dropFirst(packagePath.count + 1))
             do {
                 files.append((relativePath, try Data(contentsOf: fileURL)))
             } catch {
-                throw SpeakerIdentificationFailure.modelLoad(
-                    "Core ML package のファイルを読めません: \(relativePath)"
-                )
+                throw SpeakerIdentificationFailure.modelLoad(.packageFileReadFailed)
             }
         }
         files.sort { $0.path < $1.path }
         guard !files.isEmpty else {
-            throw SpeakerIdentificationFailure.modelLoad("Core ML package が空です")
+            throw SpeakerIdentificationFailure.modelLoad(.packageEmpty)
         }
         var packageDigest = SHA256()
         for file in files {
@@ -761,9 +770,7 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
         do {
             compiledURL = try MLModel.compileModel(at: packageURL)
         } catch {
-            throw SpeakerIdentificationFailure.modelLoad(
-                "Core ML モデルをコンパイルできません: " + error.localizedDescription
-            )
+            throw SpeakerIdentificationFailure.modelLoad(.coreMLCompileFailed)
         }
         let staging = cacheDirectory.appendingPathComponent(
             ".\(target.lastPathComponent).\(UUID().uuidString).tmp",
@@ -788,7 +795,7 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
         } catch {
             try? FileManager.default.removeItem(at: staging)
             throw SpeakerIdentificationFailure.modelLoad(
-                "コンパイル済み Core ML モデルを保存できません: " + error.localizedDescription
+                .compiledModelCacheWriteFailed
             )
         }
     }
@@ -805,23 +812,17 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
                 guard written == data.count, fsync(descriptor) == 0 else {
                     close(descriptor)
                     unlink(url.path)
-                    throw SpeakerIdentificationFailure.modelLoad(
-                        "Core ML コンパイルのロックを同期できません"
-                    )
+                    throw SpeakerIdentificationFailure.modelLoad(.compileLockSyncFailed)
                 }
                 return descriptor
             }
             guard errno == EEXIST else {
-                throw SpeakerIdentificationFailure.modelLoad(
-                    "Core ML コンパイルのロックを取得できません: errno=\(errno)"
-                )
+                throw SpeakerIdentificationFailure.modelLoad(.compileLockAcquireFailed)
             }
             if FileManager.default.fileExists(atPath: target.path) { return nil }
             try removeStaleCompileLockIfNeeded(at: url)
             guard Date() < deadline else {
-                throw SpeakerIdentificationFailure.modelLoad(
-                    "Core ML モデルのコンパイルが別の処理で長時間待機しています"
-                )
+                throw SpeakerIdentificationFailure.modelLoad(.compileLockTimeout)
             }
             Thread.sleep(forTimeInterval: 0.1)
         }
@@ -867,9 +868,7 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
                 ofItemAtPath: directory.path
             )
         } catch {
-            throw SpeakerIdentificationFailure.modelLoad(
-                "Core ML モデルのキャッシュを準備できません: " + error.localizedDescription
-            )
+            throw SpeakerIdentificationFailure.modelLoad(.cacheDirectoryPrepareFailed)
         }
     }
 
@@ -879,9 +878,7 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
               let creator = model.modelDescription.metadata[MLModelMetadataKey.creatorDefinedKey] as? [String: String],
               creator["com.coosenpai.model.source"]?.contains("Wespeaker/wespeaker-voxceleb-resnet34-LM") == true,
               creator["com.coosenpai.model.embeddingDimension"] == "256" else {
-            throw SpeakerIdentificationFailure.modelLoad(
-                "指定された Core ML モデルは CooSenpAI 用 WeSpeaker ResNet34-LM ではありません"
-            )
+            throw SpeakerIdentificationFailure.modelLoad(.modelValidationFailed)
         }
     }
 
@@ -917,7 +914,7 @@ final class CoreMLSpeakerEmbeddingPredictor: SpeakerEmbeddingPredictor {
         do {
             output = try model.prediction(from: provider)
         } catch {
-            throw SpeakerIdentificationFailure.modelLoad(error.localizedDescription)
+            throw SpeakerIdentificationFailure.modelLoad(.coreMLPredictionFailed)
         }
         guard let value = output.featureValue(for: "embs")?.multiArrayValue,
               value.count == 256 else {
@@ -4537,12 +4534,10 @@ final class SpeakerIdentificationCoordinator {
         guard !modelPath.isEmpty else { throw SpeakerIdentificationFailure.modelPathMissing }
         let modelURL = URL(fileURLWithPath: modelPath, isDirectory: modelPath.hasSuffix(".mlpackage"))
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            throw SpeakerIdentificationFailure.modelFileMissing(modelURL.path)
+            throw SpeakerIdentificationFailure.modelFileMissing(modelURL.lastPathComponent)
         }
         guard modelURL.pathExtension == "mlpackage" else {
-            throw SpeakerIdentificationFailure.modelLoad(
-                "検証済みの Core ML .mlpackage だけを指定できます"
-            )
+            throw SpeakerIdentificationFailure.modelLoad(.unsupportedFormat)
         }
         ledger = try SpeakerLedger(path: ledgerPath)
         self.log = log
@@ -4635,7 +4630,7 @@ final class SpeakerIdentificationCoordinator {
             preparationStatus(.unavailable)
         } catch {
             guard !isPreparationCancelled() else { return }
-            let failure = SpeakerIdentificationFailure.modelLoad(error.localizedDescription)
+            let failure = SpeakerIdentificationFailure.modelLoad(.coreMLLoadFailed)
             stateLock.lock()
             preparationFailure = failure
             preparationState = .unavailable

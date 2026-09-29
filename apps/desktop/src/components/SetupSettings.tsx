@@ -20,6 +20,12 @@ export function SetupSettings({ snapshot, onRestartTutorial, onRestartSetup, onR
       <h3>{t("settings.setup.licenseLabel")}</h3>
       <p>{t("settings.setup.licenseDescription")}</p>
       <div className="button-row"><button type="button" onClick={() => onOpenLicenseDocument("license")}>{t("settings.setup.openLicense")}</button><button type="button" onClick={() => onOpenLicenseDocument("eula")}>{t("settings.setup.openEula")}</button><button type="button" onClick={() => onOpenLicenseDocument("eula-en")}>{t("settings.setup.openEulaEn")}</button></div>
+      <p>{t("settings.setup.thirdPartyDescription")}</p>
+      <div className="button-row">
+        <button type="button" onClick={() => onOpenLicenseDocument("third-party-notices")}>{t("settings.setup.openThirdPartyNotices")}</button>
+        <button type="button" onClick={() => onOpenLicenseDocument("cc-by-4.0")}>{t("settings.setup.openCcByLicense")}</button>
+        <button type="button" onClick={() => onOpenLicenseDocument("wespeaker-apache-2.0")}>{t("settings.setup.openWeSpeakerLicense")}</button>
+      </div>
     </section>
   </fieldset>;
 }

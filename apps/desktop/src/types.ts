@@ -1,7 +1,7 @@
 export type ProviderName = "codex" | "claude" | "opencode";
 export interface WorkAllowedRoot { readonly path: string; readonly read: boolean; readonly write: boolean }
 export interface WorkConfigPatch { readonly approvalMode?: "manual" | "auto"; readonly allowedRoots?: readonly WorkAllowedRoot[] }
-export type LicenseDocument = "license" | "eula" | "eula-en";
+export type LicenseDocument = "license" | "eula" | "eula-en" | "third-party-notices" | "cc-by-4.0" | "wespeaker-apache-2.0";
 export type NotificationPriority = "none" | "info" | "warning" | "critical";
 export interface PersonaOption { readonly id: string; readonly displayName: string; readonly builtin: boolean }
 export interface ProviderModelOptions { readonly provider: ProviderName; readonly defaultModel: string; readonly candidates: readonly string[]; readonly efforts: readonly string[]; readonly modelEfforts: Readonly<Record<string, readonly string[]>> }
@@ -63,7 +63,7 @@ export interface CooSenpaiConfig {
     readonly mic: boolean;
     readonly microphoneCommandsEnabled: boolean;
     readonly speaker: boolean;
-    readonly speakerIdentification: { readonly enabled: boolean };
+    readonly speakerIdentification: { readonly enabled: boolean; readonly modelPath: string | null };
     readonly debugDumpDir?: string | null;
   };
   readonly voiceOutput: { readonly enabled: boolean; readonly provider: "system" | "voicevox"; readonly rate: number; readonly voicevoxStyleId: number | null };

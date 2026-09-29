@@ -1201,6 +1201,10 @@ export const en = {
       openLicense: "Open LICENSE",
       openEula: "Open EULA",
       openEulaEn: "Open EULA (English)",
+      thirdPartyDescription: "The WeSpeaker voxceleb ResNet34-LM speaker identification model is licensed under CC BY 4.0. WeSpeaker code is licensed under Apache 2.0.",
+      openThirdPartyNotices: "Open third-party notices",
+      openCcByLicense: "Open CC BY 4.0 license",
+      openWeSpeakerLicense: "Open WeSpeaker Apache 2.0 license",
     },
   },
   language: {

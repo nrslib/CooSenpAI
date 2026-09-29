@@ -19,6 +19,7 @@ const FIXED_ISSUE_PATH_PATTERNS: &[&str] = &[
     "audio.speaker",
     "audio.speakerIdentification",
     "audio.speakerIdentification.enabled",
+    "audio.speakerIdentification.modelPath",
     "bubble",
     "bubble.display",
     "bubble.edgeRecall",
