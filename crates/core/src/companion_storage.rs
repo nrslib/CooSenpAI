@@ -648,6 +648,25 @@ impl CompanionStorage {
         Ok(ConfigPaths::from_root(root))
     }
 
+    pub(crate) fn record_interrupted_dispatch(
+        &self,
+        source_ids: &[String],
+    ) -> Result<(), PersistenceError> {
+        if source_ids.is_empty() {
+            return Ok(());
+        }
+        self.update_cursor(|cursor| {
+            for id in source_ids {
+                if cursor.cancelled_input_ids.contains(id)
+                    && !cursor.dispatched_interrupted_input_ids.contains(id)
+                {
+                    cursor.dispatched_interrupted_input_ids.push(id.clone());
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn load_cursor(&self) -> Result<CursorSnapshot, PersistenceError> {
         let cursor = read_cursor(
             &self.cursor_path,
@@ -720,6 +739,8 @@ impl CompanionStorage {
         cursor.failed = scoped_cursor.failed.clone();
         cursor.observation_attempts = scoped_cursor.observation_attempts.clone();
         cursor.cancelled_input_ids = scoped_cursor.cancelled_input_ids.clone();
+        cursor.dispatched_interrupted_input_ids =
+            scoped_cursor.dispatched_interrupted_input_ids.clone();
         cursor.pending_frame_contexts = scoped_cursor.pending_frame_contexts.clone();
         cursor.consumed_frame_context_ids = scoped_cursor.consumed_frame_context_ids.clone();
         cursor.observation_consumptions = scoped_cursor.observation_consumptions.clone();
@@ -777,6 +798,14 @@ impl CompanionStorage {
     ) -> Result<R, PersistenceError> {
         let lock = cursor_lock_path(&self.cursor_path);
         let _guard = SiblingLock::acquire(&lock)?;
+        self.update_cursor_locked(update, publication)
+    }
+
+    fn update_cursor_locked<R>(
+        &self,
+        update: impl FnOnce(&mut CursorSnapshot) -> Result<R, PersistenceError>,
+        publication: Option<&crate::persistence::PublicationGate>,
+    ) -> Result<R, PersistenceError> {
         let mut cursor = read_cursor_locked(
             &self.cursor_path,
             &self.pending_quarantine_path,
@@ -807,6 +836,7 @@ impl CompanionStorage {
                 "user input の会話世代が現在の runtime と一致しません".to_owned(),
             ));
         }
+        let conversation = self.load_all_conversation()?;
         self.update_cursor(|cursor| {
             if let Some(existing) = cursor
                 .pending_inputs
@@ -829,6 +859,7 @@ impl CompanionStorage {
                 PersistenceError::Invalid("user epoch が上限に達しました".to_owned())
             })?;
             input.user_seq = next;
+            input.attach_interrupted_inputs(&conversation, &cursor.cancelled_input_ids);
             cursor
                 .pending_inputs
                 .push(PendingInput::UserMessage(input.clone()));
@@ -893,6 +924,77 @@ impl CompanionStorage {
             cursor.user_dispatch = Some(lease.clone());
             Ok((lease, inputs))
         })
+    }
+
+    /// dispatch の世代を CAS で照合し、返答完了後の中断参照を送信直前に落とす。
+    pub(crate) fn refresh_interrupted_dispatch(
+        &self,
+        input_ids: &[String],
+        dispatch_seq: Option<u64>,
+        operation_generation: Option<u64>,
+    ) -> Result<Option<Vec<PendingUserMessage>>, PersistenceError> {
+        Ok(self
+            .refresh_interrupted_dispatch_locked(input_ids, dispatch_seq, operation_generation)?
+            .map(|(inputs, _guard)| inputs))
+    }
+
+    /// 照合と rollover の間に cursor の更新が割り込まないよう、呼び出し元へ lock を渡す。
+    pub(crate) fn refresh_interrupted_dispatch_locked(
+        &self,
+        input_ids: &[String],
+        dispatch_seq: Option<u64>,
+        operation_generation: Option<u64>,
+    ) -> Result<Option<(Vec<PendingUserMessage>, SiblingLock)>, PersistenceError> {
+        let guard = SiblingLock::acquire(&cursor_lock_path(&self.cursor_path))?;
+        let inputs = self.update_cursor_locked(
+            |cursor| {
+                if operation_generation
+                    .is_some_and(|generation| cursor.user_operation_generation != generation)
+                    || dispatch_seq.is_some_and(|seq| {
+                        !cursor.user_dispatch.as_ref().is_some_and(|lease| {
+                            lease.dispatch_seq == seq
+                                && input_ids.iter().all(|id| lease.input_ids.contains(id))
+                        })
+                    })
+                {
+                    return Ok(None);
+                }
+                if input_ids.iter().any(|id| {
+                    cursor.cancelled_input_ids.contains(id)
+                        || !cursor
+                            .pending_inputs
+                            .iter()
+                            .any(|pending| pending.id() == id)
+                }) {
+                    return Ok(None);
+                }
+                let conversation = self.load_all_conversation()?;
+                let eligible = crate::companion_cursor::interrupted_entries(
+                    &conversation,
+                    &cursor.cancelled_input_ids,
+                )
+                .into_iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+                let mut inputs = Vec::new();
+                for id in input_ids {
+                    let Some(PendingInput::UserMessage(input)) = cursor
+                        .pending_inputs
+                        .iter_mut()
+                        .find(|pending| pending.id() == id)
+                    else {
+                        unreachable!("pending inputs were checked under the cursor lock");
+                    };
+                    input
+                        .interrupted_input_ids
+                        .retain(|id| eligible.contains(id.as_str()));
+                    inputs.push(input.clone());
+                }
+                Ok(Some(inputs))
+            },
+            None,
+        )?;
+        Ok(inputs.map(|inputs| (inputs, guard)))
     }
 
     pub(crate) fn extend_user_dispatch(
@@ -1320,11 +1422,6 @@ impl CompanionStorage {
             cursor.pending_inputs.retain(|input| input.id() != input_id);
             if !cursor.cancelled_input_ids.iter().any(|id| id == input_id) {
                 cursor.cancelled_input_ids.push(input_id.to_owned());
-                if cursor.cancelled_input_ids.len() > MAX_CURSOR_IDS {
-                    cursor
-                        .cancelled_input_ids
-                        .drain(..cursor.cancelled_input_ids.len() - MAX_CURSOR_IDS);
-                }
             }
             if let Some(lease) = cursor.user_dispatch.as_mut() {
                 lease.input_ids.retain(|id| id != input_id);
@@ -1499,6 +1596,7 @@ struct CursorDocument<'a> {
     failed: &'a [String],
     observation_attempts: &'a [ObservationAttempt],
     cancelled_input_ids: &'a [String],
+    dispatched_interrupted_input_ids: &'a [String],
     pending_inputs: &'a [PendingInput],
     pending_deliveries: &'a [PendingDelivery],
     pending_frame_contexts: &'a [PendingFrameContext],
@@ -1535,6 +1633,8 @@ struct RawCursorDocument {
     #[serde(default)]
     observation_attempts: Vec<ObservationAttempt>,
     cancelled_input_ids: Vec<String>,
+    #[serde(default)]
+    dispatched_interrupted_input_ids: Vec<String>,
     pending_inputs: Vec<PendingInput>,
     pending_deliveries: Vec<PendingDelivery>,
     #[serde(default)]
@@ -1638,7 +1738,8 @@ fn read_cursor_locked(
         pending: raw_pending,
         failed: raw_failed,
         observation_attempts,
-        cancelled_input_ids: raw_cancelled_input_ids,
+        cancelled_input_ids,
+        dispatched_interrupted_input_ids,
         pending_inputs,
         pending_deliveries: raw_pending_deliveries,
         pending_frame_contexts,
@@ -1703,7 +1804,6 @@ fn read_cursor_locked(
     }
     let ids = retain_ids(raw_ids);
     let failed = retain_ids(raw_failed);
-    let cancelled_input_ids = retain_ids(raw_cancelled_input_ids);
     let consumed_frame_context_ids = retain_ids(raw_consumed_frame_context_ids);
     validate_pending_inputs(&pending_inputs, next_user_seq)?;
     validate_user_dispatch(&user_dispatch, next_dispatch_seq, &pending_inputs)?;
@@ -1793,6 +1893,7 @@ fn read_cursor_locked(
                 failed: &failed,
                 observation_attempts: &observation_attempts,
                 cancelled_input_ids: &cancelled_input_ids,
+                dispatched_interrupted_input_ids: &dispatched_interrupted_input_ids,
                 pending_inputs: &pending_inputs,
                 pending_deliveries: &pending_deliveries,
                 pending_frame_contexts: &pending_frame_contexts,
@@ -1836,6 +1937,7 @@ fn read_cursor_locked(
         failed,
         observation_attempts,
         cancelled_input_ids,
+        dispatched_interrupted_input_ids,
         pending_inputs,
         pending_deliveries,
         pending_frame_contexts,
@@ -1917,7 +2019,6 @@ fn cursor_document_bytes(cursor: &CursorSnapshot) -> Result<Vec<u8>, Persistence
     let failed = retain_ids(cursor.failed.clone());
     let observation_attempts = cursor.observation_attempts.clone();
     let consumed_frame_context_ids = retain_ids(cursor.consumed_frame_context_ids.clone());
-    let cancelled_input_ids = retain_ids(cursor.cancelled_input_ids.clone());
     validate_pending_inputs(&cursor.pending_inputs, cursor.next_user_seq)?;
     validate_user_dispatch(
         &cursor.user_dispatch,
@@ -1956,7 +2057,8 @@ fn cursor_document_bytes(cursor: &CursorSnapshot) -> Result<Vec<u8>, Persistence
         pending: &cursor.pending,
         failed: &failed,
         observation_attempts: &observation_attempts,
-        cancelled_input_ids: &cancelled_input_ids,
+        cancelled_input_ids: &cursor.cancelled_input_ids,
+        dispatched_interrupted_input_ids: &cursor.dispatched_interrupted_input_ids,
         pending_inputs: &cursor.pending_inputs,
         pending_deliveries: &cursor.pending_deliveries,
         pending_frame_contexts: &cursor.pending_frame_contexts,

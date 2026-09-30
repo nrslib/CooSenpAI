@@ -62,7 +62,16 @@ pub(crate) struct RowActions {
     pub retry: bool,
     pub resend: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<CancellationState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<crate::status_presenter::UiText>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CancellationState {
+    Cancelled,
+    Carried,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -596,6 +605,14 @@ impl ConversationPresenter {
                     });
                 let user_failure = current_failure.or(history_failure);
                 let cancelled = snapshot.cancelled_user_message_ids.contains(&entry.id);
+                let carried = snapshot
+                    .carried_cancelled_user_message_ids
+                    .contains(&entry.id);
+                let cancellation = cancelled.then_some(if carried {
+                    CancellationState::Carried
+                } else {
+                    CancellationState::Cancelled
+                });
                 let failure = (!cancelled).then_some(user_failure.as_ref()).flatten().map(
                     |(failure, kind)| {
                         crate::status_presenter::user_response_failure_text(failure, *kind)
@@ -604,6 +621,7 @@ impl ConversationPresenter {
                 let terminal_for_row = terminal == Some(id) || user_failure.is_some();
                 let row = RowActions {
                     failure,
+                    cancellation,
                     cancel: available
                         && !cancelled
                         && (active == Some(id) || (terminal_for_row && recovery_idle)),
@@ -612,6 +630,7 @@ impl ConversationPresenter {
                         && active.is_none()
                         && !snapshot.user_work_pending
                         && cancelled
+                        && !carried
                         && !entry.message.trim().is_empty(),
                 };
                 (entry.id.clone(), row)

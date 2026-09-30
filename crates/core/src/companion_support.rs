@@ -23,6 +23,7 @@ pub enum DeliveryOwnership {
 pub(super) struct ProviderInvocation<'a> {
     pub prompt: &'a str,
     pub source_ids: &'a [String],
+    pub interrupted_input_ids: &'a [String],
     pub user: bool,
     pub image_paths: &'a [PathBuf],
     pub session: SessionRequest,
@@ -39,6 +40,8 @@ pub(super) struct CompanionTurn {
     pub image_paths: Vec<PathBuf>,
     pub events: Option<Arc<dyn ProviderEventSink>>,
     pub requested_source_ids: Vec<String>,
+    pub user_operation_generation: Option<u64>,
+    pub user_prompt_batch: Option<super::user_prompt::UserPromptBatch>,
     pub additional_inputs: Option<mpsc::UnboundedReceiver<ProviderMidTurnInput>>,
     pub accepted_mid_turn_ids: Option<Arc<Mutex<HashSet<String>>>>,
     pub tutorial_response_key: Option<String>,
@@ -80,6 +83,7 @@ pub(super) struct ProviderTurn<'a> {
     pub image_paths: &'a [PathBuf],
     pub events: Option<Arc<dyn ProviderEventSink>>,
     pub source_ids: &'a [String],
+    pub interrupted_input_ids: &'a [String],
     pub additional_inputs: Option<mpsc::UnboundedReceiver<ProviderMidTurnInput>>,
     pub tutorial_response_key: Option<&'a str>,
 }

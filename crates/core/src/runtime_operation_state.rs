@@ -485,6 +485,7 @@ impl RunningOperation {
         &mut self,
         pending: Vec<crate::companion_storage::PendingUserMessage>,
         preparer: &crate::companion::user::UserMessagePreparer,
+        mut dispatched: impl FnMut(&[String]),
     ) -> Result<AppendPendingResult, CompanionError> {
         let Some(control) = self.user_append.as_mut() else {
             return Ok(AppendPendingResult::NotUser);
@@ -522,15 +523,25 @@ impl RunningOperation {
         }
         for input in additional {
             preparer.begin_appended_response_attempt(&input.id)?;
-            let provider_input = match preparer.mid_turn_input(&input) {
+            let prepared = match preparer.mid_turn_input(
+                &input,
+                control.dispatch_seq,
+                control.operation_generation,
+            ) {
                 Ok(input) => input,
+                Err(crate::companion::CompanionError::DispatchSuperseded) => {
+                    preparer.release_undispatched_attempts(std::slice::from_ref(&input))?;
+                    return Ok(AppendPendingResult::NoNewInput);
+                }
                 Err(error) => {
                     control.restart_requested = true;
                     self.cancellation.cancel();
                     return Err(error);
                 }
             };
-            if control.sender.send(provider_input).is_err() {
+            preparer.record_interrupted_dispatch(&prepared.interrupted_input_ids)?;
+            dispatched(&prepared.interrupted_input_ids);
+            if control.sender.send(prepared.provider_input).is_err() {
                 control.restart_requested = true;
                 self.cancellation.cancel();
                 return Ok(AppendPendingResult::RestartRequested);

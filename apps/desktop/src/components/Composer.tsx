@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactElement } from "react";
 import { initialComposerDom, transitionComposerDom, type ComposerDomEvent } from "../composer-dom.js";
-import { resizeComposerTextarea } from "../composer-layout.js";
+import { measureComposerVisualLine, resizeComposerTextarea } from "../composer-layout.js";
 import { formatShortcutLabel } from "../shortcut-label.js";
 import type { ComposerInput, ComposerView } from "../composer-view.js";
 import { useI18n } from "../i18n/index.js";
@@ -62,9 +62,17 @@ export function Composer({ displayName, sendKey, microphoneShortcut, view, onEve
       onCompositionEnd={(event) => dispatch({ type: "composition", active: false, ...value(event.currentTarget) })}
       onKeyDown={(event) => {
         const key = { key: event.key, metaKey: event.metaKey, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey, altKey: event.altKey };
-        if (!event.nativeEvent.isComposing && event.keyCode !== 229 && view.bindings.some((binding) => binding.key === key.key && binding.metaKey === key.metaKey && binding.shiftKey === key.shiftKey && binding.ctrlKey === key.ctrlKey && binding.altKey === key.altKey)) event.preventDefault();
+        const composing = current.current.ime.active || event.nativeEvent.isComposing || event.keyCode === 229;
+        const visualLine = !composing && (key.key === "ArrowUp" || key.key === "ArrowDown")
+          ? measureComposerVisualLine(event.currentTarget)
+          : { firstVisualLine: false, lastVisualLine: false };
+        if (!composing && view.bindings.some((binding) =>
+          binding.key === key.key && binding.metaKey === key.metaKey && binding.shiftKey === key.shiftKey && binding.ctrlKey === key.ctrlKey && binding.altKey === key.altKey
+          && (binding.visualLine === null || (event.currentTarget.selectionStart === event.currentTarget.selectionEnd
+            && (binding.visualLine === "first" ? visualLine.firstVisualLine : visualLine.lastVisualLine)))
+        )) event.preventDefault();
         event.stopPropagation();
-        dispatch({ type: "key", ...key, composing: event.nativeEvent.isComposing, keyCode: event.keyCode, ...value(event.currentTarget) });
+        dispatch({ type: "key", ...key, ...visualLine, composing, keyCode: event.keyCode, ...value(event.currentTarget) });
       }} onFocus={onFocus} onBlur={onBlur} />
     <span className="send-key-hint">{sendHint}</span>
     <button className="send-button" type="submit" disabled={!view.canSend} aria-label={t("composer.sendLabel")} title={sendHint}>

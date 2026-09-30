@@ -33,6 +33,7 @@ pub struct CursorSnapshot {
     pub failed: Vec<String>,
     pub observation_attempts: Vec<ObservationAttempt>,
     pub cancelled_input_ids: Vec<String>,
+    pub dispatched_interrupted_input_ids: Vec<String>,
     pub pending_inputs: Vec<PendingInput>,
     pub pending_deliveries: Vec<PendingDelivery>,
     pub pending_frame_contexts: Vec<PendingFrameContext>,
@@ -60,6 +61,7 @@ impl Default for CursorSnapshot {
             failed: Vec::new(),
             observation_attempts: Vec::new(),
             cancelled_input_ids: Vec::new(),
+            dispatched_interrupted_input_ids: Vec::new(),
             pending_inputs: Vec::new(),
             pending_deliveries: Vec::new(),
             pending_frame_contexts: Vec::new(),
@@ -165,6 +167,9 @@ pub struct PendingUserMessage {
     pub conversation_generation: u64,
     #[serde(default)]
     pub user_seq: u64,
+    /// 次の送信で引き継ぐ中断発言。本文の正本は conversation に置く。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interrupted_input_ids: Vec<String>,
     pub created_at: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,7 +282,99 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+pub(crate) fn interrupted_entries<'a>(
+    conversation: &'a [ConversationEntry],
+    cancelled_ids: &[String],
+) -> Vec<&'a ConversationEntry> {
+    let user_ids = conversation
+        .iter()
+        .filter(|entry| entry.role == ConversationRole::User)
+        .map(|entry| entry.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let last_response = conversation.iter().rposition(|entry| {
+        entry.completes_user_response()
+            && (entry
+                .caused_by_ids
+                .iter()
+                .any(|id| user_ids.contains(id.as_str()))
+                || (entry.caused_by_ids.is_empty()
+                    && matches!(
+                        entry.message_kind,
+                        None | Some(crate::state::ConversationMessageKind::Chat)
+                    )))
+    });
+    conversation
+        .iter()
+        .skip(last_response.map_or(0, |position| position + 1))
+        .filter(|entry| entry.role == ConversationRole::User && cancelled_ids.contains(&entry.id))
+        .collect()
+}
+
 impl PendingUserMessage {
+    pub(crate) fn attach_interrupted_inputs(
+        &mut self,
+        conversation: &[ConversationEntry],
+        cancelled_ids: &[String],
+    ) {
+        if self.tutorial_response_key.is_some() {
+            return;
+        }
+        let end = conversation
+            .iter()
+            .position(|entry| entry.id == self.id)
+            .unwrap_or(conversation.len());
+        self.interrupted_input_ids = interrupted_entries(&conversation[..end], cancelled_ids)
+            .into_iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+    }
+
+    pub(crate) fn from_conversation(
+        entry: &ConversationEntry,
+        conversation_generation: u64,
+        user_seq: u64,
+    ) -> Self {
+        PendingUserMessage {
+            id: entry.id.clone(),
+            conversation_generation,
+            user_seq,
+            interrupted_input_ids: Vec::new(),
+            created_at: entry.created_at.clone(),
+            message: entry.message.clone(),
+            attachment_path: entry.attachment_path.clone(),
+            attachment_text: entry.attachment_text.clone(),
+            observations: entry
+                .screen_context
+                .as_ref()
+                .map_or_else(Vec::new, |context| context.observations.clone()),
+            judge_feedback_targets: Vec::new(),
+            pending_frames: entry
+                .screen_context
+                .as_ref()
+                .map_or_else(Vec::new, |context| context.pending_frames.clone()),
+            hearing_context: entry
+                .screen_context
+                .as_ref()
+                .map_or_else(Vec::new, |context| context.hearing_context.clone()),
+            pending_audio: entry
+                .screen_context
+                .as_ref()
+                .map_or_else(Vec::new, |context| context.pending_audio.clone()),
+            pending_audio_ids: entry
+                .screen_context
+                .as_ref()
+                .map_or_else(Vec::new, |context| context.pending_audio_ids.clone()),
+            observation_in_progress: false,
+            prepared_response: None,
+            response_commit_started: false,
+            attachment_failure: None,
+            response_attempts: 0,
+            response_terminal: false,
+            response_failure: None,
+            tutorial_response_key: entry.tutorial_response_key.clone(),
+        }
+    }
+
     pub fn pending_audio_ids(&self) -> Vec<String> {
         let mut ids = std::collections::HashSet::new();
         self.pending_audio_ids

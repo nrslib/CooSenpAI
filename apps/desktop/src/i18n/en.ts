@@ -360,6 +360,7 @@ export const en = {
     details: "Details",
     cancel: "Cancel",
     queued: "Queued",
+    carried: "Sent with your next message",
     cancelled: "Cancelled",
     retryText: "Resend text only",
     retry: "Resend",

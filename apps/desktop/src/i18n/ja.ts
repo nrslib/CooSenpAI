@@ -357,6 +357,7 @@ export const ja = {
     details: "詳細",
     cancel: "取り消す",
     queued: "順番待ち",
+    carried: "次の発言と一緒に送信しました",
     cancelled: "取り消しました",
     retryText: "文だけ再送",
     retry: "再送",

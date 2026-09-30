@@ -580,7 +580,9 @@ impl RuntimeActor {
             return Ok(AppendPendingResult::NotUser);
         };
         let pending = preparer.pending_messages()?;
-        operation.append_pending_inputs(pending, &preparer)
+        operation.append_pending_inputs(pending, &preparer, |ids| {
+            self.record_carried_cancelled_messages(ids);
+        })
     }
 
     pub(super) fn cancel_active_user(&mut self) -> Result<(), RuntimeError> {
@@ -644,9 +646,6 @@ impl RuntimeActor {
             .any(|value| value == input_id)
         {
             self.cancelled_user_message_ids.push(input_id.to_owned());
-            if self.cancelled_user_message_ids.len() > 200 {
-                self.cancelled_user_message_ids.remove(0);
-            }
         }
         self.revision = self.revision.saturating_add(1);
         Ok(())
@@ -835,6 +834,7 @@ impl RuntimeActor {
     }
 
     pub(super) fn refresh_user_preparer(&mut self) {
+        self.cancelled_message_status_loaded = false;
         self.hearing_context
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -999,6 +999,7 @@ impl RuntimeActor {
             // 揮発キューを残すと、切り替え先の recovery に旧世代の観察が混ざる。
             self.pending_observations.clear();
             self.cancelled_user_message_ids.clear();
+            self.carried_cancelled_user_message_ids.clear();
             self.user_retry_at = None;
             self.user_retry_delay = Duration::from_secs(1);
             self.companion_recovery_pending = false;
@@ -1120,6 +1121,7 @@ pub(super) fn initialization_error_kind(error: &CompanionError) -> RuntimeErrorK
             RuntimeErrorKind::ProviderTimeout
         }
         CompanionError::Cancelled
+        | CompanionError::DispatchSuperseded
         | CompanionError::Provider(_)
         | CompanionError::Output
         | CompanionError::ObservationPrompt

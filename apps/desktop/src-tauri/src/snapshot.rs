@@ -70,6 +70,7 @@ pub struct AppSnapshot {
     pub active_user_message_id: Option<String>,
     pub user_work_pending: bool,
     pub cancelled_user_message_ids: Vec<String>,
+    pub carried_cancelled_user_message_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub companion_draft: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -477,6 +478,7 @@ impl AppSnapshot {
             active_user_message_id: None,
             user_work_pending: false,
             cancelled_user_message_ids: Vec::new(),
+            carried_cancelled_user_message_ids: Vec::new(),
             companion_draft: None,
             latest_companion_thought: None,
             latest_companion_thought_generation: None,
@@ -543,6 +545,8 @@ impl AppSnapshot {
         self.active_user_message_id = runtime.active_user_message_id.clone();
         self.user_work_pending = runtime.user_work_pending;
         self.cancelled_user_message_ids = runtime.cancelled_user_message_ids.clone();
+        self.carried_cancelled_user_message_ids =
+            runtime.carried_cancelled_user_message_ids.clone();
         self.companion_draft = runtime.companion_draft.clone();
         self.latest_companion_thought = runtime.latest_companion_thought.clone();
         self.latest_companion_thought_generation = runtime.latest_companion_thought_generation;

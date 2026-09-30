@@ -132,8 +132,8 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
               ? <div className="message-state" role="alert">{renderUiText(responseFailure, t)}<button type="button" disabled={!view?.actions[entry.id]?.cancel} onClick={() => action(entry.id, "cancel")}>{t("conversation.cancel")}</button><button type="button" disabled={!view?.actions[entry.id]?.retry} onClick={() => action(entry.id, "retry")}>{t("common.retry")}</button></div>
               : entry.role === "user" && attachmentState !== undefined
               ? <div className="message-state">{attachmentState.message}{attachmentState.terminal ? <><button type="button" disabled={!view?.actions[entry.id]?.cancel} onClick={() => action(entry.id, "cancel")}>{t("conversation.cancel")}</button><button type="button" disabled={!view?.actions[entry.id]?.retry} onClick={() => action(entry.id, "retry")}>{t("common.retry")}</button></> : null}</div>
-              : entry.role === "user" && snapshot.cancelledUserMessageIds.includes(entry.id)
-              ? <div className="message-state">{t("conversation.cancelled")} <button type="button" disabled={!view?.actions[entry.id]?.resend} onClick={() => action(entry.id, "resend")}>{cancelledRetryLabel(entry.attachmentPath !== undefined || entry.attachmentText !== undefined, locale)}</button></div>
+              : entry.role === "user" && view?.actions[entry.id]?.cancellation !== undefined
+              ? <div className="message-state">{view?.actions[entry.id]?.cancellation === "carried" ? t("conversation.carried") : <>{t("conversation.cancelled")} <button type="button" disabled={!view?.actions[entry.id]?.resend} onClick={() => action(entry.id, "resend")}>{cancelledRetryLabel(entry.attachmentPath !== undefined || entry.attachmentText !== undefined, locale)}</button></>}</div>
               : entry.role === "user" && !respondedUserIds.has(entry.id)
                 ? snapshot.config.chat.whileThinking === "append" && snapshot.activeUserMessageId !== undefined && snapshot.activeUserMessageId !== entry.id
                   ? null

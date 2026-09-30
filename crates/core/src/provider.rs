@@ -240,6 +240,7 @@ pub struct ProviderError {
 }
 
 pub trait ProviderEventSink: Send + Sync {
+    fn dispatched(&self, _interrupted_input_ids: &[String]) {}
     fn delta(&self, _text: &str) {}
     fn progress(&self) {}
     fn usage(&self, _usage: &ProviderUsage) {}

@@ -206,6 +206,11 @@ pub(crate) struct UserOperationResult {
     pub(crate) call_id: Option<String>,
 }
 
+pub(crate) struct PreparedMidTurnInput {
+    pub provider_input: ProviderMidTurnInput,
+    pub interrupted_input_ids: Vec<String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct UserMessagePreparer {
     pub(super) emotions: super::emotions::CompanionEmotions,
@@ -451,7 +456,12 @@ impl CompanionAgent {
         }
         let observations = turn_observations(&inputs);
         let observation_frame_paths = self.observation_frame_paths(&observations)?;
-        let mut data = self.user_prompt_data(&inputs, observation_frame_paths)?;
+        let batch = super::user_prompt::UserPromptBatch::new(&inputs, self.storage.as_ref())?;
+        let mut data = self.user_prompt_data(
+            &batch.inputs,
+            &batch.interrupted_ids,
+            observation_frame_paths,
+        )?;
         let image_paths =
             self.bounded_provider_image_paths(self.user_image_paths(&inputs)?, Vec::new());
         let retrying_attachment = inputs.iter().any(|input| {
@@ -482,6 +492,8 @@ impl CompanionAgent {
                     image_paths,
                     events: events.clone(),
                     requested_source_ids: input_ids.clone(),
+                    user_operation_generation: operation_generation,
+                    user_prompt_batch: (!batch.interrupted_ids.is_empty()).then_some(batch),
                     additional_inputs,
                     accepted_mid_turn_ids: Some(accepted_mid_turn_ids.clone()),
                     tutorial_response_key: tutorial_response_key.clone(),
@@ -492,7 +504,11 @@ impl CompanionAgent {
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                if cancellation.is_cancelled() {
+                if matches!(error, CompanionError::DispatchSuperseded) {
+                    checkpoint.restore(self);
+                    self.user_message_preparer()
+                        .release_undispatched_attempts(&inputs)?;
+                } else if cancellation.is_cancelled() {
                     checkpoint.restore_after_cancellation(self);
                 }
                 return Err(error);
@@ -722,11 +738,17 @@ impl CompanionAgent {
         self.refresh_runtime_observation_context(&mut inputs)?;
         let observations = turn_observations(&inputs);
         let observation_frame_paths = self.observation_frame_paths(&observations)?;
-        let mut data = self.user_prompt_data(&inputs, observation_frame_paths)?;
-        let source_ids = inputs
+        let batch = super::user_prompt::UserPromptBatch::new(&inputs, self.storage.as_ref())?;
+        let mut data = self.user_prompt_data(
+            &batch.inputs,
+            &batch.interrupted_ids,
+            observation_frame_paths,
+        )?;
+        let mut source_ids = inputs
             .iter()
             .map(|input| input.id.clone())
             .collect::<Vec<_>>();
+        source_ids.extend(batch.interrupted_ids.iter().cloned());
         self.apply_memory_context(&mut data, &observations, &source_ids)?;
         self.apply_session_context(&mut data, true, &source_ids)?;
         let prompt = build_companion_prompt(&data);
@@ -750,9 +772,10 @@ impl CompanionAgent {
         Ok(crate::provider::bridge_send_request_fits(&call))
     }
 
-    fn user_prompt_data(
+    pub(super) fn user_prompt_data(
         &self,
         inputs: &[PendingUserMessage],
+        interrupted_ids: &[String],
         observation_frame_paths: HashMap<String, Vec<PathBuf>>,
     ) -> Result<CompanionPromptData, CompanionError> {
         let input = inputs.first().ok_or_else(|| {
@@ -776,7 +799,7 @@ impl CompanionAgent {
                 }
                 None => (None, None, None),
             };
-        let user_message = format_user_messages(inputs)?;
+        let user_message = format_user_messages(inputs, interrupted_ids)?;
         let pending_speaker_name_conflict_selection = match (
             self.storage.as_ref(),
             speaker_id_resolver.as_ref(),
@@ -818,7 +841,9 @@ impl CompanionAgent {
             } else {
                 serde_json::to_string(&input_ids)?
             }),
-            user_attachment: inputs.iter().any(|input| input.attachment_path.is_some()),
+            user_attachment: inputs.iter().any(|input| {
+                input.attachment_path.is_some() && !interrupted_ids.contains(&input.id)
+            }),
             attachment_ocr_text: None,
             pending_frame_context: format_pending_frame_contexts(inputs),
             memory_block: None,
@@ -896,7 +921,7 @@ impl CompanionAgent {
         Ok(())
     }
 
-    fn user_image_paths(
+    pub(super) fn user_image_paths(
         &self,
         inputs: &[PendingUserMessage],
     ) -> Result<Vec<PathBuf>, CompanionError> {

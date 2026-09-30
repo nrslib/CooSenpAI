@@ -43,6 +43,9 @@ impl CompanionStorage {
             cursor
                 .cancelled_input_ids
                 .retain(|id| retained_user_ids.contains(id.as_str()));
+            cursor
+                .dispatched_interrupted_input_ids
+                .retain(|id| retained_user_ids.contains(id.as_str()));
             for entry in &unanswered {
                 if cursor.cancelled_input_ids.iter().any(|id| id == &entry.id) {
                     continue;
@@ -61,46 +64,10 @@ impl CompanionStorage {
                 cursor.user_epoch = cursor.user_epoch.checked_add(1).ok_or_else(|| {
                     PersistenceError::Invalid("user epoch が上限に達しました".to_owned())
                 })?;
-                cursor
-                    .pending_inputs
-                    .push(PendingInput::UserMessage(PendingUserMessage {
-                        id: entry.id.clone(),
-                        conversation_generation,
-                        user_seq,
-                        created_at: entry.created_at.clone(),
-                        message: entry.message.clone(),
-                        attachment_path: entry.attachment_path.clone(),
-                        attachment_text: entry.attachment_text.clone(),
-                        observations: entry
-                            .screen_context
-                            .as_ref()
-                            .map_or_else(Vec::new, |context| context.observations.clone()),
-                        judge_feedback_targets: Vec::new(),
-                        pending_frames: entry
-                            .screen_context
-                            .as_ref()
-                            .map_or_else(Vec::new, |context| context.pending_frames.clone()),
-                        hearing_context: entry
-                            .screen_context
-                            .as_ref()
-                            .map_or_else(Vec::new, |context| context.hearing_context.clone()),
-                        pending_audio: entry
-                            .screen_context
-                            .as_ref()
-                            .map_or_else(Vec::new, |context| context.pending_audio.clone()),
-                        pending_audio_ids: entry
-                            .screen_context
-                            .as_ref()
-                            .map_or_else(Vec::new, |context| context.pending_audio_ids.clone()),
-                        observation_in_progress: false,
-                        prepared_response: None,
-                        response_commit_started: false,
-                        attachment_failure: None,
-                        response_attempts: 0,
-                        response_terminal: false,
-                        response_failure: None,
-                        tutorial_response_key: entry.tutorial_response_key.clone(),
-                    }));
+                let mut input =
+                    PendingUserMessage::from_conversation(entry, conversation_generation, user_seq);
+                input.attach_interrupted_inputs(&conversation, &cursor.cancelled_input_ids);
+                cursor.pending_inputs.push(PendingInput::UserMessage(input));
             }
             Ok(cursor.clone())
         })?;

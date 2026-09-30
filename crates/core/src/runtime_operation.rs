@@ -129,6 +129,11 @@ impl RuntimeActor {
             }
             inputs
         };
+        if let Err(error) = self.restore_cancelled_message_status(&companion) {
+            self.schedule_user_retry(initialization_error_kind(&error), snapshot_tx);
+            self.companion = Some(companion);
+            return StartResult::Completed;
+        }
         /*
          * The durable queue is the source of truth for owned runtimes. The
          * volatile branch is used only by the CLI's non-owning companion.
@@ -1361,6 +1366,12 @@ impl RuntimeActor {
                     companion.discard_provider_session();
                     response_result = Err(RuntimeError::Closed);
                     self.operation_cancellation.renew_lane(OperationLane::Coo);
+                } else if matches!(
+                    &result,
+                    Err(RuntimeError::Companion(CompanionError::DispatchSuperseded))
+                ) {
+                    response_result = Err(RuntimeError::Closed);
+                    retry_without_response = true;
                 } else if append_restart_requested {
                     companion.discard_provider_session();
                     response_result = Err(RuntimeError::Closed);
@@ -1517,6 +1528,7 @@ impl RuntimeActor {
                     None => false,
                 };
                 pending_user_drain = if cancelled
+                    || retry_without_response
                     || append_restart_requested
                     || terminal_user_failure
                     || (response_result.is_ok() && pending_user_work)
@@ -1537,11 +1549,10 @@ impl RuntimeActor {
                 result,
             } => {
                 let delivery_status_after = companion.pending_delivery_status();
-                let terminal_restore = if result.is_ok() {
+                let result = result.and_then(|()| {
+                    self.restore_cancelled_message_status(&companion)?;
                     self.restore_terminal_user_failure(&companion, RuntimeErrorKind::Provider)
-                } else {
-                    Ok(())
-                };
+                });
                 let mut companion = *companion;
                 if preempted_for_user {
                     companion.discard_provider_session();
@@ -1549,12 +1560,6 @@ impl RuntimeActor {
                 self.companion = Some(companion);
                 match result {
                     Ok(()) => {
-                        if let Err(error) = terminal_restore {
-                            self.schedule_initialization_retry(
-                                initialization_error_kind(&error),
-                                snapshot_tx,
-                            );
-                        }
                         pending_user_drain = PendingUserDrain::Continue;
                         if self.provider_build_failed {
                             self.clear_non_user_error();

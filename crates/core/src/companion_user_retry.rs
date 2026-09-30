@@ -76,6 +76,7 @@ fn fresh_input_from_history(
         id,
         conversation_generation: storage.conversation_generation()?,
         user_seq: 0,
+        interrupted_input_ids: Vec::new(),
         created_at: now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         message: entry.message,
         attachment_path: entry.attachment_path,
@@ -203,6 +204,37 @@ impl UserMessagePreparer {
             .ok_or_else(|| PersistenceError::Invalid("再送する履歴がありません".into()))?;
         storage.cancel_user_input_after_termination(input_id)?;
         Ok(fresh_input_from_history(self, storage, entry)?.id)
+    }
+}
+
+impl UserMessagePreparer {
+    pub(crate) fn release_undispatched_attempts(
+        &self,
+        inputs: &[PendingUserMessage],
+    ) -> Result<(), CompanionError> {
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        storage.update_cursor(|cursor| {
+            for original in inputs {
+                let Some(PendingInput::UserMessage(pending)) = cursor
+                    .pending_inputs
+                    .iter_mut()
+                    .find(|pending| pending.id() == original.id)
+                else {
+                    continue;
+                };
+                if pending.prepared_response.is_none()
+                    && !pending.response_commit_started
+                    && pending.response_attempts == original.response_attempts.saturating_add(1)
+                {
+                    pending.response_attempts = original.response_attempts;
+                    pending.response_failure = original.response_failure.clone();
+                }
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 }
 

@@ -95,10 +95,10 @@ impl CompanionAgent {
             }
             let response_cancel = cancellation.child_token();
             let completion = async {
-                self.prepare_call_session(true, response_cancel.clone())
+                self.prepare_call_session(true, &outcome.source_ids, response_cancel.clone())
                     .await?;
                 let mut completion_data = outcome.data.clone();
-                self.apply_session_context(&mut completion_data, true, input_ids)?;
+                self.apply_session_context(&mut completion_data, true, &outcome.source_ids)?;
                 self.call_provider(
                     ProviderTurn {
                         work_result: Some(answer.message()),
@@ -106,7 +106,8 @@ impl CompanionAgent {
                         user: true,
                         image_paths: &[],
                         events: events.clone(),
-                        source_ids: input_ids,
+                        source_ids: &outcome.source_ids,
+                        interrupted_input_ids: &[],
                         additional_inputs: None,
                         tutorial_response_key: None,
                     },

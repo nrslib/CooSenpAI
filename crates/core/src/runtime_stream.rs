@@ -4,6 +4,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 pub(super) enum ProviderStreamUpdate {
+    Dispatched {
+        input_id: String,
+        interrupted_input_ids: Vec<String>,
+    },
     Delta {
         input_id: String,
         text: String,
@@ -27,6 +31,13 @@ pub(super) struct RuntimeProviderEvents {
 }
 
 impl ProviderEventSink for RuntimeProviderEvents {
+    fn dispatched(&self, interrupted_input_ids: &[String]) {
+        let _ = self.sender.send(ProviderStreamUpdate::Dispatched {
+            input_id: self.input_id.clone(),
+            interrupted_input_ids: interrupted_input_ids.to_vec(),
+        });
+    }
+
     fn message_committed(&self) {
         let _ = self.sender.send(ProviderStreamUpdate::Committed {
             input_id: self.input_id.clone(),

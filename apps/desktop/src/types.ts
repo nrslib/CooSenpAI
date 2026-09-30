@@ -552,6 +552,7 @@ export interface AppSnapshot {
   readonly activeUserMessageId?: string;
   readonly userWorkPending: boolean;
   readonly cancelledUserMessageIds: readonly string[];
+  readonly carriedCancelledUserMessageIds: readonly string[];
   readonly companionDraft?: string;
   readonly latestCompanionThought?: string;
   readonly latestCompanionDecision?: CompanionDecision;

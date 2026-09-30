@@ -165,7 +165,7 @@ h1, h2, h3, h4, p { margin: 0; }
 .composer .send-button { color: var(--text); background: var(--accent-soft); border: 1px solid var(--accent); }
 .composer .microphone-button { color: var(--muted); background: var(--surface-raised); border: 1px solid var(--line-strong); }
 .composer .microphone-button.is-recording { color: var(--error); background: var(--error-bg); border-color: var(--error); }
-.message-state { display: flex; align-items: center; gap: 7px; margin: -8px 7px 10px; color: var(--faint); font-size: 11px; }
+.message-state { display: flex; align-items: center; gap: 7px; margin: 4px 7px 10px; color: var(--faint); font-size: 11px; }
 .message-state button { padding: 0; color: var(--accent); background: transparent; }
 .history-toggle { padding: 6px 8px; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-control); font-size: 12px; }
 .history-toggle.is-active { color: var(--text); background: var(--accent-soft); border-color: var(--accent); }

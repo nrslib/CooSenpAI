@@ -5,13 +5,32 @@ use crate::attachments::bound_text_attachment;
 use crate::companion_cursor::OWNED_USER_ID_PREFIX;
 use crate::companion_storage::{
     PendingAttachmentFailure, PendingFrameContextChange, PendingInput, PendingUserMessage,
-    MAX_CURSOR_IDS,
 };
 use crate::provider::ProviderMidTurnInput;
 use std::path::PathBuf;
 use uuid::Uuid;
 
 impl UserMessagePreparer {
+    pub(crate) fn cancelled_message_status(
+        &self,
+    ) -> Result<(Vec<String>, Vec<String>), CompanionError> {
+        let Some(storage) = &self.storage else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let cursor = storage.load_cursor()?;
+        Ok((
+            cursor.cancelled_input_ids,
+            cursor.dispatched_interrupted_input_ids,
+        ))
+    }
+
+    pub(crate) fn record_interrupted_dispatch(&self, ids: &[String]) -> Result<(), CompanionError> {
+        if let Some(storage) = &self.storage {
+            storage.record_interrupted_dispatch(ids)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn uses_persistent_queue(&self) -> bool {
         self.storage.is_some() && self.delivery_ownership == DeliveryOwnership::Owner
     }
@@ -233,6 +252,7 @@ impl UserMessagePreparer {
             id,
             conversation_generation,
             user_seq: 0,
+            interrupted_input_ids: Vec::new(),
             created_at,
             message,
             attachment_path,
@@ -280,11 +300,6 @@ impl UserMessagePreparer {
                 cursor.pending_inputs.retain(|input| input.id() != input_id);
                 if !cursor.cancelled_input_ids.iter().any(|id| id == input_id) {
                     cursor.cancelled_input_ids.push(input_id.to_owned());
-                    if cursor.cancelled_input_ids.len() > MAX_CURSOR_IDS {
-                        cursor
-                            .cancelled_input_ids
-                            .drain(..cursor.cancelled_input_ids.len() - MAX_CURSOR_IDS);
-                    }
                 }
                 if let Some(lease) = cursor.user_dispatch.as_mut() {
                     lease.input_ids.retain(|id| id != input_id);
@@ -463,7 +478,9 @@ impl UserMessagePreparer {
     pub(crate) fn mid_turn_input(
         &self,
         input: &PendingUserMessage,
-    ) -> Result<ProviderMidTurnInput, CompanionError> {
+        dispatch_seq: u64,
+        operation_generation: Option<u64>,
+    ) -> Result<super::user::PreparedMidTurnInput, CompanionError> {
         let images = match (&input.attachment_path, &self.storage) {
             (Some(relative), Some(storage)) => {
                 vec![storage.resolve_attachment(relative)?.into()]
@@ -475,10 +492,32 @@ impl UserMessagePreparer {
             }
             (None, _) => Vec::new(),
         };
-        Ok(ProviderMidTurnInput {
-            source_id: input.id.clone(),
-            message: format_appended_user_message(input)?,
-            images,
+        let inputs = match &self.storage {
+            Some(storage) if !input.interrupted_input_ids.is_empty() => storage
+                .refresh_interrupted_dispatch(
+                    std::slice::from_ref(&input.id),
+                    Some(dispatch_seq),
+                    operation_generation,
+                )?
+                .ok_or(CompanionError::DispatchSuperseded)?,
+            _ => vec![input.clone()],
+        };
+        let batch = super::user_prompt::UserPromptBatch::new(&inputs, self.storage.as_ref())?;
+        let message = if batch.interrupted_ids.is_empty() {
+            format_appended_user_message(input)?
+        } else {
+            super::user_prompt::format_appended_user_messages(
+                &batch.inputs,
+                &batch.interrupted_ids,
+            )?
+        };
+        Ok(super::user::PreparedMidTurnInput {
+            provider_input: ProviderMidTurnInput {
+                source_id: input.id.clone(),
+                message,
+                images,
+            },
+            interrupted_input_ids: batch.interrupted_ids,
         })
     }
 }

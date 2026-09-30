@@ -891,10 +891,6 @@ impl CompanionAgent {
         }
     }
 
-    pub(super) fn conversation_jsonl(&self) -> Result<Option<String>, CompanionError> {
-        self.conversation_jsonl_excluding(&[])
-    }
-
     pub(super) fn conversation_jsonl_excluding(
         &self,
         excluded_ids: &[String],

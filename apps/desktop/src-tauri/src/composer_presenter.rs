@@ -54,6 +54,8 @@ pub(crate) enum ComposerInput {
         alt_key: bool,
         composing: bool,
         key_code: u32,
+        first_visual_line: bool,
+        last_visual_line: bool,
         revision: u64,
         directive: u64,
         selection_state: SelectionState,
@@ -103,6 +105,22 @@ pub(crate) struct KeyBinding {
     pub shift_key: bool,
     pub ctrl_key: bool,
     pub alt_key: bool,
+    pub visual_line: Option<VisualLineBoundary>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum VisualLineBoundary {
+    First,
+    Last,
+}
+impl VisualLineBoundary {
+    fn matches(self, first: bool, last: bool) -> bool {
+        match self {
+            Self::First => first,
+            Self::Last => last,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -325,6 +343,8 @@ impl ComposerPresenter {
                 alt_key,
                 composing,
                 key_code,
+                first_visual_line,
+                last_visual_line,
                 revision,
                 directive,
                 selection_state,
@@ -358,7 +378,14 @@ impl ComposerPresenter {
                     }
                     return vec![];
                 }
-                if !meta_key && !shift_key && !ctrl_key && !alt_key && self.history_key(&key) {
+                if !meta_key
+                    && !shift_key
+                    && !ctrl_key
+                    && !alt_key
+                    && self.history_key(&key).is_some_and(|boundary| {
+                        boundary.matches(first_visual_line, last_visual_line)
+                    })
+                {
                     self.navigate(&key);
                     return vec![];
                 }
@@ -437,30 +464,15 @@ impl ComposerPresenter {
         ]
     }
 
-    fn history_key(&self, key: &str) -> bool {
+    fn history_key(&self, key: &str) -> Option<VisualLineBoundary> {
         let Selection { start, end } = self.view.draft.selection;
         if start != end || self.history.is_empty() {
-            return false;
+            return None;
         }
         match key {
-            "ArrowUp" => !self
-                .view
-                .draft
-                .text
-                .encode_utf16()
-                .take(start)
-                .any(|c| c == 10),
-            "ArrowDown" => {
-                self.history_selection.is_some()
-                    && !self
-                        .view
-                        .draft
-                        .text
-                        .encode_utf16()
-                        .skip(end)
-                        .any(|c| c == 10)
-            }
-            _ => false,
+            "ArrowUp" => Some(VisualLineBoundary::First),
+            "ArrowDown" if self.history_selection.is_some() => Some(VisualLineBoundary::Last),
+            _ => None,
         }
     }
 
@@ -547,7 +559,7 @@ impl ComposerPresenter {
                     let prevent = match key {
                         "Escape" => self.history_selection.is_some() || self.active_response,
                         "Enter" => self.send_key == "enter" || meta_key,
-                        _ => !meta_key && self.history_key(key),
+                        _ => !meta_key && self.history_key(key).is_some(),
                     };
                     if prevent {
                         self.view.bindings.push(KeyBinding {
@@ -556,6 +568,7 @@ impl ComposerPresenter {
                             shift_key: false,
                             ctrl_key: false,
                             alt_key: false,
+                            visual_line: self.history_key(key),
                         });
                     }
                 }

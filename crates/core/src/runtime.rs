@@ -386,6 +386,8 @@ pub struct RuntimeActor {
         std::sync::Arc<std::sync::RwLock<Option<crate::companion::user::UserMessagePreparer>>>,
     active_user_message_id: Option<String>,
     cancelled_user_message_ids: Vec<String>,
+    carried_cancelled_user_message_ids: Vec<String>,
+    cancelled_message_status_loaded: bool,
     companion_draft: Option<String>,
     conversation_revision: u64,
     latest_companion_thought: Option<String>,
@@ -655,6 +657,7 @@ impl RuntimeActor {
             active_user_message_id: None,
             user_work_pending: false,
             cancelled_user_message_ids: Vec::new(),
+            carried_cancelled_user_message_ids: Vec::new(),
             companion_draft: None,
             conversation_revision: 0,
             latest_companion_thought: None,
@@ -727,6 +730,8 @@ impl RuntimeActor {
                 user_preparer: actor_user_preparer,
                 active_user_message_id: None,
                 cancelled_user_message_ids: Vec::new(),
+                carried_cancelled_user_message_ids: Vec::new(),
+                cancelled_message_status_loaded: false,
                 companion_draft: None,
                 conversation_revision: 0,
                 latest_companion_thought: None,
@@ -1215,13 +1220,19 @@ impl RuntimeActor {
                     }
                     Some(update) = stream_rx.recv() => {
                         let input_id = match &update {
-                            ProviderStreamUpdate::Delta { input_id, .. }
+                            ProviderStreamUpdate::Dispatched { input_id, .. }
+                            | ProviderStreamUpdate::Delta { input_id, .. }
                             | ProviderStreamUpdate::Reset { input_id }
                             | ProviderStreamUpdate::Committed { input_id }
                             | ProviderStreamUpdate::Usage { input_id, .. } => input_id,
                         };
-                        if actor.active_user_message_id.as_ref() == Some(input_id) {
+                        if matches!(&update, ProviderStreamUpdate::Dispatched { .. })
+                            || actor.active_user_message_id.as_ref() == Some(input_id)
+                        {
                             match update {
+                                ProviderStreamUpdate::Dispatched { interrupted_input_ids, .. } => {
+                                    actor.record_carried_cancelled_messages(&interrupted_input_ids);
+                                }
                                 ProviderStreamUpdate::Delta { text, .. } => {
                                     actor.companion_draft.get_or_insert_with(String::new).push_str(&text);
                                 }

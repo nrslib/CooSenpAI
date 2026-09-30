@@ -105,6 +105,8 @@ pub struct CompanionResponse {
 pub enum CompanionError {
     #[error("companion の処理を取り消しました")]
     Cancelled,
+    #[error("provider 未呼び出しの dispatch が更新されました")]
+    DispatchSuperseded,
     #[error("companion の provider 呼び出しに失敗しました")]
     Provider(#[from] ProviderError),
     #[error("companion の構造化出力が不正です")]
@@ -156,7 +158,7 @@ enum ObservationFailureKind {
 impl CompanionError {
     fn observation_failure_kind(&self) -> ObservationFailureKind {
         match self {
-            Self::Cancelled => ObservationFailureKind::Ignored,
+            Self::Cancelled | Self::DispatchSuperseded => ObservationFailureKind::Ignored,
             Self::ObservationPrompt => ObservationFailureKind::DeterministicObservation,
             Self::Provider(_)
             | Self::Output
@@ -773,6 +775,8 @@ impl CompanionAgent {
                     image_paths,
                     events: None,
                     requested_source_ids: Vec::new(),
+                    user_operation_generation: None,
+                    user_prompt_batch: None,
                     additional_inputs: None,
                     accepted_mid_turn_ids: None,
                     tutorial_response_key: None,
@@ -1015,15 +1019,17 @@ impl CompanionAgent {
             mut data,
             user,
             observations: reference_observations,
-            image_paths,
+            mut image_paths,
             events,
             requested_source_ids,
+            user_operation_generation,
+            user_prompt_batch,
             additional_inputs,
             accepted_mid_turn_ids,
             tutorial_response_key,
         } = turn;
         self.initialize_storage()?;
-        let observations = if user {
+        let mut observations = if user {
             helpers::unsent_observations(reference_observations.clone(), &self.sent_observation_ids)
         } else {
             reference_observations.clone()
@@ -1034,9 +1040,9 @@ impl CompanionAgent {
             // user prompt の観察列に直近観察も含めるため、last_observation では重ねない。
             data.last_observation = None;
         }
-        self.prepare_call_session(user, cancellation.clone())
-            .await?;
         if !user {
+            self.prepare_call_session(false, &[], cancellation.clone())
+                .await?;
             self.mark_pending(&observations)?;
             if self.proactive_limit_reached() {
                 self.log_proactive_limit_reached()?;
@@ -1071,6 +1077,59 @@ impl CompanionAgent {
         } else {
             requested_source_ids
         };
+        let mut dispatch_guard = None;
+        let mut interrupted_input_ids = Vec::new();
+        if let Some(mut batch) = user_prompt_batch {
+            let storage = self.storage.clone().ok_or_else(|| {
+                PersistenceError::Invalid("中断発言の storage がありません".into())
+            })?;
+            let active_ids = source_ids.clone();
+            loop {
+                let (inputs, guard) = storage
+                    .refresh_interrupted_dispatch_locked(
+                        &active_ids,
+                        self.active_user_dispatch
+                            .as_ref()
+                            .map(|lease| lease.dispatch_seq),
+                        user_operation_generation,
+                    )?
+                    .ok_or(CompanionError::DispatchSuperseded)?;
+                let refreshed = user_prompt::UserPromptBatch::new(&inputs, Some(&storage))?;
+                if refreshed.interrupted_ids == batch.interrupted_ids {
+                    interrupted_input_ids = refreshed.interrupted_ids;
+                    source_ids.extend(interrupted_input_ids.iter().cloned());
+                    dispatch_guard = Some(guard);
+                    break;
+                }
+                drop(guard);
+                let current_observations = user_prompt::turn_observations(&inputs);
+                let frame_paths = self.observation_frame_paths(&current_observations)?;
+                let emotions = data.companion_emotions;
+                data = self.user_prompt_data(
+                    &refreshed.inputs,
+                    &refreshed.interrupted_ids,
+                    frame_paths,
+                )?;
+                data.observations = observation_values(&current_observations)?;
+                data.last_observation = None;
+                data.companion_emotions = emotions;
+                observations =
+                    helpers::unsent_observations(current_observations, &self.sent_observation_ids);
+                let images =
+                    self.bounded_provider_image_paths(self.user_image_paths(&inputs)?, Vec::new());
+                let (images, ocr) = self
+                    .prepare_image_attachments(images, cancellation.child_token(), false)
+                    .await?;
+                image_paths = images;
+                data.attachment_ocr_text = ocr;
+                batch = refreshed;
+            }
+        }
+        if user {
+            self.prepare_call_session(true, &source_ids, cancellation.clone())
+                .await?;
+        }
+        drop(dispatch_guard);
         self.apply_memory_context(&mut data, &observations, &source_ids)?;
         self.apply_session_context(&mut data, user, &source_ids)?;
         let provider_outcome = self
@@ -1082,6 +1141,7 @@ impl CompanionAgent {
                     image_paths: &image_paths,
                     events,
                     source_ids: &source_ids,
+                    interrupted_input_ids: &interrupted_input_ids,
                     additional_inputs,
                     tutorial_response_key: tutorial_response_key.as_deref(),
                 },
@@ -1147,13 +1207,15 @@ impl CompanionAgent {
     async fn prepare_call_session(
         &mut self,
         user: bool,
+        excluded_source_ids: &[String],
         cancellation: CancellationToken,
     ) -> Result<(), CompanionError> {
         let changed_day = self.refresh_usage(user)?;
         if self.session.is_some()
             && (changed_day || self.session_calls >= self.config.session_max_calls)
         {
-            self.prepare_new_session(cancellation, user).await?;
+            self.prepare_new_session(cancellation, user, excluded_source_ids)
+                .await?;
         }
         Ok(())
     }
@@ -1162,9 +1224,12 @@ impl CompanionAgent {
         &mut self,
         cancellation: CancellationToken,
         usage_fail_open: bool,
+        excluded_source_ids: &[String],
     ) -> Result<(), CompanionError> {
         if self.session.is_some() && !self.conversation.is_empty() {
-            let conversation = self.conversation_jsonl()?.unwrap_or_default();
+            let conversation = self
+                .conversation_jsonl_excluding(excluded_source_ids)?
+                .unwrap_or_default();
             let prompt = [
                 "新しい companion session へ引き継ぐため、正本の会話ログを10行以内に要約してください。",
                 "今日の作業内容と、ユーザーが自分で言ったことを含めてください。",

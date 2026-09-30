@@ -1,4 +1,4 @@
-import type { ComposerInput, ComposerKeyBinding, ComposerSelection, ComposerSelectionState, ComposerView } from "./composer-view.js";
+import type { ComposerInput, ComposerKey, ComposerVisualLine, ComposerSelection, ComposerSelectionState, ComposerView } from "./composer-view.js";
 
 interface SelectionRequest {
   readonly directive: number;
@@ -21,7 +21,7 @@ export type ComposerDomEvent =
   | ({ readonly type: "edit" | "submit" } & DomValue)
   | { readonly type: "selection"; readonly selection: ComposerSelection }
   | ({ readonly type: "composition"; readonly active: boolean } & DomValue)
-  | ({ readonly type: "key"; readonly composing: boolean; readonly keyCode: number } & ComposerKeyBinding & DomValue);
+  | ({ readonly type: "key"; readonly composing: boolean; readonly keyCode: number } & ComposerKey & ComposerVisualLine & DomValue);
 interface Result {
   readonly state: ComposerDomState;
   readonly input?: ComposerInput;

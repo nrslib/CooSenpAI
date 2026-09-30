@@ -289,7 +289,34 @@ impl RuntimeActor {
         self.publish(snapshot_tx);
     }
 
-    pub(super) fn snapshot(&self) -> RuntimeSnapshot {
+    pub(super) fn restore_cancelled_message_status(
+        &mut self,
+        companion: &CompanionAgent,
+    ) -> Result<(), CompanionError> {
+        if self.cancelled_message_status_loaded {
+            return Ok(());
+        }
+        let preparer = companion.user_message_preparer();
+        if preparer.uses_persistent_queue() {
+            let (cancelled, carried) = preparer.cancelled_message_status()?;
+            self.cancelled_user_message_ids = cancelled;
+            self.carried_cancelled_user_message_ids = carried;
+        }
+        self.cancelled_message_status_loaded = true;
+        Ok(())
+    }
+
+    pub(super) fn record_carried_cancelled_messages(&mut self, ids: &[String]) {
+        for id in ids {
+            if self.cancelled_user_message_ids.contains(id)
+                && !self.carried_cancelled_user_message_ids.contains(id)
+            {
+                self.carried_cancelled_user_message_ids.push(id.clone());
+            }
+        }
+    }
+
+    fn snapshot(&self) -> RuntimeSnapshot {
         let (pending_deliveries, delivery_outbox_blocked) = self
             .companion
             .as_ref()
@@ -331,6 +358,7 @@ impl RuntimeActor {
             active_user_message_id: self.active_user_message_id.clone(),
             user_work_pending: self.user_work_pending,
             cancelled_user_message_ids: self.cancelled_user_message_ids.clone(),
+            carried_cancelled_user_message_ids: self.carried_cancelled_user_message_ids.clone(),
             companion_draft: self.companion_draft.clone(),
             conversation_revision: self.conversation_revision,
             latest_companion_thought: self.latest_companion_thought.clone(),

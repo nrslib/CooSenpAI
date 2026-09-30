@@ -6,6 +6,58 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 const USER_SCREEN_CONTEXT_MAX_BYTES: usize = 16 * 1024;
+const REPLAY_NOTICE: &str =
+    "[以下は、利用者が応答の途中で中断した発言の再掲です。すでに受け取っていても同じ発言です。]";
+const INTERRUPTION_NOTICE: &str = "[利用者はこの時点で応答を中断しました。前の話は中断されています。最新の発言を優先して答えてください。]";
+const INTERRUPTED_IMAGE_NOTICE: &str = "[中断した発言の画像添付は今回再送していません。]";
+
+pub(super) struct UserPromptBatch {
+    pub inputs: Vec<PendingUserMessage>,
+    pub interrupted_ids: Vec<String>,
+}
+
+impl UserPromptBatch {
+    pub fn new(
+        inputs: &[PendingUserMessage],
+        storage: Option<&crate::companion_storage::CompanionStorage>,
+    ) -> Result<Self, CompanionError> {
+        let ids = inputs
+            .iter()
+            .flat_map(|input| input.interrupted_input_ids.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(Self {
+                inputs: inputs.to_vec(),
+                interrupted_ids: Vec::new(),
+            });
+        }
+        let storage = storage.ok_or_else(|| {
+            crate::persistence::PersistenceError::Invalid(
+                "中断発言の conversation storage がありません".to_owned(),
+            )
+        })?;
+        let conversation = storage.load_all_conversation()?;
+        let entries = crate::companion_cursor::interrupted_entries(&conversation, &ids);
+        let interrupted_ids = entries.iter().map(|entry| entry.id.clone()).collect();
+        let generation = storage.conversation_generation()?;
+        let mut expanded = entries
+            .into_iter()
+            .map(|entry| PendingUserMessage::from_conversation(entry, generation, 0))
+            .chain(inputs.iter().cloned())
+            .collect::<Vec<_>>();
+        let order = conversation
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.id.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        expanded.sort_by_key(|input| order.get(input.id.as_str()).copied());
+        Ok(Self {
+            inputs: expanded,
+            interrupted_ids,
+        })
+    }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,45 +177,70 @@ pub(super) fn format_pending_frame_contexts(inputs: &[PendingUserMessage]) -> Op
 
 pub(super) fn format_user_messages(
     inputs: &[PendingUserMessage],
+    interrupted_ids: &[String],
 ) -> Result<String, CompanionError> {
     if let [input] = inputs {
         return format_single_user_message(input);
     }
-    let mut attachment_index = 0usize;
-    let lines = inputs
-        .iter()
-        .map(|input| {
-            let index = input.attachment_path.as_ref().map(|_| {
-                attachment_index = attachment_index.saturating_add(1);
-                attachment_index
-            });
-            serde_json::to_string(&BatchedUserPrompt {
-                id: &input.id,
-                message: &input.message,
-                attachment_index: index,
-                attachment_text: input.attachment_text.as_deref(),
-            })
-            .map_err(CompanionError::from)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     Ok(format!(
         "以下のユーザー発言に、順番どおり1つの返事でまとめて答えてください。\n{}",
-        lines.join("\n"),
+        format_user_message_lines(inputs, interrupted_ids)?,
     ))
 }
 
 pub(super) fn format_appended_user_message(
     input: &PendingUserMessage,
 ) -> Result<String, CompanionError> {
-    let line = serde_json::to_string(&BatchedUserPrompt {
-        id: &input.id,
-        message: &input.message,
-        attachment_index: input.attachment_path.as_ref().map(|_| 1),
-        attachment_text: input.attachment_text.as_deref(),
-    })?;
+    format_appended_user_messages(std::slice::from_ref(input), &[])
+}
+
+pub(super) fn format_appended_user_messages(
+    inputs: &[PendingUserMessage],
+    interrupted_ids: &[String],
+) -> Result<String, CompanionError> {
     Ok(format!(
-        "言い足しです。まだ返事を確定せず、この発言も含めて1つの返事にまとめてください。\n{line}",
+        "言い足しです。まだ返事を確定せず、この発言も含めて1つの返事にまとめてください。\n{}",
+        format_user_message_lines(inputs, interrupted_ids)?,
     ))
+}
+
+fn format_user_message_lines(
+    inputs: &[PendingUserMessage],
+    interrupted_ids: &[String],
+) -> Result<String, CompanionError> {
+    let mut attachment_index = 0usize;
+    let lines = inputs
+        .iter()
+        .map(|input| {
+            let interrupted = interrupted_ids.contains(&input.id);
+            let index = input
+                .attachment_path
+                .as_ref()
+                .filter(|_| !interrupted)
+                .map(|_| {
+                    attachment_index = attachment_index.saturating_add(1);
+                    attachment_index
+                });
+            let mut line = serde_json::to_string(&BatchedUserPrompt {
+                id: &input.id,
+                message: &input.message,
+                attachment_index: index,
+                attachment_text: input.attachment_text.as_deref(),
+            })
+            .map_err(CompanionError::from)?;
+            if interrupted {
+                line.insert_str(0, &format!("{REPLAY_NOTICE}\n"));
+                line.push('\n');
+                line.push_str(INTERRUPTION_NOTICE);
+                if input.attachment_path.is_some() {
+                    line.push('\n');
+                    line.push_str(INTERRUPTED_IMAGE_NOTICE);
+                }
+            }
+            Ok(line)
+        })
+        .collect::<Result<Vec<_>, CompanionError>>()?;
+    Ok(lines.join("\n"))
 }
 
 fn format_single_user_message(input: &PendingUserMessage) -> Result<String, CompanionError> {
