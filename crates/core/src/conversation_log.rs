@@ -74,6 +74,10 @@ pub fn conversation_log_window(today: NaiveDate, days: i64) -> Vec<NaiveDate> {
         .collect()
 }
 
+fn has_conversation_text(record: &TranscriptRecord) -> bool {
+    !record.text.trim().is_empty()
+}
+
 // 本文は transcripts、話者情報は観察記録から組む。どちらも dataflow_log と同じ日次 JSONL の読み手を使う。
 pub fn read_conversation_log(
     paths: &ConfigPaths,
@@ -85,21 +89,27 @@ pub fn read_conversation_log(
     let window = conversation_log_window(today, days);
     let selected = match date {
         Some(date) => date,
-        None => window
-            .iter()
-            .rev()
-            .find(|date| transcript_path(paths, **date).is_file())
-            .copied()
-            .unwrap_or(today),
+        None => {
+            let mut latest = None;
+            for candidate in window.iter().rev() {
+                let path = transcript_path(paths, *candidate);
+                if !path.is_file() {
+                    continue;
+                }
+                let records = JsonlStore::new(path).read::<TranscriptRecord>()?;
+                if records.iter().any(has_conversation_text) {
+                    latest = Some(*candidate);
+                    break;
+                }
+            }
+            latest.unwrap_or(today)
+        }
     };
     let speakers = speaker_index(paths, selected)?;
     let transcript_records =
         JsonlStore::new(transcript_path(paths, selected)).read::<TranscriptRecord>()?;
     let mut comparison_sources = HashMap::new();
     for transcript in &transcript_records {
-        if transcript.source != "speaker" {
-            continue;
-        }
         let Some(info) = speakers.get(&transcript.observation_id) else {
             continue;
         };
@@ -122,6 +132,9 @@ pub fn read_conversation_log(
     let names = load_speaker_name_index(paths)?;
     let mut entries = Vec::new();
     for record in transcript_records {
+        if !has_conversation_text(&record) {
+            continue;
+        }
         let observed = speakers.get(&record.observation_id);
         let details = observed
             .map(|info| match (record.audio_start_ms, record.audio_end_ms) {

@@ -453,6 +453,22 @@ impl UiPort for NativeUiPort {
                 .write("INFO", &message)
                 .map_err(|error| error.to_string())?,
             UiEffect::RenderWindow(content) => self.render_window(content)?,
+            UiEffect::DetailsMountGeneration(generation) => {
+                let window = state
+                    .app
+                    .get_webview_window("details")
+                    .ok_or("詳細ウィンドウがありません")?;
+                window.eval(format!(
+                    "window.dispatchEvent(new CustomEvent('coosenpai:details:mount-generation', {{ detail: {generation} }}))"
+                )).map_err(|error| error.to_string())?;
+            }
+            UiEffect::DetailsReload => {
+                let window = state
+                    .app
+                    .get_webview_window("details")
+                    .ok_or("詳細ウィンドウがありません")?;
+                window.reload().map_err(|error| error.to_string())?;
+            }
             UiEffect::ActivationView(_)
             | UiEffect::Activation(_)
             | UiEffect::Run(_)
@@ -945,6 +961,24 @@ impl NativeUiPort {
                 &resources,
             )
             .map_err(|error| error.to_string()),
+            WindowContent::BrainActivity { snapshot } => {
+                let window = crate::windows::ensure_brain_activity_window(app)
+                    .map_err(|error| error.to_string())?;
+                window
+                    .set_title(if snapshot.config.ui.language == "en" {
+                        "CooSenpAI — Brain activity"
+                    } else {
+                        "CooSenpAI — 脳活動"
+                    })
+                    .map_err(|error| error.to_string())?;
+                crate::webview_event::emit_to(
+                    app,
+                    "brain-activity",
+                    "coosenpai:brain-activity:view",
+                    &Some(snapshot),
+                )
+                .map_err(|error| error.to_string())
+            }
             WindowContent::Details { history, .. } => {
                 crate::webview_event::emit_to(app, "details", "coosenpai:dataflow:load", &history)
                     .map_err(|error| error.to_string())
@@ -1021,6 +1055,22 @@ impl NativeUiPort {
                 .app
                 .emit_to("main", "coosenpai:settings:closed", ())
                 .map_err(|error| error.to_string()),
+            (PresenterId::BrainActivity, ViewCommand::Show | ViewCommand::Front) => {
+                crate::windows::show_brain_activity(&state.app).map_err(|error| error.to_string())
+            }
+            (PresenterId::BrainActivity, ViewCommand::Hide) => {
+                let Some(window) = state.app.get_webview_window("brain-activity") else {
+                    return Ok(());
+                };
+                crate::webview_event::emit_to(
+                    &state.app,
+                    "brain-activity",
+                    "coosenpai:brain-activity:view",
+                    &Option::<crate::snapshot::AppSnapshot>::None,
+                )
+                .map_err(|error| error.to_string())?;
+                window.hide().map_err(|error| error.to_string())
+            }
             (PresenterId::Details, ViewCommand::Show | ViewCommand::Front) => {
                 crate::windows::show_details(&state.app).map_err(|error| error.to_string())
             }

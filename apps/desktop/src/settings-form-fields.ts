@@ -15,7 +15,7 @@ const paths = {
   voiceOutputEnabled: "voiceOutput.enabled", voiceOutputProvider: "voiceOutput.provider",
   voiceOutputRate: "voiceOutput.rate", voicevoxStyleId: "voiceOutput.voicevoxStyleId",
   audioMicrophoneCommandsEnabled: "audio.microphoneCommandsEnabled",
-  audioEnabled: "audio.enabled", audioMic: "audio.mic", audioSpeaker: "audio.speaker",
+  audioEnabled: "audio.enabled", audioMic: "audio.mic", audioSpeaker: "audio.speaker", audioSpeakerDevices: "audio.speakerDevices",
   audioSpeakerIdentificationEnabled: "audio.speakerIdentification.enabled", audioDebugDumpDir: "audio.debugDumpDir",
   providerObserver: "observer.vision.provider", providerCompanion: "companion.provider",
   observerModel: "observer.vision.model", companionModel: "companion.model",
@@ -62,6 +62,7 @@ const paths = {
   observationDays: "retention.observationDays", conversationDays: "retention.conversationDays",
   debugEnabled: "debug.enabled", feedbackEnabled: "debug.feedbackEnabled", checkForUpdates: "app.checkForUpdates", launchAtLogin: "app.launchAtLogin",
   judgeFollow: "judge.follow",
+  judgeBundledConnectome: "judge.bundledConnectome",
 } satisfies Record<keyof ConfigForm, string>;
 
 export function formFields(form: FormState): FormFields {

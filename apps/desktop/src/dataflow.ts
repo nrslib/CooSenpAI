@@ -125,7 +125,6 @@ function speakerAnnotation(
   record: AudioObservation,
   transcript: string | TranscriptRecord | null | undefined,
 ): string {
-  if (record.source !== "speaker") return "";
   const status = typeof transcript === "string" || transcript == null
     ? record.speakerStatus
     : transcript.speakerStatus ?? record.speakerStatus;

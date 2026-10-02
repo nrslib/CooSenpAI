@@ -108,9 +108,7 @@ impl CompanionStorage {
             let transcript_path = path_text(&path)?.to_owned();
             let mut speakers = BTreeMap::<String, SpeakerTranscriptRange>::new();
             for record in &records {
-                if record.source != "speaker"
-                    || record.speaker_status != Some(SpeakerIdentificationStatus::Identified)
-                {
+                if record.speaker_status != Some(SpeakerIdentificationStatus::Identified) {
                     continue;
                 }
                 let (Some(registry_id), Some(speaker_id)) = (
@@ -239,9 +237,7 @@ fn collect_observation_speakers(
 ) -> Result<(), PersistenceError> {
     if let Some(segments) = observation.get("audioSegments").and_then(Value::as_array) {
         for segment in segments {
-            if segment.get("source").and_then(Value::as_str) != Some("speaker")
-                || segment.get("speakerStatus").and_then(Value::as_str) != Some("identified")
-            {
+            if segment.get("speakerStatus").and_then(Value::as_str) != Some("identified") {
                 continue;
             }
             let (Some(registry_id), Some(speaker_id)) = (
@@ -264,7 +260,6 @@ fn collect_observation_speakers(
     }
 
     if observation.get("kind").and_then(Value::as_str) == Some("audio")
-        && observation.get("source").and_then(Value::as_str) == Some("speaker")
         && observation.get("speakerStatus").and_then(Value::as_str) == Some("identified")
     {
         if let (Some(registry_id), Some(speaker_id)) = (

@@ -49,7 +49,7 @@ const CONTROL_PATHS = new Set<string>([
   "memory.dailyRetentionDays",
   "memory.weeklyRetentionWeeks", "memory.factPromptDailyLimit",
   "memory.enabled", "memory.providerConsent", "watch.fullscreen", "watch.focusElement", "watch.ocrGate.executable",
-  "audio.microphoneCommandsEnabled", "audio.mic", "audio.speaker", "audio.speakerIdentification.enabled",
+  "audio.microphoneCommandsEnabled", "audio.mic", "audio.speaker", "audio.speakerDevices", "audio.speakerIdentification.enabled",
   "voiceOutput.enabled", "voiceOutput.provider", "voiceOutput.rate", "voiceOutput.voicevoxStyleId",
   "work.approvalMode", "work.allowedRoots",
   "notification.mode", "bubble.position", "bubble.display",

@@ -12,8 +12,11 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::webview::{PageLoadEvent, WebviewWindowBuilder};
 use tauri::{App, AppHandle, LogicalPosition, Manager, Runtime, WindowEvent};
 
+#[path = "windows_brain_activity.rs"]
+mod brain_activity;
 #[path = "windows_tray.rs"]
 mod tray;
+pub(crate) use brain_activity::{ensure_brain_activity_window, show_brain_activity};
 #[path = "window_focus.rs"]
 pub(crate) mod window_focus;
 use tray::recording_icon;
@@ -173,9 +176,7 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
             );
         }
     });
-    let details = app
-        .get_webview_window("details")
-        .ok_or_else(|| tauri::Error::WindowNotFound)?;
+    let details = create_details_window(app)?;
     let details_ui = app.state::<Arc<DesktopState>>().ui.clone();
     details.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
@@ -356,6 +357,34 @@ pub(crate) fn create_thought_window(app: &App) -> tauri::Result<tauri::WebviewWi
         .cloned()
         .ok_or(tauri::Error::WindowNotFound)?;
     WebviewWindowBuilder::from_config(app.handle(), &config)?.build()
+}
+
+pub(crate) fn create_details_window(app: &App) -> tauri::Result<tauri::WebviewWindow> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == "details")
+        .cloned()
+        .ok_or(tauri::Error::WindowNotFound)?;
+    WebviewWindowBuilder::from_config(app.handle(), &config)?
+        .on_page_load(|window, payload| {
+            let (phase, event) = match payload.event() {
+                PageLoadEvent::Started => ("開始", crate::ui_events::UiEvent::DetailsPageStarted),
+                PageLoadEvent::Finished => (
+                    "完了: result=renderer-pending",
+                    crate::ui_events::UiEvent::DetailsPageFinished,
+                ),
+            };
+            if let Some(state) = window.app_handle().try_state::<Arc<DesktopState>>() {
+                let _ = state
+                    .logger
+                    .write("INFO", &format!("詳細rendererのページ読み込み{phase}"));
+                state.ui.input(crate::ui_events::UiView::Details, event);
+            }
+        })
+        .build()
 }
 
 /// ポップアップからの送信が受理・失敗・拒否のどれで終わっても、

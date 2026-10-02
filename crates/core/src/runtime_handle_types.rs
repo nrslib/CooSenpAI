@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 pub(super) enum ControlCommand {
     BeginHearingSession {
@@ -54,6 +55,7 @@ pub(super) enum ControlCommand {
 
 pub(super) struct ObserveRequest {
     pub(super) frames: Vec<ObservationFrameInput>,
+    pub(super) capture_directories: Option<Arc<Vec<tempfile::TempDir>>>,
     pub(super) audio: Vec<crate::state::AudioObservation>,
     pub(super) user_input_sequence: Option<u64>,
     pub(super) allow_companion_delivery: bool,

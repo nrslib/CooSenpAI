@@ -1,6 +1,7 @@
 import { type RefObject, type ReactElement, useEffect, useRef } from "react";
 
 import { useI18n, type TranslationKey } from "../i18n/index.js";
+import { CloseIcon } from "../components/LineIcons.js";
 import type { ConversationLogEntryView, ConversationLogState } from "../types.js";
 import { formatTime, speakerDisplayName } from "../view-model.js";
 import { SpeakerDecisionDetails } from "./SpeakerDecisionDetails.js";
@@ -23,8 +24,8 @@ interface ConversationLogPanelProps {
 
 // 名前は表示だけに使い、操作対象の UUID は行と選択肢から全文で渡す。
 function speakerLabel(entry: ConversationLogEntryView, t: (key: TranslationKey) => string): string {
-  if (entry.source === "mic") return t("details.logSpeakerSelf");
   if (entry.speakerTag !== undefined) return speakerDisplayName(entry.speakerTag, entry.speakerName);
+  if (entry.source === "mic" && entry.speakerStatus === undefined) return t("details.logSpeakerSelf");
   switch (entry.speakerStatus) {
     case "mixed": return t("details.logSpeakerMixed");
     case "unknown": return t("details.logSpeakerUnknown");
@@ -119,7 +120,11 @@ export function ConversationLogPanel({ log, details, action, listRef, scrollGene
       </div>
     </div>
     {details === null && log.speakerEditor == null ? null : <aside ref={speakerAsideRef} className="log-speaker-details">
-    <h3>{t("details.speakerDetailsTitle")}</h3>
+    <div className="log-speaker-details-heading">
+      <h3>{t("details.speakerDetailsTitle")}</h3>
+      <button className="icon-button" type="button" aria-label={t("details.speakerDetailsCloseAria")} disabled={isSavingSpeakerName} onClick={() => action("logSpeakerClose")}><CloseIcon /></button>
+    </div>
+    <div className="log-speaker-details-content">
     {details === null ? null : <SpeakerDecisionDetails details={details} />}
     {log.speakerEditor == null ? null : <form className="log-speaker-editor" onSubmit={(event) => {
       event.preventDefault();
@@ -145,6 +150,7 @@ export function ConversationLogPanel({ log, details, action, listRef, scrollGene
       </div>
       {log.speakerEditor.error === null ? null : <p className="dataflow-empty" role="alert">{log.speakerEditor.error}</p>}
     </form>}
+    </div>
     </aside>}
     {log.loadError === null ? null : <p className="dataflow-empty" role="alert">{log.loadError}</p>}
     {log.deleteError === null ? null : <p className="dataflow-empty" role="alert">{log.deleteError}</p>}

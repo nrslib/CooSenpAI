@@ -318,7 +318,9 @@ private func parseArguments() -> Arguments {
     let engine: SpeechEngine
     do {
         let selection: String
-        if let index = arguments.firstIndex(of: "--engine") {
+        if let index = arguments.indices.first(where: {
+            arguments[$0] == "--engine" && ($0 == 0 || arguments[$0 - 1] != "--input-device")
+        }) {
             guard index + 1 < arguments.count else {
                 throw SpeechAnalysisFailure(kind: "arguments", message: "--engine の値を指定してください")
             }

@@ -340,7 +340,7 @@ impl UserMessagePreparer {
                 .collect());
         };
         Ok(storage
-            .reconcile_pending_user_inputs()?
+            .reconcile_pending_user_inputs(self.clock.now())?
             .pending_inputs
             .into_iter()
             .map(|pending| match pending {
@@ -378,7 +378,7 @@ impl UserMessagePreparer {
             return Ok(false);
         };
         Ok(storage
-            .reconcile_pending_user_inputs()?
+            .reconcile_pending_user_inputs(self.clock.now())?
             .pending_inputs
             .iter()
             .any(|pending| match pending {

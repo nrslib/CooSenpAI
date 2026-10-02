@@ -1,25 +1,37 @@
 import AVFoundation
+import AudioToolbox
 import CoreAudio
+import CoreAudioTypes
 import Foundation
 
 protocol SpeakerAudioCapture: AnyObject {
+    var missingDeviceCount: Int { get }
     func start() throws -> AVAudioFormat
     func takeConfigurationChange() -> Bool
-    func nextBuffer() throws -> AVAudioPCMBuffer?
+    func nextBuffer() throws -> SpeakerCapturedBuffer?
     func stop() throws
     func close() throws
 }
 
+struct SpeakerCapturedBuffer {
+    let buffer: AVAudioPCMBuffer
+    let timestamp: UInt64
+}
+
 extension SpeakerAudioCapture {
+    var missingDeviceCount: Int { 0 }
     func close() throws { try stop() }
 }
 
 enum SpeakerAudioTapError: LocalizedError {
     case operation(String, OSStatus)
     case noOutputDevice
+    case speakerDevicesMissing(Int)
+    case outputDeviceListUnavailable
     case currentProcessUnavailable
     case invalidFormat
     case invalidBuffer
+    case invalidTimestamp
     case allocation
     case overflow
     case startupTimeout
@@ -27,11 +39,22 @@ enum SpeakerAudioTapError: LocalizedError {
     case cleanup([String])
     case unexpected(Error)
 
+    func isRecoverableDeviceInterruption(hasStarted: Bool) -> Bool {
+        switch self {
+        case .speakerDevicesMissing, .outputDeviceListUnavailable: return true
+        case .noOutputDevice: return hasStarted
+        default: return false
+        }
+    }
+
     var kind: String {
         switch self {
         case .operation(_, kAudioDevicePermissionsError): return "system-audio-permission"
         case .noOutputDevice: return "system-audio-device"
+        case .speakerDevicesMissing: return "speaker-device-missing"
+        case .outputDeviceListUnavailable: return "system-audio-device-list"
         case .invalidFormat, .invalidBuffer: return "system-audio-format"
+        case .invalidTimestamp: return "system-audio-clock"
         case .overflow: return "system-audio-overflow"
         case .startupTimeout: return "system-audio-start-timeout"
         case .cleanup: return "system-audio-cleanup"
@@ -44,9 +67,12 @@ enum SpeakerAudioTapError: LocalizedError {
         case .operation(_, kAudioDevicePermissionsError): return "システムオーディオ録音が許可されていません。システム設定の「プライバシーとセキュリティ」→「画面収録とシステムオーディオ録音」で許可し、Hearing を入れ直してください"
         case let .operation(operation, status): return "Core Audio operation=\(operation) status=\(status)"
         case .noOutputDevice: return "利用可能な音声出力デバイスがありません"
+        case let .speakerDevicesMissing(count): return "指定した出力デバイスのうち \(count) 台が未接続です"
+        case .outputDeviceListUnavailable: return "出力デバイス一覧を取得できません"
         case .currentProcessUnavailable: return "音声除外対象のプロセスを取得できませんでした"
         case .invalidFormat: return "スピーカー音声の形式を取得できませんでした"
         case .invalidBuffer: return "スピーカー音声のバッファ形式が変わりました"
+        case .invalidTimestamp: return "スピーカー音声の取得時刻を取得できませんでした"
         case .allocation: return "スピーカー音声のバッファを確保できませんでした"
         case .overflow: return "スピーカー音声の処理が追いつかず、バッファが上限に達しました"
         case .startupTimeout: return "スピーカー音声の開始処理が時間内に完了しませんでした"
@@ -59,51 +85,115 @@ enum SpeakerAudioTapError: LocalizedError {
 }
 
 @available(macOS 14.2, *)
+protocol SpeakerSystemPropertyListening {
+    func add(_ address: inout AudioObjectPropertyAddress, changes: OpaquePointer) -> OSStatus
+    func remove(_ address: inout AudioObjectPropertyAddress, changes: OpaquePointer) -> OSStatus
+}
+
+@available(macOS 14.2, *)
+private struct CoreAudioSystemPropertyListener: SpeakerSystemPropertyListening {
+    func add(_ address: inout AudioObjectPropertyAddress, changes: OpaquePointer) -> OSStatus {
+        AudioObjectAddPropertyListener(AudioObjectID(kAudioObjectSystemObject), &address,
+            coosenpai_audio_property_changed, UnsafeMutableRawPointer(changes))
+    }
+
+    func remove(_ address: inout AudioObjectPropertyAddress, changes: OpaquePointer) -> OSStatus {
+        AudioObjectRemovePropertyListener(AudioObjectID(kAudioObjectSystemObject), &address,
+            coosenpai_audio_property_changed, UnsafeMutableRawPointer(changes))
+    }
+}
+
+@available(macOS 14.2, *)
 final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     // 32 HAL callbacks are buffered; an overrun is reported instead of silently losing speech.
     private static let frameCapacity: UInt32 = 16_384
     private let diagnostic: (String) -> Void
     private let onStage: (String, String) -> Void
+    private let systemListener: any SpeakerSystemPropertyListening
+    private let selectedUIDs: [String]
     private let changes: OpaquePointer
     private var observedSequence: UInt64 = 0
+    private var observedDeviceListSequence: UInt64 = 0
+    private var observedOutputDevices: [String: AudioObjectID] = [:]
     private var outputID = AudioObjectID(kAudioObjectUnknown)
-    private var tapID = AudioObjectID(kAudioObjectUnknown)
+    private var tapIDs: [AudioObjectID] = []
     private var deviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var ring: OpaquePointer?
     private var buffer: AVAudioPCMBuffer?
     private var listeners: [(AudioObjectID, AudioObjectPropertyAddress)] = []
     private var outputListenerInstalled = false
+    private var deviceListListenerInstalled = false
     private var deviceStarted = false
     private var cleanupFailed = false
     private var activityCheckAt = Date.distantPast
     private var missingAudioSince: Date?
     private var receivedCount: UInt64 = 0
+    private(set) var missingDeviceCount = 0
+    private var selectedOutputIDs: [AudioObjectID] = []
 
-    init(diagnostic: @escaping (String) -> Void, onStage: @escaping (String, String) -> Void) throws {
+    init(selectedUIDs: [String], diagnostic: @escaping (String) -> Void, onStage: @escaping (String, String) -> Void,
+         systemListener: any SpeakerSystemPropertyListening = CoreAudioSystemPropertyListener()) throws {
+        self.selectedUIDs = selectedUIDs
         self.diagnostic = diagnostic
         self.onStage = onStage
+        self.systemListener = systemListener
         guard let changes = coosenpai_audio_changes_create() else { throw SpeakerAudioTapError.allocation }
         self.changes = changes
-        var address = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
-        let status = AudioObjectAddPropertyListener(
-            AudioObjectID(kAudioObjectSystemObject), &address,
-            coosenpai_audio_property_changed, UnsafeMutableRawPointer(changes)
-        )
-        guard status == noErr else {
-            throw SpeakerAudioTapError.operation("observe-default-output", status)
+        var address: AudioObjectPropertyAddress
+        if selectedUIDs.isEmpty {
+            address = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
+            let status = systemListener.add(&address, changes: changes)
+            guard status == noErr else {
+                coosenpai_audio_changes_destroy(changes)
+                throw SpeakerAudioTapError.operation("observe-default-output", status)
+            }
+            outputListenerInstalled = true
+        } else {
+            address = Self.address(kAudioHardwarePropertyDevices)
+            do {
+                try check(systemListener.add(&address, changes: changes), "observe-output-devices")
+                deviceListListenerInstalled = true
+            } catch {
+                do { try close() }
+                catch {
+                    diagnostic("audio-tap-cleanup operation=init action=terminate-process")
+                    exit(1)
+                }
+                coosenpai_audio_changes_destroy(changes)
+                throw error
+            }
         }
-        outputListenerInstalled = true
     }
 
     func start() throws -> AVAudioFormat {
         guard !cleanupFailed else { throw SpeakerAudioTapError.operation("previous-cleanup", kAudioHardwareUnspecifiedError) }
+        selectedOutputIDs.removeAll()
         observedSequence = coosenpai_audio_changes_sequence(changes)
+        observedDeviceListSequence = coosenpai_audio_device_list_sequence(changes)
         do {
-            outputID = try uint32Property(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice)
-            guard outputID != kAudioObjectUnknown,
-                  try outputProperty(kAudioDevicePropertyDeviceIsAlive) != 0 else {
-                throw SpeakerAudioTapError.noOutputDevice
+            let tapTargets: [(uid: String, stream: UInt)]
+            if selectedUIDs.isEmpty {
+                outputID = try uint32Property(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice)
+                guard outputID != kAudioObjectUnknown,
+                      try outputProperty(kAudioDevicePropertyDeviceIsAlive) != 0 else {
+                    throw SpeakerAudioTapError.noOutputDevice
+                }
+                tapTargets = []
+                selectedOutputIDs = [outputID]
+                missingDeviceCount = 0
+            } else {
+                let available: [SpeakerOutputDevice]
+                do { available = try SpeakerOutputDevices.available() }
+                catch { throw SpeakerAudioTapError.outputDeviceListUnavailable }
+                observedOutputDevices = SpeakerOutputDevices.captureIdentity(available)
+                let resolved = SpeakerOutputDevices.resolve(selectedUIDs, from: available)
+                missingDeviceCount = resolved.missingCount
+                guard !resolved.devices.isEmpty else { throw SpeakerAudioTapError.speakerDevicesMissing(missingDeviceCount) }
+                tapTargets = SpeakerOutputDevices.captureStreams(resolved.devices)
+                guard !tapTargets.isEmpty else { throw SpeakerAudioTapError.invalidFormat }
+                selectedOutputIDs = resolved.devices.map(\.objectID)
+                outputID = selectedOutputIDs[0]
             }
             onStage("tap-create", "begin")
             var address = Self.address(kAudioHardwarePropertyTranslatePIDToProcessObject)
@@ -115,32 +205,64 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
                 UInt32(MemoryLayout<pid_t>.size), &pid, &size, &processID
             ), "resolve-current-process")
             guard processID != kAudioObjectUnknown else { throw SpeakerAudioTapError.currentProcessUnavailable }
-            let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [processID])
-            description.name = "CooSenpAI Hearing"
-            description.isPrivate = true
-            description.muteBehavior = .unmuted
-            try check(AudioHardwareCreateProcessTap(description, &tapID), "create-tap")
-            let tapUID = try readStringProperty(tapID, kAudioTapPropertyUID, operation: "read-tap-uid")
+            var tapUIDs: [String] = []
+            let targets: [(uid: String, stream: UInt)?] = selectedUIDs.isEmpty ? [nil] : tapTargets.map(Optional.some)
+            for target in targets {
+                let description = target.map {
+                    CATapDescription(excludingProcesses: [processID], deviceUID: $0.uid, stream: $0.stream)
+                } ?? CATapDescription(stereoGlobalTapButExcludeProcesses: [processID])
+                description.name = "CooSenpAI Hearing"
+                description.isPrivate = true
+                description.muteBehavior = .unmuted
+                if target != nil {
+                    description.isMixdown = true
+                    description.isMono = true
+                }
+                var tapID = AudioObjectID(kAudioObjectUnknown)
+                try check(AudioHardwareCreateProcessTap(description, &tapID), "create-tap")
+                tapIDs.append(tapID)
+                tapUIDs.append(try readStringProperty(tapID, kAudioTapPropertyUID, operation: "read-tap-uid"))
+            }
             onStage("tap-create", "end")
             onStage("aggregate-create", "begin")
-            let deviceDescription: [String: Any] = [
-                kAudioAggregateDeviceNameKey: "CooSenpAI Hearing",
-                kAudioAggregateDeviceUIDKey: UUID().uuidString,
-                kAudioAggregateDeviceIsPrivateKey: true,
-                kAudioAggregateDeviceIsStackedKey: false,
-                // Waiting for a tapped application can block AudioDeviceStart indefinitely.
-                kAudioAggregateDeviceTapAutoStartKey: false,
-            ]
+            let deviceDescription = Self.aggregateDescription(
+                tapUIDs: tapUIDs,
+                clockDeviceUID: tapTargets.first?.uid,
+                tapDeviceUIDs: tapTargets.map(\.uid)
+            )
             try check(AudioHardwareCreateAggregateDevice(deviceDescription as CFDictionary, &deviceID), "create-aggregate")
             onStage("aggregate-ready", "begin")
             try waitForDeviceAlive(deviceID)
             onStage("aggregate-ready", "end")
-            try attachTap(tapUID, to: deviceID)
+            if selectedUIDs.isEmpty { try attachTaps(tapUIDs, to: deviceID) }
             var streamDescription = AudioStreamBasicDescription()
             address = Self.address(kAudioTapPropertyFormat)
             size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            try check(AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &streamDescription), "read-tap-format")
-            guard let format = AVAudioFormat(streamDescription: &streamDescription),
+            try check(AudioObjectGetPropertyData(tapIDs[0],
+                &address, 0, nil, &size, &streamDescription), "read-capture-format")
+            var precedingInputChannels: UInt32 = 0
+            if !selectedUIDs.isEmpty {
+                let channels = try aggregateInputChannelCount(deviceID)
+                guard channels >= tapIDs.count, streamDescription.mChannelsPerFrame == 1 else {
+                    throw SpeakerAudioTapError.invalidFormat
+                }
+                precedingInputChannels = UInt32(channels - tapIDs.count)
+                streamDescription.mSampleRate = try doubleProperty(deviceID, kAudioDevicePropertyNominalSampleRate)
+                streamDescription.mChannelsPerFrame = UInt32(tapIDs.count)
+                streamDescription.mFormatFlags |= kAudioFormatFlagIsNonInterleaved
+            }
+            let format: AVAudioFormat?
+            if streamDescription.mChannelsPerFrame > 2 {
+                let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | streamDescription.mChannelsPerFrame)
+                if let layout {
+                    format = AVAudioFormat(streamDescription: &streamDescription, channelLayout: layout)
+                } else {
+                    format = nil
+                }
+            } else {
+                format = AVAudioFormat(streamDescription: &streamDescription)
+            }
+            guard let format,
                   format.sampleRate > 0, format.channelCount > 0,
                   let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: Self.frameCapacity) else {
                 throw SpeakerAudioTapError.invalidFormat
@@ -152,52 +274,133 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             self.ring = ring
             onStage("aggregate-create", "end")
             onStage("add-output", "begin")
+            let tapSuffixOnly = !selectedUIDs.isEmpty
             try check(AudioDeviceCreateIOProcIDWithBlock(
                 &ioProcID, deviceID, nil
-            ) { _, inputData, _, _, _ in
-                coosenpai_audio_ring_push(ring, inputData)
+            ) { _, inputData, inputTime, _, _ in
+                let time = inputTime.pointee
+                let hostTime = time.mFlags.contains(.hostTimeValid) ? time.mHostTime : 0
+                if tapSuffixOnly {
+                    // The clock subdevice's input buffers precede the aggregate's tap buffers.
+                    coosenpai_audio_ring_push_tap_suffix(ring, inputData, hostTime, precedingInputChannels)
+                } else {
+                    coosenpai_audio_ring_push(ring, inputData, hostTime)
+                }
             }, "create-io-proc")
             onStage("add-output", "end")
             onStage("start-capture", "begin")
             try check(AudioDeviceStart(deviceID, ioProcID), "start-device")
             deviceStarted = true
             onStage("start-capture", "end")
-            try observe(tapID, kAudioTapPropertyFormat)
-            try observe(deviceID, kAudioDevicePropertyStreamFormat, scope: kAudioDevicePropertyScopeInput)
-            for device in [deviceID, outputID] {
+            for tapID in tapIDs { try observe(tapID, kAudioTapPropertyFormat) }
+            for address in Self.aggregateMonitorAddresses() {
+                try observe(deviceID, address.mSelector, scope: address.mScope)
+            }
+            for device in selectedOutputIDs {
                 try observe(device, kAudioDevicePropertyDeviceIsAlive)
                 try observe(device, kAudioDevicePropertyNominalSampleRate)
                 try observe(device, kAudioDevicePropertyBufferFrameSize)
+                if !selectedUIDs.isEmpty {
+                    try observe(device, kAudioDevicePropertyStreamConfiguration, scope: kAudioDevicePropertyScopeOutput)
+                }
             }
             missingAudioSince = nil
             activityCheckAt = .distantPast
             receivedCount = 0
             return format
         } catch {
+            let failure = classifyCaptureFailure(error)
             try stop()
-            throw error
+            throw failure
         }
+    }
+
+    private func classifyCaptureFailure(_ error: Error) -> Error {
+        guard case let SpeakerAudioTapError.operation(_, status) = error,
+              status == kAudioHardwareBadObjectError || status == kAudioHardwareBadDeviceError
+        else { return error }
+        guard let currentIDs = try? SpeakerOutputDevices.objectIDs() else {
+            return SpeakerAudioTapError.outputDeviceListUnavailable
+        }
+        let missing = selectedOutputIDs.contains {
+            !currentIDs.contains($0) || (try? uint32Property($0, kAudioDevicePropertyDeviceIsAlive)) == 0
+        }
+        return Self.deviceDisappearanceError(status: status, selected: !selectedUIDs.isEmpty, missing: missing) ?? error
+    }
+
+    static func deviceDisappearanceError(status: OSStatus, selected: Bool, missing: Bool) -> SpeakerAudioTapError? {
+        guard missing, status == kAudioHardwareBadObjectError || status == kAudioHardwareBadDeviceError else { return nil }
+        return selected ? .speakerDevicesMissing(1) : .noOutputDevice
+    }
+
+    static func cleanupReleased(_ status: OSStatus) -> Bool {
+        status == noErr || status == kAudioHardwareBadObjectError || status == kAudioHardwareBadDeviceError
+    }
+
+    static func aggregateMonitorAddresses() -> [AudioObjectPropertyAddress] {
+        [
+            address(kAudioDevicePropertyStreamFormat, scope: kAudioDevicePropertyScopeInput),
+            address(kAudioDevicePropertyDeviceIsAlive),
+            address(kAudioDevicePropertyNominalSampleRate),
+            address(kAudioDevicePropertyBufferFrameSize),
+        ]
+    }
+
+    static func aggregateDescription(
+        tapUIDs: [String], clockDeviceUID: String?, tapDeviceUIDs: [String]
+    ) -> [String: Any] {
+        var description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "CooSenpAI Hearing",
+            kAudioAggregateDeviceUIDKey: SpeakerOutputDevices.aggregateUIDPrefix + UUID().uuidString,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            // Waiting for a tapped application can block AudioDeviceStart indefinitely.
+            kAudioAggregateDeviceTapAutoStartKey: false,
+        ]
+        if let clockDeviceUID {
+            precondition(tapUIDs.count == tapDeviceUIDs.count && !tapUIDs.isEmpty)
+            description[kAudioAggregateDeviceMainSubDeviceKey] = clockDeviceUID
+            description[kAudioAggregateDeviceSubDeviceListKey] = [[kAudioSubDeviceUIDKey: clockDeviceUID]]
+            description[kAudioAggregateDeviceTapListKey] = zip(tapUIDs, tapDeviceUIDs).map { tapUID, deviceUID in
+                [
+                    kAudioSubTapUIDKey: tapUID,
+                    kAudioSubTapDriftCompensationKey: deviceUID != clockDeviceUID,
+                ] as [String: Any]
+            }
+        }
+        return description
     }
 
     func takeConfigurationChange() -> Bool {
         let sequence = coosenpai_audio_changes_sequence(changes)
-        guard sequence != observedSequence else { return false }
+        let listSequence = coosenpai_audio_device_list_sequence(changes)
+        let propertyChanged = sequence != observedSequence
+        let listChanged = listSequence != observedDeviceListSequence
+        guard propertyChanged || listChanged else { return false }
         observedSequence = sequence
-        return true
+        observedDeviceListSequence = listSequence
+        guard listChanged, !selectedUIDs.isEmpty else { return propertyChanged }
+        guard let available = try? SpeakerOutputDevices.available() else { return true }
+        let outputDevices = SpeakerOutputDevices.captureIdentity(available)
+        let changed = outputDevices != observedOutputDevices
+        observedOutputDevices = outputDevices
+        return propertyChanged || changed
     }
 
-    func nextBuffer() throws -> AVAudioPCMBuffer? {
+    func nextBuffer() throws -> SpeakerCapturedBuffer? {
         guard let ring, let buffer else { return nil }
         switch coosenpai_audio_ring_fault(ring) {
         case UInt32(COOSENPAI_AUDIO_RING_OVERFLOW): throw SpeakerAudioTapError.overflow
         case UInt32(COOSENPAI_AUDIO_RING_INVALID_LAYOUT): throw SpeakerAudioTapError.invalidBuffer
+        case UInt32(COOSENPAI_AUDIO_RING_INVALID_TIMESTAMP): throw SpeakerAudioTapError.invalidTimestamp
         default: break
         }
         buffer.frameLength = buffer.frameCapacity
-        let frames = coosenpai_audio_ring_pop(ring, buffer.mutableAudioBufferList)
+        var hostTime: UInt64 = 0
+        let frames = coosenpai_audio_ring_pop(ring, buffer.mutableAudioBufferList, &hostTime)
         if frames > 0 {
             buffer.frameLength = frames
-            return buffer
+            return SpeakerCapturedBuffer(buffer: buffer, timestamp: AudioConvertHostTimeToNanos(hostTime))
         }
         try checkAudioDelivery(ring)
         return nil
@@ -208,7 +411,14 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         guard now.timeIntervalSince(activityCheckAt) >= 0.5 else { return }
         activityCheckAt = now
         let count = coosenpai_audio_ring_received(ring)
-        let playing = try outputProperty(kAudioDevicePropertyDeviceIsRunningSomewhere) != 0
+        let playing = try selectedOutputIDs.contains { device in
+            do { return try uint32Property(device, kAudioDevicePropertyDeviceIsRunningSomewhere) != 0 }
+            catch SpeakerAudioTapError.operation(_, kAudioHardwareBadObjectError) {
+                throw selectedUIDs.isEmpty ? SpeakerAudioTapError.noOutputDevice : .speakerDevicesMissing(1)
+            } catch SpeakerAudioTapError.operation(_, kAudioHardwareBadDeviceError) {
+                throw selectedUIDs.isEmpty ? SpeakerAudioTapError.noOutputDevice : .speakerDevicesMissing(1)
+            }
+        }
         defer { receivedCount = count }
         guard playing, count == receivedCount else { missingAudioSince = nil; return }
         if let since = missingAudioSince {
@@ -219,7 +429,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     func stop() throws {
         var failures: [String] = []
         func recordFailure(_ status: OSStatus, _ operation: String) {
-            guard status != noErr else { return }
+            guard !Self.cleanupReleased(status) else { return }
             diagnostic("audio-tap-cleanup operation=\(operation) status=\(status)")
             failures.append("operation=\(operation) status=\(status)")
         }
@@ -229,8 +439,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             var address = storedAddress
             let status = AudioObjectRemovePropertyListener(object, &address,
                 coosenpai_audio_property_changed, UnsafeMutableRawPointer(changes))
-            // Removing the output device also removes its registered listeners.
-            if status != noErr && status != kAudioHardwareBadObjectError {
+            if !Self.cleanupReleased(status) {
                 recordFailure(status, "remove-observer")
                 remainingListeners.append((object, storedAddress))
             }
@@ -240,11 +449,11 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             if deviceStarted {
                 let status = AudioDeviceStop(deviceID, ioProcID)
                 recordFailure(status, "stop-device")
-                if status == noErr { deviceStarted = false }
+                if Self.cleanupReleased(status) { deviceStarted = false }
             }
             let status = AudioDeviceDestroyIOProcID(deviceID, ioProcID)
             recordFailure(status, "destroy-io-proc")
-            if status == noErr {
+            if Self.cleanupReleased(status) {
                 self.ioProcID = nil
                 deviceStarted = false
             }
@@ -263,22 +472,24 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         if deviceID != kAudioObjectUnknown {
             let status = AudioHardwareDestroyAggregateDevice(deviceID)
             recordFailure(status, "destroy-aggregate")
-            if status == noErr { deviceID = AudioObjectID(kAudioObjectUnknown) }
+            if Self.cleanupReleased(status) { deviceID = AudioObjectID(kAudioObjectUnknown) }
         }
-        if tapID != kAudioObjectUnknown {
+        var remainingTapIDs: [AudioObjectID] = []
+        for tapID in tapIDs {
             let status = AudioHardwareDestroyProcessTap(tapID)
             recordFailure(status, "destroy-tap")
-            if status == noErr { tapID = AudioObjectID(kAudioObjectUnknown) }
+            if !Self.cleanupReleased(status) { remainingTapIDs.append(tapID) }
         }
+        tapIDs = remainingTapIDs
         if !listeners.isEmpty { failures.append("operation=retain-observers") }
         cleanupFailed = !failures.isEmpty
             || ioProcID != nil
             || deviceID != kAudioObjectUnknown
-            || tapID != kAudioObjectUnknown
+            || !tapIDs.isEmpty
         if cleanupFailed {
             if ioProcID != nil { failures.append("operation=retain-io-proc") }
             if deviceID != kAudioObjectUnknown { failures.append("operation=retain-aggregate") }
-            if tapID != kAudioObjectUnknown { failures.append("operation=retain-tap") }
+            if !tapIDs.isEmpty { failures.append("operation=retain-tap") }
             throw SpeakerAudioTapError.cleanup(failures)
         }
     }
@@ -292,13 +503,22 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         }
         if outputListenerInstalled {
             var address = Self.address(kAudioHardwarePropertyDefaultOutputDevice)
-            let status = AudioObjectRemovePropertyListener(AudioObjectID(kAudioObjectSystemObject),
-                &address, coosenpai_audio_property_changed, UnsafeMutableRawPointer(changes))
-            if status == noErr || status == kAudioHardwareBadObjectError {
+            let status = systemListener.remove(&address, changes: changes)
+            if Self.cleanupReleased(status) {
                 outputListenerInstalled = false
             } else {
                 diagnostic("audio-tap-cleanup operation=remove-output-observer status=\(status)")
                 failures.append("operation=remove-output-observer status=\(status)")
+            }
+        }
+        if deviceListListenerInstalled {
+            var address = Self.address(kAudioHardwarePropertyDevices)
+            let status = systemListener.remove(&address, changes: changes)
+            if Self.cleanupReleased(status) {
+                deviceListListenerInstalled = false
+            } else {
+                diagnostic("audio-tap-cleanup operation=remove-device-list-observer status=\(status)")
+                failures.append("operation=remove-device-list-observer status=\(status)")
             }
         }
         if !failures.isEmpty {
@@ -309,7 +529,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     deinit {
         do { try close() }
         catch { diagnostic("audio-tap-cleanup operation=deinit detail=\(error.localizedDescription)") }
-        if !outputListenerInstalled && listeners.isEmpty && ring == nil {
+        if !outputListenerInstalled && !deviceListListenerInstalled && listeners.isEmpty && ring == nil {
             coosenpai_audio_changes_destroy(changes)
         }
     }
@@ -319,8 +539,8 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         var address = Self.address(selector, scope: scope)
         let status = AudioObjectAddPropertyListener(object, &address,
             coosenpai_audio_property_changed, UnsafeMutableRawPointer(changes))
-        if object == outputID && (status == kAudioHardwareBadObjectError || status == kAudioHardwareBadDeviceError) {
-            throw SpeakerAudioTapError.noOutputDevice
+        if selectedOutputIDs.contains(object) && (status == kAudioHardwareBadObjectError || status == kAudioHardwareBadDeviceError) {
+            throw selectedUIDs.isEmpty ? SpeakerAudioTapError.noOutputDevice : .speakerDevicesMissing(1)
         }
         try check(status, "observe-device")
         listeners.append((object, address))
@@ -339,6 +559,14 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         var address = Self.address(selector)
         var value: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
+        try check(AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value), "read-device-property")
+        return value
+    }
+
+    private func doubleProperty(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector) throws -> Double {
+        var address = Self.address(selector)
+        var value: Double = 0
+        var size = UInt32(MemoryLayout<Double>.size)
         try check(AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value), "read-device-property")
         return value
     }
@@ -362,7 +590,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         return string
     }
 
-    private func attachTap(_ uid: String, to aggregate: AudioObjectID) throws {
+    private func attachTaps(_ uids: [String], to aggregate: AudioObjectID) throws {
         var address = Self.address(kAudioAggregateDevicePropertyTapList)
         var size: UInt32 = 0
         try check(
@@ -379,7 +607,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             )
         }
         var values = (tapList as? [CFString]) ?? []
-        if !values.contains(uid as CFString) {
+        for uid in uids where !values.contains(uid as CFString) {
             values.append(uid as CFString)
             size += UInt32(MemoryLayout<CFString>.stride)
         }
@@ -390,6 +618,21 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             },
             "attach-tap"
         )
+    }
+
+    private func aggregateInputChannelCount(_ aggregate: AudioObjectID) throws -> Int {
+        var address = Self.address(kAudioDevicePropertyStreamConfiguration, scope: kAudioDevicePropertyScopeInput)
+        var size: UInt32 = 0
+        try check(AudioObjectGetPropertyDataSize(aggregate, &address, 0, nil, &size), "read-aggregate-channels-size")
+        guard size >= MemoryLayout<AudioBufferList>.size else { throw SpeakerAudioTapError.invalidFormat }
+        let storage = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { storage.deallocate() }
+        let list = storage.bindMemory(to: AudioBufferList.self, capacity: 1)
+        try check(AudioObjectGetPropertyData(aggregate, &address, 0, nil, &size, list), "read-aggregate-channels")
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+        let channels = buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
+        guard channels > 0 else { throw SpeakerAudioTapError.invalidFormat }
+        return channels
     }
 
     private func waitForDeviceAlive(_ device: AudioObjectID) throws {

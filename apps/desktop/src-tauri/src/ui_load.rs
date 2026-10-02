@@ -15,6 +15,7 @@ pub(crate) enum WindowRequest {
     BubbleClick(crate::bubbles::BubbleClickTarget),
     Settings { section: Option<&'static str> },
     Details,
+    BrainActivity,
     ModelPicker,
     PreparedMain(Arc<MainContent>),
 }
@@ -35,6 +36,9 @@ pub(crate) struct SettingsResources {
 
 #[derive(Debug)]
 pub(crate) enum WindowContent {
+    BrainActivity {
+        snapshot: Arc<AppSnapshot>,
+    },
     Main(Arc<MainContent>),
     Settings {
         main: Arc<MainContent>,
@@ -57,6 +61,7 @@ impl WindowContent {
             Self::Main(_) => PresenterId::Chat,
             Self::Settings { .. } => PresenterId::Settings,
             Self::Details { .. } => PresenterId::Details,
+            Self::BrainActivity { .. } => PresenterId::BrainActivity,
             Self::ModelPicker { .. } => PresenterId::ModelPicker,
         }
     }
@@ -85,6 +90,7 @@ pub(crate) async fn load(
         WindowRequest::Settings { section } => {
             prepare_settings(state).await?;
             state.refresh_speech_input_devices().await;
+            state.refresh_output_devices().await;
             let models =
                 crate::commands_provider_models::provider_models_for_state("main", state).await?;
             let locale = Locale::from_config(&state.runtime_config().ui.language);
@@ -99,6 +105,7 @@ pub(crate) async fn load(
             }
         }
         WindowRequest::Details => details_content(state).await,
+        WindowRequest::BrainActivity => brain_activity_content(state).await,
         WindowRequest::ModelPicker => model_content(state).await,
     };
     Ok(Some(content))
@@ -111,6 +118,7 @@ pub(crate) async fn refresh(
     match view {
         PresenterId::Chat => Ok(WindowContent::Main(main_content(state, false).await?)),
         PresenterId::Details => Ok(details_content(state).await),
+        PresenterId::BrainActivity => Ok(brain_activity_content(state).await),
         PresenterId::ModelPicker => Ok(model_content(state).await),
         _ => Err(format!("未対応のView初期化: {view:?}")),
     }
@@ -127,6 +135,12 @@ async fn main_content(
         advance_tutorial,
         bubble_click: None,
     }))
+}
+
+async fn brain_activity_content(state: &DesktopState) -> WindowContent {
+    WindowContent::BrainActivity {
+        snapshot: Arc::new(state.snapshot().await),
+    }
 }
 
 async fn details_content(state: &DesktopState) -> WindowContent {

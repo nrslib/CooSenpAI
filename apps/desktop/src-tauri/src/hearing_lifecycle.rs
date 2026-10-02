@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct HearingSessionSettings {
     pub(crate) locale: String,
     pub(crate) input_device: String,
+    pub(crate) speaker_devices: Vec<String>,
     pub(crate) sources: Vec<AudioObservationSource>,
     pub(crate) debug_dump_dir: Option<String>,
     pub(crate) speaker_identification_enabled: bool,
@@ -23,6 +24,7 @@ impl HearingSessionSettings {
         Self {
             locale: locale.into(),
             input_device: input_device.into(),
+            speaker_devices: Vec::new(),
             sources,
             debug_dump_dir: None,
             speaker_identification_enabled: false,
@@ -33,6 +35,11 @@ impl HearingSessionSettings {
 
     pub(crate) fn with_debug_dump_dir(mut self, debug_dump_dir: Option<String>) -> Self {
         self.debug_dump_dir = debug_dump_dir;
+        self
+    }
+
+    pub(crate) fn with_speaker_devices(mut self, speaker_devices: Vec<String>) -> Self {
+        self.speaker_devices = speaker_devices;
         self
     }
 
@@ -62,6 +69,8 @@ pub(crate) enum Lifecycle {
         cancellation: CancellationToken,
         control: HearingSessionControl,
         settings: HearingSessionSettings,
+        stop_events: oneshot::Sender<()>,
+        ingestion_completed: oneshot::Receiver<()>,
     },
     Stopping {
         generation: u64,
@@ -83,6 +92,8 @@ pub(crate) struct StopOutcome {
     pub(crate) control: Option<HearingSessionControl>,
     pub(crate) changed: bool,
     pub(crate) initialization_completed: Option<oneshot::Receiver<()>>,
+    pub(crate) stop_events: Option<oneshot::Sender<()>>,
+    pub(crate) ingestion_completed: Option<oneshot::Receiver<()>>,
 }
 
 pub(crate) enum AttachOutcome {
@@ -127,6 +138,10 @@ impl HearingLifecycle {
         )
     }
 
+    pub(crate) fn is_stopping(&self, generation: u64) -> bool {
+        matches!(self.state, Lifecycle::Stopping { generation: current, .. } if current == generation)
+    }
+
     pub(crate) fn same_settings(&self, settings: &HearingSessionSettings) -> bool {
         match &self.state {
             Lifecycle::Starting {
@@ -144,6 +159,8 @@ impl HearingLifecycle {
         generation: u64,
         cancellation: CancellationToken,
         control: HearingSessionControl,
+        stop_events: oneshot::Sender<()>,
+        ingestion_completed: oneshot::Receiver<()>,
     ) -> AttachOutcome {
         match &self.state {
             Lifecycle::Starting {
@@ -156,6 +173,8 @@ impl HearingLifecycle {
                     cancellation,
                     control,
                     settings: settings.clone(),
+                    stop_events,
+                    ingestion_completed,
                 };
                 AttachOutcome::Listening
             }
@@ -165,8 +184,15 @@ impl HearingLifecycle {
 
     pub(crate) fn stop(&mut self) -> Option<StopOutcome> {
         let previous = std::mem::replace(&mut self.state, Lifecycle::Idle);
-        let (generation, cancellation, control, settings, initialization_completed) = match previous
-        {
+        let (
+            generation,
+            cancellation,
+            control,
+            settings,
+            initialization_completed,
+            stop_events,
+            ingestion_completed,
+        ) = match previous {
             Lifecycle::Starting {
                 generation,
                 cancellation,
@@ -178,13 +204,25 @@ impl HearingLifecycle {
                 None,
                 settings,
                 Some(initialization_completed),
+                None,
+                None,
             ),
             Lifecycle::Listening {
                 generation,
                 cancellation,
                 control,
                 settings,
-            } => (generation, cancellation, Some(control), settings, None),
+                stop_events,
+                ingestion_completed,
+            } => (
+                generation,
+                cancellation,
+                Some(control),
+                settings,
+                None,
+                Some(stop_events),
+                Some(ingestion_completed),
+            ),
             Lifecycle::Idle => return None,
             Lifecycle::Stopping {
                 generation,
@@ -199,6 +237,8 @@ impl HearingLifecycle {
                     control: control.clone(),
                     changed: false,
                     initialization_completed: None,
+                    stop_events: None,
+                    ingestion_completed: None,
                 };
                 self.state = Lifecycle::Stopping {
                     generation,
@@ -210,6 +250,7 @@ impl HearingLifecycle {
                 return Some(outcome);
             }
         };
+        cancellation.cancel();
         self.state = Lifecycle::Stopping {
             generation,
             cancellation: cancellation.clone(),
@@ -223,6 +264,8 @@ impl HearingLifecycle {
             control,
             changed: true,
             initialization_completed,
+            stop_events,
+            ingestion_completed,
         })
     }
 
@@ -266,6 +309,8 @@ impl HearingLifecycle {
             control,
             changed: true,
             initialization_completed: None,
+            stop_events: None,
+            ingestion_completed: None,
         })
     }
 }

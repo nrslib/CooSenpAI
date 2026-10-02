@@ -536,7 +536,10 @@ impl CompanionAgent {
             let mut work_inputs = inputs.clone();
             if input_ids.len() != work_inputs.len() {
                 let storage = self.storage.as_ref().ok_or(CompanionError::Output)?;
-                for pending in storage.reconcile_pending_user_inputs()?.pending_inputs {
+                for pending in storage
+                    .reconcile_pending_user_inputs(self.clock.now())?
+                    .pending_inputs
+                {
                     let PendingInput::UserMessage(input) = pending;
                     if input_ids.contains(&input.id)
                         && !work_inputs.iter().any(|known| known.id == input.id)
@@ -577,7 +580,10 @@ impl CompanionAgent {
                         .iter()
                         .map(|input| (input.id.clone(), input.message.clone()))
                         .collect::<Vec<_>>();
-                    for pending in storage.reconcile_pending_user_inputs()?.pending_inputs {
+                    for pending in storage
+                        .reconcile_pending_user_inputs(self.clock.now())?
+                        .pending_inputs
+                    {
                         let PendingInput::UserMessage(input) = pending;
                         if input_ids.contains(&input.id)
                             && !source_messages.iter().any(|(id, _)| id == &input.id)
@@ -676,7 +682,7 @@ impl CompanionAgent {
         let Some(storage) = self.storage.clone() else {
             return Ok(Vec::new());
         };
-        let cursor = storage.reconcile_pending_user_inputs()?;
+        let cursor = storage.reconcile_pending_user_inputs(self.clock.now())?;
         self.pending_user_messages = cursor
             .pending_inputs
             .into_iter()
@@ -1057,7 +1063,10 @@ impl CompanionAgent {
                 "言い足しを復元する storage がありません".to_owned(),
             )));
         };
-        for pending in storage.reconcile_pending_user_inputs()?.pending_inputs {
+        for pending in storage
+            .reconcile_pending_user_inputs(self.clock.now())?
+            .pending_inputs
+        {
             let PendingInput::UserMessage(input) = pending;
             if accepted.contains(&input.id) && !input_ids.contains(&input.id) {
                 input_ids.push(input.id);
@@ -1238,7 +1247,7 @@ impl CompanionAgent {
     ) -> Result<(), CompanionError> {
         if let Some(storage) = &self.storage {
             self.pending_user_messages = storage
-                .reconcile_pending_user_inputs()?
+                .reconcile_pending_user_inputs(self.clock.now())?
                 .pending_inputs
                 .into_iter()
                 .map(|pending| match pending {

@@ -40,6 +40,7 @@ swiftc -target "$swift_target" -O -parse-as-library -module-cache-path "$module_
   "$script_dir/Sources/speaker_screen_capture.swift" \
   "$script_dir/Sources/speaker_screen_device.swift" \
   "$script_dir/Sources/speaker_audio_device.swift" \
+  "$script_dir/Sources/speaker_output_devices.swift" \
   "$script_dir/Sources/audio_stats.swift" \
   "$script_dir/Sources/audio_scaling.swift" \
   "$script_dir/Sources/audio_buffer_copy.swift" \

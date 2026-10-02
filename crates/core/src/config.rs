@@ -245,6 +245,14 @@ pub enum JudgeComposition {
     Weighted,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BundledConnectome {
+    #[default]
+    Off,
+    On,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JudgeModuleConfig {
@@ -268,6 +276,8 @@ pub struct JudgeConfig {
     pub veto: bool,
     #[serde(default)]
     pub modules: Vec<JudgeModuleConfig>,
+    #[serde(default)]
+    pub bundled_connectome: BundledConnectome,
     #[serde(default = "default_judge_timeout")]
     pub timeout_ms: u64,
 }
@@ -279,6 +289,7 @@ impl Default for JudgeConfig {
             composition: JudgeComposition::Single,
             veto: false,
             modules: Vec::new(),
+            bundled_connectome: BundledConnectome::Off,
             timeout_ms: default_judge_timeout(),
         }
     }
@@ -350,6 +361,8 @@ pub struct AudioConfig {
     #[serde(default = "default_true")]
     pub speaker: bool,
     #[serde(default)]
+    pub speaker_devices: Vec<String>,
+    #[serde(default)]
     pub speaker_identification: SpeakerIdentificationConfig,
     #[serde(default)]
     pub debug_dump_dir: Option<String>,
@@ -380,6 +393,7 @@ impl Default for AudioConfig {
             mic: true,
             microphone_commands_enabled: false,
             speaker: true,
+            speaker_devices: Vec::new(),
             speaker_identification: SpeakerIdentificationConfig::default(),
             debug_dump_dir: None,
         }
@@ -1021,6 +1035,11 @@ pub fn normalize_audio_sources_on_enable(audio_was_enabled: bool, config: &mut C
 }
 
 pub(super) fn normalize_config(mut config: Config) -> Config {
+    let mut seen_speaker_devices = std::collections::HashSet::new();
+    config
+        .audio
+        .speaker_devices
+        .retain(|uid| seen_speaker_devices.insert(uid.clone()));
     for actions in [
         &mut config.popup.quick_actions.text,
         &mut config.popup.quick_actions.image,

@@ -1,0 +1,32 @@
+[
+  {
+    "version": "v6",
+    "entry": {
+      "observationId": "legacy-v6",
+      "time": "2026-09-16T10:00:00Z",
+      "source": "speaker",
+      "text": "以前の発言",
+      "speakerStatus": "unknown"
+    }
+  },
+  {
+    "version": "v6-no-status",
+    "entry": {
+      "observationId": "legacy-v6-no-status",
+      "time": "2026-09-16T10:00:00Z",
+      "source": "speaker",
+      "text": "以前の発言"
+    }
+  },
+  {
+    "version": "v7",
+    "entry": {
+      "observationId": "legacy-v7",
+      "time": "2026-09-18T10:00:00Z",
+      "source": "speaker",
+      "text": "以前の発言",
+      "speakerStatus": "identified",
+      "speakerTag": "11111111-1111-4111-8111-111111111111"
+    }
+  }
+]

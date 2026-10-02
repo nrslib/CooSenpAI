@@ -324,11 +324,8 @@ async fn tutorial_operation(
     command: DesktopCommand,
 ) -> IpcResult<AppSnapshot> {
     let handler = state.clone();
-    dispatch_result(
-        state,
-        CommandSource::IpcMain,
-        command,
-        move |context| async move {
+    dispatch_result(state, CommandSource::IpcMain, command, move |context| {
+        Box::pin(async move {
             let locale = Locale::from_config(&handler.runtime_config().ui.language);
             let result = match command {
                 DesktopCommand::TutorialSettingsPresented => handler
@@ -361,8 +358,8 @@ async fn tutorial_operation(
                 Ok(()) => IpcResult::success(handler.snapshot().await),
                 Err(error) => IpcResult::failure(error),
             }
-        },
-    )
+        })
+    })
     .await
 }
 

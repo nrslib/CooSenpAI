@@ -1,5 +1,5 @@
 use crate::snapshot::{AppSnapshot, AudioLogEvent, AudioLogStage, AudioObservationView};
-use coosenpai_core::locale::{localize_audio_message, Locale};
+use coosenpai_core::locale::{localize_audio_message, speaker_missing_device_count, Locale};
 use coosenpai_core::ports::SpeechPermissionKind;
 use coosenpai_core::state::{AudioObservation, AudioObservationSource};
 
@@ -70,11 +70,13 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             view.phase = "off".to_owned();
             view.warning_kind = None;
             view.message = None;
+            view.missing_speaker_device_count = None;
         }
         HearingResult::Cancelled(generation) if view.generation == generation => {
             view.phase = "off".to_owned();
             view.warning_kind = None;
             view.message = None;
+            view.missing_speaker_device_count = None;
         }
         HearingResult::Started(generation) => {
             view.generation = generation;
@@ -90,7 +92,11 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             generation,
             microphone,
             recognition,
-        } if view.generation == generation => {
+        } if snapshot.config.audio.enabled
+            && view.generation == generation
+            && view.phase != "stopping"
+            && view.phase != "off" =>
+        {
             view.phase = "listening".to_owned();
             view.microphone_permission = crate::speech::permission_name(microphone);
             view.recognition_permission = crate::speech::permission_name(recognition);
@@ -113,24 +119,29 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             if clears_warning {
                 view.message = None;
                 view.warning_kind = None;
+                view.missing_speaker_device_count = None;
             }
         }
         HearingResult::Warning {
             generation,
             kind,
             message,
-        } if view.generation == generation => {
+        } if view.generation == generation && view.phase != "stopping" && view.phase != "off" => {
             if kind == "system-audio-restored" {
-                if view
-                    .warning_kind
-                    .as_deref()
-                    .is_some_and(|kind| kind == "system-audio" || kind.starts_with("system-audio-"))
-                {
+                if view.warning_kind.as_deref().is_some_and(|kind| {
+                    kind == "speaker-device-missing"
+                        || kind == "system-audio"
+                        || kind.starts_with("system-audio-")
+                }) {
                     view.message = None;
                     view.warning_kind = None;
+                    view.missing_speaker_device_count = None;
                 }
             } else {
                 if can_replace_protocol_warning(view.warning_kind.as_deref(), &kind) {
+                    view.missing_speaker_device_count = (kind == "speaker-device-missing")
+                        .then(|| speaker_missing_device_count(&message))
+                        .flatten();
                     view.message = Some(localize_audio_message(&kind, &message, locale));
                     view.warning_kind = Some(kind);
                 }
@@ -183,8 +194,14 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             view.phase = "off".to_owned();
             view.warning_kind = None;
             view.message = None;
+            view.missing_speaker_device_count = None;
         }
-        HearingResult::Restarted(generation) if view.generation == generation => {
+        HearingResult::Restarted(generation)
+            if snapshot.config.audio.enabled
+                && view.generation == generation
+                && view.phase != "stopping"
+                && view.phase != "off" =>
+        {
             view.phase = "listening".to_owned()
         }
         HearingResult::Failed {
@@ -197,6 +214,9 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
         {
             if can_replace_protocol_warning(view.warning_kind.as_deref(), &kind) {
                 view.phase = "error".to_owned();
+                view.missing_speaker_device_count = (kind == "speaker-device-missing")
+                    .then(|| speaker_missing_device_count(&message))
+                    .flatten();
                 view.message = Some(localize_audio_message(&kind, &message, locale));
                 match kind.as_str() {
                     "permission-microphone" => view.microphone_permission = "denied".to_owned(),

@@ -334,6 +334,8 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
         content = <>
           <DeveloperSettings
             {...categoryProps}
+            connectomeStatus={snapshot.connectomeStatus}
+            connectomeDownload={snapshot.connectomeDownload}
             debugWake={debugWake}
             onDebugWakeImage={(file) => { void selectDebugWakeImage(file); }}
             onDebugWakeContext={(value) => action("debugWakeContext", value)}

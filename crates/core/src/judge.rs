@@ -248,6 +248,7 @@ const MAX_PENDING_JUDGE_OBSERVATIONS: usize = 4_096;
 
 #[derive(Debug, Clone, Default)]
 pub struct JudgeTraceStore {
+    activity: Arc<Mutex<crate::brain_activity_history::BrainActivityStore>>,
     entries: Arc<Mutex<HashMap<String, JudgeTrace>>>,
     order: Arc<Mutex<VecDeque<String>>>,
     observation_inputs: Arc<Mutex<HashMap<String, String>>>,
@@ -256,6 +257,33 @@ pub struct JudgeTraceStore {
 }
 
 impl JudgeTraceStore {
+    pub fn brain_activity_history(&self) -> crate::brain_activity::BrainActivityHistory {
+        self.activity.lock().expect("activity store lock").history()
+    }
+
+    pub fn brain_activity_record(
+        &self,
+        generation: u64,
+        record_id: u64,
+        input_id: &str,
+    ) -> Option<crate::brain_activity::BrainActivityRecord> {
+        self.activity
+            .lock()
+            .ok()?
+            .record(generation, record_id, input_id)
+    }
+
+    pub fn brain_activity_for_input(
+        &self,
+        input_id: &str,
+    ) -> Option<crate::brain_activity::BrainActivityObservation> {
+        self.activity.lock().ok()?.for_input(input_id)
+    }
+
+    fn reset_activity(&self) -> u64 {
+        self.activity.lock().expect("activity store lock").reset()
+    }
+
     pub fn get(&self, input_id: &str) -> Option<JudgeTrace> {
         self.entries
             .lock()
@@ -301,6 +329,23 @@ impl JudgeTraceStore {
     }
 
     fn insert(&self, trace: JudgeTrace) {
+        let generation = self.brain_activity_history().generation;
+        self.insert_in_generation(trace, generation);
+    }
+
+    fn insert_in_generation(&self, mut trace: JudgeTrace, generation: u64) {
+        let mut activity = crate::brain_activity::extract_activity(&mut trace);
+        let current = self
+            .activity
+            .lock()
+            .is_ok_and(|store| store.generation() == generation);
+        if current {
+            crate::brain_activity_history::attach_previews(&mut activity, &trace.request);
+            if let Ok(mut store) = self.activity.lock() {
+                store.insert(generation, activity);
+            }
+        }
+
         let input_id = trace.input_id.clone();
         let Ok(mut entries) = self.entries.lock() else {
             return;
@@ -896,6 +941,7 @@ pub struct JudgeAgent {
     feedback_store: Option<PathBuf>,
     feedback_store_load_error: Option<String>,
     trace_store: JudgeTraceStore,
+    activity_generation: u64,
 }
 
 impl JudgeAgent {
@@ -926,6 +972,7 @@ impl JudgeAgent {
             feedback_store: None,
             feedback_store_load_error: None,
             trace_store: JudgeTraceStore::default(),
+            activity_generation: 1,
         }
     }
 
@@ -1013,6 +1060,7 @@ impl JudgeAgent {
     }
 
     pub(crate) fn with_trace_store(mut self, trace_store: JudgeTraceStore) -> Self {
+        self.activity_generation = trace_store.reset_activity();
         self.trace_store = trace_store;
         self
     }
@@ -1045,20 +1093,31 @@ impl JudgeAgent {
         gate
     }
 
-    fn remember_trace(
+    async fn remember_trace(
         &self,
         input_id: &str,
         request: &Value,
         responses: Vec<JudgeModuleTrace>,
         decision: Option<JudgeDecision>,
     ) {
-        self.trace_store.insert(JudgeTrace {
+        let store = self.trace_store.clone();
+        let generation = self.activity_generation;
+        let trace = JudgeTrace {
             input_id: input_id.to_owned(),
             request: request.clone(),
             feedable: !responses.is_empty() && responses.iter().all(module_trace_feedable),
             responses,
             decision,
-        });
+        };
+        // Input images disappear with the observation's temporary directory; capture
+        // bounded previews here while keeping decoding off the async runtime thread.
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || store.insert_in_generation(trace, generation)).await
+        {
+            if let Some(logger) = &self.logger {
+                let _ = logger.write("WARN", &format!("judge activity recording failed: {error}"));
+            }
+        }
     }
 
     fn unavailable_request(&self, input_id: &str, reason: &str) -> Value {
@@ -1088,7 +1147,8 @@ impl JudgeAgent {
         if let Some(reason) = input_insufficiency(frames, audio) {
             let evaluation = self.input_hold(&input_id, reason);
             let request = self.unavailable_request(&input_id, reason);
-            self.remember_trace(&input_id, &request, Vec::new(), evaluation.decision.clone());
+            self.remember_trace(&input_id, &request, Vec::new(), evaluation.decision.clone())
+                .await;
             return evaluation;
         }
         let request_id = Uuid::new_v4().to_string();
@@ -1097,7 +1157,8 @@ impl JudgeAgent {
             Err(error) => {
                 let evaluation = self.fallback(&input_id, error.to_string());
                 let request = self.unavailable_request(&input_id, "request-build-failed");
-                self.remember_trace(&input_id, &request, Vec::new(), evaluation.decision.clone());
+                self.remember_trace(&input_id, &request, Vec::new(), evaluation.decision.clone())
+                    .await;
                 return evaluation;
             }
         };
@@ -1118,7 +1179,8 @@ impl JudgeAgent {
                     }),
                     Vec::new(),
                     evaluation.decision.clone(),
-                );
+                )
+                .await;
                 return evaluation;
             }
         };
@@ -1158,7 +1220,8 @@ impl JudgeAgent {
             for (_, transport, _) in &responses {
                 transport.reset().await;
             }
-            self.remember_trace(&input_id, &request_value, Vec::new(), None);
+            self.remember_trace(&input_id, &request_value, Vec::new(), None)
+                .await;
             return JudgeEvaluation::pass_through();
         }
         let mut evaluations = Vec::new();
@@ -1206,7 +1269,8 @@ impl JudgeAgent {
                     for transport in &all_transports {
                         transport.reset().await;
                     }
-                    self.remember_trace(&input_id, &request_value, traces, None);
+                    self.remember_trace(&input_id, &request_value, traces, None)
+                        .await;
                     return JudgeEvaluation::pass_through();
                 }
                 Err(error) => {
@@ -1233,8 +1297,15 @@ impl JudgeAgent {
                     module_errors.join("; ")
                 )
             };
-            self.remember_trace(&input_id, &request_value, traces, None);
-            return self.fallback(&input_id, reason);
+            let evaluation = self.fallback(&input_id, reason);
+            self.remember_trace(
+                &input_id,
+                &request_value,
+                traces,
+                evaluation.decision.clone(),
+            )
+            .await;
+            return evaluation;
         }
         self.log_feed_metadata(&input_id, &evaluations);
         let evaluation = match self.compose(&input_id, evaluations, module_errors.is_empty()) {
@@ -1259,7 +1330,8 @@ impl JudgeAgent {
             &request_value,
             traces,
             evaluation.decision.clone(),
-        );
+        )
+        .await;
         evaluation
     }
 

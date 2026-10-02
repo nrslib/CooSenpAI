@@ -857,11 +857,12 @@ async fn flush_if_due(
     let batch_scope_generation = current_scope_generation;
     let batch_user_input_sequence = user_input_sequence;
     let (frames, directories) = memory.take_pending_capture_sets();
+    let directories = Arc::new(directories);
     memory.window_start = Instant::now();
     let state = state.clone();
     let cancellation_for_work = cancellation.clone();
     let started = memory.start_work(async move {
-        let _directories = directories;
+        let _directories = directories.clone();
         if tutorial_watch {
             tokio::select! {
                 () = cancellation_for_work.cancelled() => {
@@ -891,6 +892,7 @@ async fn flush_if_due(
                 frames,
                 cancellation_for_work.clone(),
                 batch_user_input_sequence,
+                directories,
             )
             .await
         {

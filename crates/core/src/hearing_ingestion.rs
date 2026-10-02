@@ -52,11 +52,19 @@ impl HearingAudioIngestion {
         corrections: &[HearingSpeakerCorrection],
     ) -> Result<Option<HearingAudioRecord>, PersistenceError> {
         let mut buffer = self.lock()?;
-        if !buffer.accepts_session(&self.session_id) {
+        // キューで受理済みの final は入力停止後も保存する。
+        if !buffer.is_current_session(&self.session_id) {
             return Ok(None);
         }
         // モード切替も同じロックを使い、判定後から書き込みまでの競合を防ぐ。
+        let mut incoming_corrections = buffer.pending_speaker_corrections().to_vec();
+        incoming_corrections.extend_from_slice(corrections);
         let observation = if buffer.is_persistent() {
+            let mut observation = observation;
+            crate::hearing_context::apply_speaker_corrections_to_audio(
+                &mut observation,
+                &incoming_corrections,
+            )?;
             let observation = persist_audio(paths, retention_days, observation)?;
             crate::observer::apply_speaker_corrections(
                 paths,
@@ -67,8 +75,15 @@ impl HearingAudioIngestion {
             buffer.acknowledge_saved_audio(&observation.id);
             observation
         } else {
+            let mut observation = observation;
+            crate::hearing_context::apply_speaker_corrections_to_audio(
+                &mut observation,
+                &incoming_corrections,
+            )?;
+            buffer.apply_pending_speaker_corrections(&incoming_corrections)?;
             observation
         };
+        buffer.remember_speaker_corrections(corrections)?;
         let transcript_path = if buffer.is_persistent() {
             let time = chrono::DateTime::parse_from_rfc3339(&observation.created_at)
                 .map_err(|_| PersistenceError::Invalid("発話時刻が不正です".to_owned()))?;
@@ -101,7 +116,11 @@ impl HearingAudioIngestion {
             return Ok(Vec::new());
         }
         let audio = if buffer.is_persistent() {
-            for record in buffer.pending_audio().to_vec() {
+            for mut record in buffer.pending_audio().to_vec() {
+                crate::hearing_context::apply_speaker_corrections_to_audio(
+                    &mut record,
+                    buffer.pending_speaker_corrections(),
+                )?;
                 let saved = persist_audio(paths, retention_days, record)?;
                 buffer.acknowledge_saved_audio(&saved.id);
             }

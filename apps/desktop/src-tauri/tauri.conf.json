@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CooSenpAI",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "identifier": "dev.nrslib.coosenpai",
   "build": {
     "beforeDevCommand": "../../tools/ocr-helper/build.sh && ../../tools/speech-helper/build.sh && ../../tools/hearing-helper/build.sh && npm run frontend:dev",
@@ -130,6 +130,18 @@
         "height": 680,
         "minWidth": 400,
         "minHeight": 480,
+        "create": false,
+        "visible": false
+      },
+      {
+        "label": "brain-activity",
+        "title": "CooSenpAI — 脳活動",
+        "url": "brain-activity.html",
+        "width": 780,
+        "height": 820,
+        "minWidth": 540,
+        "minHeight": 600,
+        "create": false,
         "visible": false
       }
     ],
@@ -165,12 +177,16 @@
       "../../../docs/legal/EULA.en.md": "EULA.en.md",
       "../../../docs/legal/THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
       "../../../docs/legal/CC-BY-4.0-legalcode.txt": "CC-BY-4.0-legalcode.txt",
-      "../../../docs/legal/WeSpeaker-Apache-2.0.txt": "WeSpeaker-Apache-2.0.txt"
+      "../../../docs/legal/WeSpeaker-Apache-2.0.txt": "WeSpeaker-Apache-2.0.txt",
+      "../../../third_party/habitua/LICENSE-MIT": "licenses/habitua/LICENSE-MIT",
+      "../../../third_party/habitua/LICENSE-APACHE": "licenses/habitua/LICENSE-APACHE",
+      "../../../dist/connectome/malecns-frozen-response-learning-artifact-r14.json": "connectome/malecns-frozen-response-learning-artifact-r14.json"
     },
     "externalBin": [
       "../../../target/helpers/coosenpai-ocr",
       "../../../target/helpers/coosenpai-speech",
-      "../../../target/helpers/coosenpai-hearing"
+      "../../../target/helpers/coosenpai-hearing",
+      "../../../target/helpers/coosenpai-connectome"
     ],
     "macOS": {
       "minimumSystemVersion": "13.0",

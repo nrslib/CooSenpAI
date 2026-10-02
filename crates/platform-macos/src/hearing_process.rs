@@ -1,7 +1,7 @@
 use super::source_name;
 use coosenpai_core::interactive_process::{
     InteractiveProcess, InteractiveProcessControl, InteractiveProcessEvent,
-    InteractiveProcessRequest,
+    InteractiveProcessRequest, SHUTDOWN_GRACE,
 };
 use coosenpai_core::ports::{decode_hearing_event, HearingEvent, PortError, RuntimeLogger};
 use coosenpai_core::state::AudioObservationSource;
@@ -45,10 +45,7 @@ enum ProcessOutcome {
 struct ForwardSanitizedFinalContext<'a> {
     source: AudioObservationSource,
     events: &'a mpsc::Sender<SourceProcessEvent>,
-    cancellation: &'a CancellationToken,
-    parent_cancellation: &'a CancellationToken,
     logger: &'a dyn RuntimeLogger,
-    diagnostic_logged: bool,
 }
 
 pub(crate) async fn run_source_process(
@@ -63,20 +60,23 @@ pub(crate) async fn run_source_process(
     loop {
         if cancellation.is_cancelled() || spec.parent_cancellation.is_cancelled() {
             if let Some(mut process) = initial_process.take() {
-                let control = process.control();
-                return cancel_and_reap(&mut process, &control, spec.logger.as_ref()).await;
+                return match monitor_process(
+                    spec.source,
+                    &mut process,
+                    &events,
+                    &cancellation,
+                    &spec.parent_cancellation,
+                    spec.logger.as_ref(),
+                )
+                .await
+                {
+                    ProcessOutcome::Stopped(result) => result,
+                    ProcessOutcome::Restart { .. } => Ok(()),
+                };
             }
             return Ok(());
         }
-        if !send_source_event(
-            &events,
-            spec.source,
-            SourceProcessEventKind::Restarting,
-            &cancellation,
-            &spec.parent_cancellation,
-        )
-        .await
-        {
+        if !send_source_event(&events, spec.source, SourceProcessEventKind::Restarting).await {
             return Ok(());
         }
 
@@ -181,8 +181,6 @@ async fn schedule_restart(
         events,
         source,
         SourceProcessEventKind::Unavailable { error },
-        cancellation,
-        parent_cancellation,
     )
     .await
     {
@@ -193,8 +191,6 @@ async fn schedule_restart(
             events,
             source,
             SourceProcessEventKind::Exhausted { error: None },
-            cancellation,
-            parent_cancellation,
         )
         .await;
         return false;
@@ -213,26 +209,47 @@ async fn schedule_restart(
 async fn forward_sanitized_final(
     event: HearingEvent,
     reason: &str,
-    context: &mut ForwardSanitizedFinalContext<'_>,
+    context: &ForwardSanitizedFinalContext<'_>,
 ) -> bool {
-    if !context.diagnostic_logged {
+    if let HearingEvent::Final {
+        generation,
+        sequence,
+        ..
+    } = &event
+    {
         let _ = context.logger.write(
             "WARN",
             &format!(
-                "speaker-metadata-unavailable utterance-identification-unavailable transcription-continued source={} path={reason}",
+                "speaker-metadata-unavailable utterance-identification-unavailable transcription-continued source={} generation={generation} sequence={sequence} reason={}",
                 source_name(context.source),
+                speaker_metadata_reason_class(reason),
             ),
         );
-        context.diagnostic_logged = true;
     }
     send_source_event(
         context.events,
         context.source,
         SourceProcessEventKind::Event(event),
-        context.cancellation,
-        context.parent_cancellation,
     )
     .await
+}
+
+fn speaker_metadata_reason_class(reason: &str) -> &'static str {
+    match reason {
+        "metadata.decode" => "metadata.decode",
+        "metadata.segment-id" => "metadata.segment-id",
+        "metadata.period-bounds" => "metadata.period-bounds",
+        "metadata.registry-id" => "metadata.registry-id",
+        "metadata.correction-count" => "metadata.correction-count",
+        "metadata.correction-consistency" => "metadata.correction-consistency",
+        "metadata.correction-registry" => "metadata.correction-registry",
+        "metadata.speaker-id" => "metadata.speaker-id",
+        "metadata.identified-registry" => "metadata.identified-registry",
+        "metadata.status-identifiers" => "metadata.status-identifiers",
+        _ if reason.starts_with("metadata.speakerSegments[") => "metadata.speaker-segments",
+        _ if reason.starts_with("metadata.speakerCorrections[") => "metadata.speaker-corrections",
+        _ => "metadata.validation",
+    }
 }
 
 async fn monitor_process(
@@ -245,36 +262,48 @@ async fn monitor_process(
 ) -> ProcessOutcome {
     let control = process.control();
     let mut valid_final_seen = false;
-    let mut forward_context = ForwardSanitizedFinalContext {
+    let forward_context = ForwardSanitizedFinalContext {
         source,
         events,
-        cancellation,
-        parent_cancellation,
         logger,
-        diagnostic_logged: false,
     };
     let device_started = std::time::Instant::now();
+    let mut stopping = false;
+    let force_shutdown = tokio::time::sleep(SHUTDOWN_GRACE);
+    tokio::pin!(force_shutdown);
+    let mut force_shutdown_armed = false;
+    let mut cancel_write_error = None;
     let _ = logger.write(
         "INFO",
         &format!("hearing-start: source={source:?} stage=device-ready phase=begin"),
     );
     loop {
+        if !stopping && (cancellation.is_cancelled() || parent_cancellation.is_cancelled()) {
+            stopping = true;
+            if let Err(error) = control.write_line(br#"{"op":"cancel"}"#.to_vec()).await {
+                cancel_write_error = Some(process_error(error));
+            }
+            force_shutdown
+                .as_mut()
+                .reset(tokio::time::Instant::now() + SHUTDOWN_GRACE);
+            force_shutdown_armed = true;
+        }
         let event = tokio::select! {
             biased;
+            _ = &mut force_shutdown, if force_shutdown_armed => {
+                let _ = control.terminate(true).await;
+                force_shutdown_armed = false;
+                continue;
+            }
             event = process.next_event() => event,
-            _ = cancellation.cancelled() => {
-                return ProcessOutcome::Stopped(
-                    cancel_and_reap(process, &control, logger).await,
-                );
-            }
-            _ = parent_cancellation.cancelled() => {
-                return ProcessOutcome::Stopped(
-                    cancel_and_reap(process, &control, logger).await,
-                );
-            }
+            _ = cancellation.cancelled(), if !stopping => continue,
+            _ = parent_cancellation.cancelled(), if !stopping => continue,
         };
         match event {
             Some(Ok(InteractiveProcessEvent::StdoutLine(line))) => {
+                if stopping {
+                    continue;
+                }
                 match decode_hearing_event(&line) {
                     Ok(decoded) => {
                         let (event, wire_metadata_reason) = decoded.into_parts();
@@ -283,9 +312,7 @@ async fn monitor_process(
                                 && event.is_valid_for_source(source)
                             {
                                 valid_final_seen = true;
-                                if !forward_sanitized_final(event, reason, &mut forward_context)
-                                    .await
-                                {
+                                if !forward_sanitized_final(event, reason, &forward_context).await {
                                     return ProcessOutcome::Stopped(
                                         cancel_and_reap(process, &control, logger).await,
                                     );
@@ -299,12 +326,8 @@ async fn monitor_process(
                                     event.detach_invalid_speaker_metadata(source)
                                 {
                                     valid_final_seen = true;
-                                    if !forward_sanitized_final(
-                                        event,
-                                        &reason,
-                                        &mut forward_context,
-                                    )
-                                    .await
+                                    if !forward_sanitized_final(event, &reason, &forward_context)
+                                        .await
                                     {
                                         return ProcessOutcome::Stopped(
                                             cancel_and_reap(process, &control, logger).await,
@@ -334,8 +357,6 @@ async fn monitor_process(
                                     events,
                                     source,
                                     SourceProcessEventKind::Event(event),
-                                    cancellation,
-                                    parent_cancellation,
                                 )
                                 .await
                                 {
@@ -365,8 +386,6 @@ async fn monitor_process(
                                     events,
                                     source,
                                     SourceProcessEventKind::Event(event),
-                                    cancellation,
-                                    parent_cancellation,
                                 )
                                 .await
                                 {
@@ -400,8 +419,8 @@ async fn monitor_process(
                 log_helper_stderr(logger, &line);
             }
             Some(Ok(InteractiveProcessEvent::Exited { status, stderr })) => {
-                if cancellation.is_cancelled() || parent_cancellation.is_cancelled() {
-                    return ProcessOutcome::Stopped(Ok(()));
+                if stopping || cancellation.is_cancelled() || parent_cancellation.is_cancelled() {
+                    return ProcessOutcome::Stopped(cancel_write_error.map_or(Ok(()), Err));
                 }
                 let error = (status != Some(0)).then(|| helper_exit_error(&stderr));
                 return ProcessOutcome::Restart {
@@ -520,14 +539,11 @@ async fn send_source_event(
     events: &mpsc::Sender<SourceProcessEvent>,
     source: AudioObservationSource,
     kind: SourceProcessEventKind,
-    cancellation: &CancellationToken,
-    parent_cancellation: &CancellationToken,
 ) -> bool {
-    tokio::select! {
-        result = events.send(SourceProcessEvent { source, kind }) => result.is_ok(),
-        _ = cancellation.cancelled() => false,
-        _ = parent_cancellation.cancelled() => false,
-    }
+    events
+        .send(SourceProcessEvent { source, kind })
+        .await
+        .is_ok()
 }
 
 async fn cancel_and_reap(

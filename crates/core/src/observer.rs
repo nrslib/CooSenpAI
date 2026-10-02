@@ -102,9 +102,7 @@ fn prompt_speaker_id(
     record: &AudioObservation,
     resolver: &PromptSpeakerIdResolver,
 ) -> Option<String> {
-    if record.source != crate::state::AudioObservationSource::Speaker
-        || record.speaker_status != Some(crate::state::SpeakerIdentificationStatus::Identified)
-    {
+    if record.speaker_status != Some(crate::state::SpeakerIdentificationStatus::Identified) {
         return None;
     }
     let id = record.speaker_id.as_deref()?;

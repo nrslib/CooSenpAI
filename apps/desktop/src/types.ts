@@ -63,6 +63,7 @@ export interface CooSenpaiConfig {
     readonly mic: boolean;
     readonly microphoneCommandsEnabled: boolean;
     readonly speaker: boolean;
+    readonly speakerDevices: readonly string[];
     readonly speakerIdentification: { readonly enabled: boolean; readonly modelPath: string | null };
     readonly debugDumpDir?: string | null;
   };
@@ -108,6 +109,7 @@ export interface CooSenpaiConfig {
   readonly companion: CompanionConfig;
   readonly judge?: {
     readonly follow: boolean;
+    readonly bundledConnectome?: "off" | "on";
     readonly composition?: "single" | "ensemble" | "weighted";
     readonly veto?: boolean;
     readonly modules?: readonly {
@@ -365,10 +367,11 @@ export interface SpeakerDecisionDetails {
   readonly decisionVersion: string;
   readonly registryId?: string;
   readonly modelPackageDigest: string;
-  readonly phase: "initial" | "initial-recent" | "backfill-anchor" | "backfill-samples";
-  readonly status: SpeakerIdentificationStatus;
-  readonly reason: "matched-known" | "enrolled-new" | "enrolled-pending" | "pending-candidate" | "below-known-above-new" | "single-window" | "mixed-clusters" | "no-evidence" | "matched-samples" | "ambiguous-representatives" | "replayed-confirmed";
-  readonly candidates: readonly { readonly speakerId: string; readonly score: number }[];
+  readonly phase: string;
+  readonly status: string;
+  readonly reason: string;
+  readonly candidates: readonly { readonly speakerId: string; readonly score: number;
+    readonly role?: "adoption" | "top-below-threshold" | "top-margin-shortfall" | "lower-ranked" }[];
   readonly candidateNames: Readonly<Record<string, string>>;
   readonly candidateCount: number;
   readonly knownThreshold: number;
@@ -380,16 +383,33 @@ export interface SpeakerDecisionDetails {
     readonly anchorId: string; readonly anchorScore: number; readonly score: number;
   }[];
   readonly supportThreshold?: number;
+  readonly newSpeakerSimilarityThreshold?: number;
+  readonly minimumEnrollmentEvidenceWindowCount?: number;
+  readonly minimumEnrollmentVoicedFrameCount?: number;
   readonly recentCandidateCount?: number;
   readonly recentMatchCount?: number;
   readonly recentBestScore?: number;
   readonly recentComparisons?: readonly {
     readonly segmentId: string; readonly startMs: number; readonly endMs: number; readonly score: number;
+    readonly roles?: readonly ("adoption" | "enrollment-check" | "enrollment-veto" | "triad-check"
+      | "triad-member" | "triad-support" | "unused")[];
   }[];
+  readonly rolesRecorded?: boolean;
+  readonly pendingConditions?: readonly ("evidence-windows" | "voiced-frames" | "no-triad"
+    | "no-mutual-consensus" | "triad-voiced-frames" | "recent-similarity-veto" | "duplicate"
+    | "already-corrected")[];
   readonly recentComparisonSources?: readonly {
     readonly segmentId: string; readonly startMs: number; readonly endMs: number;
     readonly time?: string; readonly text?: string;
   }[];
+  readonly representativeIDCount?: number;
+  readonly representativeMargin?: number;
+  readonly decidedAt?: string;
+  readonly decisionKind?: "initial" | "correction";
+  readonly independentPriorCandidatePairCount?: number;
+  readonly mutualConsensusPairCount?: number;
+  readonly speechEligibleConsensusPairCount?: number;
+  readonly consensusEvaluationSkipped?: boolean;
 }
 
 export interface ConversationLogEntryView {
@@ -499,6 +519,18 @@ export interface UtteranceFeedbackSummary {
 }
 
 export interface AppSnapshot {
+  readonly connectomeDownload: {
+    readonly phase: "idle" | "downloading" | "verifying" | "complete" | "failed";
+    readonly receivedBytes: number;
+    readonly totalBytes: number;
+    readonly reason: string | null;
+  };
+  readonly connectomeStatus?: {
+    readonly state: "off" | "manual" | "checking" | "ready" | "unavailable";
+    readonly reason?: string | null;
+    readonly packPath: string;
+    readonly manifestSha256?: string | null;
+  };
   readonly utteranceFeedback: Readonly<Record<string, UtteranceFeedbackSummary>>;
   readonly speakerDirectoryRevision?: number;
   readonly companionEmotions: CompanionEmotions;
@@ -542,6 +574,7 @@ export interface AppSnapshot {
   readonly screenRecordingMessage?: string;
   readonly screenRecordingRestartRequired: boolean;
   readonly signedBuild: boolean;
+  readonly osVersion: { readonly major: number; readonly minor: number; readonly patch: number };
   readonly lastError?: RuntimeLastError;
   readonly companionRetryInSeconds?: number;
   readonly pendingDeliveries: number;
@@ -614,6 +647,9 @@ export type AudioLogEvent = {
 );
 
 export interface AudioView {
+  readonly outputDevices: readonly { readonly id: string; readonly name: string }[];
+  readonly outputDevicesLoadFailed: boolean;
+  readonly outputDevicesMonitorFailed: boolean;
   readonly generation: number;
   readonly phase: "off" | "starting" | "listening" | "stopping" | "error";
   readonly microphonePermission: "not-determined" | "granted" | "denied" | "restricted" | "unavailable";

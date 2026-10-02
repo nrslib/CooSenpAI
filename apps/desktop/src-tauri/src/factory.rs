@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use coosenpai_core::companion::{CompanionAgent, DeliveryOwnership};
 use coosenpai_core::companion_assertiveness::TemporaryAssertiveness;
-use coosenpai_core::config::{Config, ConfigPaths, ConfigValidationIssue};
+use coosenpai_core::config::{Config, ConfigPaths, ConfigValidationIssue, JudgeConfig};
 use coosenpai_core::debug::DebugStore;
 use coosenpai_core::locale::{
     localize_config_issue_message, localize_factory_message, text, Locale, TextKey,
@@ -24,8 +24,9 @@ use coosenpai_core::runtime::{RuntimeAgents, RuntimeFactory};
 use coosenpai_core::work::{harness_environment, Harness, HarnessLaunch};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -78,8 +79,16 @@ pub struct DesktopRuntimeFactory {
     bridge: Arc<OnceLock<ProviderBridge>>,
     executable_dir: PathBuf,
     resource_root: Option<PathBuf>,
+    connectome_resolution: Arc<Mutex<Option<ConnectomeResolution>>>,
     temporary_assertiveness: TemporaryAssertiveness,
     keychain: Arc<dyn ProviderApiKeyStore>,
+}
+
+struct ConnectomeResolution {
+    revision: u64,
+    requested: JudgeConfig,
+    resolved: JudgeConfig,
+    status: crate::connectome::ConnectomeStatus,
 }
 
 /// 承認審査用のClaude bridgeと、作業を実行するハーネスの起動情報。
@@ -90,6 +99,80 @@ pub(crate) struct WorkSession {
 }
 
 impl DesktopRuntimeFactory {
+
+    pub(crate) fn connectome_resources(&self) -> Option<&Path> {
+        self.resource_root.as_deref()
+    }
+
+    pub(crate) fn connectome_status(&self, config: &Config) -> crate::connectome::ConnectomeStatus {
+        self.resolve_connectome(config, false).1
+    }
+
+    pub(crate) fn recheck_connectome_status(
+        &self,
+        config: &Config,
+    ) -> crate::connectome::ConnectomeStatus {
+        self.resolve_connectome(config, true).1
+    }
+
+    pub(crate) async fn prepare_connectome_resolution(
+        &self,
+        config: Config,
+    ) -> Result<crate::connectome::ConnectomeStatus, &'static str> {
+        let factory = self.clone();
+        tokio::task::spawn_blocking(move || factory.connectome_status(&config))
+            .await
+            .map_err(|_| "pack-verification-failed")
+    }
+
+    fn resolve_connectome(
+        &self,
+        config: &Config,
+        force_full_hash: bool,
+    ) -> (JudgeConfig, crate::connectome::ConnectomeStatus) {
+        let mut cached = self
+            .connectome_resolution
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cached.as_ref() {
+            if !force_full_hash
+                && cached.revision == config.revision
+                && cached.requested == config.judge
+            {
+                return (cached.resolved.clone(), cached.status.clone());
+            }
+        }
+        let (resolved, status) = if force_full_hash {
+            crate::connectome::resolve_force(
+                config,
+                &self.paths,
+                self.resource_root.as_deref(),
+                &self.executable_dir,
+            )
+        } else {
+            crate::connectome::resolve(
+                config,
+                &self.paths,
+                self.resource_root.as_deref(),
+                &self.executable_dir,
+            )
+        };
+        *cached = Some(ConnectomeResolution {
+            revision: config.revision,
+            requested: config.judge.clone(),
+            resolved: resolved.clone(),
+            status: status.clone(),
+        });
+        (resolved, status)
+    }
+
+    pub(crate) fn invalidate_connectome_resolution(&self) {
+        *self
+            .connectome_resolution
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     /// ハーネスの起動情報（必須）と承認審査用の Claude bridge（任意）を解決する。
     pub(crate) async fn work_session(
         &self,
@@ -181,6 +264,7 @@ impl DesktopRuntimeFactory {
             bridge: Arc::new(OnceLock::new()),
             executable_dir,
             resource_root,
+            connectome_resolution: Arc::new(Mutex::new(None)),
             temporary_assertiveness: TemporaryAssertiveness::default(),
             keychain,
         })
@@ -613,6 +697,9 @@ impl DesktopRuntimeFactory {
         config: &Config,
         notice: Option<String>,
     ) -> Result<RuntimeAgents, DesktopFactoryError> {
+        self.prepare_connectome_resolution(config.clone())
+            .await
+            .map_err(|reason| DesktopFactoryError::new("judge.bundledConnectome", reason))?;
         if self.cancellation.is_cancelled() {
             return Err(DesktopFactoryError::new(
                 "config",
@@ -991,6 +1078,10 @@ pub fn persona_options(paths: &ConfigPaths) -> Result<Vec<PersonaOption>, String
 
 #[async_trait]
 impl RuntimeFactory for DesktopRuntimeFactory {
+    fn resolve_judge_config(&self, config: &Config) -> coosenpai_core::config::JudgeConfig {
+        self.resolve_connectome(config, false).0
+    }
+
     async fn build(&self, config: &Config) -> Result<RuntimeAgents, String> {
         self.build_candidate(config)
             .await

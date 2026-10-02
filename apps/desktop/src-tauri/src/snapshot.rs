@@ -2,8 +2,8 @@ use coosenpai_core::config::Config;
 use coosenpai_core::debug::DebugCatalog;
 use coosenpai_core::locale::{
     localize_audio_message, localize_capture_disposition, localize_error_message,
-    localize_screen_permission_message, localize_shortcut_message, localize_speech_message, Locale,
-    TextKey,
+    localize_screen_permission_message, localize_shortcut_message,
+    localize_speaker_missing_device_count, localize_speech_message, Locale, TextKey,
 };
 use coosenpai_core::memory::MemoryStatus;
 use coosenpai_core::runtime::{RuntimeLastError, RuntimeSnapshot};
@@ -23,10 +23,15 @@ pub struct AudioPermissions {
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     pub revision: u64,
+    pub os_version: OsVersionView,
     #[serde(default)]
     pub speaker_directory_revision: u64,
     pub config_revision: u64,
     pub config: Config,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connectome_status: Option<crate::connectome::ConnectomeStatus>,
+    #[serde(default)]
+    pub connectome_download: crate::connectome_download::DownloadView,
     pub observer_running: bool,
     pub watch_intent_active: bool,
     pub observer: ObserverView,
@@ -95,6 +100,25 @@ pub struct AppSnapshot {
         std::collections::BTreeMap<String, crate::utterance_feedback::FeedbackSummary>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OsVersionView {
+    pub major: isize,
+    pub minor: isize,
+    pub patch: isize,
+}
+
+impl OsVersionView {
+    fn current() -> Self {
+        let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+        Self {
+            major: version.majorVersion,
+            minor: version.minorVersion,
+            patch: version.patchVersion,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingView {
@@ -161,6 +185,12 @@ pub struct SpeechView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioView {
+    #[serde(default)]
+    pub output_devices: Vec<coosenpai_core::ports::AudioOutputDevice>,
+    #[serde(default)]
+    pub output_devices_load_failed: bool,
+    #[serde(default)]
+    pub output_devices_monitor_failed: bool,
     pub generation: u64,
     pub phase: String,
     pub microphone_permission: String,
@@ -170,6 +200,8 @@ pub struct AudioView {
     pub warning_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip)]
+    pub(crate) missing_speaker_device_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_observation: Option<AudioObservationView>,
     #[serde(default)]
@@ -419,6 +451,9 @@ impl AppSnapshot {
         };
         Self {
             revision: 1,
+            os_version: OsVersionView::current(),
+            connectome_status: None,
+            connectome_download: Default::default(),
             speaker_directory_revision: 0,
             config_revision,
             observer_running: false,
@@ -504,6 +539,9 @@ impl AppSnapshot {
                 source: None,
             },
             audio: AudioView {
+                output_devices: Vec::new(),
+                output_devices_load_failed: false,
+                output_devices_monitor_failed: false,
                 generation: 0,
                 phase: "off".to_owned(),
                 microphone_permission: speech_permission_name(audio_permissions.hearing.microphone),
@@ -519,6 +557,7 @@ impl AppSnapshot {
                     .to_owned(),
                 warning_kind: None,
                 message: None,
+                missing_speaker_device_count: None,
                 latest_observation: None,
                 recent_events: Vec::new(),
             },
@@ -640,11 +679,12 @@ impl AppSnapshot {
             )
         });
         let audio_warning_kind = self.audio.warning_kind.as_deref().unwrap_or_default();
-        self.audio.message = self
-            .audio
-            .message
-            .take()
-            .map(|message| localize_audio_message(audio_warning_kind, &message, locale));
+        self.audio.message = self.audio.message.take().map(|message| {
+            self.audio.missing_speaker_device_count.map_or_else(
+                || localize_audio_message(audio_warning_kind, &message, locale),
+                |count| localize_speaker_missing_device_count(count, locale),
+            )
+        });
         self.config_revision = config.revision;
         self.config = config;
         true

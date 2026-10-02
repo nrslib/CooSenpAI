@@ -619,6 +619,7 @@ impl RuntimeActor {
     ) -> StartResult {
         let super::handle_types::ObserveRequest {
             frames,
+            capture_directories,
             audio,
             user_input_sequence,
             allow_companion_delivery,
@@ -718,6 +719,9 @@ impl RuntimeActor {
         let judge_enabled = judge.enabled();
         if judge_enabled && !judge_follow {
             let judge = judge.clone();
+            // Move a capture owner into the future before detaching: it must also
+            // survive when the observer finishes before the judge starts polling.
+            let directories_for_judge = capture_directories.clone();
             let frames_for_judge = frames.clone();
             let audio_for_judge = audio.clone();
             let result_tx = judge_result_tx.clone();
@@ -726,6 +730,7 @@ impl RuntimeActor {
                 let evaluation = judge
                     .evaluate(&frames_for_judge, &audio_for_judge, shutdown)
                     .await;
+                drop(directories_for_judge);
                 if let Some(decision) = evaluation.decision {
                     let _ = result_tx
                         .send(ControlCommand::JudgeCompleted {
@@ -737,6 +742,7 @@ impl RuntimeActor {
             });
         }
         let task = tokio::spawn(async move {
+            let _capture_directories = capture_directories;
             let (judge_decision, companion_delivery) = if judge_follow && judge_enabled {
                 let evaluation = judge
                     .evaluate(&frames, &audio, provider_cancellation.clone())

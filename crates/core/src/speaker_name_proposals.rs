@@ -1664,7 +1664,6 @@ fn verify_user_request_evidence(
                 record.observation_id == item.observation_id
                     && record.audio_start_ms == Some(item.audio_start_ms)
                     && record.audio_end_ms == Some(item.audio_end_ms)
-                    && record.source == "speaker"
                     && record.speaker_status == Some(SpeakerIdentificationStatus::Identified)
                     && record.text.contains(&item.quote)
                     && record.speaker_registry_id.as_deref() == Some(active_registry_id)
@@ -1704,8 +1703,7 @@ fn verify_user_request_evidence(
         let other_speakers = records
             .iter()
             .filter(|record| {
-                record.source == "speaker"
-                    && record.speaker_status == Some(SpeakerIdentificationStatus::Identified)
+                record.speaker_status == Some(SpeakerIdentificationStatus::Identified)
                     && record.text.contains(&item.quote)
                     && record.speaker_registry_id.as_deref() == Some(active_registry_id)
                     && record
@@ -1794,7 +1792,6 @@ fn verify_inferred_evidence(
             record.observation_id == item.observation_id
                 && record.audio_start_ms == Some(item.audio_start_ms)
                 && record.audio_end_ms == Some(item.audio_end_ms)
-                && record.source == "speaker"
                 && record.speaker_status == Some(SpeakerIdentificationStatus::Identified)
                 && record.text.contains(&item.quote)
                 && record.speaker_registry_id.as_deref() == Some(active_registry_id)
@@ -1808,7 +1805,6 @@ fn verify_inferred_evidence(
                 record.observation_id == item.observation_id
                     && record.audio_start_ms == Some(item.audio_start_ms)
                     && record.audio_end_ms == Some(item.audio_end_ms)
-                    && record.source == "speaker"
                     && record.speaker_status == Some(SpeakerIdentificationStatus::Identified)
                     && record.text.contains(&item.quote)
                     && record.speaker_registry_id.as_deref() == Some(active_registry_id)
@@ -1867,7 +1863,6 @@ fn verify_inferred_evidence(
             }
             if records.iter().any(|record| {
                 record.observation_id == address.observation_id
-                    && record.source == "speaker"
                     && (record.audio_start_ms.is_none() || record.audio_end_ms.is_none())
             }) {
                 return None;
@@ -2057,9 +2052,7 @@ fn indexed_transcript_ref_paths(
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if observation.get("source").and_then(Value::as_str) == Some("speaker")
-            && observation.get("speakerStatus").and_then(Value::as_str) == Some("identified")
-        {
+        if observation.get("speakerStatus").and_then(Value::as_str) == Some("identified") {
             if let (Some(start), Some(end), Some(path)) = (
                 observation.get("audioStartMs").and_then(Value::as_u64),
                 observation.get("audioEndMs").and_then(Value::as_u64),
@@ -2396,7 +2389,6 @@ pub fn verify_stored_speaker_name_proposal(
                         record.observation_id == evidence.observation_id
                             && record.audio_start_ms == Some(evidence.audio_start_ms)
                             && record.audio_end_ms == Some(evidence.audio_end_ms)
-                            && record.source == "speaker"
                             && record.speaker_status
                                 == Some(SpeakerIdentificationStatus::Identified)
                             && record.speaker_registry_id.as_deref() == Some(active_registry_id)
@@ -2421,9 +2413,7 @@ pub fn verify_stored_speaker_name_proposal(
                 let ambiguous_quote = records
                     .iter()
                     .filter(|record| {
-                        record.source == "speaker"
-                            && record.speaker_status
-                                == Some(SpeakerIdentificationStatus::Identified)
+                        record.speaker_status == Some(SpeakerIdentificationStatus::Identified)
                             && record.speaker_registry_id.as_deref() == Some(active_registry_id)
                             && record.text.contains(&evidence.quote)
                             && record.audio_start_ms.is_some()

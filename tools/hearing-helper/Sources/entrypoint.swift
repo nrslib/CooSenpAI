@@ -3,6 +3,7 @@ import Foundation
 @main
 struct HearingHelperApp {
     static func main() {
+        if runSpeakerOutputDevicesCommandIfRequested() { return }
         if runSpeakerManagementCommandIfRequested() { return }
         if runSpeakerDiagnosisCommandIfRequested() { return }
         let arguments = parseArguments()
@@ -15,9 +16,11 @@ struct HearingHelperApp {
             debugDumpAppendedPath: arguments.debugDumpAppendedPath,
             debugRequestAuth: arguments.debugRequestAuth,
             speakerBackend: arguments.speakerBackend,
+            speakerDevices: arguments.speakerDevices,
             speakerIdentificationEnabled: arguments.speakerIdentificationEnabled,
             speakerModelPath: arguments.speakerModelPath,
             speakerLedgerPath: arguments.speakerLedgerPath,
+            speakerSessionID: arguments.speakerSessionID,
             debugRequestScreenCaptureAuth: arguments.debugRequestScreenCaptureAuth
         )
         DispatchQueue.global(qos: .userInitiated).async {

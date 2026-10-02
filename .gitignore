@@ -1,5 +1,9 @@
 target/
 node_modules/
-dist/
+dist/*
+!dist/connectome/
+dist/connectome/*
+!dist/connectome/malecns-frozen-response-learning-artifact-r14.json
+!dist/connectome/malecns-frozen-response-learning-artifact-r14.json.sha256
 .DS_Store
 /apps/desktop/src-tauri/gen/

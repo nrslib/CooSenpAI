@@ -21,6 +21,7 @@ struct ReceivedAudioBufferProcessingResult {
 enum ReceivedAudioBufferProcessor {
     static func processReceivedAudioBuffer(
         _ source: AVAudioPCMBuffer,
+        mixing: AudioChannelMixing,
         appendTo target: AudioBufferAppendTarget
     ) throws -> ReceivedAudioBufferProcessingResult {
         let ownedBuffer: AVAudioPCMBuffer
@@ -32,7 +33,7 @@ enum ReceivedAudioBufferProcessor {
 
         let normalizedBuffer: AVAudioPCMBuffer
         do {
-            normalizedBuffer = try normalizedAudioBufferForAppend(from: ownedBuffer)
+            normalizedBuffer = try normalizedAudioBufferForAppend(from: ownedBuffer, mixing: mixing)
         } catch let error as MonoAudioBufferConversionError {
             throw ReceivedAudioBufferProcessingError.normalization(error)
         }

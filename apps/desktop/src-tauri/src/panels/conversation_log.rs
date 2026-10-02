@@ -199,7 +199,7 @@ impl ConversationLog {
         let entry = self
             .entries
             .iter()
-            .find(|entry| key.matches(entry) && entry["source"].as_str() == Some("speaker"))
+            .find(|entry| key.matches(entry))
             .cloned()
             .ok_or("話者の詳細を表示する発言が見つかりません")?;
         if self
@@ -310,8 +310,7 @@ impl ConversationLog {
     }
 
     fn is_editable_entry(entry: &Value, speaker_id: &str) -> bool {
-        entry["source"].as_str() == Some("speaker")
-            && entry["speakerStatus"].as_str() == Some("identified")
+        entry["speakerStatus"].as_str() == Some("identified")
             && entry["speakerTag"].as_str() == Some(speaker_id)
     }
 
@@ -499,7 +498,7 @@ impl ConversationLog {
             .insert("speakerEditId".to_owned(), speaker_edit_id);
         view.as_object_mut().expect("conversation log entry object").insert(
             "speakerDetailsKey".to_owned(),
-            if entry["source"].as_str() == Some("speaker") {
+            if entry["speakerStatus"].as_str().is_some() {
                 json!({"observationId": entry["observationId"], "audioStartMs": entry["audioStartMs"], "audioEndMs": entry["audioEndMs"]})
             } else { Value::Null },
         );

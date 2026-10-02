@@ -21,6 +21,7 @@ reqwest = { workspace = true, features = ["query"] }
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10.1"

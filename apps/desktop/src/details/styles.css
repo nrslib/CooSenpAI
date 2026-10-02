@@ -82,13 +82,18 @@ div.dataflow-row { display: flex; gap: 8px; align-items: baseline; }
 .log-speaker-editor-actions button { padding: 4px 9px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--line); border-radius: var(--radius-control); font-size: 11px; }
 .log-speaker-editor-actions button:disabled { opacity: .6; }
 .log-speaker-details {
+  display: flex;
   flex: 0 0 auto;
+  flex-direction: column;
   max-height: 48vh;
-  overflow: auto;
+  overflow: hidden;
   padding: 12px;
   border: 1px solid var(--border-color, #7774);
   border-radius: 8px;
 }
+.log-speaker-details-heading { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; }
+.log-speaker-details-heading h3 { margin: 0; }
+.log-speaker-details-content { min-height: 0; overflow: auto; }
 .log-speaker-decision + .log-speaker-decision { border-top: 1px solid #7774; margin-top: 12px; padding-top: 12px; }
 .log-speaker-decision h4, .log-speaker-decision p { margin: 6px 0; }
 .log-speaker-decision table { width: 100%; text-align: left; font-variant-numeric: tabular-nums; }

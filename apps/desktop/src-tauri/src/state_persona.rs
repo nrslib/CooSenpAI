@@ -635,11 +635,19 @@ async fn rollback_after_runtime_failure(
             state
                 .config_update
                 .observe_config_revision(rollback.revision);
-            if let Err(error) = state
-                .runtime
-                .update_config_without_factory(rollback.clone())
+            let runtime_update = match state
+                .factory
+                .prepare_connectome_resolution(rollback.clone())
                 .await
             {
+                Ok(_) => state
+                    .runtime
+                    .update_config_without_factory(rollback.clone())
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(reason) => Err(reason.to_owned()),
+            };
+            if let Err(error) = runtime_update {
                 let _ = state.logger.write(
                     "WARN",
                     &format!("runtime の設定復元に失敗しました: {error}"),

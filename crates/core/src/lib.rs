@@ -2,6 +2,8 @@
 
 pub mod application_frames;
 pub mod attachments;
+pub mod brain_activity;
+mod brain_activity_history;
 pub mod capture_mask;
 pub mod companion;
 pub mod companion_assertiveness;

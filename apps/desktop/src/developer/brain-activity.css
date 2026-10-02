@@ -1,0 +1,30 @@
+.brain-panel { display: grid; gap: 10px; font-size: 12px; }
+.brain-panel p { margin: 0; overflow-wrap: anywhere; }
+.brain-observation, .brain-note, .brain-source { color: var(--muted); }
+.brain-module, .brain-controls, .brain-camera-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.brain-module select, .brain-panel button { padding: 6px 10px; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); }
+.brain-controls label { display: flex; flex: 1; align-items: center; gap: 8px; }
+.brain-controls input { flex: 1; min-width: 80px; }
+.brain-canvas { width: 100%; height: min(46vh, 420px); min-height: 220px; overflow: hidden; background: #080f1c; border-radius: var(--radius-control); }
+.brain-canvas canvas { display: block; width: 100%; height: 100%; }
+.brain-legend { display: flex; align-items: center; gap: 8px; }
+.brain-legend span { width: 96px; height: 9px; background: linear-gradient(90deg, #0d2945, #ff9421); border-radius: 4px; }
+.brain-window { height: 100%; overflow: auto; padding: 18px; background: var(--bg); color: var(--text); }
+.brain-window-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.brain-window-header h1 { font-size: 18px; }
+.brain-window-header button { padding: 6px 10px; }
+.brain-mode { display: flex; gap: 8px; align-items: center; }
+.brain-mode select { padding: 6px; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); }
+.brain-change-legend span { background: linear-gradient(90deg, #3399ff, #0d2945, #ff9421); }
+.brain-panel [data-playback-state] { padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); }
+
+.brain-latest, .brain-record { border-top: 1px solid var(--border-color, #8885); padding-top: .75rem; }
+.brain-history { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 1rem 0; }
+.brain-history select { max-width: 100%; }
+.brain-reference { font-weight: 600; }
+.brain-decision h3 { margin: .8rem 0 .3rem; font-size: 1rem; }
+.brain-preview img { display: block; max-width: 100%; height: auto; border: 1px solid #8885; }
+.brain-decision p, .brain-observation, .brain-record > p { overflow-wrap: anywhere; }
+
+.brain-decision { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; }
+@media (max-width: 700px) { .brain-decision { grid-template-columns: minmax(0, 1fr); } }

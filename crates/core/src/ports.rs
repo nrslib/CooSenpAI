@@ -444,7 +444,7 @@ pub enum HearingEvent {
         sequence: u64,
         text: String,
         #[serde(flatten)]
-        speaker: Option<HearingSpeakerMetadata>,
+        speaker: Option<Box<HearingSpeakerMetadata>>,
     },
     Warning {
         kind: String,
@@ -545,7 +545,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
                 generation,
                 sequence,
                 text,
-                speaker: Some(metadata),
+                speaker: Some(Box::new(metadata)),
             },
             speaker_metadata_reason: None,
         }),
@@ -589,10 +589,7 @@ pub struct HearingSpeakerMetadata {
 }
 
 impl HearingSpeakerMetadata {
-    pub fn validation_reason_for(&self, source: AudioObservationSource) -> Option<String> {
-        if source != AudioObservationSource::Speaker {
-            return Some("metadata.source".to_owned());
-        }
+    pub fn validation_reason(&self) -> Option<String> {
         if self.segment_id.is_empty() || uuid::Uuid::parse_str(&self.segment_id).is_err() {
             return Some("metadata.segment-id".to_owned());
         }
@@ -660,8 +657,8 @@ impl HearingSpeakerMetadata {
         None
     }
 
-    pub fn is_valid_for(&self, source: AudioObservationSource) -> bool {
-        self.validation_reason_for(source).is_none()
+    pub fn is_valid(&self) -> bool {
+        self.validation_reason().is_none()
     }
 }
 
@@ -863,8 +860,8 @@ impl HearingEvent {
         match self {
             HearingEvent::Final { speaker, .. } => speaker
                 .as_ref()
-                .is_none_or(|metadata| metadata.validation_reason_for(source).is_none()),
-            HearingEvent::SpeakerIdentification { .. } => source == AudioObservationSource::Speaker,
+                .is_none_or(|metadata| metadata.validation_reason().is_none()),
+            HearingEvent::SpeakerIdentification { .. } => true,
             _ => true,
         }
     }
@@ -886,7 +883,7 @@ impl HearingEvent {
         else {
             return None;
         };
-        let reason = metadata.validation_reason_for(source)?;
+        let reason = metadata.validation_reason()?;
         Some((
             HearingEvent::Final {
                 source: event_source,
@@ -969,6 +966,11 @@ impl HearingSessionControl {
 
 #[async_trait]
 pub trait HearingPort: Send + Sync {
+    async fn output_devices(&self) -> Result<Vec<AudioOutputDevice>, PortError> {
+        Err(PortError::Unavailable(
+            "出力デバイス一覧を取得できません".to_owned(),
+        ))
+    }
     async fn start(
         &self,
         locale: &str,
@@ -995,6 +997,7 @@ pub trait HearingPort: Send + Sync {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HearingStartOptions {
+    pub speaker_devices: Vec<String>,
     pub speaker_identification_enabled: bool,
     pub speaker_model: Option<PathBuf>,
     pub speaker_ledger: Option<PathBuf>,
@@ -1003,6 +1006,13 @@ pub struct HearingStartOptions {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeechInputDevice {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioOutputDevice {
     pub id: String,
     pub name: String,
 }

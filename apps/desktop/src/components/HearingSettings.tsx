@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 import { useEffect, useRef, type FormEvent } from "react";
 
 import { useI18n } from "../i18n/index.js";
+import { SettingsSearchItem } from "../settings-search.js";
 import { audioPhaseLabel, permissionLabel } from "../settings-form.js";
 import type { MergedSpeakers, SpeakerSummary } from "../types.js";
 import { speakerDisplayName } from "../view-model.js";
@@ -134,19 +135,38 @@ function SpeakerManagementSection({ speaker, confirmation, onSpeakerAction }: {
 
 export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings, speaker, speakerConfirmation, onSpeakerAction }: Props): ReactElement {
   const { locale, t } = useI18n();
+  const { major, minor } = snapshot.osVersion;
+  const supportsDeviceSelection = major > 14 || (major === 14 && minor >= 2);
   return <>
     <fieldset id="settings-audio"><legend>{t("settings.hearing.source")}</legend>
       <BooleanInput label={t("settings.hearing.microphone")} path="audio.mic" value={form.audioMic} update={(value) => update("audioMic", value)} />
       <BooleanInput label={t("settings.hearing.microphoneCommands")} path="audio.microphoneCommandsEnabled" value={form.audioMicrophoneCommandsEnabled} update={(value) => update("audioMicrophoneCommandsEnabled", value)} />
       <p className="field-help">{t("settings.hearing.microphoneCommandsHelp")}</p>
       <BooleanInput label={t("settings.hearing.speaker")} path="audio.speaker" value={form.audioSpeaker} update={(value) => update("audioSpeaker", value)} />
+      <SettingsSearchItem label={t("settings.hearing.outputDevices")} path="audio.speakerDevices">
+        <fieldset id="setting-audio-speakerDevices" disabled={!form.audioSpeaker}>
+          <legend>{t("settings.hearing.outputDevices")}</legend>
+          {!supportsDeviceSelection && <p className="field-help">{t("settings.hearing.outputDevicesUnsupported")}</p>}
+          {snapshot.audio.outputDevicesLoadFailed && <p className="field-help" role="alert">{t("settings.hearing.outputDevicesLoadFailed")}</p>}
+          {snapshot.audio.outputDevicesMonitorFailed && <p className="field-help" role="alert">{t("settings.hearing.outputDevicesMonitorFailed")}</p>}
+          <label className="boolean-field"><span>{t("settings.hearing.followDefaultOutput")}</span><input type="checkbox" checked={form.audioSpeakerDevices.length === 0} onChange={() => update("audioSpeakerDevices", [])} /></label>
+          {snapshot.audio.outputDevices.map((device) => <label className="boolean-field" key={device.id}>
+            <span>{device.name}</span><input type="checkbox" disabled={!supportsDeviceSelection} checked={form.audioSpeakerDevices.includes(device.id)} onChange={(event) => update("audioSpeakerDevices", event.target.checked
+              ? [...new Set([...form.audioSpeakerDevices, device.id])]
+              : form.audioSpeakerDevices.filter((id) => id !== device.id))} />
+          </label>)}
+          {form.audioSpeakerDevices.filter((id) => !snapshot.audio.outputDevices.some((device) => device.id === id)).map((id) => <label className="boolean-field" key={id}>
+            <span>{t(snapshot.audio.outputDevicesLoadFailed ? "settings.hearing.unknownOutput" : "settings.hearing.disconnectedOutput", { id })}</span><input type="checkbox" disabled={!supportsDeviceSelection} checked onChange={() => update("audioSpeakerDevices", form.audioSpeakerDevices.filter((value) => value !== id))} />
+          </label>)}
+        </fieldset>
+      </SettingsSearchItem>
       <BooleanInput label={t("settings.hearing.speakerIdentification")} path="audio.speakerIdentification.enabled" value={form.audioSpeakerIdentificationEnabled} update={(value) => update("audioSpeakerIdentificationEnabled", value)} />
       <p className="field-help">{t("settings.hearing.help")}</p>
       <p className="field-help">{t("settings.hearing.speakerIdentificationHelp")}</p>
       {snapshot.audio.screenCapturePermission === "not-required" ? <>
         <p className="field-help">{t("settings.hearing.systemAudioStatus", { phase: audioPhaseLabel(snapshot.audio.phase, locale), microphone: permissionLabel(snapshot.audio.microphonePermission, locale) })}</p>
         <p className="field-help">{t("settings.hearing.systemAudioPermissionHelp")}</p>
-        {snapshot.audio.warningKind?.startsWith("system-audio") && snapshot.audio.message && <p className="field-help" role="status">{snapshot.audio.message}</p>}
+        {(snapshot.audio.warningKind?.startsWith("system-audio") || snapshot.audio.warningKind === "speaker-device-missing") && snapshot.audio.message && <p className="field-help" role="status">{snapshot.audio.message}</p>}
       </> : <p className="field-help">{t("settings.hearing.status", { phase: audioPhaseLabel(snapshot.audio.phase, locale), microphone: permissionLabel(snapshot.audio.microphonePermission, locale), screen: permissionLabel(snapshot.audio.screenCapturePermission, locale) })}</p>}
     </fieldset>
     <fieldset id="settings-hearing-permissions">

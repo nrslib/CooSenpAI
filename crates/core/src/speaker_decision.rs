@@ -16,6 +16,42 @@ pub enum SpeakerDecisionPhase {
 pub struct SpeakerCandidateScore {
     pub speaker_id: String,
     pub score: Number,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<SpeakerCandidateRole>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpeakerCandidateRole {
+    Adoption,
+    TopBelowThreshold,
+    TopMarginShortfall,
+    LowerRanked,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpeakerRecentRole {
+    Adoption,
+    EnrollmentCheck,
+    EnrollmentVeto,
+    TriadCheck,
+    TriadMember,
+    TriadSupport,
+    Unused,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpeakerPendingCondition {
+    EvidenceWindows,
+    VoicedFrames,
+    NoTriad,
+    NoMutualConsensus,
+    TriadVoicedFrames,
+    RecentSimilarityVeto,
+    Duplicate,
+    AlreadyCorrected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +72,8 @@ pub struct SpeakerRecentComparison {
     pub start_ms: u64,
     pub end_ms: u64,
     pub score: Number,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<SpeakerRecentRole>>,
 }
 
 /// 判定時のスコアと参照。声紋・音声を含めず、Numberで非有限値を排除する。
@@ -61,6 +99,12 @@ pub struct SpeakerDecisionDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub support_threshold: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_speaker_similarity_threshold: Option<Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_enrollment_evidence_window_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_enrollment_voiced_frame_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent_candidate_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent_match_count: Option<usize>,
@@ -84,6 +128,22 @@ pub struct SpeakerDecisionDetails {
     pub representative_direct_id_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub representative_margin: Option<Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independent_prior_candidate_pair_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutual_consensus_pair_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_eligible_consensus_pair_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_evaluation_skipped: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles_recorded: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_conditions: Option<Vec<SpeakerPendingCondition>>,
 }
 
 fn score_in(value: &Number, min: f64, max: f64) -> bool {
@@ -108,6 +168,57 @@ impl SpeakerDecisionDetails {
 
         invalid_if!(self.end_ms <= self.start_ms, "decision.period-bounds");
         invalid_if!(
+            self.decided_at
+                .as_ref()
+                .is_some_and(|value| { chrono::DateTime::parse_from_rfc3339(value).is_err() }),
+            "decision.decided-at"
+        );
+        invalid_if!(
+            self.decision_kind.as_deref().is_some_and(|kind| {
+                !matches!(kind, "initial" | "correction")
+                    || (kind == "initial"
+                        && !matches!(
+                            self.phase,
+                            SpeakerDecisionPhase::Initial | SpeakerDecisionPhase::InitialRecent
+                        ))
+                    || (kind == "correction" && matches!(self.phase, SpeakerDecisionPhase::Initial))
+            }),
+            "decision.kind"
+        );
+        invalid_if!(
+            match (
+                self.independent_prior_candidate_pair_count,
+                self.mutual_consensus_pair_count,
+                self.speech_eligible_consensus_pair_count,
+            ) {
+                (None, None, None) => false,
+                (Some(independent), Some(mutual), Some(voiced)) => {
+                    independent > 2_016
+                        || mutual > independent
+                        || voiced > mutual
+                        || self.reason != "pending-candidate"
+                }
+                _ => true,
+            },
+            "decision.consensus-counts"
+        );
+        invalid_if!(
+            self.consensus_evaluation_skipped.is_some_and(|skipped| {
+                !skipped
+                    || self.reason != "pending-candidate"
+                    || self
+                        .independent_prior_candidate_pair_count
+                        .is_some_and(|count| count != 0)
+                    || self
+                        .mutual_consensus_pair_count
+                        .is_some_and(|count| count != 0)
+                    || self
+                        .speech_eligible_consensus_pair_count
+                        .is_some_and(|count| count != 0)
+            }),
+            "decision.consensus-skipped"
+        );
+        invalid_if!(
             !matches!(
                 self.decision_version.as_str(),
                 "speaker-cosine-ledger-v6"
@@ -117,6 +228,68 @@ impl SpeakerDecisionDetails {
             ),
             "decision.version"
         );
+        invalid_if!(
+            self.roles_recorded.is_some_and(|recorded| !recorded)
+                || (self.roles_recorded.is_some()
+                    && self.decision_version != "speaker-cosine-ledger-v9")
+                || (self.roles_recorded.is_none()
+                    && (self.pending_conditions.is_some()
+                        || self
+                            .candidates
+                            .iter()
+                            .any(|candidate| candidate.role.is_some())
+                        || self.recent_comparisons.as_ref().is_some_and(|comparisons| {
+                            comparisons
+                                .iter()
+                                .any(|comparison| comparison.roles.is_some())
+                        }))),
+            "decision.roles-recorded"
+        );
+        if self.roles_recorded == Some(true) {
+            invalid_if!(
+                self.candidates
+                    .iter()
+                    .enumerate()
+                    .any(|(index, candidate)| {
+                        match (index, candidate.role) {
+                            (0, Some(SpeakerCandidateRole::LowerRanked)) => true,
+                            (0, None) => true,
+                            (_, Some(SpeakerCandidateRole::LowerRanked)) if index > 0 => false,
+                            (index, _) => index > 0,
+                        }
+                    }),
+                "decision.candidate-role"
+            );
+            invalid_if!(
+                self.recent_comparisons.as_ref().is_some_and(|comparisons| {
+                    comparisons.iter().any(|comparison| {
+                        comparison.roles.as_ref().is_none_or(|roles| {
+                            roles.is_empty()
+                                || (roles.len() > 1 && roles.contains(&SpeakerRecentRole::Unused))
+                                || roles
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(index, role)| roles[..index].contains(role))
+                        })
+                    })
+                }),
+                "decision.recent-role"
+            );
+            invalid_if!(
+                (self.reason == "pending-candidate")
+                    != self
+                        .pending_conditions
+                        .as_ref()
+                        .is_some_and(|items| !items.is_empty())
+                    || self.pending_conditions.as_ref().is_some_and(|items| {
+                        items
+                            .iter()
+                            .enumerate()
+                            .any(|(index, item)| items[..index].contains(item))
+                    }),
+                "decision.pending-conditions"
+            );
+        }
         invalid_if!(
             self.registry_id
                 .as_deref()
@@ -153,6 +326,24 @@ impl SpeakerDecisionDetails {
             !score_in(&self.known_threshold, 0.0, 1.0)
                 || !score_in(&self.margin_threshold, 0.0, 1.0),
             "decision.threshold"
+        );
+        invalid_if!(
+            match (
+                &self.new_speaker_similarity_threshold,
+                self.minimum_enrollment_evidence_window_count,
+                self.minimum_enrollment_voiced_frame_count,
+            ) {
+                (None, None, None) => false,
+                (Some(threshold), Some(windows), Some(frames)) => {
+                    self.decision_version != "speaker-cosine-ledger-v9"
+                        || self.phase != SpeakerDecisionPhase::InitialRecent
+                        || !score_in(threshold, 0.0, 1.0)
+                        || !(1..=64).contains(&windows)
+                        || !(1..=3_200).contains(&frames)
+                }
+                _ => true,
+            },
+            "decision.enrollment-thresholds"
         );
         invalid_if!(
             !self.candidates.iter().all(|candidate| {
@@ -288,6 +479,20 @@ impl SpeakerDecisionDetails {
             if !counts_valid {
                 return Some("decision.recent-counts");
             }
+            let corrected_replay = self.reason == "pending-candidate"
+                && self.consensus_evaluation_skipped == Some(true)
+                && self.candidate_count == 0
+                && self.recent_candidate_count == Some(0)
+                && self.recent_match_count == Some(0)
+                && self.recent_comparisons.is_none()
+                && self.representative_sample_count.is_none()
+                && self.representative_id_count.is_none()
+                && self.representative_direct_id_count.is_none()
+                && self.representative_margin.is_none()
+                && self.supporting_samples.is_empty()
+                && (self.roles_recorded.is_none()
+                    || self.pending_conditions.as_deref()
+                        == Some(&[SpeakerPendingCondition::AlreadyCorrected][..]));
             if self.decision_version == "speaker-cosine-ledger-v9"
                 && self.status == SpeakerIdentificationStatus::Mixed
                 && (self.recent_candidate_count.is_some()
@@ -303,6 +508,7 @@ impl SpeakerDecisionDetails {
             }
             if self.decision_version == "speaker-cosine-ledger-v9"
                 && self.reason != "recent-consensus"
+                && !corrected_replay
                 && !(matches!(self.reason.as_str(), "mixed-clusters" | "no-evidence")
                     && self.representative_sample_count.is_none()
                     && self.representative_id_count.is_none()

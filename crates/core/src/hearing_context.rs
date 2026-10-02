@@ -144,7 +144,7 @@ pub(crate) fn validate_contexts(contexts: &[HearingContext]) -> Result<(), &'sta
                 || context
                     .speaker
                     .as_ref()
-                    .is_some_and(|speaker| !speaker.is_valid_for(context.source))
+                    .is_some_and(|speaker| !speaker.is_valid())
                 || contexts[..index]
                     .iter()
                     .any(|previous| previous.source == context.source)
@@ -159,6 +159,7 @@ pub(crate) struct HearingContextBuffer {
     session: Option<(u64, String, CancellationToken)>,
     latest: Vec<HearingContext>,
     pending_audio: Vec<crate::state::AudioObservation>,
+    pending_speaker_corrections: Vec<crate::ports::HearingSpeakerCorrection>,
     persistent: bool,
     microphone_commands: MicrophoneCommands,
 }
@@ -169,6 +170,7 @@ impl Default for HearingContextBuffer {
             session: None,
             latest: Vec::new(),
             pending_audio: Vec::new(),
+            pending_speaker_corrections: Vec::new(),
             persistent: true,
             microphone_commands: MicrophoneCommands::default(),
         }
@@ -185,6 +187,7 @@ impl HearingContextBuffer {
         }
         self.latest.clear();
         self.pending_audio.clear();
+        self.pending_speaker_corrections.clear();
         self.microphone_commands.reset_session();
         self.persistent = persistent;
     }
@@ -194,9 +197,17 @@ impl HearingContextBuffer {
     }
 
     pub(crate) fn accepts_session(&self, id: &str) -> bool {
+        self.is_current_session(id)
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|(_, _, cancellation)| !cancellation.is_cancelled())
+    }
+
+    pub(crate) fn is_current_session(&self, id: &str) -> bool {
         self.session
             .as_ref()
-            .is_some_and(|(_, current, cancellation)| current == id && !cancellation.is_cancelled())
+            .is_some_and(|(_, current, _)| current == id)
     }
 
     pub(crate) fn begin(
@@ -216,6 +227,7 @@ impl HearingContextBuffer {
         let id = uuid::Uuid::new_v4().to_string();
         self.session = Some((generation, id.clone(), cancellation));
         self.latest.clear();
+        self.pending_speaker_corrections.clear();
         self.microphone_commands.reset_session();
         Some(id)
     }
@@ -357,8 +369,76 @@ impl HearingContextBuffer {
         self.pending_audio = pending_audio;
     }
 
+    pub(crate) fn apply_pending_speaker_corrections(
+        &mut self,
+        corrections: &[crate::ports::HearingSpeakerCorrection],
+    ) -> Result<(), crate::persistence::PersistenceError> {
+        if corrections.is_empty() {
+            return Ok(());
+        }
+        if corrections.iter().any(|correction| !correction.is_valid()) {
+            return Err(crate::persistence::PersistenceError::Invalid(
+                "話者訂正の対象または話者 ID が不正です".to_owned(),
+            ));
+        }
+        let mut updated = self.pending_audio.clone();
+        for audio in &mut updated {
+            apply_speaker_corrections_to_audio(audio, corrections)?;
+        }
+        self.pending_audio = updated;
+        Ok(())
+    }
+
+    pub(crate) fn pending_speaker_corrections(&self) -> &[crate::ports::HearingSpeakerCorrection] {
+        &self.pending_speaker_corrections
+    }
+
+    pub(crate) fn remember_speaker_corrections(
+        &mut self,
+        corrections: &[crate::ports::HearingSpeakerCorrection],
+    ) -> Result<(), crate::persistence::PersistenceError> {
+        if corrections.iter().any(|correction| !correction.is_valid()) {
+            return Err(crate::persistence::PersistenceError::Invalid(
+                "話者訂正の対象または話者 ID が不正です".to_owned(),
+            ));
+        }
+        // helper 台帳の再送上限と同じ512件を保持し、先着順で古い訂正を除く。
+        const MAX_PENDING_SPEAKER_CORRECTIONS: usize = 512;
+        for correction in corrections {
+            self.pending_speaker_corrections.retain(|existing| {
+                existing.segment_id != correction.segment_id
+                    || existing.audio_start_ms != correction.audio_start_ms
+                    || existing.audio_end_ms != correction.audio_end_ms
+            });
+            if self.pending_speaker_corrections.len() == MAX_PENDING_SPEAKER_CORRECTIONS {
+                self.pending_speaker_corrections.remove(0);
+            }
+            self.pending_speaker_corrections.push(correction.clone());
+        }
+        Ok(())
+    }
+
     pub(crate) fn pending_audio(&self) -> &[crate::state::AudioObservation] {
         &self.pending_audio
     }
 
+}
+
+pub(crate) fn apply_speaker_corrections_to_audio(
+    audio: &mut crate::state::AudioObservation,
+    corrections: &[crate::ports::HearingSpeakerCorrection],
+) -> Result<(), crate::persistence::PersistenceError> {
+    for correction in corrections {
+        if !correction.is_valid() {
+            return Err(crate::persistence::PersistenceError::Invalid(
+                "話者訂正の対象または話者 ID が不正です".to_owned(),
+            ));
+        }
+        if audio.segment_id.as_deref() == Some(correction.segment_id.as_str()) {
+            audio.apply_speaker_correction(correction).map_err(|_| {
+                crate::persistence::PersistenceError::Invalid("話者訂正の対象が不正です".to_owned())
+            })?;
+        }
+    }
+    Ok(())
 }

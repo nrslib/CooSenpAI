@@ -12,7 +12,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
     private enum Phase { case opening, running, waitingForDevice, stopped }
     private var phase = Phase.opening
     private var hasStarted = false
-    private var onBuffer: ((AVAudioPCMBuffer) -> Void)?
+    private var onBuffer: ((SpeakerCapturedBuffer) -> Void)?
 
     // Lifecycle completions and deadlines are confined to the main queue.
     private var startupDeadline: DispatchWorkItem?
@@ -31,7 +31,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
     }
 
     func start(onReady: @escaping (AVAudioFormat, Bool) -> Void,
-               onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
+               onBuffer: @escaping (SpeakerCapturedBuffer) -> Void,
                onInterruption: @escaping (SpeakerAudioTapError) -> Void,
                onFailure: @escaping (SpeakerAudioTapError) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -93,16 +93,21 @@ final class SpeakerAudioTap: @unchecked Sendable {
                 guard !cancellation.isCancelled else { return }
                 startupDeadline?.cancel()
                 onReady?(format, reconfigured)
+                if device.missingDeviceCount > 0 {
+                    onInterruption?(.speakerDevicesMissing(device.missingDeviceCount))
+                }
                 worker.async { [self] in
                     if !cancellation.isCancelled { phase = .running }
                 }
             }
-        } catch SpeakerAudioTapError.noOutputDevice where hasStarted {
+        } catch let error as SpeakerAudioTapError where error.isRecoverableDeviceInterruption(hasStarted: hasStarted) {
+            if case .speakerDevicesMissing = error { hasStarted = true }
+            if case .outputDeviceListUnavailable = error { hasStarted = true }
             phase = .waitingForDevice
             DispatchQueue.main.async { [self] in
                 guard !cancellation.isCancelled else { return }
                 startupDeadline?.cancel()
-                onInterruption?(.noOutputDevice)
+                onInterruption?(error)
             }
         } catch { reportFailure(error) }
     }
@@ -121,6 +126,8 @@ final class SpeakerAudioTap: @unchecked Sendable {
                 onBuffer?(buffer)
             }
         } catch SpeakerAudioTapError.noOutputDevice {
+            reconfigureDevice()
+        } catch SpeakerAudioTapError.speakerDevicesMissing {
             reconfigureDevice()
         } catch { reportFailure(error) }
     }

@@ -35,6 +35,7 @@ async-trait.workspace = true
 chrono.workspace = true
 coosenpai-core = { path = "../../../crates/core" }
 coosenpai-platform-macos = { path = "../../../crates/platform-macos" }
+habitua-connectome = { path = "../../../third_party/habitua/crates/habitua-connectome" }
 image = { workspace = true, features = ["jpeg"] }
 reqwest.workspace = true
 serde.workspace = true

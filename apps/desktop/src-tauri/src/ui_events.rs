@@ -9,6 +9,7 @@ pub(crate) enum PresenterId {
     Capture,
     Bubble,
     Details,
+    BrainActivity,
     Settings,
     ModelPicker,
     Avatar,
@@ -31,6 +32,7 @@ impl PresenterId {
             | Self::Capture
             | Self::Bubble
             | Self::Details
+            | Self::BrainActivity
             | Self::Settings
             | Self::ModelPicker
             | Self::Avatar => Some(Self::Root),
@@ -48,6 +50,7 @@ pub(crate) enum UiView {
     Bubble,
     Thought,
     Details,
+    BrainActivity,
     Settings,
     ModelPicker,
     Avatar,
@@ -62,6 +65,7 @@ impl UiView {
             Self::Bubble => PresenterId::Bubble,
             Self::Thought => PresenterId::Chat,
             Self::Details => PresenterId::Details,
+            Self::BrainActivity => PresenterId::BrainActivity,
             Self::Settings => PresenterId::Settings,
             Self::ModelPicker => PresenterId::ModelPicker,
             Self::Avatar => PresenterId::Avatar,
@@ -298,6 +302,7 @@ pub(crate) enum UiEvent {
     OpenSettings,
     OpenSettingsAt(&'static str),
     OpenDetails,
+    OpenBrainActivity,
     OpenModelPicker,
     Window {
         view: PresenterId,
@@ -316,6 +321,12 @@ pub(crate) enum UiEvent {
     Close,
     Present(ViewCommand),
     Mounted(UiView),
+    DetailsRendered {
+        generation: u64,
+        failed: bool,
+    },
+    DetailsPageStarted,
+    DetailsPageFinished,
     SpeechTranscript {
         generation: u64,
         text: String,
@@ -336,7 +347,9 @@ pub(crate) enum UiEvent {
         source: crate::capture::CancelSource,
     },
     SnapshotUpdated(std::sync::Arc<crate::snapshot::AppSnapshot>),
+    ConnectomeDownloadUpdated(std::sync::Arc<crate::snapshot::AppSnapshot>),
     InterruptCapture(bool),
+    InterruptCaptureForConversationSelect,
     NativeShutdown(crate::shutdown::ExitKind),
     Shutdown,
     ModelPicker(crate::model_picker_presenter::ModelPickerEvent),
@@ -385,6 +398,8 @@ pub(crate) enum UiEffect {
     Complete(Result<EffectResult, String>),
     Fail(String),
     RenderWindow(crate::ui_load::WindowContent),
+    DetailsMountGeneration(u64),
+    DetailsReload,
     BubbleTyping {
         id: String,
         revealed: Option<usize>,
@@ -640,6 +655,7 @@ impl UiEvent {
             Self::OpenSettingsAt(_) => "OpenSettingsAt".into(),
             Self::OpenSettings => "OpenSettings".into(),
             Self::OpenDetails => "OpenDetails".into(),
+            Self::OpenBrainActivity => "OpenBrainActivity".into(),
             Self::OpenModelPicker => "OpenModelPicker".into(),
             Self::Window { view, event } => format!(
                 "Window({view:?},{})",
@@ -669,6 +685,11 @@ impl UiEvent {
             Self::Close => "Close".into(),
             Self::Present(command) => format!("Present({command:?})"),
             Self::Mounted(view) => format!("Mounted({view:?})"),
+            Self::DetailsRendered { generation, failed } => {
+                format!("DetailsRendered({generation},failed={failed})")
+            }
+            Self::DetailsPageStarted => "DetailsPageStarted".into(),
+            Self::DetailsPageFinished => "DetailsPageFinished".into(),
             Self::SpeechTranscript { generation, .. } => format!("SpeechTranscript({generation})"),
             Self::SubmitInput(_) => "SubmitInput".into(),
             Self::SubmitChat(_) => "SubmitChat".into(),
@@ -713,8 +734,14 @@ impl UiEvent {
             Self::SnapshotUpdated(snapshot) => {
                 format!("SnapshotUpdated(revision={})", snapshot.revision)
             }
+            Self::ConnectomeDownloadUpdated(snapshot) => {
+                format!("ConnectomeDownloadUpdated(revision={})", snapshot.revision)
+            }
             Self::InterruptCapture(selection_only) => {
                 format!("InterruptCapture(selection_only={selection_only})")
+            }
+            Self::InterruptCaptureForConversationSelect => {
+                "InterruptCaptureForConversationSelect".into()
             }
             Self::NativeShutdown(kind) => format!("NativeShutdown({kind:?})"),
             Self::Shutdown => "Shutdown".into(),

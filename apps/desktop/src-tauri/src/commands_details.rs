@@ -1,10 +1,105 @@
 use crate::commands::{authorize_window, CommandOrigin, IpcResult, TauriIpcResult};
 use crate::state::DesktopState;
 use coosenpai_core::locale::{text, Locale, TextKey};
+use coosenpai_core::ports::RuntimeLogger;
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{State, WebviewWindow};
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DetailsRendererError {
+    name: String,
+    frames: Vec<DetailsStackFrame>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DetailsStackFrame {
+    file: String,
+    line: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetailsRendered {
+    generation: u64,
+    failed: bool,
+}
+
+fn safe_renderer_error(payload: &DetailsRendererError) -> bool {
+    payload.name.len() <= 64
+        && !payload.name.is_empty()
+        && payload
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric())
+        && payload.frames.len() <= 8
+        && payload.frames.iter().all(|frame| {
+            !frame.file.is_empty()
+                && frame.file.len() <= 128
+                && frame
+                    .file
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+                && frame.line > 0
+        })
+}
+
+#[tauri::command]
+pub fn details_renderer_error(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: DetailsRendererError,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::Details)?;
+    if !safe_renderer_error(&payload) {
+        return Err("描画エラーの形式が不正です".to_owned());
+    }
+    state
+        .logger
+        .write(
+            "ERROR",
+            &format!(
+                "詳細rendererの例外: name={} frames={}",
+                payload.name,
+                payload
+                    .frames
+                    .iter()
+                    .map(|frame| format!("{}:{}", frame.file, frame.line))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(IpcResult::success(()))
+}
+
+#[tauri::command]
+pub async fn details_rendered(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: DetailsRendered,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::Details)?;
+    Ok(
+        match state
+            .ui
+            .request(
+                crate::ui_events::UiView::Details,
+                crate::ui_events::UiEvent::DetailsRendered {
+                    generation: payload.generation,
+                    failed: payload.failed,
+                },
+            )
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(message) => IpcResult::failure(message),
+        },
+    )
+}
 
 #[tauri::command]
 pub async fn details_open(
@@ -12,6 +107,9 @@ pub async fn details_open(
     state: State<'_, Arc<DesktopState>>,
 ) -> TauriIpcResult<()> {
     authorize_window(&window, CommandOrigin::Main)?;
+    let _ = state
+        .logger
+        .write("INFO", "詳細ウィンドウの表示要求を受け付けました");
     Ok(
         match state
             .ui

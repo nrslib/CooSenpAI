@@ -345,5 +345,9 @@ pub enum ObservationDelivery {
 pub trait RuntimeFactory: Send + Sync {
     async fn build(&self, config: &Config) -> Result<RuntimeAgents, String>;
 
+    fn resolve_judge_config(&self, config: &Config) -> crate::config::JudgeConfig {
+        config.judge.clone()
+    }
+
     async fn shutdown(&self) {}
 }

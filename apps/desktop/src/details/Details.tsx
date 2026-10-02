@@ -15,6 +15,7 @@ import type { AppSnapshot, ConversationLogState, DebugDetail, IpcResult } from "
 import { ConversationLogPanel } from "./ConversationLogPanel.js";
 import { presentSpeakerDetails } from "./speaker-details-presenter.js";
 import { ConversationsPanel } from "./ConversationsPanel.js";
+import { currentMountGeneration } from "./renderer-error-listeners.js";
 
 export type DetailsTab = "state" | "emotions" | "conversation" | "dataflow" | "log";
 
@@ -127,7 +128,7 @@ export function Details(): ReactElement {
   const logScrollGeneration = useRef(0);
   const presenter = usePanelPresenter<DetailsView, PanelCommand & { payload: number }>("details", null, async (command) => {
     switch (command.kind) {
-      case "ready": { const ready = await listenersReady.current; return ready.ok ? detailsApi.ready() : ready; }
+      case "ready": { const ready = await listenersReady.current; return ready.ok ? detailsApi.ready(await currentMountGeneration(), false) : ready; }
       case "select": return detailsApi.selectConversationGeneration(command.payload);
       case "resetEmotions": return detailsApi.resetCompanionEmotions();
       case "loadLog": return detailsApi.getConversationLog((command.payload as unknown as { date: string | null }).date);

@@ -9,6 +9,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let speech_sources = manifest_dir.join("../../../tools/speech-helper/Sources");
     let speech_plist = manifest_dir.join("../../../tools/speech-helper/Info.plist");
     let hearing_script = manifest_dir.join("../../../tools/hearing-helper/build.sh");
+    let connectome_script = manifest_dir.join("../../../tools/connectome-helper/build.sh");
+    let connectome_source = manifest_dir.join("../../../third_party/habitua");
     let hearing_sources = manifest_dir.join("../../../tools/hearing-helper/Sources");
     let hearing_source = manifest_dir.join("../../../tools/hearing-helper/Sources/main.swift");
     let hearing_stats_source =
@@ -46,6 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={}", speech_sources.display());
     println!("cargo:rerun-if-changed={}", speech_plist.display());
     println!("cargo:rerun-if-changed={}", hearing_script.display());
+    println!("cargo:rerun-if-changed={}", connectome_script.display());
+    println!("cargo:rerun-if-changed={}", connectome_source.display());
     println!("cargo:rerun-if-changed={}", hearing_sources.display());
     println!("cargo:rerun-if-changed={}", hearing_source.display());
     println!("cargo:rerun-if-changed={}", hearing_stats_source.display());
@@ -102,6 +106,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !hearing_status.success() {
         return Err(format!("聴覚観察 helper のビルドに失敗しました: {hearing_status}").into());
     }
+    let connectome_status = Command::new(&connectome_script).arg(&target).status()?;
+    if !connectome_status.success() {
+        return Err(format!("判断役 helper のビルドに失敗しました: {connectome_status}").into());
+    }
+    println!(
+        "cargo:rustc-env=CONNECTOME_HELPER_TEST_BINARY={}",
+        manifest_dir
+            .join(format!(
+                "../../../target/helpers/coosenpai-connectome-{target}"
+            ))
+            .display()
+    );
     let bridge_status = Command::new(&bridge_script).status()?;
     if !bridge_status.success() {
         return Err(format!("provider bridge のビルドに失敗しました: {bridge_status}").into());

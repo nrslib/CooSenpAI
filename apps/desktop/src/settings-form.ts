@@ -35,6 +35,7 @@ export interface FormState {
   audioMic: boolean;
   audioMicrophoneCommandsEnabled: boolean;
   audioSpeaker: boolean;
+  audioSpeakerDevices: readonly string[];
   audioSpeakerIdentificationEnabled: boolean;
   audioDebugDumpDir: string;
   providerObserver: ProviderName;
@@ -132,6 +133,7 @@ export interface FormState {
   debugEnabled: boolean;
   feedbackEnabled: boolean;
   judgeFollow: boolean;
+  judgeBundledConnectome: boolean;
   checkForUpdates: boolean;
   launchAtLogin: boolean;
 }
@@ -149,7 +151,7 @@ const pageFields: Readonly<Record<SettingsCategory, readonly ConfigFormKey[]>> =
     "memoryDailyRetentionDays", "memoryWeeklyRetentionWeeks", "factPromptDailyLimit", "observationDays", "conversationDays",
   ],
   vision: ["watchFullscreen", "watchApps", "watchFocusElement"],
-  hearing: ["audioMicrophoneCommandsEnabled", "audioMic", "audioSpeaker", "audioSpeakerIdentificationEnabled"],
+  hearing: ["audioMicrophoneCommandsEnabled", "audioMic", "audioSpeaker", "audioSpeakerDevices", "audioSpeakerIdentificationEnabled"],
   speech: ["speechLocale", "speechInputDevice", "speechMode", "speechConfirmBeforeSend", "voiceOutputEnabled", "voiceOutputProvider", "voiceOutputRate", "voicevoxStyleId"],
   notifications: ["notificationMode", "bubblePosition", "bubbleDisplay", "bubbleEdgeRecall", "thoughtBubble", "bubbleKeepLatest", "textQuickActions", "imageQuickActions", "minPriority", "bubbleDurationMs"],
   providers: [
@@ -158,7 +160,7 @@ const pageFields: Readonly<Record<SettingsCategory, readonly ConfigFormKey[]>> =
   ],
   shortcuts: ["captureShortcut", "microphoneShortcut", "togglePanelShortcut", "toggleAvatarShortcut", "toggleWatchShortcut", "sendTextShortcut", "copyLastReplyShortcut", "sendKey"],
   setup: [],
-  developer: ["ocrGateExecutable", "observerExecutable", "hearingExecutable", "companionExecutable", "debugEnabled", "feedbackEnabled", "audioDebugDumpDir", "judgeFollow"],
+  developer: ["ocrGateExecutable", "observerExecutable", "hearingExecutable", "companionExecutable", "debugEnabled", "feedbackEnabled", "audioDebugDumpDir", "judgeFollow", "judgeBundledConnectome"],
 };
 
 const globalSettingsFields = ["watchEnabled", "audioEnabled"] as const satisfies readonly ConfigFormKey[];
@@ -208,6 +210,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     audioMic: config.audio.mic,
     audioMicrophoneCommandsEnabled: config.audio.microphoneCommandsEnabled,
     audioSpeaker: config.audio.speaker,
+    audioSpeakerDevices: config.audio.speakerDevices,
     audioSpeakerIdentificationEnabled: config.audio.speakerIdentification.enabled,
     audioDebugDumpDir: config.audio.debugDumpDir ?? "",
     ...toBaseForm(config),
@@ -247,6 +250,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     debugEnabled: config.debug.enabled,
     feedbackEnabled: config.debug.feedbackEnabled,
     judgeFollow: config.judge?.follow ?? false,
+    judgeBundledConnectome: config.judge?.bundledConnectome === "on",
     checkForUpdates: config.app.checkForUpdates,
     launchAtLogin: config.app.launchAtLogin,
   };
@@ -337,6 +341,7 @@ export function toPatch(form: FormState): ConfigPatch {
       mic: form.audioMic,
       microphoneCommandsEnabled: form.audioMicrophoneCommandsEnabled,
       speaker: form.audioSpeaker,
+      speakerDevices: [...new Set(form.audioSpeakerDevices)],
       speakerIdentification: { enabled: form.audioSpeakerIdentificationEnabled },
       debugDumpDir: form.audioDebugDumpDir === "" ? null : form.audioDebugDumpDir,
     },
@@ -350,7 +355,7 @@ export function toPatch(form: FormState): ConfigPatch {
       reminders: form.reminders,
       proactiveQuietMinutes: Number(form.proactiveQuietMinutes),
     },
-    judge: { follow: form.judgeFollow ?? false },
+    judge: { follow: form.judgeFollow, bundledConnectome: form.judgeBundledConnectome ? "on" : "off" },
     memory: {
       enabled: form.memoryEnabled,
       providerConsent: form.memoryProviderConsent,

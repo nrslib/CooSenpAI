@@ -305,6 +305,9 @@ impl ChatPresenter {
 pub(crate) struct WindowPresenter {
     id: PresenterId,
     presentation: Presentation,
+    details_mount_generation: u64,
+    details_mounted: bool,
+    details_page_loaded: bool,
     panels: crate::panels::PanelPresenters,
     preview: crate::settings_preview_presenter::SettingsPreviewPresenter,
     model_picker: Option<crate::model_picker_presenter::ModelPickerPresenter>,
@@ -316,6 +319,9 @@ impl WindowPresenter {
         Self {
             id,
             presentation: Presentation::default(),
+            details_mount_generation: 0,
+            details_mounted: false,
+            details_page_loaded: false,
             panels: Default::default(),
             preview: Default::default(),
             model_picker: (id == PresenterId::ModelPicker).then(Default::default),
@@ -398,6 +404,48 @@ impl WindowPresenter {
                 self.presentation.close_failed();
                 vec![UiEffect::Fail(error)]
             }
+            UiEvent::DetailsRendered { generation, failed } if self.id == PresenterId::Details => {
+                if self.details_page_loaded && generation == self.details_mount_generation {
+                    self.details_mounted = true;
+                    vec![UiEffect::Log(format!(
+                        "詳細rendererのページ読み込み完了: generation={generation} result={}",
+                        if failed { "error-screen" } else { "success" }
+                    ))]
+                } else {
+                    Vec::new()
+                }
+            }
+            UiEvent::DetailsPageStarted if self.id == PresenterId::Details => {
+                self.details_mount_generation += 1;
+                self.details_mounted = false;
+                self.details_page_loaded = false;
+                Vec::new()
+            }
+            UiEvent::DetailsPageFinished if self.id == PresenterId::Details => {
+                self.details_page_loaded = true;
+                if self.presentation.state() == PresentationState::Shown {
+                    vec![UiEffect::DetailsMountGeneration(
+                        self.details_mount_generation,
+                    )]
+                } else {
+                    Vec::new()
+                }
+            }
+            UiEvent::Window {
+                view,
+                event: PresentationEvent::Open(WindowRequest::Details),
+            } if view == self.id
+                && self.id == PresenterId::Details
+                && self.presentation.state() == PresentationState::Shown =>
+            {
+                if self.details_mounted {
+                    vec![self.command(ViewCommand::Front)]
+                } else {
+                    self.details_mount_generation += 1;
+                    self.details_page_loaded = false;
+                    vec![UiEffect::DetailsReload]
+                }
+            }
             UiEvent::Window { view, event } if view == self.id => self.present(event),
             UiEvent::Refreshed { view, .. }
                 if view == self.id && self.presentation.state() == PresentationState::Hidden =>
@@ -437,6 +485,11 @@ impl WindowPresenter {
                 }
                 if self.id == PresenterId::Details {
                     effects.extend(self.observe_details_snapshot(&snapshot));
+                }
+                if self.id == PresenterId::BrainActivity {
+                    effects.push(UiEffect::RenderWindow(WindowContent::BrainActivity {
+                        snapshot,
+                    }));
                 }
                 effects
             }
@@ -536,12 +589,16 @@ impl WindowPresenter {
                     WindowContent::ModelPicker { snapshot, catalog } => {
                         effects.extend(self.model_picker.as_mut().unwrap().loaded(snapshot.clone(), catalog.clone()));
                     }
+                    WindowContent::BrainActivity { .. } => {},
                     WindowContent::Details { snapshot, .. } => {
                         effects.extend(self.observe_details_snapshot(snapshot));
                     }
                 }
                 effects.push(UiEffect::RenderWindow(content));
                 effects.push(self.command(ViewCommand::Show));
+                if self.id == PresenterId::Details && self.details_page_loaded {
+                    effects.push(UiEffect::DetailsMountGeneration(self.details_mount_generation));
+                }
                 if let Some(target) = bubble_click {
                     effects.push(UiEffect::Deliver {
                         child: PresenterId::Root,

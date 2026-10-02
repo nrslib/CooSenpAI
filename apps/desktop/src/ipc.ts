@@ -67,6 +67,12 @@ function subscribeLocal<T>(channel: string, listener: (payload: T) => void): { r
 }
 
 export const desktopApi = {
+  downloadConnectomePack: (): Promise<IpcResult<null>> => call("connectome_pack_download"),
+  cancelConnectomePackDownload: (): Promise<IpcResult<null>> => call("connectome_pack_cancel_download"),
+  recheckConnectomePack: (): Promise<IpcResult<null>> => call("connectome_pack_recheck"),
+  openConnectomePackDirectory: (): Promise<IpcResult<null>> => call("connectome_pack_open_directory"),
+  copyConnectomePackPath: (): Promise<IpcResult<null>> => call("connectome_pack_copy_path"),
+  openBrainActivity: (): Promise<IpcResult<null>> => call("developer_brain_activity_open"),
   panelEvent: <S, C extends PanelCommand>(payload: { readonly session: string; readonly kind: PanelKind; readonly event: PanelEvent }): Promise<IpcResult<PanelOutput<S, C>>> => call("ui_panel_event", { payload }),
   appInput: (payload: import("./app-view.js").AppInput): Promise<IpcResult<null>> => call("app_view_input", { payload }),
   appSelectPersona: (persona: string): Promise<IpcResult<CooSenpaiConfig>> => call("app_select_persona", { persona }),
@@ -213,10 +219,18 @@ export const modelPopupApi = {
   close: (): Promise<IpcResult<null>> => call("model_popup_close"),
 };
 
+export const brainActivityApi = {
+  getHistory: (): Promise<IpcResult<import("./brain-activity.js").BrainActivityHistory>> => call("developer_brain_activity_history"),
+  getActivity: (payload: import("./brain-activity.js").BrainActivitySelection): Promise<IpcResult<import("./brain-activity.js").BrainActivityRecord | null>> => call("developer_brain_activity", { payload }),
+  subscribeView: (listener: (snapshot: AppSnapshot | null) => void) => subscribeLocal("coosenpai:brain-activity:view", listener),
+  ready: (): Promise<IpcResult<null>> => call("ui_view_mounted"),
+  close: (): Promise<IpcResult<null>> => call("developer_brain_activity_close"),
+};
+
 export const detailsApi = {
   subscribeDataFlow: (listener: (result: IpcResult<DataFlowLog>) => void) => subscribeLocal("coosenpai:dataflow:load", listener),
   subscribePanelUpdates: (listener: (updates: readonly PanelUpdate[]) => void) => subscribeLocal("coosenpai:panel:updates", listener),
-  ready: (): Promise<IpcResult<null>> => call("ui_view_mounted"),
+  ready: (generation: number, failed: boolean): Promise<IpcResult<null>> => call("details_rendered", { payload: { generation, failed } }),
   getDataFlowLog: (): Promise<IpcResult<DataFlowLog>> => call("details_dataflow_log"),
   getConversationLog: (date: string | null): Promise<IpcResult<ConversationLogPage>> => call("details_conversation_log", { payload: { date } }),
   deleteConversationLog: (date: string): Promise<IpcResult<null>> => call("details_delete_conversation_log", { payload: { date } }),

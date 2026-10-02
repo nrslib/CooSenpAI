@@ -260,11 +260,20 @@ enum MonoAudioBufferConversionError: LocalizedError {
     }
 }
 
-func normalizedAudioBufferForAppend(from source: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
-    try monoFloat32AudioBuffer(from: source)
+enum AudioChannelMixing {
+    case average
+    case volumeWeighted
 }
 
-func monoFloat32AudioBuffer(from source: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
+func normalizedAudioBufferForAppend(
+    from source: AVAudioPCMBuffer, mixing: AudioChannelMixing
+) throws -> AVAudioPCMBuffer {
+    try monoFloat32AudioBuffer(from: source, mixing: mixing)
+}
+
+func monoFloat32AudioBuffer(
+    from source: AVAudioPCMBuffer, mixing: AudioChannelMixing = .average
+) throws -> AVAudioPCMBuffer {
     guard source.frameLength > 0 else {
         throw MonoAudioBufferConversionError.emptyBuffer
     }
@@ -382,6 +391,27 @@ func monoFloat32AudioBuffer(from source: AVAudioPCMBuffer) throws -> AVAudioPCMB
         }
     }
 
+    // Selected taps need silence to contribute no weight, while duplicate playback must not double the level.
+    var weights = [Double](repeating: 1.0 / Double(channelCount), count: channelCount)
+    if mixing == .volumeWeighted {
+        var energies = [Double](repeating: 0, count: channelCount)
+        for frame in 0..<frameCount {
+            for channel in 0..<channelCount {
+                let bufferIndex = source.format.isInterleaved ? 0 : channel
+                let sampleIndex = source.format.isInterleaved ? frame * channelCount + channel : frame
+                let sample = try sampleValue(
+                    from: sourceBuffers[bufferIndex], bufferIndex: bufferIndex, sampleIndex: sampleIndex
+                )
+                energies[channel] += sample * sample
+            }
+        }
+        let volumes = energies.map { sqrt($0 / Double(frameCount)) }
+        let totalVolume = volumes.reduce(0, +)
+        if totalVolume > 0, totalVolume.isFinite {
+            weights = volumes.map { $0 / totalVolume }
+        }
+    }
+
     for frame in 0..<frameCount {
         var sum = 0.0
         for channel in 0..<channelCount {
@@ -389,13 +419,14 @@ func monoFloat32AudioBuffer(from source: AVAudioPCMBuffer) throws -> AVAudioPCMB
             let sampleIndex = source.format.isInterleaved
                 ? frame * channelCount + channel
                 : frame
-            sum += try sampleValue(
+            let sample = try sampleValue(
                 from: sourceBuffers[bufferIndex],
                 bufferIndex: bufferIndex,
                 sampleIndex: sampleIndex
             )
+            sum += mixing == .average ? sample : weights[channel] * sample
         }
-        monoData[frame] = Float(sum / Double(channelCount))
+        monoData[frame] = Float(mixing == .average ? sum / Double(channelCount) : sum)
     }
     return monoBuffer
 }

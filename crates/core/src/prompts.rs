@@ -1344,9 +1344,7 @@ fn append_observation_segment_reference(
     references: &mut Vec<Value>,
     seen: &mut BTreeSet<String>,
 ) {
-    if segment.get("source").and_then(Value::as_str) != Some("speaker")
-        || segment.get("speakerStatus").and_then(Value::as_str) != Some("identified")
-    {
+    if segment.get("speakerStatus").and_then(Value::as_str) != Some("identified") {
         return;
     }
     let Some(speaker_id) = speaker_label(segment, resolver)
@@ -2004,9 +2002,6 @@ fn speaker_label(
     value: &Value,
     resolver: Option<&crate::speaker_id::PromptSpeakerIdResolver>,
 ) -> Option<String> {
-    if value.get("source").and_then(Value::as_str) != Some("speaker") {
-        return None;
-    }
     match value.get("speakerStatus").and_then(Value::as_str) {
         Some("identified") => {
             let id = value

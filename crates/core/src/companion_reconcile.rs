@@ -14,23 +14,17 @@ impl CompanionStorage {
         })
     }
 
-    pub(crate) fn reconcile_pending_user_inputs(&self) -> Result<CursorSnapshot, PersistenceError> {
-        self.reconcile_pending_user_inputs_with_pruning(true)
+    pub(crate) fn reconcile_pending_user_inputs(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CursorSnapshot, PersistenceError> {
+        self.prune_retention_at(now)?;
+        self.reconcile_pending_user_inputs_without_pruning()
     }
 
     pub(crate) fn reconcile_pending_user_inputs_without_pruning(
         &self,
     ) -> Result<CursorSnapshot, PersistenceError> {
-        self.reconcile_pending_user_inputs_with_pruning(false)
-    }
-
-    fn reconcile_pending_user_inputs_with_pruning(
-        &self,
-        prune_conversation: bool,
-    ) -> Result<CursorSnapshot, PersistenceError> {
-        if prune_conversation {
-            self.prune_retention_at(chrono::Utc::now())?;
-        }
         let conversation = self.load_all_conversation()?;
         let unanswered = unanswered_user_entries(&conversation);
         let retained_user_ids = conversation

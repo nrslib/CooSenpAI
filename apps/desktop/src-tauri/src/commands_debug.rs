@@ -1,4 +1,4 @@
-use crate::commands::{authorize_window, CommandOrigin, TauriIpcResult};
+use crate::commands::{authorize_window, CommandOrigin, IpcResult, TauriIpcResult};
 use crate::state::DesktopState;
 use crate::ui_commands::UserCommand;
 use crate::ui_events::{UiEvent, UiView};
@@ -119,9 +119,14 @@ pub(crate) async fn run(
         own_window_context: None,
         image_path,
     };
+    let directories = Arc::new(vec![directory]);
     let observation = state
         .core_runtime()
-        .observe_without_companion_delivery(vec![frame], state.cancellation.child_token())
+        .observe_without_companion_delivery(
+            vec![frame],
+            state.cancellation.child_token(),
+            directories.clone(),
+        )
         .await
         .map_err(|error| format!("画像観察に失敗しました: {error}"))?;
     let source_id = observation.id().to_owned();
@@ -201,4 +206,82 @@ fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>, String> {
         .write_to(&mut output, ImageFormat::Png)
         .map_err(|error| format!("画像を PNG に変換できません: {error}"))?;
     Ok(output.into_inner())
+}
+
+#[tauri::command]
+pub async fn developer_brain_activity_open(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::Main)?;
+    Ok(
+        match state
+            .ui
+            .request(UiView::Application, UiEvent::OpenBrainActivity)
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(error) => IpcResult::failure(error),
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn developer_brain_activity_close(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<()> {
+    authorize_window(&window, CommandOrigin::BrainActivity)?;
+    Ok(
+        match state
+            .ui
+            .request(UiView::BrainActivity, UiEvent::Close)
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(error) => IpcResult::failure(error),
+        },
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrainActivityPayload {
+    generation: u64,
+    record_id: u64,
+    input_id: String,
+}
+
+#[tauri::command]
+pub async fn developer_brain_activity(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: BrainActivityPayload,
+) -> TauriIpcResult<Option<coosenpai_core::brain_activity::BrainActivityRecord>> {
+    authorize_window(&window, CommandOrigin::BrainActivity)?;
+    if payload.generation == 0
+        || payload.record_id == 0
+        || payload.input_id.is_empty()
+        || payload.input_id.len() > 256
+    {
+        return Ok(IpcResult::failure("invalid brain activity input ID"));
+    }
+    Ok(IpcResult::success(
+        state.core_runtime().brain_activity_record(
+            payload.generation,
+            payload.record_id,
+            &payload.input_id,
+        ),
+    ))
+}
+
+#[tauri::command]
+pub async fn developer_brain_activity_history(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+) -> TauriIpcResult<coosenpai_core::brain_activity::BrainActivityHistory> {
+    authorize_window(&window, CommandOrigin::BrainActivity)?;
+    Ok(IpcResult::success(
+        state.core_runtime().brain_activity_history(),
+    ))
 }

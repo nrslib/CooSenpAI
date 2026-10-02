@@ -1,12 +1,12 @@
 {
   "name": "@coosenpai/desktop",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node scripts/tauri.mjs dev",
     "frontend:dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
-    "build": "vite build",
+    "build": "vite build --configLoader runner",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "tauri": "node scripts/tauri.mjs"

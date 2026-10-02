@@ -8,6 +8,7 @@ use coosenpai_core::runtime::{
 use coosenpai_core::state::{
     AudioObservation, ObservationRecord, PendingFrameContext, StagnationObservation,
 };
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[async_trait]
@@ -15,6 +16,13 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
     fn config(&self) -> Config;
     fn judge_feed_available(&self) -> bool;
     fn snapshot(&self) -> RuntimeSnapshot;
+    fn brain_activity_history(&self) -> coosenpai_core::brain_activity::BrainActivityHistory;
+    fn brain_activity_record(
+        &self,
+        generation: u64,
+        record_id: u64,
+        input_id: &str,
+    ) -> Option<coosenpai_core::brain_activity::BrainActivityRecord>;
     fn judge_trace_for_input(&self, input_id: &str) -> Option<coosenpai_core::judge::JudgeTrace>;
     // 観察単位の trace を扱うポート契約として保持するが、現行 UI からは未参照。
     #[allow(dead_code)]
@@ -95,11 +103,13 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
         user_input_sequence: u64,
+        capture_directories: Arc<Vec<tempfile::TempDir>>,
     ) -> Result<ObservationRecord, RuntimeError>;
     async fn observe_without_companion_delivery(
         &self,
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
+        capture_directories: Arc<Vec<tempfile::TempDir>>,
     ) -> Result<ObservationRecord, RuntimeError>;
     async fn process_mailbox(
         &self,
@@ -177,6 +187,17 @@ impl CoreRuntimePort for RuntimeHandle {
         RuntimeHandle::snapshot(self)
     }
 
+    fn brain_activity_history(&self) -> coosenpai_core::brain_activity::BrainActivityHistory {
+        RuntimeHandle::brain_activity_history(self)
+    }
+    fn brain_activity_record(
+        &self,
+        generation: u64,
+        record_id: u64,
+        input_id: &str,
+    ) -> Option<coosenpai_core::brain_activity::BrainActivityRecord> {
+        RuntimeHandle::brain_activity_record(self, generation, record_id, input_id)
+    }
     fn judge_trace_for_input(&self, input_id: &str) -> Option<coosenpai_core::judge::JudgeTrace> {
         RuntimeHandle::judge_trace_for_input(self, input_id)
     }
@@ -274,12 +295,15 @@ impl CoreRuntimePort for RuntimeHandle {
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
         user_input_sequence: u64,
+        capture_directories: Arc<Vec<tempfile::TempDir>>,
     ) -> Result<ObservationRecord, RuntimeError> {
-        RuntimeHandle::observe_cancellable_at_user_input_sequence(
+        RuntimeHandle::observe_cancellable_with_capture_directories(
             self,
             frames,
             cancellation,
-            user_input_sequence,
+            true,
+            Some(user_input_sequence),
+            capture_directories,
         )
         .await
     }
@@ -288,8 +312,17 @@ impl CoreRuntimePort for RuntimeHandle {
         &self,
         frames: Vec<ObservationFrameInput>,
         cancellation: CancellationToken,
+        capture_directories: Arc<Vec<tempfile::TempDir>>,
     ) -> Result<ObservationRecord, RuntimeError> {
-        RuntimeHandle::observe_without_companion_delivery(self, frames, cancellation).await
+        RuntimeHandle::observe_cancellable_with_capture_directories(
+            self,
+            frames,
+            cancellation,
+            false,
+            None,
+            capture_directories,
+        )
+        .await
     }
 
     async fn process_mailbox(

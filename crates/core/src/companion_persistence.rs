@@ -195,7 +195,7 @@ impl CompanionAgent {
         }
         let active_turn_commit = storage.prepare_turn_commit_recovery()?;
         let cursor = if prune_conversation {
-            storage.reconcile_pending_user_inputs()?
+            storage.reconcile_pending_user_inputs(self.clock.now())?
         } else {
             storage.reconcile_pending_user_inputs_without_pruning()?
         };

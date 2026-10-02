@@ -358,7 +358,14 @@ fn parse_judge(
 ) -> JudgeConfig {
     issues.extend(unknown_keys(
         object,
-        &["follow", "composition", "veto", "modules", "timeoutMs"],
+        &[
+            "follow",
+            "composition",
+            "veto",
+            "modules",
+            "bundledConnectome",
+            "timeoutMs",
+        ],
         "judge",
     ));
     let composition = match enum_string(
@@ -380,6 +387,19 @@ fn parse_judge(
         composition,
         veto: boolean(object, "veto", false, "judge.veto", issues),
         modules: parse_judge_modules(object.get("modules"), issues),
+        bundled_connectome: match enum_string(
+            object,
+            "bundledConnectome",
+            "off",
+            &["off", "on"],
+            "judge.bundledConnectome",
+            issues,
+        )
+        .as_str()
+        {
+            "on" => super::BundledConnectome::On,
+            _ => super::BundledConnectome::Off,
+        },
         timeout_ms: positive_u64(object, "timeoutMs", 3_000, "judge.timeoutMs", issues),
     }
 }

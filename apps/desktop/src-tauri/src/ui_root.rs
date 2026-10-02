@@ -198,6 +198,7 @@ impl<P: UiPort> UiRoot<P> {
         monotonic_clock: Arc<dyn MonotonicClock>,
     ) -> Self {
         let windows = [
+            PresenterId::BrainActivity,
             PresenterId::Details,
             PresenterId::Settings,
             PresenterId::ModelPicker,
@@ -494,6 +495,7 @@ impl<P: UiPort> UiRoot<P> {
                             PresenterId::Chat
                                 | PresenterId::Settings
                                 | PresenterId::Details
+                                | PresenterId::BrainActivity
                                 | PresenterId::ModelPicker
                                 | PresenterId::Bubble
                         ) =>
@@ -950,8 +952,13 @@ impl<P: UiPort> UiRoot<P> {
                 }
                 Vec::new()
             }
-            UiEvent::InterruptCapture(false) if self.model.protected_popup.is_some() => {
+            UiEvent::InterruptCapture(false) | UiEvent::InterruptCaptureForConversationSelect
+                if self.model.protected_popup.is_some() =>
+            {
                 vec![UiEffect::RejectInput]
+            }
+            UiEvent::InterruptCaptureForConversationSelect => {
+                vec![UiEffect::Run(UiTask::InterruptCapture(false))]
             }
             UiEvent::InterruptCapture(selection_only) => {
                 let mut effects = if selection_only {
@@ -1277,6 +1284,7 @@ impl<P: UiPort> UiRoot<P> {
                     PresenterId::Chat,
                     PresenterId::Capture,
                     PresenterId::Details,
+                    PresenterId::BrainActivity,
                     PresenterId::ModelPicker,
                     PresenterId::Avatar,
                     PresenterId::Bubble,
@@ -1296,6 +1304,16 @@ impl<P: UiPort> UiRoot<P> {
                 );
                 effects
             }
+            UiEvent::ConnectomeDownloadUpdated(snapshot) => {
+                if snapshot.revision < self.model.snapshot_revision {
+                    return Handling::Handled(vec![]);
+                }
+                self.model.snapshot_revision = snapshot.revision;
+                vec![UiEffect::Deliver {
+                    child: PresenterId::Chat,
+                    event: UiEvent::SnapshotUpdated(snapshot),
+                }]
+            }
             UiEvent::OpenSettings => vec![window(
                 PresenterId::Settings,
                 PresentationEvent::Open(WindowRequest::Settings { section: None }),
@@ -1305,6 +1323,10 @@ impl<P: UiPort> UiRoot<P> {
                 PresentationEvent::Open(WindowRequest::Settings {
                     section: Some(section),
                 }),
+            )],
+            UiEvent::OpenBrainActivity => vec![window(
+                PresenterId::BrainActivity,
+                PresentationEvent::Open(WindowRequest::BrainActivity),
             )],
             UiEvent::OpenDetails => vec![window(
                 PresenterId::Details,

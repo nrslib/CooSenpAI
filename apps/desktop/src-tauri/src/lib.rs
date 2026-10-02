@@ -24,6 +24,7 @@ mod commands_bubble;
 mod commands_capture;
 mod commands_chat_view;
 mod commands_config;
+mod commands_connectome;
 mod commands_conversation;
 mod commands_debug;
 mod commands_details;
@@ -41,6 +42,8 @@ mod commands_voice_output;
 mod commands_work;
 mod composer_presenter;
 mod config_update;
+mod connectome;
+mod connectome_download;
 mod conversation_feedback;
 mod conversation_presenter;
 mod core_runtime_port;
@@ -52,6 +55,7 @@ mod input_popup;
 mod model_catalog;
 mod model_picker_presenter;
 mod motion_settings_presenter;
+mod output_device_monitor;
 mod own_bounds;
 mod platform;
 mod presentation;
@@ -226,6 +230,9 @@ fn setup_desktop(app: &mut tauri::App) -> anyhow::Result<()> {
     windows::configure(app)?;
     if let Some(state) = app.try_state::<Arc<DesktopState>>() {
         let state = state.inner().clone();
+        if let Err(status) = output_device_monitor::start(state.clone()) {
+            eprintln!("Core Audio device-list listener failed: status={status}");
+        }
         update_check::start(state.clone());
         model_catalog::start(state.clone());
         tauri::async_runtime::spawn(async move {
@@ -302,6 +309,11 @@ pub fn run() -> anyhow::Result<()> {
             commands_debug::debug_wake,
             commands::config_get,
             commands_config::config_get_persisted,
+            commands_connectome::connectome_pack_open_directory,
+            commands_connectome::connectome_pack_copy_path,
+            commands_connectome::connectome_pack_download,
+            commands_connectome::connectome_pack_cancel_download,
+            commands_connectome::connectome_pack_recheck,
             commands::config_update,
             commands::model_popup_open,
             commands::model_popup_close,
@@ -309,6 +321,12 @@ pub fn run() -> anyhow::Result<()> {
             commands::model_popup_companion_model_catalog,
             commands::model_popup_opencode_models_reload,
             commands_details::details_open,
+            commands_details::details_renderer_error,
+            commands_details::details_rendered,
+            commands_debug::developer_brain_activity,
+            commands_debug::developer_brain_activity_history,
+            commands_debug::developer_brain_activity_open,
+            commands_debug::developer_brain_activity_close,
             commands_details::details_dataflow_log,
             commands_details::details_dataflow_open_path,
             commands_details::details_conversation_log,

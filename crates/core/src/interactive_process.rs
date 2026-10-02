@@ -2,7 +2,7 @@ use crate::process::{cleanup_process_group, terminate_process_group, ActiveProce
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -11,7 +11,7 @@ const LINE_LIMIT: usize = 256 * 1024;
 const STDERR_LIMIT: usize = 64 * 1024;
 const TERMINATION_GRACE: Duration = Duration::from_secs(1);
 const FORCE_TERMINATION_WAIT: Duration = Duration::from_secs(1);
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct InteractiveProcessRequest {
@@ -174,6 +174,10 @@ impl InteractiveProcess {
         self.completion.clone()
     }
 
+    pub async fn wait_for_completion(&self) {
+        self.completion.wait().await;
+    }
+
     pub async fn next_event(
         &mut self,
     ) -> Option<Result<InteractiveProcessEvent, InteractiveProcessError>> {
@@ -229,6 +233,66 @@ impl InteractiveProcessControl {
     }
 }
 
+// The pending line survives cancellation of next_line() in run_process's select.
+// One extra byte allows a CR at the limit until the next LF confirms CRLF.
+struct BoundedLineReader<R> {
+    reader: BufReader<R>,
+    pending: Vec<u8>,
+}
+
+impl<R: AsyncRead + Unpin> BoundedLineReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            pending: Vec::with_capacity(LINE_LIMIT + 1),
+        }
+    }
+
+    async fn next_line(&mut self) -> Result<Option<Vec<u8>>, InteractiveProcessError> {
+        loop {
+            let available = self
+                .reader
+                .fill_buf()
+                .await
+                .map_err(InteractiveProcessError::Io)?;
+            if available.is_empty() {
+                if self.pending.is_empty() {
+                    return Ok(None);
+                }
+                // Unlike CRLF, a trailing CR at EOF belongs to the line.
+                if self.pending.len() > LINE_LIMIT {
+                    return Err(InteractiveProcessError::OutputLimit);
+                }
+                return self.finish_line().map(Some);
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let count = newline.unwrap_or(available.len());
+            let length = self.pending.len() + count;
+            let last = available[..count].last().or(self.pending.last());
+            if length > LINE_LIMIT + 1 || (length > LINE_LIMIT && last != Some(&b'\r')) {
+                return Err(InteractiveProcessError::OutputLimit);
+            }
+            self.pending.extend_from_slice(&available[..count]);
+            self.reader.consume(count + usize::from(newline.is_some()));
+            if newline.is_some() {
+                if self.pending.last() == Some(&b'\r') {
+                    self.pending.pop();
+                }
+                return self.finish_line().map(Some);
+            }
+        }
+    }
+
+    fn finish_line(&mut self) -> Result<Vec<u8>, InteractiveProcessError> {
+        std::str::from_utf8(&self.pending).map_err(|error| {
+            InteractiveProcessError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?;
+        let line = self.pending.clone();
+        self.pending.clear();
+        Ok(line)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_process(
     mut child: tokio::process::Child,
@@ -245,7 +309,7 @@ async fn run_process(
     completion: ProcessCompletion,
 ) {
     let mut process_group = ActiveProcessGroup::register(pid);
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BoundedLineReader::new(stdout);
     let mut stderr = stderr;
     let mut stderr_buffer = [0_u8; 4096];
     let mut stderr_pending = Vec::new();
@@ -253,38 +317,38 @@ async fn run_process(
     let mut status = None;
     let mut stdout_open = true;
     let mut stderr_open = true;
+    let mut stdin_open = true;
+    let mut pending_write_error = None;
+    // 子の終了を検知しても、パイプに残る出力は停止通知で捨てない。
+    let exited_drain = CancellationToken::new();
     loop {
+        if status.is_some() && !stdout_open && !stderr_open {
+            break;
+        }
+        let event_cancellation = if status.is_some() {
+            &exited_drain
+        } else {
+            &cancellation
+        };
         tokio::select! {
             biased;
             line = lines.next_line(), if stdout_open => match line {
-                Ok(Some(line)) if line.len() <= LINE_LIMIT => {
+                Ok(Some(line)) => {
                     if !send_process_event(
                         &events,
-                        Ok(InteractiveProcessEvent::StdoutLine(line.into_bytes())),
-                        &cancellation,
-                        &termination_requested,
+                        Ok(InteractiveProcessEvent::StdoutLine(line)),
+                        event_cancellation,
                     ).await {
                         terminate_process_group(pid, false);
                         break;
                     }
                 }
-                Ok(Some(_)) => {
-                    let _ = send_process_event(
-                        &events,
-                        Err(InteractiveProcessError::OutputLimit),
-                        &cancellation,
-                        &termination_requested,
-                    ).await;
-                    terminate_process_group(pid, false);
-                    break;
-                }
                 Ok(None) => stdout_open = false,
                 Err(error) => {
                     let _ = send_process_event(
                         &events,
-                        Err(InteractiveProcessError::Io(error)),
-                        &cancellation,
-                        &termination_requested,
+                        Err(error),
+                        event_cancellation,
                     ).await;
                     terminate_process_group(pid, false);
                     break;
@@ -296,8 +360,7 @@ async fn run_process(
                 &mut stderr_output,
                 &mut stderr_pending,
                 &events,
-                &cancellation,
-                &termination_requested,
+                event_cancellation,
             ), if stderr_open => match result {
                 Ok(true) => {}
                 Ok(false) => stderr_open = false,
@@ -306,13 +369,12 @@ async fn run_process(
                         &events,
                         Err(error),
                         &cancellation,
-                        &termination_requested,
                     ).await;
                     terminate_process_group(pid, false);
                     break;
                 }
             },
-            instruction = commands.recv() => match instruction {
+            instruction = commands.recv(), if status.is_none() && stdin_open => match instruction {
                 Some(ProcessCommand::Write(bytes)) => {
                     let write_result = tokio::select! {
                         _ = force_termination_requested.cancelled() => {
@@ -322,14 +384,10 @@ async fn run_process(
                         result = stdin.write_all(&bytes) => result,
                     };
                     if let Err(error) = write_result {
-                        let _ = send_process_event(
-                            &events,
-                            Err(InteractiveProcessError::Io(error)),
-                            &cancellation,
-                            &termination_requested,
-                        ).await;
+                        pending_write_error = Some(InteractiveProcessError::Io(error));
+                        stdin_open = false;
                         terminate_process_group(pid, false);
-                        break;
+                        continue;
                     }
                     let flush_result = tokio::select! {
                         _ = force_termination_requested.cancelled() => {
@@ -339,14 +397,10 @@ async fn run_process(
                         result = stdin.flush() => result,
                     };
                     if let Err(error) = flush_result {
-                        let _ = send_process_event(
-                            &events,
-                            Err(InteractiveProcessError::Io(error)),
-                            &cancellation,
-                            &termination_requested,
-                        ).await;
+                        pending_write_error = Some(InteractiveProcessError::Io(error));
+                        stdin_open = false;
                         terminate_process_group(pid, false);
-                        break;
+                        continue;
                     }
                 }
                 Some(ProcessCommand::Terminate { force }) => {
@@ -358,19 +412,21 @@ async fn run_process(
                     break;
                 }
             },
-            result = child.wait() => {
-                status = result.ok().map(|value| value.code().unwrap_or(-1));
-                break;
+            result = child.wait(), if status.is_none() => {
+                match result {
+                    Ok(value) => status = Some(value.code().unwrap_or(-1)),
+                    Err(_) => break,
+                }
             }
-            _ = cancellation.cancelled() => {
+            _ = cancellation.cancelled(), if status.is_none() => {
                 terminate_process_group(pid, false);
                 break;
             }
-            _ = termination_requested.cancelled() => {
+            _ = termination_requested.cancelled(), if status.is_none() => {
                 terminate_process_group(pid, false);
                 break;
             }
-            _ = force_termination_requested.cancelled() => {
+            _ = force_termination_requested.cancelled(), if status.is_none() => {
                 terminate_process_group(pid, true);
                 break;
             }
@@ -401,7 +457,6 @@ async fn run_process(
                     &mut stderr_pending,
                     &events,
                     &cancellation,
-                    &termination_requested,
                 ) => match result {
                     Ok(open) => stderr_open = open,
                     Err(_) => break,
@@ -412,6 +467,9 @@ async fn run_process(
     .await;
     cleanup_process_group(pid).await;
     process_group.disarm();
+    if let Some(error) = pending_write_error {
+        let _ = events.send(Err(error)).await;
+    }
     let _ = events.try_send(Ok(InteractiveProcessEvent::Exited {
         status,
         stderr: stderr_output,
@@ -442,7 +500,6 @@ async fn read_stderr_chunk(
     pending: &mut Vec<u8>,
     events: &mpsc::Sender<Result<InteractiveProcessEvent, InteractiveProcessError>>,
     cancellation: &CancellationToken,
-    termination_requested: &CancellationToken,
 ) -> Result<bool, InteractiveProcessError> {
     let count = reader
         .read(buffer)
@@ -455,7 +512,6 @@ async fn read_stderr_chunk(
                 events,
                 Ok(InteractiveProcessEvent::StderrLine(line)),
                 cancellation,
-                termination_requested,
             )
             .await
             {
@@ -479,7 +535,6 @@ async fn read_stderr_chunk(
             events,
             Ok(InteractiveProcessEvent::StderrLine(line)),
             cancellation,
-            termination_requested,
         )
         .await
         {
@@ -493,11 +548,9 @@ async fn send_process_event(
     events: &mpsc::Sender<Result<InteractiveProcessEvent, InteractiveProcessError>>,
     event: Result<InteractiveProcessEvent, InteractiveProcessError>,
     cancellation: &CancellationToken,
-    termination_requested: &CancellationToken,
 ) -> bool {
     tokio::select! {
         result = events.send(event) => result.is_ok(),
         _ = cancellation.cancelled() => false,
-        _ = termination_requested.cancelled() => false,
     }
 }

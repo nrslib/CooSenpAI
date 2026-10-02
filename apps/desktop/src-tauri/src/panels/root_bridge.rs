@@ -17,7 +17,12 @@ impl UiPort for Port {
                 println!("SETTINGS_ROOT {}", json!({"panelUpdates": updates}));
                 std::io::stdout().flush().unwrap();
             }
+            UiEffect::DetailsMountGeneration(generation) => {
+                println!("SETTINGS_ROOT {}", json!({"mountGeneration": generation}));
+                std::io::stdout().flush().unwrap();
+            }
             UiEffect::Log(_)
+            | UiEffect::DetailsReload
             | UiEffect::View { .. }
             | UiEffect::RenderWindow(_)
             | UiEffect::TrayRender(_)

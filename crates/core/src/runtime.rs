@@ -277,6 +277,27 @@ impl RuntimeHandle {
         self.snapshot_rx.borrow().clone()
     }
 
+    pub fn brain_activity_history(&self) -> crate::brain_activity::BrainActivityHistory {
+        self.judge_trace_store.brain_activity_history()
+    }
+
+    pub fn brain_activity_record(
+        &self,
+        generation: u64,
+        record_id: u64,
+        input_id: &str,
+    ) -> Option<crate::brain_activity::BrainActivityRecord> {
+        self.judge_trace_store
+            .brain_activity_record(generation, record_id, input_id)
+    }
+
+    pub fn brain_activity_for_input(
+        &self,
+        input_id: &str,
+    ) -> Option<crate::brain_activity::BrainActivityObservation> {
+        self.judge_trace_store.brain_activity_for_input(input_id)
+    }
+
     pub fn judge_trace_for_input(&self, input_id: &str) -> Option<crate::judge::JudgeTrace> {
         self.judge_trace_store.get(input_id)
     }
@@ -628,9 +649,13 @@ impl RuntimeActor {
             .as_ref()
             .and_then(CompanionAgent::judge_feedback_store_path);
         let automatic_companion_recovery = judge_override.is_none();
+        let judge_config = factory.as_ref().map_or_else(
+            || config.judge.clone(),
+            |factory| factory.resolve_judge_config(&config),
+        );
         let judge = judge_override.unwrap_or_else(|| {
             std::sync::Arc::new(
-                JudgeAgent::new(config.judge.clone())
+                JudgeAgent::new(judge_config)
                     .with_feedback_store_if_present(judge_feedback_store)
                     .with_logger(logger.clone()),
             )

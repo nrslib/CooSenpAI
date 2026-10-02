@@ -235,7 +235,14 @@ pub enum TextKey {
     AudioSystemPermissionRequired,
     AudioSystemFailed,
     AudioSystemDeviceUnavailable,
+    AudioOutputDeviceListUnavailable,
+    AudioSpeakerDevicesMissing,
+    AudioSpeakerDeviceUnsupported,
+    AudioSystemRestored,
+    AudioPending,
+    AudioInputDeviceFallback,
     AudioSystemFormatFailed,
+    AudioSystemClockUnavailable,
     AudioSystemOverflow,
     AudioSystemStartupTimeout,
     AudioProtocolInvalid,
@@ -275,6 +282,7 @@ pub enum TextKey {
     ConfigPersonaId,
     ConfigExecutable,
     ConfigRange,
+    ConfigSpeakerDeviceLimit,
     ConfigPositiveRange,
     ConfigActiveThreshold,
     ConfigSpacing,
@@ -1169,8 +1177,22 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::AudioSystemFailed, Locale::En) => "Could not capture speaker audio. Check System Audio Recording permission and the output device.",
         (TextKey::AudioSystemDeviceUnavailable, Locale::Ja) => "音声出力デバイスがありません。出力デバイスの接続を確認してください。",
         (TextKey::AudioSystemDeviceUnavailable, Locale::En) => "No audio output device is available. Check the output device connection.",
+        (TextKey::AudioOutputDeviceListUnavailable, Locale::Ja) => "出力デバイス一覧を取得できません。デバイスの変更時に再取得します。",
+        (TextKey::AudioOutputDeviceListUnavailable, Locale::En) => "Could not get the output device list. It will be checked again when devices change.",
+        (TextKey::AudioSpeakerDevicesMissing, Locale::Ja) => "指定した出力デバイスのうち {count} 台が未接続です",
+        (TextKey::AudioSpeakerDevicesMissing, Locale::En) => "Disconnected selected output devices: {count}.",
+        (TextKey::AudioSpeakerDeviceUnsupported, Locale::Ja) => "出力デバイスの個別指定には macOS 14.2 以降が必要です。",
+        (TextKey::AudioSpeakerDeviceUnsupported, Locale::En) => "Selecting individual output devices requires macOS 14.2 or later.",
+        (TextKey::AudioSystemRestored, Locale::Ja) => "スピーカー音声の取得を再開しました。",
+        (TextKey::AudioSystemRestored, Locale::En) => "Speaker audio capture resumed.",
+        (TextKey::AudioPending, Locale::Ja) => "認識終了待ちの音声バッファを保持できませんでした。",
+        (TextKey::AudioPending, Locale::En) => "Could not retain audio buffered while recognition finishes.",
+        (TextKey::AudioInputDeviceFallback, Locale::Ja) => "選択したマイクを利用できないため、システム既定を使います。",
+        (TextKey::AudioInputDeviceFallback, Locale::En) => "The selected microphone is unavailable, so the system default will be used.",
         (TextKey::AudioSystemFormatFailed, Locale::Ja) => "スピーカー音声の形式を取得できません。出力デバイスを確認し、Hearing AI を入れ直してください。",
         (TextKey::AudioSystemFormatFailed, Locale::En) => "Could not read the speaker audio format. Check the output device and restart Hearing AI.",
+        (TextKey::AudioSystemClockUnavailable, Locale::Ja) => "スピーカー音声の取得時刻を取得できません。Hearing AI を入れ直してください。",
+        (TextKey::AudioSystemClockUnavailable, Locale::En) => "Could not read the speaker audio capture time. Restart Hearing AI.",
         (TextKey::AudioSystemOverflow, Locale::Ja) => "スピーカー音声の処理が追いつかず停止しました。負荷を減らして Hearing AI を入れ直してください。",
         (TextKey::AudioSystemOverflow, Locale::En) => "Speaker capture stopped because processing could not keep up. Reduce system load and restart Hearing AI.",
         (TextKey::AudioSystemStartupTimeout, Locale::Ja) => "スピーカー音声の開始がタイムアウトしました。システムオーディオ録音の許可と出力デバイスを確認してください。",
@@ -1297,6 +1319,8 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::ConfigRange, Locale::En) => {
             "Enter an integer from {minimum} through {maximum}."
         }
+        (TextKey::ConfigSpeakerDeviceLimit, Locale::Ja) => "出力デバイスは32台以下で指定してください。",
+        (TextKey::ConfigSpeakerDeviceLimit, Locale::En) => "Select no more than 32 output devices.",
         (TextKey::ConfigPositiveRange, Locale::Ja) => "{minimum}以上の整数で指定してください。",
         (TextKey::ConfigPositiveRange, Locale::En) => {
             "Enter an integer of {minimum} or greater."
@@ -1908,11 +1932,21 @@ pub fn localize_capture_message(message: &str, locale: Locale) -> String {
 }
 
 pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> String {
+    if kind == "speaker-device-missing" {
+        if let Some(count) = speaker_missing_device_count(message) {
+            return localize_speaker_missing_device_count(count, locale);
+        }
+    }
     let key = match kind {
         "system-audio-permission" => Some(TextKey::AudioSystemPermissionRequired),
         "system-audio" => Some(TextKey::AudioSystemFailed),
         "system-audio-device" => Some(TextKey::AudioSystemDeviceUnavailable),
+        "system-audio-device-list" => Some(TextKey::AudioOutputDeviceListUnavailable),
+        "system-audio-restored" => Some(TextKey::AudioSystemRestored),
+        "audio-pending" => Some(TextKey::AudioPending),
+        "speaker-device-unsupported" => Some(TextKey::AudioSpeakerDeviceUnsupported),
         "system-audio-format" => Some(TextKey::AudioSystemFormatFailed),
+        "system-audio-clock" => Some(TextKey::AudioSystemClockUnavailable),
         "system-audio-overflow" => Some(TextKey::AudioSystemOverflow),
         "system-audio-start-timeout" => Some(TextKey::AudioSystemStartupTimeout),
         "hearing-protocol" => Some(TextKey::AudioProtocolInvalid),
@@ -1925,6 +1959,11 @@ pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> Stri
         }
         "input-device-fallback" if matches_text(message, TextKey::SpeechInputDeviceFallback) => {
             Some(TextKey::SpeechInputDeviceFallback)
+        }
+        "input-device-fallback"
+            if message == "選択したマイクを利用できないため、システム既定を使います" =>
+        {
+            Some(TextKey::AudioInputDeviceFallback)
         }
         "input-device-list" if matches_text(message, TextKey::SpeechInputDeviceListFallback) => {
             Some(TextKey::SpeechInputDeviceListFallback)
@@ -1976,6 +2015,18 @@ pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> Stri
         },
         |key| text(key, locale).to_owned(),
     )
+}
+
+pub fn speaker_missing_device_count(message: &str) -> Option<usize> {
+    message
+        .strip_prefix("指定した出力デバイスのうち ")?
+        .strip_suffix(" 台が未接続です")?
+        .parse()
+        .ok()
+}
+
+pub fn localize_speaker_missing_device_count(count: usize, locale: Locale) -> String {
+    text(TextKey::AudioSpeakerDevicesMissing, locale).replace("{count}", &count.to_string())
 }
 
 pub fn localize_speech_message(message: &str, locale: Locale) -> String {
@@ -2319,6 +2370,9 @@ pub fn localize_config_issue_message(message: &str, locale: Locale) -> String {
             Some(TextKey::ConfigReviewTime)
         }
         "10件以下で指定してください。" => Some(TextKey::ConfigReminderLimit),
+        "出力デバイスは32台以下で指定してください。" => {
+            Some(TextKey::ConfigSpeakerDeviceLimit)
+        }
         "1以上128以下の英数字とハイフンで指定してください。" => {
             Some(TextKey::ConfigReminderId)
         }

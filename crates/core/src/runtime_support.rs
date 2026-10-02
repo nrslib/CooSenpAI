@@ -1064,11 +1064,15 @@ impl RuntimeActor {
     }
 
     pub(super) async fn refresh_judge(&mut self, config: &Config) {
+        let judge_config = self.factory.as_ref().map_or_else(
+            || config.judge.clone(),
+            |factory| factory.resolve_judge_config(config),
+        );
         let feedback_store = self
             .companion
             .as_ref()
             .and_then(CompanionAgent::judge_feedback_store_path);
-        if self.config.judge == config.judge
+        if self.judge.config() == &judge_config
             && self.judge.feedback_store_path() == feedback_store.as_deref()
         {
             return;
@@ -1077,7 +1081,7 @@ impl RuntimeActor {
         let start_gate = previous.begin_shutdown();
         self.judge_generation = self.judge_generation.saturating_add(1);
         self.judge = std::sync::Arc::new(
-            crate::judge::JudgeAgent::new_with_start_gate(config.judge.clone(), start_gate)
+            crate::judge::JudgeAgent::new_with_start_gate(judge_config, start_gate)
                 .with_feedback_store_if_present(feedback_store)
                 .with_trace_store(self.judge_trace_store.clone())
                 .with_logger(self.logger.clone()),

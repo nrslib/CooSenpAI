@@ -98,6 +98,7 @@ pub(crate) struct DesktopState {
     screen_permission: Mutex<permission::ScreenPermissionCache>,
     pub(crate) snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
     pub(crate) config_update: ConfigUpdateCoordinator,
+    pub(crate) connectome_download: Mutex<Option<crate::connectome_download::DownloadTask>>,
     watch_control: Mutex<WatchControl>,
     pub(crate) watch_intent_lock: Mutex<()>,
     runtime_active: AtomicBool,
@@ -154,6 +155,10 @@ impl DesktopState {
 
     pub(crate) async fn refresh_speech_input_devices(&self) {
         self.speech.refresh_input_devices(self).await;
+    }
+
+    pub(crate) async fn refresh_output_devices(&self) {
+        self.hearing.refresh_output_devices(self).await;
     }
 
     pub(crate) async fn tutorial_is_active(&self) -> bool {
@@ -275,6 +280,12 @@ impl DesktopState {
         }
         let watch_lock = WatchLock::acquire(&paths.watch_lock)
             .context("別の coosenpai watch が起動しています")?;
+        if let Err(reason) = crate::connectome_download::cleanup_stale(&paths) {
+            let _ = logger.write(
+                "WARN",
+                &format!("配線データの一時ファイル整理に失敗しました: {reason}"),
+            );
+        }
         let cancellation = CancellationToken::new();
         let factory = Arc::new(
             DesktopRuntimeFactory::new_with_keychain(
@@ -299,6 +310,10 @@ impl DesktopState {
         } = startup;
         factory.work.approvals.set_mode(config.work.approval_mode);
         factory.work.set_roots(config.work.allowed_roots.clone());
+        let connectome_status = factory
+            .prepare_connectome_resolution(config.clone())
+            .await
+            .map_err(anyhow::Error::msg)?;
         let runtime = startup::startup_runtime(
             &config,
             runtime_error.clone(),
@@ -386,6 +401,7 @@ impl DesktopState {
                     companion_calls,
                     signed_build(),
                 );
+                snapshot.connectome_status = Some(connectome_status);
                 snapshot.companion.proactive_limit_reached = companion_limit_reached;
                 snapshot.avatar_image_png = initial_avatar.image_png;
                 snapshot.avatar_image_load_failed = initial_avatar.failed;
@@ -399,6 +415,7 @@ impl DesktopState {
                 snapshot
             })),
             config_update: ConfigUpdateCoordinator::new(config_revision),
+            connectome_download: Mutex::new(None),
             watch_control: Mutex::new(WatchControl {
                 lifecycle: WatchLifecycle::Stopped,
                 generation: 0,
@@ -500,6 +517,14 @@ impl DesktopState {
         &self,
         event: crate::snapshot_presenter::SnapshotEvent,
     ) -> AppSnapshot {
+        let config_for_connectome = match &event {
+            crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(config)
+            | crate::snapshot_presenter::SnapshotEvent::ConfigSaved(config)
+            | crate::snapshot_presenter::SnapshotEvent::CompanionReconfigured(config) => {
+                Some(config.clone())
+            }
+            _ => None,
+        };
         let input = crate::snapshot_presenter::SnapshotInput {
             event,
             config_revision: self.config_update.current_revision(),
@@ -518,7 +543,76 @@ impl DesktopState {
         {
             let _ = self.logger.write("WARN", &error);
         }
+        if let Some(config) = config_for_connectome {
+            let status = match self
+                .factory
+                .prepare_connectome_resolution(config.clone())
+                .await
+            {
+                Ok(status) => status,
+                Err(reason) => {
+                    let _ = self.logger.write("WARN", reason);
+                    return self.snapshot().await;
+                }
+            };
+            let input = crate::snapshot_presenter::SnapshotInput {
+                event: crate::snapshot_presenter::SnapshotEvent::ConnectomeStatus {
+                    config_revision: config.revision,
+                    status,
+                },
+                config_revision: self.config_update.current_revision(),
+                work: coosenpai_core::work::WorkConfig {
+                    approval_mode: self.work.approvals.mode(),
+                    allowed_roots: self.work.roots(),
+                },
+            };
+            if let Err(error) = self
+                .ui
+                .request(
+                    crate::ui_events::UiView::Application,
+                    crate::ui_events::UiEvent::SnapshotResult(Box::new(input)),
+                )
+                .await
+            {
+                let _ = self.logger.write("WARN", &error);
+            }
+        }
         self.snapshot().await
+    }
+
+    pub(crate) fn publish_connectome_download(
+        &self,
+        view: crate::connectome_download::DownloadView,
+    ) {
+        self.ui.input(
+            crate::ui_events::UiView::Application,
+            crate::ui_events::UiEvent::SnapshotResult(Box::new(
+                crate::snapshot_presenter::SnapshotInput {
+                    event: crate::snapshot_presenter::SnapshotEvent::ConnectomeDownload(view),
+                    config_revision: self.config_update.current_revision(),
+                    work: coosenpai_core::work::WorkConfig {
+                        approval_mode: self.work.approvals.mode(),
+                        allowed_roots: self.work.roots(),
+                    },
+                },
+            )),
+        );
+    }
+
+    pub(crate) async fn refresh_connectome(&self, force_full_hash: bool) -> Result<(), String> {
+        let (status, config_revision) = refresh_connectome_runtime(
+            self.factory.clone(),
+            &self.runtime,
+            &self.config_update,
+            force_full_hash,
+        )
+        .await?;
+        self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConnectomeStatus {
+            config_revision,
+            status,
+        })
+        .await;
+        Ok(())
     }
 
     pub async fn refresh_conversation(&self) {
@@ -580,6 +674,7 @@ impl DesktopState {
 
     pub(crate) async fn finish_capture_cleanup(&self) {
         self.cancellation.cancel();
+        crate::connectome_download::cancel_and_wait(&self.connectome_download).await;
         self.capture.shutdown().await;
     }
 
@@ -588,6 +683,7 @@ impl DesktopState {
             return;
         }
         self.cancellation.cancel();
+        crate::connectome_download::cancel_and_wait(&self.connectome_download).await;
         self.capture.shutdown().await;
         self.work.shutdown().await;
         self.voice_output.stop().await;
@@ -605,6 +701,35 @@ impl DesktopState {
             .logger
             .write("INFO", "CooSenpAI desktop runtimeを停止しました。");
     }
+}
+
+pub(crate) async fn refresh_connectome_runtime(
+    factory: Arc<DesktopRuntimeFactory>,
+    runtime: &RuntimeHandle,
+    config_update: &ConfigUpdateCoordinator,
+    force_full_hash: bool,
+) -> Result<(crate::connectome::ConnectomeStatus, u64), String> {
+    let transaction = config_update.begin().await;
+    let config = runtime.config();
+    let resolution_config = config.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        if force_full_hash {
+            factory.recheck_connectome_status(&resolution_config)
+        } else {
+            factory.invalidate_connectome_resolution();
+            factory.connectome_status(&resolution_config)
+        }
+    })
+    .await
+    .map_err(|_| "判断役の再設定に失敗しました".to_owned())?;
+    runtime
+        .update_config_without_factory(config.clone())
+        .await
+        .map_err(|_| "判断役の再設定に失敗しました".to_owned())?;
+    transaction
+        .commit()
+        .map_err(|_| "判断役の再設定に失敗しました".to_owned())?;
+    Ok((status, config.revision))
 }
 
 fn companion_usage_summary(paths: &ConfigPaths, proactive_limit: Option<u32>) -> (u32, bool) {

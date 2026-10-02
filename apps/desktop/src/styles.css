@@ -196,7 +196,7 @@ h1, h2, h3, h4, p { margin: 0; }
 .confirmation-card p { color: var(--muted); line-height: 1.5; }
 .confirmation-card button { padding: 8px 10px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-control); }
 .confirmation-card button.primary { background: var(--accent-soft); border-color: var(--accent); }
-.settings-panel { display: flex; height: calc(100% - 42px); min-height: 0; flex-direction: column; padding: 0 14px 18px; overflow: hidden; background: var(--surface-solid); border-top: 1px solid var(--line-strong); border-radius: var(--radius-surface) var(--radius-surface) 0 0; animation: sheet-in 180ms ease-out; }
+.settings-panel { display: flex; height: 100%; min-height: 0; flex-direction: column; padding: 0 14px 18px; overflow: hidden; background: var(--surface-solid); border-top: 1px solid var(--line-strong); border-radius: var(--radius-surface) var(--radius-surface) 0 0; animation: sheet-in 180ms ease-out; }
 .tutorial-locked-settings { gap: 14px; }
 .tutorial-locked-settings p { color: var(--muted); line-height: 1.5; }
 .tutorial-locked-settings > button { align-self: flex-start; padding: 8px 10px; color: var(--text); background: var(--accent-soft); border-radius: var(--radius-control); }
@@ -265,7 +265,7 @@ img.watch-target-icon { object-fit: contain; background: transparent; }
 .application-picker-list { display: grid; max-height: 210px; gap: 5px; overflow-y: auto; }
 .application-picker-list button { display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 8px; text-align: left; }
 .coming-soon { display: flex; justify-content: space-between; color: var(--faint); font-size: 12px; }
-.settings-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 10px 0 0; background: var(--surface-solid); border-top: 1px solid var(--line); }
+.settings-footer { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 10px 0 0; background: var(--surface-solid); border-top: 1px solid var(--line); }
 .persona-picker-trigger { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
 .persona-picker-trigger > button { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 8px; color: var(--text); background: var(--bg); border: 1px solid var(--line-strong); border-radius: var(--radius-control); text-align: left; }
 .persona-picker-trigger > button > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

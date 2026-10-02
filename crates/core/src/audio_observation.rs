@@ -162,8 +162,7 @@ impl AudioObservation {
         speaker_status: SpeakerIdentificationStatus,
         speaker_segments: Vec<crate::ports::HearingSpeakerSegment>,
     ) -> Result<(), ObservationError> {
-        if self.source != AudioObservationSource::Speaker
-            || segment_id.is_empty()
+        if segment_id.is_empty()
             || Uuid::parse_str(segment_id).is_err()
             || audio_end_ms <= audio_start_ms
             || !speaker_segments
@@ -211,8 +210,7 @@ impl AudioObservation {
         &mut self,
         correction: &crate::ports::HearingSpeakerCorrection,
     ) -> Result<bool, ObservationError> {
-        if self.source != AudioObservationSource::Speaker
-            || !correction.is_valid()
+        if !correction.is_valid()
             || self.segment_id.as_deref() != Some(correction.segment_id.as_str())
         {
             return Err(ObservationError::Invalid);
@@ -263,8 +261,7 @@ impl AudioObservation {
         &self,
         correction: &crate::ports::HearingSpeakerCorrection,
     ) -> Result<bool, ObservationError> {
-        if self.source != AudioObservationSource::Speaker
-            || !correction.is_valid()
+        if !correction.is_valid()
             || self.segment_id.as_deref() != Some(correction.segment_id.as_str())
         {
             return Err(ObservationError::Invalid);
@@ -341,9 +338,6 @@ fn valid_speaker_metadata(record: &AudioObservation) -> bool {
         || !record.speaker_decision_details.is_empty();
     if record.schema_version == 1 {
         return !has_metadata;
-    }
-    if record.source != AudioObservationSource::Speaker {
-        return false;
     }
     let (Some(segment_id), Some(start), Some(end), Some(status)) = (
         record.segment_id.as_deref(),

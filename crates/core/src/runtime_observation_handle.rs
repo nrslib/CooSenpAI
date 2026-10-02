@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 impl RuntimeHandle {
     pub fn user_input_sequence(&self) -> u64 {
@@ -24,6 +25,7 @@ impl RuntimeHandle {
             cancellation,
             true,
             None,
+            None,
         )
         .await
     }
@@ -39,6 +41,26 @@ impl RuntimeHandle {
             cancellation,
             true,
             Some(user_input_sequence),
+            None,
+        )
+        .await
+    }
+
+    /// Keeps capture files alive through a detached Shadow evaluation and preview recording.
+    pub async fn observe_cancellable_with_capture_directories(
+        &self,
+        frames: Vec<ObservationFrameInput>,
+        cancellation: CancellationToken,
+        allow_companion_delivery: bool,
+        user_input_sequence: Option<u64>,
+        capture_directories: Arc<Vec<tempfile::TempDir>>,
+    ) -> Result<ObservationRecord, RuntimeError> {
+        self.observe_cancellable_with_delivery_and_user_input_sequence(
+            frames,
+            cancellation,
+            allow_companion_delivery,
+            user_input_sequence,
+            Some(capture_directories),
         )
         .await
     }
@@ -53,6 +75,7 @@ impl RuntimeHandle {
             cancellation,
             false,
             None,
+            None,
         )
         .await
     }
@@ -63,6 +86,7 @@ impl RuntimeHandle {
         cancellation: CancellationToken,
         allow_companion_delivery: bool,
         user_input_sequence: Option<u64>,
+        capture_directories: Option<Arc<Vec<tempfile::TempDir>>>,
     ) -> Result<ObservationRecord, RuntimeError> {
         self.ensure_open()?;
         let generation = self.watch_scope_generation();
@@ -76,6 +100,7 @@ impl RuntimeHandle {
         self.control_tx
             .send(ControlCommand::Observe(ObserveRequest {
                 frames,
+                capture_directories,
                 audio: Vec::new(),
                 user_input_sequence,
                 allow_companion_delivery,
@@ -174,6 +199,7 @@ impl RuntimeHandle {
         self.control_tx
             .send(ControlCommand::Observe(ObserveRequest {
                 frames: Vec::new(),
+                capture_directories: None,
                 audio,
                 user_input_sequence: None,
                 allow_companion_delivery: true,

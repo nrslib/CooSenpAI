@@ -182,6 +182,23 @@ fn validate_speech(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
 }
 
 fn validate_audio(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
+    if config.audio.speaker_devices.len() > 32 {
+        issues.push(issue(
+            "audio.speakerDevices",
+            "出力デバイスは32台以下で指定してください。",
+        ));
+    }
+    if config
+        .audio
+        .speaker_devices
+        .iter()
+        .any(|uid| uid.trim().is_empty() || uid.len() > 512 || uid.chars().any(char::is_control))
+    {
+        issues.push(issue(
+            "audio.speakerDevices",
+            "各 UID は制御文字を含まない1以上512 byteの文字列で指定してください。",
+        ));
+    }
     if config
         .audio
         .debug_dump_dir

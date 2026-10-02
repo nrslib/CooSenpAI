@@ -132,6 +132,11 @@ pub(crate) enum SnapshotEvent {
     },
     ConfigLoaded(coosenpai_core::config::Config),
     ConfigSaved(coosenpai_core::config::Config),
+    ConnectomeStatus {
+        config_revision: u64,
+        status: crate::connectome::ConnectomeStatus,
+    },
+    ConnectomeDownload(crate::connectome_download::DownloadView),
     CompanionStopped,
     CompanionReconfigured(coosenpai_core::config::Config),
     CompanionFailed(coosenpai_core::runtime::RuntimeLastError),
@@ -156,6 +161,10 @@ pub(crate) enum SnapshotEvent {
         limit_reached: bool,
     },
     SpeechDevicesLoaded(Result<Vec<coosenpai_core::ports::SpeechInputDevice>, String>),
+    OutputDevicesLoaded {
+        result: Result<Vec<coosenpai_core::ports::AudioOutputDevice>, String>,
+        monitor_failed: bool,
+    },
     DebugLoaded(coosenpai_core::debug::DebugCatalog),
     SpeechPermissionsLoaded(SpeechPermissions),
     ScreenPermissionLoaded(ScreenCapturePermission),
@@ -289,9 +298,14 @@ impl SnapshotPresenter {
         metadata: Option<(u64, coosenpai_core::work::WorkConfig)>,
     ) -> Vec<UiEffect> {
         let force_publish = matches!(&event, SnapshotEvent::ObserverDisplayTick);
+        let connectome_download = matches!(&event, SnapshotEvent::ConnectomeDownload(_));
         let count = self.publications.entry(event.source()).or_default();
         count.attempted += 1;
         let mut snapshot = self.snapshot.lock().expect("snapshot lock");
+        let metadata_changes_snapshot = metadata.as_ref().is_some_and(|(revision, work)| {
+            *revision >= snapshot.config_revision
+                && (*revision != snapshot.config_revision || *work != snapshot.config.work)
+        });
         let before = serde_json::to_value(&*snapshot).expect("snapshot serialization");
         let previous_speech = crate::speech::SpeechPopupSnapshot::from_app(&snapshot);
         let old_avatar_path = snapshot.config.ui.avatar_path.clone();
@@ -538,6 +552,15 @@ impl SnapshotPresenter {
                     self.stopped_observer_execution_id = None;
                 }
             }
+            SnapshotEvent::ConnectomeStatus {
+                config_revision,
+                status,
+            } => {
+                if snapshot.config_revision == config_revision {
+                    snapshot.connectome_status = Some(status);
+                }
+            }
+            SnapshotEvent::ConnectomeDownload(view) => snapshot.connectome_download = view,
             SnapshotEvent::CompanionStopped => {
                 snapshot.companion.phase = crate::snapshot::CompanionViewPhase::Idle
             }
@@ -635,6 +658,22 @@ impl SnapshotPresenter {
                     }
                 }
             },
+            SnapshotEvent::OutputDevicesLoaded {
+                result,
+                monitor_failed,
+            } => {
+                snapshot.audio.output_devices_monitor_failed = monitor_failed;
+                match result {
+                    Ok(devices) => {
+                        snapshot.audio.output_devices = devices;
+                        snapshot.audio.output_devices_load_failed = false;
+                    }
+                    Err(_) => {
+                        snapshot.audio.output_devices.clear();
+                        snapshot.audio.output_devices_load_failed = true;
+                    }
+                }
+            }
             SnapshotEvent::DebugLoaded(catalog) => snapshot.debug_catalog = catalog,
             SnapshotEvent::SpeechPermissionsLoaded(permissions) => {
                 snapshot.speech.microphone_permission =
@@ -682,7 +721,14 @@ impl SnapshotPresenter {
             || snapshot.speech.phase != "idle")
             && previous_speech != crate::speech::SpeechPopupSnapshot::from_app(&snapshot);
         snapshot.revision = snapshot.revision.saturating_add(1);
-        effects.extend(snapshot_effects(&snapshot, voice_changed));
+        if connectome_download && !metadata_changes_snapshot {
+            effects.push(UiEffect::Deliver {
+                child: PresenterId::Root,
+                event: UiEvent::ConnectomeDownloadUpdated(Arc::new(snapshot.clone())),
+            });
+        } else {
+            effects.extend(snapshot_effects(&snapshot, voice_changed));
+        }
         if focus_after_speech {
             effects.push(UiEffect::Deliver {
                 child: PresenterId::Root,
@@ -751,9 +797,12 @@ impl SnapshotEvent {
             Self::ConfigLoaded(_) | Self::ConfigSaved(_) | Self::CompanionReconfigured(_) => {
                 "Config"
             }
+            Self::ConnectomeStatus { .. } => "ConnectomeStatus",
+            Self::ConnectomeDownload(_) => "ConnectomeDownload",
             Self::CompanionStopped | Self::CompanionFailed(_) => "Companion",
             Self::AvatarRefresh | Self::AvatarLoaded { .. } => "Avatar",
             Self::SpeechDevicesLoaded(_) => "SpeechDevices",
+            Self::OutputDevicesLoaded { .. } => "OutputDevices",
             Self::SpeechPermissionsLoaded(_) => "SpeechPermissions",
             Self::ScreenPermissionLoaded(_) => "ScreenPermission",
         }

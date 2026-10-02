@@ -1,0 +1,3 @@
+Upstream commit: a3d83f295b87082a1fa0fecaa9c343e2a9f827b1
+Snapshot: git archive of pinned commit
+Refresh: tools/connectome-helper/import.sh /absolute/path/to/habitua-checkout

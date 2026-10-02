@@ -242,11 +242,13 @@ pub(crate) async fn prepare_input_transition(
     ) {
         return Ok(false);
     }
-    ui.request(
-        crate::ui_events::UiView::Application,
-        crate::ui_events::UiEvent::InterruptCapture(false),
-    )
-    .await
-    .map_err(DispatchError::handler)?;
+    let interruption = if command == DesktopCommand::ConversationSelect {
+        crate::ui_events::UiEvent::InterruptCaptureForConversationSelect
+    } else {
+        crate::ui_events::UiEvent::InterruptCapture(false)
+    };
+    ui.request(crate::ui_events::UiView::Application, interruption)
+        .await
+        .map_err(DispatchError::handler)?;
     Ok(true)
 }

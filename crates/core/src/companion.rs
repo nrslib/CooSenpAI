@@ -394,7 +394,7 @@ impl CompanionAgent {
                     "永続ユーザーキューの storage がありません".to_owned(),
                 ))
             })?
-            .reconcile_pending_user_inputs()?
+            .reconcile_pending_user_inputs(self.clock.now())?
             .pending_inputs
             .iter()
             .any(|input| match input {
@@ -419,7 +419,7 @@ impl CompanionAgent {
                     "永続ユーザーキューの storage がありません".to_owned(),
                 ))
             })?
-            .reconcile_pending_user_inputs()?
+            .reconcile_pending_user_inputs(self.clock.now())?
             .pending_inputs
             .iter()
             .any(|input| match input {

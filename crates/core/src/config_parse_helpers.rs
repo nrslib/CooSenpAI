@@ -279,6 +279,7 @@ pub(super) fn parse_audio(
             "mic",
             "microphoneCommandsEnabled",
             "speaker",
+            "speakerDevices",
             "speakerIdentification",
             "debugDumpDir",
         ],
@@ -306,9 +307,55 @@ pub(super) fn parse_audio(
             issues,
         ),
         speaker: boolean(object, "speaker", true, "audio.speaker", issues),
+        speaker_devices: parse_speaker_devices(object, issues),
         speaker_identification,
         debug_dump_dir: optional_string(object, "debugDumpDir", "audio.debugDumpDir", issues),
     }
+}
+
+fn parse_speaker_devices(
+    object: &Map<String, Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> Vec<String> {
+    let Some(value) = object.get("speakerDevices") else {
+        return Vec::new();
+    };
+    let Value::Array(values) = value else {
+        issues.push(issue(
+            "audio.speakerDevices",
+            "出力デバイス UID の配列で指定してください。",
+        ));
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for value in values {
+        match value.as_str() {
+            Some(uid)
+                if uid.trim().is_empty()
+                    || uid.len() > 512
+                    || uid.chars().any(char::is_control) =>
+            {
+                issues.push(issue(
+                    "audio.speakerDevices",
+                    "各 UID は制御文字を含まない1以上512 byteの文字列で指定してください。",
+                ));
+            }
+            Some(uid) if seen.insert(uid) => result.push(uid.to_owned()),
+            Some(_) => {}
+            None => issues.push(issue(
+                "audio.speakerDevices",
+                "出力デバイス UID の配列で指定してください。",
+            )),
+        }
+    }
+    if result.len() > 32 {
+        issues.push(issue(
+            "audio.speakerDevices",
+            "出力デバイスは32台以下で指定してください。",
+        ));
+    }
+    result
 }
 
 fn parse_speaker_identification(

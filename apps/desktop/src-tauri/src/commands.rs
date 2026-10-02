@@ -144,6 +144,7 @@ pub(super) enum CommandOrigin {
     SpeechPopup,
     ModelPopup,
     Details,
+    BrainActivity,
     Avatar,
 }
 
@@ -155,6 +156,7 @@ pub(crate) fn authorize(label: &str, required: CommandOrigin) -> Result<(), Stri
         "speech-popup" => CommandOrigin::SpeechPopup,
         "model-popup" => CommandOrigin::ModelPopup,
         "details" => CommandOrigin::Details,
+        "brain-activity" => CommandOrigin::BrainActivity,
         "avatar" => CommandOrigin::Avatar,
         _ => return Err(text(TextKey::CommandWindowNotAllowed, Locale::Ja).to_owned()),
     };
