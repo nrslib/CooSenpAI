@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useLayoutEffect, useState, type ReactElement } from "react";
 
 import type { ThoughtWindowView } from "../app-view.js";
 import { ThoughtBubble } from "../components/ThoughtBubble.js";
@@ -18,6 +18,10 @@ export function ThoughtWindow(): ReactElement {
     void thought.ready.then(() => desktopApi.ready());
     return thought.dispose;
   }, []);
+
+  useLayoutEffect(() => {
+    if (view !== undefined) void desktopApi.thoughtRendered(view.generation);
+  }, [view?.generation]);
 
   return <I18nProvider locale={view?.language ?? "ja"}>
     <div className="thought-window">

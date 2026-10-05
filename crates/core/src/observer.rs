@@ -503,8 +503,40 @@ impl ObserverAgent {
     }
 
     fn load_previous_observation(&mut self, paths: &ConfigPaths) {
-        self.previous = read_latest_observation(paths, self.limits);
+        let since = crate::companion_storage::CompanionStorage::from_paths(paths, 1)
+            .load_cursor()
+            .ok()
+            .map(|cursor| cursor.watch_context_since);
+        self.previous = since.and_then(|since| {
+            read_latest_observation(paths, self.limits).filter(|value| {
+                value.get("kind").and_then(Value::as_str) == Some("audio")
+                    || since.is_none_or(|since| {
+                        value
+                            .get("createdAt")
+                            .and_then(Value::as_str)
+                            .and_then(|created| DateTime::parse_from_rfc3339(created).ok())
+                            .is_some_and(|created| created.with_timezone(&Utc) > since)
+                    })
+            })
+        });
         self.previous_loaded = true;
+    }
+
+    pub(crate) fn invalidate_previous_watch_context(&mut self) {
+        self.previous = None;
+        self.previous_loaded = true;
+        self.reset_session();
+    }
+
+    pub(crate) fn persist_watch_context_cutoff(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<(), ObserverError> {
+        if let Some(paths) = &self.observation_paths {
+            crate::companion_storage::CompanionStorage::from_paths(paths, 1)
+                .invalidate_watch_context(since)?;
+        }
+        Ok(())
     }
 
     pub fn with_mailbox(mut self, mailbox: Mailbox) -> Self {

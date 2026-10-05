@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use block2::RcBlock;
+use coosenpai_core::config::CaptureAllowlist;
 use coosenpai_core::ports::{PortError, RuntimeLogger};
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
@@ -11,11 +12,12 @@ use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGDirectDisplayID, CGDisplayBounds, CGError,
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace, CGContext,
+    CGDirectDisplayID, CGDisplayBounds, CGDisplayPixelsHigh, CGDisplayPixelsWide, CGError,
     CGGetActiveDisplayList, CGImage, CGImageAlphaInfo, CGRectNull, CGWindowID, CGWindowImageOption,
     CGWindowListOption,
 };
-use objc2_foundation::{NSDictionary, NSError, NSInteger};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSInteger};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
     SCStreamErrorCode, SCStreamErrorDomain,
@@ -105,6 +107,7 @@ pub(crate) fn capture_watch_png(
     target: CaptureTarget,
     cancellation: &CancellationToken,
     logger: Option<Arc<dyn RuntimeLogger>>,
+    allowlist: &CaptureAllowlist,
 ) -> Result<Vec<u8>> {
     let log = CaptureLog::new(
         logger,
@@ -114,12 +117,26 @@ pub(crate) fn capture_watch_png(
             "fullscreen"
         },
     );
-    let image = capture_target(target, cancellation, log.clone())?;
-    encode_watch_png(image, cancellation, &log)
+    let image = if allowlist.enabled {
+        match target {
+            CaptureTarget::Display(display_id) => {
+                capture_allowed_display(display_id, allowlist, cancellation, log.clone())?
+            }
+            CaptureTarget::Window(_) => {
+                anyhow::bail!("許可リスト付きのウィンドウ撮影経路がありません")
+            }
+        }
+    } else {
+        capture_target(target, cancellation, log.clone())?
+    };
+    let png = encode_watch_png(image, cancellation, &log)?;
+    log.mask_succeeded();
+    Ok(png)
 }
 
 pub(crate) fn capture_application_watch_pngs(
     window_ids: &[CGWindowID],
+    expected_bundle_id: Option<&str>,
     cancellation: &CancellationToken,
     logger: Option<Arc<dyn RuntimeLogger>>,
 ) -> Result<Vec<Vec<u8>>> {
@@ -127,23 +144,31 @@ pub(crate) fn capture_application_watch_pngs(
         return Ok(Vec::new());
     }
     let log = CaptureLog::new(logger, "application");
-    let images = capture_application_targets(window_ids, cancellation, log.clone())
-        .map_err(CaptureError::into_error)?;
-    images
+    let images =
+        capture_application_targets(window_ids, expected_bundle_id, cancellation, log.clone())
+            .map_err(CaptureError::into_error)?;
+    let pngs = images
         .into_iter()
         .map(|image| encode_watch_png(image, cancellation, &log))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    log.mask_succeeded();
+    Ok(pngs)
 }
 
 #[derive(Clone)]
 struct CaptureLog {
     logger: Option<Arc<dyn RuntimeLogger>>,
     target: &'static str,
+    mask_counts: Arc<Mutex<Option<(usize, usize)>>>,
 }
 
 impl CaptureLog {
     fn new(logger: Option<Arc<dyn RuntimeLogger>>, target: &'static str) -> Self {
-        Self { logger, target }
+        Self {
+            logger,
+            target,
+            mask_counts: Arc::new(Mutex::new(None)),
+        }
     }
 
     fn stage(&self, stage: &str, mode: &str, elapsed: Duration, success: bool) {
@@ -158,6 +183,216 @@ impl CaptureLog {
             );
         }
     }
+
+    fn mask_succeeded(&self) {
+        let counts = *self.mask_counts.lock().expect("capture mask counts");
+        if let (Some(logger), Some((allowed, excluded))) = (&self.logger, counts) {
+            let _ = logger.write(
+                "INFO",
+                &format!("撮影許可: allowed-windows={allowed} excluded-windows={excluded}"),
+            );
+        }
+    }
+}
+
+fn capture_allowed_display(
+    display_id: CGDirectDisplayID,
+    allowlist: &CaptureAllowlist,
+    cancellation: &CancellationToken,
+    log: CaptureLog,
+) -> Result<CFRetained<CGImage>> {
+    anyhow::ensure!(
+        !allowlist.apps.is_empty(),
+        "撮影許可リストが空のため撮影を停止しました"
+    );
+    anyhow::ensure!(
+        screenshot_manager_available(),
+        "許可リスト撮影には macOS 14 以降が必要です"
+    );
+    check_cancellation(cancellation).map_err(CaptureError::into_error)?;
+    let flight = acquire_capture_flight(&CAPTURE_FLIGHT, cancellation, SCK_CAPTURE_TIMEOUT)
+        .map_err(CaptureError::into_error)?;
+    let ids = allowlist
+        .apps
+        .iter()
+        .map(|app| app.bundle_id.clone())
+        .collect::<Vec<_>>();
+    capture_with_retry(cancellation, || {
+        capture_allowed_display_once(display_id, &ids, cancellation, flight.clone(), log.clone())
+    })
+    .map_err(CaptureError::into_error)
+}
+
+fn capture_allowed_display_once(
+    display_id: CGDirectDisplayID,
+    bundle_ids: &[String],
+    cancellation: &CancellationToken,
+    flight: Arc<OwnedSemaphorePermit>,
+    log: CaptureLog,
+) -> Result<CFRetained<CGImage>, CaptureError> {
+    let (tx, rx) = mpsc::channel();
+    let ids = bundle_ids.to_vec();
+    let callback_cancellation = cancellation.clone();
+    let content_started = Instant::now();
+    let block = RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut NSError| {
+            let _flight = flight.clone();
+            let result = start_allowed_display_capture(
+                content,
+                error,
+                display_id,
+                &ids,
+                tx.clone(),
+                &callback_cancellation,
+                flight.clone(),
+                log.clone(),
+            );
+            log.stage(
+                "content",
+                "allowed-window-list",
+                content_started.elapsed(),
+                result.is_ok(),
+            );
+            if let Err(error) = result {
+                let _ = tx.send(Err(error));
+            }
+        },
+    );
+    // SAFETY: ScreenCaptureKit retains and calls the block with live objects.
+    // Finder を許可してもデスクトップ面は撮影対象に含めない。
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(true, true, &block);
+    }
+    await_sck_reply(&rx, SCK_CAPTURE_TIMEOUT, cancellation)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_allowed_display_capture(
+    content: *mut SCShareableContent,
+    error: *mut NSError,
+    display_id: CGDirectDisplayID,
+    bundle_ids: &[String],
+    tx: mpsc::Sender<SckReply>,
+    cancellation: &CancellationToken,
+    flight: Arc<OwnedSemaphorePermit>,
+    log: CaptureLog,
+) -> Result<(), CaptureError> {
+    check_cancellation(cancellation)?;
+    if let Some(error) = NonNull::new(error) {
+        // SAFETY: NSError is live for this callback.
+        return Err(CaptureError::from_nserror(unsafe { error.as_ref() }));
+    }
+    let content = NonNull::new(content).ok_or(CaptureError::NoResult)?;
+    // SAFETY: the callback owns the shareable content for its duration.
+    let content = unsafe { content.as_ref() };
+    let display = unsafe { content.displays() }
+        .iter()
+        .find(|display| unsafe { display.displayID() } == display_id)
+        .ok_or(CaptureError::InvalidMode)?;
+    let display_frame = unsafe { display.frame() };
+    let windows = unsafe { content.windows() };
+    let mut allowed = Vec::new();
+    let mut excluded = 0;
+    for window in windows.iter() {
+        if !rectangles_overlap(unsafe { window.frame() }, display_frame) {
+            continue;
+        }
+        let owner = unsafe { window.owningApplication() };
+        let permitted = owner.as_ref().is_some_and(|owner| {
+            let bundle = unsafe { owner.bundleIdentifier() };
+            allowed_window_owner(
+                &bundle.to_string(),
+                unsafe { owner.processID() },
+                std::process::id() as i32,
+                bundle_ids,
+            )
+        });
+        if permitted {
+            allowed.push(window);
+        } else {
+            excluded += 1;
+        }
+    }
+    *log.mask_counts.lock().expect("capture mask counts") = Some((allowed.len(), excluded));
+    if allowed.is_empty() {
+        let image = opaque_black_image(
+            CGDisplayPixelsWide(display_id),
+            CGDisplayPixelsHigh(display_id),
+        )?;
+        let _ = tx.send(Ok(image));
+        return Ok(());
+    }
+    let included = NSArray::from_retained_slice(&allowed);
+    // SAFETY: the display and windows belong to the current shareable-content snapshot.
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_includingWindows(
+            SCContentFilter::alloc(),
+            &display,
+            &included,
+        )
+    };
+    let bounds = unsafe { filter.contentRect() };
+    let scale = unsafe { filter.pointPixelScale() } as f64;
+    let (width, height) = window_pixel_size(bounds, scale)?;
+    let configuration = unsafe { SCStreamConfiguration::new() };
+    let black = CGColor::new_generic_rgb(0.0, 0.0, 0.0, 1.0);
+    unsafe {
+        configuration.setWidth(width);
+        configuration.setHeight(height);
+        configuration.setShowsCursor(false);
+        configuration.setBackgroundColor(&black);
+    }
+    let block =
+        capture_completion_with_background(tx, flight, log, "allowlist-filter", Some(black));
+    // SAFETY: live filter and configuration; ScreenCaptureKit retains the completion block.
+    unsafe {
+        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+            &filter,
+            &configuration,
+            Some(&block),
+        );
+    }
+    Ok(())
+}
+
+fn opaque_black_image(width: usize, height: usize) -> Result<CFRetained<CGImage>, CaptureError> {
+    if width == 0 || height == 0 {
+        return Err(CaptureError::InvalidMode);
+    }
+    let row_bytes = width.checked_mul(4).ok_or(CaptureError::InvalidMode)?;
+    let length = row_bytes
+        .checked_mul(height)
+        .ok_or(CaptureError::InvalidMode)?;
+    let mut pixels = vec![0_u8; length];
+    for alpha in pixels[3..].iter_mut().step_by(4) {
+        *alpha = 255;
+    }
+    let color_space = CGColorSpace::new_device_rgb().ok_or(CaptureError::NoResult)?;
+    // SAFETY: the RGBA backing store remains live through image creation.
+    let context = unsafe {
+        CGBitmapContextCreate(
+            pixels.as_mut_ptr().cast(),
+            width,
+            height,
+            8,
+            row_bytes,
+            Some(&color_space),
+            CGImageAlphaInfo::PremultipliedLast.0,
+        )
+    }
+    .ok_or(CaptureError::NoResult)?;
+    CGBitmapContextCreateImage(Some(&context)).ok_or(CaptureError::NoResult)
+}
+
+fn allowed_window_owner(bundle_id: &str, pid: i32, own_pid: i32, bundle_ids: &[String]) -> bool {
+    pid != own_pid && bundle_ids.iter().any(|id| id == bundle_id)
+}
+
+fn rectangles_overlap(left: CGRect, right: CGRect) -> bool {
+    left.origin.x < right.origin.x + right.size.width
+        && right.origin.x < left.origin.x + left.size.width
+        && left.origin.y < right.origin.y + right.size.height
+        && right.origin.y < left.origin.y + left.size.height
 }
 
 fn capture_target(
@@ -195,6 +430,7 @@ fn capture_target(
 
 fn capture_application_targets(
     window_ids: &[CGWindowID],
+    expected_bundle_id: Option<&str>,
     cancellation: &CancellationToken,
     log: CaptureLog,
 ) -> Result<Vec<CFRetained<CGImage>>, CaptureError> {
@@ -206,6 +442,7 @@ fn capture_application_targets(
         capture_with_retry(cancellation, || {
             capture_application_with_screenshot_kit(
                 window_ids,
+                expected_bundle_id,
                 cancellation,
                 flight.clone(),
                 log.clone(),
@@ -324,7 +561,7 @@ fn capture_backend<T>(
     }
 }
 
-fn screenshot_manager_available() -> bool {
+pub(crate) fn screenshot_manager_available() -> bool {
     AnyClass::get(c"SCScreenshotManager").is_some()
 }
 
@@ -472,6 +709,7 @@ fn capture_once_with_screenshot_kit(
 
 fn capture_application_with_screenshot_kit(
     window_ids: &[CGWindowID],
+    expected_bundle_id: Option<&str>,
     cancellation: &CancellationToken,
     flight: Arc<OwnedSemaphorePermit>,
     log: CaptureLog,
@@ -480,6 +718,7 @@ fn capture_application_with_screenshot_kit(
     let callback_cancellation = cancellation.clone();
     let callback_flight = flight.clone();
     let callback_window_ids = window_ids.to_owned();
+    let callback_bundle_id = expected_bundle_id.map(str::to_owned);
     let (tx, rx) = mpsc::channel();
     let block = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -489,8 +728,12 @@ fn capture_application_with_screenshot_kit(
                 let _ = tx.send(Err(error));
                 return;
             }
-            let requests =
-                prepare_application_capture_requests(content, error, &callback_window_ids);
+            let requests = prepare_application_capture_requests(
+                content,
+                error,
+                &callback_window_ids,
+                callback_bundle_id.as_deref(),
+            );
             log.stage(
                 "content",
                 "window-list",
@@ -504,6 +747,11 @@ fn capture_application_with_screenshot_kit(
                     return;
                 }
             };
+            if callback_bundle_id.is_some() {
+                let total = unsafe { content.windows() }.len();
+                *log.mask_counts.lock().expect("capture mask counts") =
+                    Some((requests.len(), total.saturating_sub(requests.len())));
+            }
             // Keep the existing shared ownership contract for framework-retained callbacks.
             #[allow(clippy::arc_with_non_send_sync)]
             let state = Arc::new(Mutex::new(SckApplicationCaptureSequence {
@@ -549,6 +797,7 @@ fn prepare_application_capture_requests(
     content: *mut SCShareableContent,
     error: *mut NSError,
     window_ids: &[CGWindowID],
+    expected_bundle_id: Option<&str>,
 ) -> Result<
     (
         Retained<SCShareableContent>,
@@ -569,7 +818,8 @@ fn prepare_application_capture_requests(
     let requests = window_ids
         .iter()
         .map(|window_id| {
-            let (filter, pixel_width, pixel_height) = capture_filter(content_ref, *window_id)?;
+            let (filter, pixel_width, pixel_height) =
+                capture_filter(content_ref, *window_id, expected_bundle_id)?;
             // SAFETY: SCStreamConfiguration is a plain NSObject with no thread affinity.
             let configuration = unsafe { SCStreamConfiguration::new() };
             // SAFETY: setters on a live configuration object with in-range pixel dimensions.
@@ -701,7 +951,7 @@ fn start_capture(
     let content = NonNull::new(content).ok_or(CaptureError::NoResult)?;
     // SAFETY: the framework passes a valid SCShareableContent for the duration of the handler.
     let content = unsafe { content.as_ref() };
-    let (filter, pixel_width, pixel_height) = capture_filter(content, window_id)?;
+    let (filter, pixel_width, pixel_height) = capture_filter(content, window_id, None)?;
     // SAFETY: SCStreamConfiguration is a plain NSObject with no thread affinity.
     let configuration = unsafe { SCStreamConfiguration::new() };
     // SAFETY: setters on a live configuration object with in-range pixel dimensions.
@@ -749,9 +999,20 @@ fn capture_completion(
     log: CaptureLog,
     mode: &'static str,
 ) -> RcBlock<dyn Fn(*mut CGImage, *mut NSError)> {
+    capture_completion_with_background(tx, flight, log, mode, None)
+}
+
+fn capture_completion_with_background(
+    tx: mpsc::Sender<SckReply>,
+    flight: Arc<OwnedSemaphorePermit>,
+    log: CaptureLog,
+    mode: &'static str,
+    background: Option<CFRetained<CGColor>>,
+) -> RcBlock<dyn Fn(*mut CGImage, *mut NSError)> {
     let started = Instant::now();
     let flight = Mutex::new(Some(flight));
     RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+        let _background = &background;
         // タイムアウトや取消後も OS の完了まで保持し、block の保管期間には依存しない。
         let _flight = flight.lock().expect("capture flight").take();
         let reply = if let Some(image) = NonNull::new(image) {
@@ -772,6 +1033,7 @@ fn capture_completion(
 fn capture_filter(
     content: &SCShareableContent,
     window_id: CGWindowID,
+    expected_bundle_id: Option<&str>,
 ) -> Result<(Retained<SCContentFilter>, usize, usize), CaptureError> {
     // SAFETY: windows are from the current shareable-content snapshot.
     let windows = unsafe { content.windows() };
@@ -779,6 +1041,14 @@ fn capture_filter(
         .iter()
         .find(|window| unsafe { window.windowID() } == window_id)
         .ok_or(CaptureError::WindowNotFound)?;
+    if expected_bundle_id.is_some_and(|expected| {
+        unsafe { window.owningApplication() }.is_none_or(|owner| {
+            unsafe { owner.bundleIdentifier() }.to_string() != expected
+                || unsafe { owner.processID() } == std::process::id() as i32
+        })
+    }) {
+        return Err(CaptureError::WindowNotFound);
+    }
     let filter = unsafe {
         SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)
     };

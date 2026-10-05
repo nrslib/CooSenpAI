@@ -924,6 +924,9 @@ async fn request_with_deadline(
             "判断役の{operation}が timeout しました"
         )));
     }
+    if cancellation.is_cancelled() {
+        return Err(JudgeError::Cancelled);
+    }
     tokio::time::timeout_at(deadline, transport.request(request, timeout, cancellation))
         .await
         .map_err(|_| JudgeError::Process(format!("判断役の{operation}が timeout しました")))?

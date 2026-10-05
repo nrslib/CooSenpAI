@@ -1,7 +1,14 @@
 use tauri::{PhysicalPosition, WebviewWindow};
 
 pub(crate) const THOUGHT_WIDTH_LOGICAL: f64 = 340.0;
+const THOUGHT_HEIGHT_LOGICAL: f64 = 300.0;
 const GAP_LOGICAL: f64 = 8.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MainControls {
+    pub top: f64,
+    pub bottom: f64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScreenPoint {
@@ -19,6 +26,7 @@ pub(crate) struct ScreenRect {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MainWindowGeometry {
     pub main: ScreenRect,
+    pub content_top: i32,
     pub work_area: ScreenRect,
     pub scale_factor: f64,
 }
@@ -53,6 +61,7 @@ pub(crate) fn main_geometry<R: tauri::Runtime>(
             .map_err(|error| error.to_string())?)
         .ok_or_else(|| "メインウィンドウの配置先ディスプレイがありません".to_owned())?;
     let main_position = window.outer_position().map_err(|error| error.to_string())?;
+    let content_position = window.inner_position().map_err(|error| error.to_string())?;
     let main_size = window.outer_size().map_err(|error| error.to_string())?;
     let work_area = monitor.work_area();
 
@@ -65,6 +74,7 @@ pub(crate) fn main_geometry<R: tauri::Runtime>(
             width: main_size.width,
             height: main_size.height,
         },
+        content_top: content_position.y,
         work_area: ScreenRect {
             origin: ScreenPoint {
                 x: work_area.position.x,
@@ -96,26 +106,62 @@ pub(crate) fn is_on_active_space<R: tauri::Runtime>(
     }
 }
 
-pub(crate) fn target_placement(geometry: MainWindowGeometry) -> ThoughtPlacement {
+pub(crate) fn target_placement(
+    geometry: MainWindowGeometry,
+    controls: Option<MainControls>,
+) -> Option<ThoughtPlacement> {
     let scale = valid_scale(geometry.scale_factor);
     let thought_width = logical_to_physical(THOUGHT_WIDTH_LOGICAL, scale);
+    let thought_height = logical_to_physical(THOUGHT_HEIGHT_LOGICAL, scale);
     let gap = logical_to_physical(GAP_LOGICAL, scale);
+    let main_left = i64::from(geometry.main.origin.x);
+    let main_top = i64::from(geometry.main.origin.y);
     let main_right = i64::from(geometry.main.origin.x) + i64::from(geometry.main.width);
-    let side_x = main_right + gap;
+    let main_bottom = main_top + i64::from(geometry.main.height);
+    let work_left = i64::from(geometry.work_area.origin.x);
+    let work_top = i64::from(geometry.work_area.origin.y);
     let work_area_right =
         i64::from(geometry.work_area.origin.x) + i64::from(geometry.work_area.width);
-    let side_fits = side_x + thought_width <= work_area_right;
+    let work_bottom = work_top + i64::from(geometry.work_area.height);
+    if work_area_right - work_left < thought_width || work_bottom - work_top < thought_height {
+        return None;
+    }
 
-    let (x, bubble_tail) = if side_fits {
-        (side_x, true)
-    } else {
-        (main_right - thought_width, false)
-    };
+    let side_y = main_top.clamp(work_top, work_bottom - thought_height);
+    let right_x = main_right + gap;
+    if right_x >= work_left && right_x + thought_width <= work_area_right {
+        return Some(placement(right_x, side_y, true));
+    }
+    let left_x = main_left - gap - thought_width;
+    if left_x >= work_left && left_x + thought_width <= work_area_right {
+        return Some(placement(left_x, side_y, false));
+    }
 
+    let top_y = main_top - gap - thought_height;
+    let top_x = (main_right - thought_width).clamp(work_left, work_area_right - thought_width);
+    if top_y >= work_top && top_y + thought_height <= work_bottom {
+        return Some(placement(top_x, top_y, false));
+    }
+
+    // 実測値が届くまで内側は使わない。操作部品の高さを推測するとクリックを妨げる。
+    let controls = controls?;
+    let safe_top = i64::from(geometry.content_top) + (controls.top * scale).ceil() as i64;
+    let safe_bottom = i64::from(geometry.content_top) + (controls.bottom * scale).floor() as i64;
+    let inner_left = main_left.max(work_left);
+    let inner_right = main_right.min(work_area_right);
+    let inner_top = safe_top.max(main_top).max(work_top);
+    let inner_bottom = safe_bottom.min(main_bottom).min(work_bottom);
+    if inner_right - inner_left < thought_width || inner_bottom - inner_top < thought_height {
+        return None;
+    }
+    Some(placement(inner_right - thought_width, inner_top, false))
+}
+
+fn placement(x: i64, y: i64, bubble_tail: bool) -> ThoughtPlacement {
     ThoughtPlacement {
         position: ScreenPoint {
             x: clamp_coordinate(x),
-            y: geometry.main.origin.y,
+            y: clamp_coordinate(y),
         },
         bubble_tail,
     }

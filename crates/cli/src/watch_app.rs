@@ -176,6 +176,7 @@ async fn capture_application(
     target: &mut ApplicationWatchState,
     watch: &mut WatchState,
 ) -> Result<CaptureDisposition> {
+    let scope_generation = environment.runtime.watch_scope_generation();
     let directory = tempfile::tempdir()?;
     let focus_task = config.watch.focus_element.then(|| {
         let focus_element = environment.focus_element.clone();
@@ -197,6 +198,7 @@ async fn capture_application(
             &application.bundle_id,
             &source_directory,
             config.watch.app_window_limit,
+            &config.capture.allowlist,
             environment.cancellation.clone(),
         )
         .await?;
@@ -230,13 +232,13 @@ async fn capture_application(
     let mut debug_frames = Vec::new();
     for prepared_frame in prepared.frames {
         let frame = prepared_frame.observation_frame(
-            environment.runtime.watch_scope_generation(),
+            scope_generation,
             captured_at,
             captured_at_instant
                 .duration_since(watch.window_start)
                 .as_secs_f64(),
             trigger,
-            front_app.clone(),
+            config.capture.allowlist.redact_front_app(front_app.clone()),
             application.name.clone(),
             frame_target.clone(),
             focus.clone(),
@@ -315,7 +317,7 @@ async fn capture_application(
                 frame.context_id.clone(),
                 captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 trigger,
-                front_app.clone(),
+                frame.front_app.clone(),
                 Some(application.name.clone()),
                 frame.target.clone(),
                 frame.ocr_text.clone(),
@@ -378,6 +380,9 @@ async fn capture_application(
         watch
             .publication
             .publish_batch_with_directories(directories, |locks| -> Result<()> {
+                let _scope_guard = environment
+                    .runtime
+                    .lock_current_watch_scope(scope_generation)?;
                 publication_started = true;
                 let result = (|| {
                     debug_batch.publish(locks)?;

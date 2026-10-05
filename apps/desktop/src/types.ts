@@ -58,6 +58,7 @@ export interface CooSenpaiConfig {
     readonly battery: { readonly enabled: boolean; readonly multiplier: number };
     readonly ocrGate: { readonly enabled: boolean; readonly level: "fast" | "accurate"; readonly timeoutMs: number; readonly executable?: string | null };
   };
+  readonly capture: { readonly allowlist: { readonly enabled: boolean; readonly apps: readonly CaptureAllowedApp[] } };
   readonly audio: {
     readonly enabled: boolean;
     readonly mic: boolean;
@@ -861,6 +862,7 @@ export type IpcResult<T> =
   | { readonly ok: true; readonly value: T; readonly issues?: readonly ConfigIssue[] }
   | { readonly ok: false; readonly error: { readonly message: string; readonly issues?: readonly ConfigIssue[] } };
 export type ConfigPatch = Record<string, unknown>;
+export interface CaptureAllowedApp { readonly bundleId: string; readonly name: string }
 
 export interface SpeakerManagementPayload {
   readonly operation: "merge" | "undoMerge" | "reregister" | "delete" | "deleteAll";

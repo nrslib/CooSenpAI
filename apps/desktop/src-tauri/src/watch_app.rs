@@ -109,6 +109,7 @@ impl ApplicationWatchSet {
         ocr: &dyn OcrPort,
         semaphore: &Arc<Semaphore>,
         memory: &mut WatchMemory,
+        scope_generation: u64,
         generation: u64,
         cancellation: CancellationToken,
     ) -> Result<()> {
@@ -188,6 +189,7 @@ impl ApplicationWatchSet {
                 semaphore,
                 target,
                 memory,
+                scope_generation,
                 generation,
                 cancellation.clone(),
             )
@@ -230,6 +232,7 @@ async fn capture_application(
     semaphore: &Arc<Semaphore>,
     target: &mut ApplicationWatchState,
     memory: &mut WatchMemory,
+    scope_generation: u64,
     generation: u64,
     cancellation: CancellationToken,
 ) -> Result<(CaptureDisposition, Option<String>, usize, Option<String>)> {
@@ -237,7 +240,6 @@ async fn capture_application(
         .publish_watch_view(generation, WatchResult::CaptureStarted)
         .await;
     let runtime = state.core_runtime();
-    let scope_generation = runtime.watch_scope_generation();
     let user_input_sequence = runtime.user_input_sequence();
     ensure_capture_active(&cancellation)?;
     let directory = tempfile::tempdir()?;
@@ -265,6 +267,7 @@ async fn capture_application(
             &application.bundle_id,
             &source_directory,
             config.watch.app_window_limit,
+            &config.capture.allowlist,
             cancellation.clone(),
         )
         .await
@@ -307,7 +310,10 @@ async fn capture_application(
                 .duration_since(memory.window_start)
                 .as_secs_f64(),
             trigger,
-            memory.front_app.clone(),
+            config
+                .capture
+                .allowlist
+                .redact_front_app(memory.front_app.clone()),
             application.name.clone(),
             frame_target.clone(),
             focus.clone(),
@@ -493,7 +499,7 @@ async fn capture_application(
                 frame.context_id.clone(),
                 captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 trigger,
-                memory.front_app.clone(),
+                frame.front_app.clone(),
                 Some(application.name.clone()),
                 frame.target.clone(),
                 frame.ocr_text.clone(),
@@ -557,7 +563,6 @@ async fn capture_application(
     let mut queued_capture = Some((
         frame_target.clone(),
         scope_generation,
-        config.revision,
         user_input_sequence,
         frames,
         directory,
@@ -567,6 +572,7 @@ async fn capture_application(
         memory
             .publication
             .publish_batch_with_directories(directories, |locks| -> Result<()> {
+                let _scope_guard = runtime.lock_current_watch_scope(scope_generation)?;
                 publication_started = true;
                 let result = (|| {
                     debug_batch.publish(locks)?;
@@ -620,19 +626,13 @@ async fn capture_application(
             pending_change.as_mut(),
         ));
     }
-    if let Some((
-        target,
-        scope_generation,
-        config_revision,
-        user_input_sequence,
-        frames,
-        directory,
-    )) = queued_capture.take()
+    if let Some((target, scope_generation, user_input_sequence, frames, directory)) =
+        queued_capture.take()
     {
         memory.enqueue_capture_set(PendingCaptureSetInput {
             target,
             scope_generation,
-            config_revision,
+            config: config.clone(),
             user_input_sequence,
             frames,
             directory,

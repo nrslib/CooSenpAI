@@ -14,6 +14,9 @@ use tauri::{App, AppHandle, LogicalPosition, Manager, Runtime, WindowEvent};
 
 #[path = "windows_brain_activity.rs"]
 mod brain_activity;
+#[cfg(target_os = "macos")]
+#[path = "windows_bubble_tracking.rs"]
+mod bubble_tracking;
 #[path = "windows_tray.rs"]
 mod tray;
 pub(crate) use brain_activity::{ensure_brain_activity_window, show_brain_activity};
@@ -70,7 +73,9 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
     });
     bubble.set_focusable(true)?;
     bubble.set_visible_on_all_workspaces(true)?;
+    configure_bubble_nonactivating_panel(&bubble)?;
     configure_full_screen_space_behavior(&bubble)?;
+    configure_bubble_mouse_tracking(&bubble)?;
     bubble.set_ignore_cursor_events(true)?;
     crate::window_bubble::position(&bubble)?;
     let thought = create_thought_window(app)?;
@@ -345,6 +350,34 @@ pub(crate) fn create_bubble_window(app: &App) -> tauri::Result<tauri::WebviewWin
             }
         })
         .build()
+}
+
+#[cfg(target_os = "macos")]
+fn configure_bubble_nonactivating_panel(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use objc2_app_kit::NSPanel;
+
+    let native_window = window.ns_window()?;
+    crate::platform::convert_to_nonactivating_panel(native_window)
+        .map_err(|error| tauri::Error::Io(std::io::Error::other(error)))?;
+    // SAFETY: convert_to_nonactivating_panel replaces the native class with an NSPanel subclass.
+    let panel: &NSPanel = unsafe { &*native_window.cast() };
+    panel.setBecomesKeyOnlyIfNeeded(true);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_bubble_nonactivating_panel(_window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_bubble_mouse_tracking(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    bubble_tracking::configure(window)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_bubble_mouse_tracking(_window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    Ok(())
 }
 
 pub(crate) fn create_thought_window(app: &App) -> tauri::Result<tauri::WebviewWindow> {

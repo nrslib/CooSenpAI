@@ -307,6 +307,23 @@ impl UserMessagePreparer {
                         cursor.user_dispatch = None;
                     }
                 }
+                if let Some(next) = cursor
+                    .pending_inputs
+                    .iter_mut()
+                    .filter_map(|pending| match pending {
+                        PendingInput::UserMessage(message)
+                            if !message.is_terminal()
+                                && message.tutorial_response_key.is_none() =>
+                        {
+                            Some(message)
+                        }
+                        _ => None,
+                    })
+                    .min_by_key(|message| message.user_seq)
+                {
+                    let conversation = storage.load_all_conversation()?;
+                    next.attach_interrupted_inputs(&conversation, &cursor.cancelled_input_ids);
+                }
                 Ok(false)
             })?;
             if commit_started {

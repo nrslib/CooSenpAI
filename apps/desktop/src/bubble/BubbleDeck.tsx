@@ -9,11 +9,11 @@ interface Props {
   readonly snapshot: BubbleSnapshot;
   readonly controls: BubbleControlsView;
   readonly typing?: { id: string; revealed: number | null };
-  readonly onHover: (id: string, hovering: boolean) => void;
+  readonly hoveredId: string | null;
   readonly onEvent: (event: BubbleViewInput) => void;
 }
 
-export function BubbleDeck({ snapshot, controls, typing, onHover, onEvent }: Props): ReactElement {
+export function BubbleDeck({ snapshot, controls, typing, hoveredId, onEvent }: Props): ReactElement {
   const faceRef = useRef<HTMLDivElement>(null);
   const { t } = useI18n();
   const record = controls.record;
@@ -28,7 +28,7 @@ export function BubbleDeck({ snapshot, controls, typing, onHover, onEvent }: Pro
     <div className="deck-face" ref={faceRef}>
       {record === null ? null : <Bubble key={record.id} record={record} controls={controls}
         revealed={typing?.id === record.id ? typing.revealed : null} avatarColor={snapshot.avatarColor} avatarImage={snapshot.avatarImagePng}
-        exiting={controls.exiting} reading={controls.reading} onHover={(hovering) => onHover(record.id, hovering)} onEvent={onEvent} />}
+        exiting={controls.exiting} reading={controls.reading} hovered={hoveredId === record.id} onEvent={onEvent} />}
     </div>
     {controls.showLatest ? <button className="deck-latest" type="button" onClick={() => onEvent({ type: "navigate", direction: "latest" })}>{t("bubble.latestCard")}</button> : null}
   </section>;

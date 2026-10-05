@@ -9,6 +9,27 @@ const RECENT_WINDOW_MINUTES: i64 = 10;
 const RECENT_LIMIT: usize = 10;
 const RECENT_MAX_BYTES: usize = 16 * 1024;
 
+pub(crate) fn observation_is_current(
+    observation: &ObservationRecord,
+    since: Option<DateTime<Utc>>,
+) -> bool {
+    observation.is_audio()
+        || since.is_none_or(|since| {
+            DateTime::parse_from_rfc3339(observation.created_at())
+                .is_ok_and(|created| created.with_timezone(&Utc) > since)
+        })
+}
+
+pub(crate) fn frame_context_is_current(
+    context: &crate::state::PendingFrameContext,
+    since: Option<DateTime<Utc>>,
+) -> bool {
+    since.is_none_or(|since| {
+        DateTime::parse_from_rfc3339(&context.captured_at)
+            .is_ok_and(|captured| captured.with_timezone(&Utc) > since)
+    })
+}
+
 pub fn read_recent_observations(
     directory: &Path,
     now: DateTime<Utc>,

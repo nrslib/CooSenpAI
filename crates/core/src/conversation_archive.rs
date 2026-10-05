@@ -431,6 +431,7 @@ fn execute_intent(paths: &ConfigPaths, intent: &ResetIntent) -> Result<(), Persi
             emotion_updates_enabled: cursor.emotion_updates_enabled,
             companion_emotions: cursor.companion_emotions,
             emotion_epoch: cursor.emotion_epoch,
+            watch_context_since: cursor.watch_context_since,
             ..Default::default()
         };
         cursor.user_operation_generation = intent.target_user_operation_generation;

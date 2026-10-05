@@ -742,6 +742,7 @@ impl CompanionStorage {
         cursor.dispatched_interrupted_input_ids =
             scoped_cursor.dispatched_interrupted_input_ids.clone();
         cursor.pending_frame_contexts = scoped_cursor.pending_frame_contexts.clone();
+        cursor.watch_context_since = scoped_cursor.watch_context_since;
         cursor.consumed_frame_context_ids = scoped_cursor.consumed_frame_context_ids.clone();
         cursor.observation_consumptions = scoped_cursor.observation_consumptions.clone();
         cursor.turn_commit_recovery_attempts = scoped_cursor.turn_commit_recovery_attempts.clone();
@@ -1123,6 +1124,26 @@ impl CompanionStorage {
             },
             publication,
         )
+    }
+
+    pub fn invalidate_watch_context(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), PersistenceError> {
+        self.update_cursor(|cursor| {
+            cursor.watch_context_since = Some(since);
+            cursor.pending_frame_contexts.clear();
+            cursor
+                .pending
+                .retain(|pending| pending.observation.is_audio());
+            for input in &mut cursor.pending_inputs {
+                let PendingInput::UserMessage(input) = input;
+                input.observations.retain(ObservationRecord::is_audio);
+                input.pending_frames.clear();
+                input.observation_in_progress = false;
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn observation_claimed_by_user(
@@ -1600,6 +1621,7 @@ struct CursorDocument<'a> {
     pending_inputs: &'a [PendingInput],
     pending_deliveries: &'a [PendingDelivery],
     pending_frame_contexts: &'a [PendingFrameContext],
+    watch_context_since: Option<chrono::DateTime<chrono::Utc>>,
     consumed_frame_context_ids: &'a [String],
     observation_consumptions: &'a [ObservationConsumption],
     turn_commit_recovery_attempts: &'a [TurnCommitRecoveryAttempt],
@@ -1639,6 +1661,8 @@ struct RawCursorDocument {
     pending_deliveries: Vec<PendingDelivery>,
     #[serde(default)]
     pending_frame_contexts: Vec<PendingFrameContext>,
+    #[serde(default)]
+    watch_context_since: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     consumed_frame_context_ids: Vec<String>,
     #[serde(default)]
@@ -1743,6 +1767,7 @@ fn read_cursor_locked(
         pending_inputs,
         pending_deliveries: raw_pending_deliveries,
         pending_frame_contexts,
+        watch_context_since,
         consumed_frame_context_ids: raw_consumed_frame_context_ids,
         observation_consumptions,
         mut turn_commit_recovery_attempts,
@@ -1897,6 +1922,7 @@ fn read_cursor_locked(
                 pending_inputs: &pending_inputs,
                 pending_deliveries: &pending_deliveries,
                 pending_frame_contexts: &pending_frame_contexts,
+                watch_context_since,
                 consumed_frame_context_ids: &consumed_frame_context_ids,
                 observation_consumptions: &observation_consumptions,
                 turn_commit_recovery_attempts: &turn_commit_recovery_attempts,
@@ -1941,6 +1967,7 @@ fn read_cursor_locked(
         pending_inputs,
         pending_deliveries,
         pending_frame_contexts,
+        watch_context_since,
         consumed_frame_context_ids,
         observation_consumptions,
         turn_commit_recovery_attempts,
@@ -2062,6 +2089,7 @@ fn cursor_document_bytes(cursor: &CursorSnapshot) -> Result<Vec<u8>, Persistence
         pending_inputs: &cursor.pending_inputs,
         pending_deliveries: &cursor.pending_deliveries,
         pending_frame_contexts: &cursor.pending_frame_contexts,
+        watch_context_since: cursor.watch_context_since,
         consumed_frame_context_ids: &consumed_frame_context_ids,
         observation_consumptions: &cursor.observation_consumptions,
         turn_commit_recovery_attempts: &cursor.turn_commit_recovery_attempts,

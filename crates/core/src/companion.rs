@@ -457,6 +457,35 @@ impl CompanionAgent {
         self.defer_observations(observations)
     }
 
+    pub(crate) fn invalidate_watch_context(
+        &mut self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), CompanionError> {
+        if let Some(storage) = &self.storage {
+            storage.invalidate_watch_context(since)?;
+        }
+        self.pending_observations
+            .retain(ObservationRecord::is_audio);
+        for input in &mut self.pending_user_messages {
+            input.observations.retain(ObservationRecord::is_audio);
+            input.pending_frames.clear();
+            input.observation_in_progress = false;
+        }
+        let mut queue = self
+            .runtime_user_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for input in queue.iter_mut() {
+            input.observations.retain(ObservationRecord::is_audio);
+            input.pending_frames.clear();
+            input.observation_in_progress = false;
+        }
+        self.session = None;
+        self.session_calls = 0;
+        self.needs_session_context = true;
+        Ok(())
+    }
+
     pub(crate) fn user_epoch(&self) -> Result<u64, CompanionError> {
         self.storage.as_ref().map_or(Ok(0), |storage| {
             storage
@@ -621,8 +650,21 @@ impl CompanionAgent {
         let delivery_was_blocked = self.delivery_backpressure_active();
         self.deliver_outbox()?;
         self.retry_pending_remarks()?;
+        let since = self
+            .storage
+            .as_ref()
+            .map(|storage| {
+                storage
+                    .load_cursor()
+                    .map(|cursor| cursor.watch_context_since)
+            })
+            .transpose()?
+            .flatten();
         let mut queued = mem::take(&mut self.pending_observations);
         queued.extend(observations);
+        queued.retain(|observation| {
+            crate::recent_observations::observation_is_current(observation, since)
+        });
         let queued = self.exclude_user_claimed_observations(queued)?;
         let mut queued_ids = HashSet::new();
         let observations = queued

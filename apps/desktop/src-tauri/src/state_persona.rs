@@ -74,10 +74,15 @@ impl DesktopState {
         let work_mode_only = work_config_is_only_difference(&persisted_before, &staged);
         let watch_enabled_is_only_difference =
             watch_enabled_is_only_difference(&persisted_before, &staged);
+        let inactive_allowlist_is_only_difference =
+            persisted_before.inactive_allowlist_is_only_difference(&staged);
         let keymap_only = only_keymap_difference(&persisted_before, &requested);
         let audio_only = audio_config_is_only_difference(&persisted_before, &requested);
-        let requires_factory =
-            !work_mode_only && !watch_enabled_is_only_difference && !keymap_only && !audio_only;
+        let requires_factory = !work_mode_only
+            && !watch_enabled_is_only_difference
+            && !inactive_allowlist_is_only_difference
+            && !keymap_only
+            && !audio_only;
         // この permit だけは、構築中も別の音声 intent を保存・反映できる。
         let provider_update =
             permit.command() == crate::command_guard::DesktopCommand::ConfigProviderUpdate;
@@ -106,8 +111,10 @@ impl DesktopState {
             Ok(()) => (requested.clone(), Vec::new()),
             Err(message) => (staged.clone(), vec![keymap_issue(message)]),
         };
-        let saved = match save_config_candidate(
+        let watch_scope_changed = persisted_before.watch_capture_scope_changed(&config);
+        let saved = match save_config_candidate_with_watch_scope(
             &self.paths,
+            &self.runtime,
             &persisted_before,
             &config,
             &mut staged_avatar,
@@ -125,6 +132,7 @@ impl DesktopState {
         };
         let config = saved.config;
         let rollback_base = saved.previous;
+        let inactive_allowlist_save = rollback_base.inactive_allowlist_is_only_difference(&config);
         if provider_update {
             self.work.approvals.set_mode(config.work.approval_mode);
             self.work.set_roots(config.work.allowed_roots.clone());
@@ -140,14 +148,10 @@ impl DesktopState {
                 &format!("アバター旧ファイルの cleanup に失敗しました: {error}"),
             );
         }
-        let watch_scope_changed = watch_scope_changed(&persisted_before, &config);
         let language_changed = persisted_before.ui.language != config.ui.language;
         let bubble_stack_changed = persisted_before.bubble.max_stack != config.bubble.max_stack;
         let bubble_appearance_changed = bubble_appearance_changed(&persisted_before, &config);
         let watch_was_running = self.snapshot().await.observer_running;
-        if watch_scope_changed {
-            self.runtime.invalidate_watch_scope();
-        }
         let config_update = if requires_factory {
             async {
                 let prepared_runtime = match prepared_runtime {
@@ -207,6 +211,9 @@ impl DesktopState {
             self.work.approvals.set_mode(config.work.approval_mode);
             self.work.set_roots(config.work.allowed_roots.clone());
         }
+        if watch_scope_changed && watch_was_running {
+            self.stop_watch_internal(false).await;
+        }
         if let Some(gate) = provider_start_gate.take() {
             gate.release();
         }
@@ -218,7 +225,11 @@ impl DesktopState {
                 );
             }
         }
-        transaction.commit_config(config.revision)?;
+        if inactive_allowlist_save {
+            transaction.commit_inactive_allowlist_config(config.revision)?;
+        } else {
+            transaction.commit_config_while_holding(config.revision)?;
+        }
         if watch_enabled_is_only_difference || work_mode_only || audio_only {
             self.activate_runtime();
             self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
@@ -288,10 +299,23 @@ impl DesktopState {
         self.refresh_debug().await;
         self.activate_runtime();
         if watch_scope_changed && watch_was_running {
-            self.stop_watch_internal(false).await;
-            self.start_watch(permit).await.map_err(|error| {
-                ConfigCommitError::Runtime(RuntimeError::Factory(error.to_string()))
-            })?;
+            if let Err(error) = self.start_watch(permit).await {
+                let error = ConfigCommitError::Runtime(RuntimeError::Factory(error.to_string()));
+                if !provider_update {
+                    rollback_after_runtime_failure(self, &rollback_base, &config, shortcut_version)
+                        .await;
+                    self.config_update
+                        .record_watch_invalidation(self.config_update.current_revision());
+                }
+                self.runtime
+                    .enter_degraded(config_commit_last_error_for_locale(
+                        &error,
+                        Locale::from_config(&persisted_before.ui.language),
+                    ))
+                    .await?;
+                self.finish_config_degraded_state(&error).await;
+                return Err(error);
+            }
         }
         Ok(ConfigUpdateOutcome { config, issues })
     }
@@ -337,6 +361,8 @@ impl DesktopState {
         ))
         .await;
         applied?;
+        self.config_update
+            .record_watch_invalidation(config.revision);
         self.activate_runtime();
         Ok(ConfigUpdateOutcome {
             config,
@@ -394,6 +420,9 @@ impl DesktopState {
             })?;
         self.config_update.observe_config_revision(config.revision);
         if previous == persona {
+            self.runtime
+                .update_config_without_factory(config.clone())
+                .await?;
             transaction.commit_config(config.revision)?;
             self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(
                 config.clone(),
@@ -452,6 +481,9 @@ impl DesktopState {
             })?;
         self.config_update.observe_config_revision(config.revision);
         if previous == persona {
+            self.runtime
+                .update_config_without_factory(config.clone())
+                .await?;
             transaction.commit_config(config.revision)?;
             self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigLoaded(
                 config.clone(),
@@ -520,7 +552,7 @@ struct PreparedConfigUpdate {
     provider_start_gate: Option<coosenpai_core::runtime::ProviderStartGate>,
 }
 
-struct SavedConfig {
+pub(crate) struct SavedConfig {
     config: Config,
     previous: Config,
     avatar_cleanup_error: Option<String>,
@@ -574,6 +606,27 @@ fn save_config_candidate(
         previous,
         avatar_cleanup_error: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; ")),
     })
+}
+
+pub(crate) fn save_config_candidate_with_watch_scope(
+    paths: &ConfigPaths,
+    runtime: &RuntimeHandle,
+    previous: &Config,
+    candidate: &Config,
+    staged_avatar: &mut Option<crate::avatar::StagedAvatar>,
+) -> Result<SavedConfig, coosenpai_core::config::ConfigError> {
+    let allowlist_scope_changed = previous
+        .capture
+        .allowlist
+        .effective_scope_changed(&candidate.capture.allowlist);
+    if allowlist_scope_changed {
+        runtime.invalidate_watch_scope();
+    }
+    let saved = save_config_candidate(paths, previous, candidate, staged_avatar)?;
+    if !allowlist_scope_changed && previous.watch_capture_scope_changed(&saved.config) {
+        runtime.invalidate_watch_scope();
+    }
+    Ok(saved)
 }
 
 fn save_config_preserving_audio(
@@ -681,12 +734,6 @@ fn watch_enabled_is_only_difference(current: &Config, next: &Config) -> bool {
     current_without_intent.watch.enabled = false;
     next_without_intent.watch.enabled = false;
     current_without_intent == next_without_intent
-}
-
-fn watch_scope_changed(current: &Config, next: &Config) -> bool {
-    current.watch.fullscreen != next.watch.fullscreen
-        || current.watch.apps != next.watch.apps
-        || current.watch.app_window_limit != next.watch.app_window_limit
 }
 
 fn only_keymap_difference(current: &Config, next: &Config) -> bool {

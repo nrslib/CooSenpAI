@@ -342,7 +342,34 @@ fn validate_work(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
     }
 }
 
+pub(super) fn validate_capture_allowlist(
+    allowlist: &super::CaptureAllowlist,
+    issues: &mut Vec<ConfigValidationIssue>,
+) {
+    let mut allowed_ids = HashSet::new();
+    for (index, app) in allowlist.apps.iter().enumerate() {
+        if app.bundle_id.trim().is_empty() || app.bundle_id.chars().any(char::is_control) {
+            issues.push(issue(
+                format!("capture.allowlist.apps[{index}].bundleId"),
+                "空でない制御文字を含まない bundle ID を指定してください。",
+            ));
+        } else if !allowed_ids.insert(app.bundle_id.as_str()) {
+            issues.push(issue(
+                format!("capture.allowlist.apps[{index}].bundleId"),
+                "同じ bundle ID を重複して指定できません。",
+            ));
+        }
+        if app.name.trim().is_empty() || app.name.chars().any(char::is_control) {
+            issues.push(issue(
+                format!("capture.allowlist.apps[{index}].name"),
+                "空でない制御文字を含まないアプリ名を指定してください。",
+            ));
+        }
+    }
+}
+
 fn validate_watch_targets(config: &Config, issues: &mut Vec<ConfigValidationIssue>) {
+    validate_capture_allowlist(&config.capture.allowlist, issues);
     let mut bundle_ids = HashSet::new();
     for (index, app) in config.watch.apps.iter().enumerate() {
         if app.bundle_id.trim().is_empty() || app.bundle_id.chars().any(char::is_control) {

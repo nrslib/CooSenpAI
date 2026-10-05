@@ -2,6 +2,45 @@ use super::*;
 use std::sync::Arc;
 
 impl RuntimeHandle {
+    pub async fn observe_watch_frames(
+        &self,
+        frames: Vec<ObservationFrameInput>,
+        captured_allowlist: &crate::config::CaptureAllowlist,
+    ) -> Result<ObservationRecord, RuntimeError> {
+        self.ensure_open()?;
+        let permit = self
+            .control_tx
+            .reserve()
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        let (response, result) = oneshot::channel();
+        {
+            let _guard = self
+                .watch_scope_commit_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let generation = self.watch_scope_generation();
+            if frames.is_empty()
+                || frames
+                    .iter()
+                    .any(|frame| frame.scope_generation != generation)
+                || captured_allowlist.effective_scope_changed(&self.config().capture.allowlist)
+            {
+                return Err(RuntimeError::StaleWatchScope);
+            }
+            permit.send(ControlCommand::Observe(ObserveRequest {
+                frames,
+                capture_directories: None,
+                audio: Vec::new(),
+                user_input_sequence: None,
+                allow_companion_delivery: true,
+                cancellation: self.cancellation.child_token(),
+                response,
+            }));
+        }
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
+
     pub fn user_input_sequence(&self) -> u64 {
         self.user_input_sequence
             .load(std::sync::atomic::Ordering::Acquire)

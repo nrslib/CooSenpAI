@@ -1,6 +1,13 @@
 use std::collections::BTreeSet;
 
 const FIXED_ISSUE_PATH_PATTERNS: &[&str] = &[
+    "capture",
+    "capture.allowlist",
+    "capture.allowlist.enabled",
+    "capture.allowlist.apps",
+    "capture.allowlist.apps[n]",
+    "capture.allowlist.apps[n].bundleId",
+    "capture.allowlist.apps[n].name",
     "work",
     "work.allowedRoots",
     "work.allowedRoots[n]",
@@ -205,6 +212,9 @@ const FIXED_ISSUE_PATH_PATTERNS: &[&str] = &[
 ];
 
 const UNKNOWN_KEY_SCOPES: &[&str] = &[
+    "capture",
+    "capture.allowlist",
+    "capture.allowlist.apps[n]",
     "app",
     "audio",
     "audio.speakerIdentification",

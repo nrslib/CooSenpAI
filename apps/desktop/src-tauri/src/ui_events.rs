@@ -321,6 +321,7 @@ pub(crate) enum UiEvent {
     Close,
     Present(ViewCommand),
     Mounted(UiView),
+    ThoughtRendered(u64),
     DetailsRendered {
         generation: u64,
         failed: bool,
@@ -685,6 +686,7 @@ impl UiEvent {
             Self::Close => "Close".into(),
             Self::Present(command) => format!("Present({command:?})"),
             Self::Mounted(view) => format!("Mounted({view:?})"),
+            Self::ThoughtRendered(generation) => format!("ThoughtRendered({generation})"),
             Self::DetailsRendered { generation, failed } => {
                 format!("DetailsRendered({generation},failed={failed})")
             }

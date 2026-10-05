@@ -1,6 +1,7 @@
 use super::*;
 use crate::commands_speaker::SpeakerDirectory;
 use coosenpai_core::locale::{text, Locale, TextKey};
+use coosenpai_core::ports::RunningApplication;
 use serde_json::json;
 
 #[path = "settings_fields.rs"]
@@ -85,6 +86,51 @@ const SETTINGS_CATEGORIES: &[&str] = &[
     "setup",
     "developer",
 ];
+
+#[derive(Default)]
+struct AppPicker {
+    applications: Vec<RunningApplication>,
+    icon_loading: Option<u64>,
+    target: Option<String>,
+    query: String,
+    loading: Option<u64>,
+    error: Option<String>,
+}
+
+impl AppPicker {
+    fn view(&self, config: &Value) -> Value {
+        let selected = match self.target.as_deref() {
+            Some("watch") => Some(
+                config["watch"]["apps"]
+                    .as_array()
+                    .expect("watch.apps must be an array"),
+            ),
+            Some("allowlist") => Some(
+                config["capture"]["allowlist"]["apps"]
+                    .as_array()
+                    .expect("capture.allowlist.apps must be an array"),
+            ),
+            _ => None,
+        };
+        let query = self.query.trim().to_lowercase();
+        let candidate_bundle_ids: Vec<&str> = self
+            .applications
+            .iter()
+            .filter(|app| {
+                self.target.is_some()
+                    && !selected.is_some_and(|apps| {
+                        apps.iter().any(|item| item["bundleId"] == app.bundle_id)
+                    })
+                    && (query.is_empty()
+                        || app.name.to_lowercase().contains(&query)
+                        || app.bundle_id.to_lowercase().contains(&query))
+            })
+            .map(|app| app.bundle_id.as_str())
+            .collect();
+        json!({"target":self.target,"query":self.query,"loading":self.loading.is_some(),
+            "error":self.error,"applications":self.applications,"candidateBundleIds":candidate_bundle_ids})
+    }
+}
 
 // 話者管理の動作状態。統合・取消・再登録・削除・表示名の可否判断と
 // busy・成功失敗・確認の遷移はここに置き、View は候補の描画と操作イベントだけを持つ。
@@ -250,6 +296,7 @@ pub(super) struct SettingsPresenter {
     feedback_export_path: Option<String>,
     feedback_export_error: Option<String>,
     debug_wake: DebugWake,
+    app_picker: AppPicker,
 }
 
 impl SettingsPresenter {
@@ -303,6 +350,7 @@ impl SettingsPresenter {
                 self.last_input = initial.draft.clone();
                 self.draft = initial.draft;
                 self.observe(initial.observation, io, true)?;
+                self.app_picker.icon_loading = Some(io.command("listRunningApps", ()));
                 io.command("focusFirst", ());
             }
             PanelEvent::Change { value } if !self.closed && self.closing.is_none() => {
@@ -333,6 +381,7 @@ impl SettingsPresenter {
         "vrmControlsOpen":self.vrm_open,"closing":self.closing.is_some(),"escapeEnabled":self.escape_enabled(),
         "feedbackExport":{"busy":self.feedback_export.is_some(),"path":self.feedback_export_path,"error":self.feedback_export_error},
         "debugWake":self.debug_wake.view(),
+        "appPicker":self.app_picker.view(&self.candidate()),
         "speakerManagement":{
             "loading":self.speaker.directory_loading.is_some(),
             "directoryError":self.speaker.directory_error,
@@ -535,11 +584,31 @@ impl SettingsPresenter {
                     return Err(action_error(&category));
                 }
                 self.category = Some(category.clone());
+                if category != "vision" {
+                    self.app_picker.target = None;
+                    self.app_picker.loading = None;
+                }
                 if category == "hearing" {
                     self.speaker.directory = None;
                     self.ensure_speaker_directory(io);
                 }
             }
+            "appPickerOpen" => {
+                let target: String = decode(value)?;
+                if !matches!(target.as_str(), "watch" | "allowlist") {
+                    return Err(action_error(&target));
+                }
+                self.app_picker.target = Some(target);
+                self.app_picker.query.clear();
+                self.app_picker.error = None;
+                self.app_picker.loading = Some(io.command("listRunningApps", ()));
+            }
+            "appPickerClose" => {
+                self.app_picker.target = None;
+                self.app_picker.loading = None;
+                self.app_picker.error = None;
+            }
+            "appPickerQuery" => self.app_picker.query = decode(value)?,
             "feedbackExport" => {
                 if self.feedback_export.is_none() {
                     self.feedback_export_path = None;
@@ -899,6 +968,22 @@ impl SettingsPresenter {
             return Ok(());
         }
         match command.kind.as_str() {
+            "listRunningApps" if self.app_picker.icon_loading == Some(command.id) => {
+                self.app_picker.icon_loading = None;
+                if result.ok {
+                    self.app_picker.applications = decode(result.value)?;
+                }
+            }
+            "listRunningApps" if self.app_picker.loading == Some(command.id) => {
+                self.app_picker.loading = None;
+                if result.ok {
+                    self.app_picker.applications = decode(result.value)?;
+                    self.app_picker.error = None;
+                    self.app_picker.icon_loading = None;
+                } else {
+                    self.app_picker.error = Some(result.message().into());
+                }
+            }
             "feedbackExport" if self.feedback_export == Some(command.id) => {
                 self.feedback_export = None;
                 if result.ok {

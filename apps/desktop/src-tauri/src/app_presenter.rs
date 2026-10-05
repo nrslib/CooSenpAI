@@ -35,8 +35,18 @@ pub(crate) enum AppInput {
     TutorialFinish,
     Recover,
     DismissBanner,
-    SettingsPresented { generation: u64 },
-    Report { error: Option<String> },
+    SettingsPresented {
+        generation: u64,
+    },
+    Report {
+        error: Option<String>,
+    },
+    ThoughtControlsChanged {
+        #[serde(rename = "insideAllowed")]
+        inside_allowed: bool,
+        top: Option<f64>,
+        bottom: Option<f64>,
+    },
 }
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -212,6 +222,9 @@ impl AppPresenter {
     }
     pub(crate) fn thought_window_mounted(&mut self) -> Vec<UiEffect> {
         self.status.thought_window_mounted()
+    }
+    pub(crate) fn thought_rendered(&mut self, generation: u64) -> Vec<UiEffect> {
+        self.status.thought_rendered(generation)
     }
     pub(crate) fn main_visibility(&mut self, visible: bool) -> Vec<UiEffect> {
         self.status.main_visibility(visible)
@@ -460,6 +473,21 @@ impl AppPresenter {
     fn input(&mut self, input: AppInput, snapshot: Option<&Arc<AppSnapshot>>) -> Vec<UiEffect> {
         use AppInput::*;
         match input {
+            ThoughtControlsChanged {
+                inside_allowed,
+                top,
+                bottom,
+            } => {
+                let controls = match (inside_allowed, top, bottom) {
+                    (true, Some(top), Some(bottom))
+                        if top.is_finite() && bottom.is_finite() && top >= 0.0 && bottom > top =>
+                    {
+                        Some(crate::window_thought::MainControls { top, bottom })
+                    }
+                    _ => None,
+                };
+                self.status.main_controls_changed(controls)
+            }
             Report { error } => {
                 self.view.error = error;
                 vec![]

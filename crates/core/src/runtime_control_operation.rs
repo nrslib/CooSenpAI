@@ -178,7 +178,7 @@ impl RuntimeActor {
                     self.operation_cancellation
                         .cancel_current_for_config_update();
                     self.operation_cancellation.renew();
-                    let _ = config_tx.send(self.config.clone());
+                    self.publish_config(config_tx);
                 }
                 let _ = response.send(result);
                 self.publish(snapshot_tx);
@@ -191,7 +191,7 @@ impl RuntimeActor {
             } => {
                 let result = self.replace_config(*config, *agents).await;
                 if result.is_ok() {
-                    let _ = config_tx.send(self.config.clone());
+                    self.publish_config(config_tx);
                 }
                 let _ = response.send(result);
                 self.publish(snapshot_tx);

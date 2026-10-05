@@ -725,10 +725,19 @@ impl RuntimeActor {
             let frames_for_judge = frames.clone();
             let audio_for_judge = audio.clone();
             let result_tx = judge_result_tx.clone();
-            let shutdown = self.operation_cancellation.shutdown_token();
+            let scope_cancellation = self.watch_scope_cancellation();
+            let scope_generation_for_judge = scope_generation.clone();
             tokio::spawn(async move {
+                let current_generation =
+                    scope_generation_for_judge.load(std::sync::atomic::Ordering::Acquire);
+                if frames_for_judge
+                    .iter()
+                    .any(|frame| frame.scope_generation != current_generation)
+                {
+                    return;
+                }
                 let evaluation = judge
-                    .evaluate(&frames_for_judge, &audio_for_judge, shutdown)
+                    .evaluate(&frames_for_judge, &audio_for_judge, scope_cancellation)
                     .await;
                 drop(directories_for_judge);
                 if let Some(decision) = evaluation.decision {

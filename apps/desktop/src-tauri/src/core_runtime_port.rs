@@ -68,6 +68,11 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
     ) -> Result<CompanionObservationResult, RuntimeError>;
     fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot>;
     fn watch_scope_generation(&self) -> u64;
+    fn watch_capture_config(&self) -> (Config, u64);
+    fn lock_current_watch_scope(
+        &self,
+        expected: u64,
+    ) -> Result<std::sync::MutexGuard<'_, ()>, RuntimeError>;
     fn user_input_sequence(&self) -> u64;
     async fn begin_hearing_session(
         &self,
@@ -268,6 +273,17 @@ impl CoreRuntimePort for RuntimeHandle {
 
     fn watch_scope_generation(&self) -> u64 {
         RuntimeHandle::watch_scope_generation(self)
+    }
+
+    fn watch_capture_config(&self) -> (Config, u64) {
+        RuntimeHandle::watch_capture_config(self)
+    }
+
+    fn lock_current_watch_scope(
+        &self,
+        expected: u64,
+    ) -> Result<std::sync::MutexGuard<'_, ()>, RuntimeError> {
+        RuntimeHandle::lock_current_watch_scope(self, expected)
     }
 
     fn user_input_sequence(&self) -> u64 {

@@ -22,8 +22,8 @@ pub(crate) fn resize(
     let Some(area) = resolve_display_area(window, display, None)? else {
         return Ok(());
     };
-    let width = 390.0_f64;
-    let height = f64::from(height);
+    let width = bubble_width(area.width, position);
+    let height = bubble_height(area.height, f64::from(height));
     let origin = bubble_origin(area, width, height, position);
     let scale = window.scale_factor()?;
     let current_size = window.outer_size()?.to_logical::<f64>(scale);
@@ -183,19 +183,35 @@ fn monitor_area(monitor: &tauri::Monitor) -> MonitorArea {
     }
 }
 
+fn bubble_width(display_width: f64, position: &str) -> f64 {
+    let margin = 16.0_f64.min(display_width / 4.0);
+    let content_width: f64 = if position.ends_with("left") {
+        392.0
+    } else {
+        374.0
+    };
+    content_width.min(display_width - margin * 2.0)
+}
+
+fn bubble_height(display_height: f64, requested_height: f64) -> f64 {
+    let margin = 16.0_f64.min(display_height / 4.0);
+    requested_height.min(display_height - margin * 2.0)
+}
+
 fn bubble_origin(monitor: MonitorArea, width: f64, height: f64, position: &str) -> ScreenPoint {
     let left = position.ends_with("left");
     let bottom = position.starts_with("bottom");
+    let horizontal_margin = 16.0_f64.min((monitor.width - width) / 2.0);
     ScreenPoint {
         x: if left {
-            monitor.x + 16.0
+            monitor.x + horizontal_margin
         } else {
-            monitor.x + (monitor.width - width - 16.0).max(0.0)
+            monitor.x + monitor.width - width - horizontal_margin
         },
         y: if bottom {
-            monitor.y + (monitor.height - height - 16.0).max(0.0)
+            monitor.y + monitor.height - height - 16.0_f64.min((monitor.height - height) / 2.0)
         } else {
-            monitor.y + 16.0
+            monitor.y + 16.0_f64.min((monitor.height - height) / 2.0)
         },
     }
 }

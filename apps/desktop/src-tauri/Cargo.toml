@@ -66,4 +66,4 @@ coosenpai-platform-macos = { path = "../../../crates/platform-macos", features =
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSNotification", "NSOperation", "NSObject", "NSString", "block2"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSGraphics", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSGraphics", "NSPanel", "NSResponder", "NSTrackingArea", "NSView", "NSWindow", "NSWorkspace"] }

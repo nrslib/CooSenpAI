@@ -887,12 +887,22 @@ impl CompanionAgent {
                 .map(|pending| pending.observation.clone())
                 .collect(),
         );
-        let observations = keep_latest_observations(observations, self.config.wake_coalesce_max);
+        let since = cursor.watch_context_since;
+        let observations = keep_latest_observations(
+            observations
+                .into_iter()
+                .filter(|observation| {
+                    crate::recent_observations::observation_is_current(observation, since)
+                })
+                .collect(),
+            self.config.wake_coalesce_max,
+        );
         let observation_in_progress = inputs.iter().any(|input| input.observation_in_progress);
         let supplied_frames = inputs
             .iter()
             .flat_map(|input| input.pending_frames.iter().cloned())
             .chain(cursor.pending_frame_contexts)
+            .filter(|context| crate::recent_observations::frame_context_is_current(context, since))
             .collect::<Vec<_>>();
         let observation_frame_paths = storage.observation_frame_paths(&observations, now)?;
         let (observations, pending_frames) =

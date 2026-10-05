@@ -19,6 +19,8 @@ pub(crate) struct ConfigUpdateCoordinator {
     pub(crate) audio: Mutex<()>,
     revision: AtomicU64,
     config_revision: Arc<AtomicU64>,
+    // 値を元に戻す保存を挟んでも古い見守り frame を再採用しないための境界。
+    watch_invalidation_revision: AtomicU64,
     edge_recall: RwLock<()>,
 }
 
@@ -37,6 +39,7 @@ impl ConfigUpdateCoordinator {
             audio: Mutex::new(()),
             revision: AtomicU64::new(0),
             config_revision: Arc::new(AtomicU64::new(config_revision)),
+            watch_invalidation_revision: AtomicU64::new(config_revision),
             edge_recall: RwLock::new(()),
         }
     }
@@ -57,12 +60,21 @@ impl ConfigUpdateCoordinator {
         self.config_revision.load(Ordering::Acquire)
     }
 
+    pub(crate) fn watch_invalidation_revision(&self) -> u64 {
+        self.watch_invalidation_revision.load(Ordering::Acquire)
+    }
+
     pub(crate) async fn edge_recall_read(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
         self.edge_recall.read().await
     }
 
     pub(crate) fn observe_config_revision(&self, revision: u64) {
         self.config_revision.fetch_max(revision, Ordering::AcqRel);
+    }
+
+    pub(crate) fn record_watch_invalidation(&self, revision: u64) {
+        self.watch_invalidation_revision
+            .fetch_max(revision, Ordering::AcqRel);
     }
 }
 
@@ -110,6 +122,23 @@ impl ConfigUpdateTransaction<'_> {
     }
 
     pub(crate) fn commit_config(self, config_revision: u64) -> Result<(), ConfigCommitError> {
+        self.commit_config_while_holding(config_revision)
+    }
+
+    pub(crate) fn commit_config_while_holding(
+        &self,
+        config_revision: u64,
+    ) -> Result<(), ConfigCommitError> {
+        self.commit_generation()?;
+        self.coordinator.observe_config_revision(config_revision);
+        self.coordinator.record_watch_invalidation(config_revision);
+        Ok(())
+    }
+
+    pub(crate) fn commit_inactive_allowlist_config(
+        &self,
+        config_revision: u64,
+    ) -> Result<(), ConfigCommitError> {
         self.commit_generation()?;
         self.coordinator.observe_config_revision(config_revision);
         Ok(())

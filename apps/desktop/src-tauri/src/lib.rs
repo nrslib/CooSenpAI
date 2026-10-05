@@ -278,6 +278,7 @@ pub fn run() -> anyhow::Result<()> {
         .setup(|app| desktop_startup::complete(setup_desktop(app), app))
         .invoke_handler(tauri::generate_handler![
             commands_ui::ui_view_mounted,
+            commands_ui::thought_rendered,
             commands_ui::settings_close,
             commands_ui::ui_panel_event,
             avatar_window::avatar_state_get,

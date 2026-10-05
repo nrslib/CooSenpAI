@@ -213,6 +213,7 @@ pub trait ScreenCapturePort: Send + Sync {
     async fn capture(
         &self,
         destination_directory: &Path,
+        allowlist: &crate::config::CaptureAllowlist,
         cancellation: CancellationToken,
     ) -> Result<Vec<CapturedScreen>, PortError>;
 }
@@ -1060,6 +1061,7 @@ pub trait ApplicationCapturePort: Send + Sync {
         bundle_id: &str,
         destination_directory: &Path,
         window_limit: usize,
+        allowlist: &crate::config::CaptureAllowlist,
         cancellation: CancellationToken,
     ) -> Result<Vec<ApplicationCapture>, PortError>;
 }

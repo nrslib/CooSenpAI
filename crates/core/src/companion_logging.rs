@@ -19,7 +19,7 @@ impl CompanionAgent {
         if let Some(logger) = &self.logger {
             logger.write(
                 "INFO",
-                &format!("相棒の自発呼び出しが一日上限に達しました: limit={}", limit),
+                &format!("Coo の自発呼び出しが一日上限に達しました: limit={}", limit),
             )?;
         }
         if self.storage.is_none() {

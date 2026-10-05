@@ -91,8 +91,8 @@ pub(crate) async fn run(
         &paths.root,
         active_config.watch.ocr_gate.executable.as_deref(),
     );
-    let screen_capture = platform::MacScreenCapture::default();
-    let application_capture = platform::MacApplicationCapture::default();
+    let screen_capture = platform::MacScreenCapture::with_logger(logger.clone());
+    let application_capture = platform::MacApplicationCapture::with_logger(logger.clone());
     let focus_element: Arc<dyn FocusElementPort> = Arc::new(platform::MacFocusedElement);
     let activity = platform::MacActivity;
     let ocr = platform::MacOcr::new(helper.clone());
@@ -546,6 +546,7 @@ async fn capture_and_deliver(
         }
     };
     let directory = tempfile::tempdir()?;
+    let scope_generation = environment.runtime.watch_scope_generation();
     let focus_task = config.watch.focus_element.then(|| {
         let focus_element = environment.focus_element.clone();
         let cancellation = environment.cancellation.clone();
@@ -558,13 +559,15 @@ async fn capture_and_deliver(
         .screen_capture
         .capture(
             &directory.path().join("screens"),
+            &config.capture.allowlist,
             environment.cancellation.clone(),
         )
         .await?;
     let focus = match focus_task {
         Some(task) => task.await.ok().flatten(),
         None => None,
-    };
+    }
+    .filter(|element| config.capture.allowlist.permits(&element.bundle_id));
     let prepared = prepare_screen_frames(
         captured_screens,
         directory.path(),
@@ -585,11 +588,11 @@ async fn capture_and_deliver(
     let mut frames = Vec::with_capacity(prepared.frames.len());
     for screen in prepared.frames {
         let frame = screen.observation_frame(
-            environment.runtime.watch_scope_generation(),
+            scope_generation,
             captured_at_utc,
             captured_at.duration_since(state.window_start).as_secs_f64(),
             trigger,
-            front_app.clone(),
+            config.capture.allowlist.redact_front_app(front_app.clone()),
             focus.clone(),
             config.debug.enabled,
         );
@@ -629,12 +632,15 @@ async fn capture_and_deliver(
         "見守りの撮影が取り消されました"
     );
     for frame in &frames {
+        let _scope_guard = environment
+            .runtime
+            .lock_current_watch_scope(scope_generation)?;
         environment.runtime.register_pending_frame_context(
             PendingFrameContext::bounded_with_focus(
                 frame.context_id.clone(),
                 captured_at_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 trigger,
-                front_app.clone(),
+                frame.front_app.clone(),
                 None,
                 frame.target.clone(),
                 frame.ocr_text.clone(),
@@ -699,7 +705,17 @@ async fn flush_pending(
     cli_notifications: &NotificationConsumer,
 ) -> Result<()> {
     let latest_config = coosenpai_core::config::load_config(paths)?;
+    if config
+        .capture
+        .allowlist
+        .effective_scope_changed(&latest_config.capture.allowlist)
+    {
+        state.pending_frames.clear();
+    }
     retain_enabled_frames(&latest_config, &mut state.pending_frames);
+    state
+        .pending_frames
+        .retain(|frame| frame.scope_generation == runtime.watch_scope_generation());
     if state.pending_frames.is_empty() {
         state.last_accepted = None;
         state.temporary_directories.clear();
@@ -723,7 +739,7 @@ async fn flush_pending(
         state.last_accepted = None;
         state.window_start = now;
         status.report_observation_start(config, state);
-        match runtime.observe(frames.clone()).await {
+        match observe_pending_frames(config, paths, runtime, frames.clone()).await {
             Ok(_) => {}
             Err(
                 coosenpai_core::runtime::RuntimeError::StaleWatchScope
@@ -755,4 +771,22 @@ async fn flush_pending(
         cli_notifications.accept(notification)?;
     }
     Ok(())
+}
+
+async fn observe_pending_frames(
+    config: &Config,
+    paths: &ConfigPaths,
+    runtime: &coosenpai_core::runtime::RuntimeHandle,
+    frames: Vec<ObservationFrameInput>,
+) -> Result<coosenpai_core::state::ObservationRecord, coosenpai_core::runtime::RuntimeError> {
+    if config.capture.allowlist.effective_scope_changed(
+        &coosenpai_core::config::load_config(paths)?
+            .capture
+            .allowlist,
+    ) {
+        return Err(coosenpai_core::runtime::RuntimeError::StaleWatchScope);
+    }
+    runtime
+        .observe_watch_frames(frames, &config.capture.allowlist)
+        .await
 }

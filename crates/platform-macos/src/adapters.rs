@@ -79,10 +79,12 @@ impl ScreenCapturePort for MacScreenCapture {
     async fn capture(
         &self,
         destination: &Path,
+        allowlist: &coosenpai_core::config::CaptureAllowlist,
         cancellation: CancellationToken,
     ) -> Result<Vec<CapturedScreen>, PortError> {
         crate::watch_capture::capture_screen_with_logger(
             destination.to_owned(),
+            allowlist.clone(),
             cancellation,
             self.logger.clone(),
         )
@@ -247,12 +249,14 @@ impl ApplicationCapturePort for MacApplicationCapture {
         bundle_id: &str,
         destination_directory: &Path,
         window_limit: usize,
+        allowlist: &coosenpai_core::config::CaptureAllowlist,
         cancellation: CancellationToken,
     ) -> Result<Vec<ApplicationCapture>, PortError> {
         crate::watch_capture::capture_application_window_with_logger(
             bundle_id,
             destination_directory.to_owned(),
             window_limit,
+            allowlist.clone(),
             cancellation,
             self.logger.clone(),
         )

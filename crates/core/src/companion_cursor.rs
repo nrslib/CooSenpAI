@@ -37,6 +37,7 @@ pub struct CursorSnapshot {
     pub pending_inputs: Vec<PendingInput>,
     pub pending_deliveries: Vec<PendingDelivery>,
     pub pending_frame_contexts: Vec<PendingFrameContext>,
+    pub watch_context_since: Option<chrono::DateTime<chrono::Utc>>,
     pub consumed_frame_context_ids: Vec<String>,
     /// TurnCommit で実際に消費した観察の監査記録。
     pub observation_consumptions: Vec<ObservationConsumption>,
@@ -65,6 +66,7 @@ impl Default for CursorSnapshot {
             pending_inputs: Vec::new(),
             pending_deliveries: Vec::new(),
             pending_frame_contexts: Vec::new(),
+            watch_context_since: None,
             consumed_frame_context_ids: Vec::new(),
             observation_consumptions: Vec::new(),
             turn_commit_recovery_attempts: Vec::new(),

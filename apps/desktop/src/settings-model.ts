@@ -49,6 +49,7 @@ const CONTROL_PATHS = new Set<string>([
   "memory.dailyRetentionDays",
   "memory.weeklyRetentionWeeks", "memory.factPromptDailyLimit",
   "memory.enabled", "memory.providerConsent", "watch.fullscreen", "watch.focusElement", "watch.ocrGate.executable",
+  "capture.allowlist.enabled",
   "audio.microphoneCommandsEnabled", "audio.mic", "audio.speaker", "audio.speakerDevices", "audio.speakerIdentification.enabled",
   "voiceOutput.enabled", "voiceOutput.provider", "voiceOutput.rate", "voiceOutput.voicevoxStyleId",
   "work.approvalMode", "work.allowedRoots",
@@ -80,6 +81,7 @@ export function settingsIssueTarget(path: string): SettingsIssueTarget {
   if (inPathFamily(path, "companion")) return { id: "settings-companion" };
   if (inPathFamily(path, "observer")) return { id: "settings-ai" };
   if (inPathFamily(path, "watch.apps")) return { id: "settings-watch-targets" };
+  if (inPathFamily(path, "capture")) return { id: "settings-capture-allowlist" };
   if (path === "watch") return { id: "settings-watch-targets" };
   if (inPathFamily(path, "watch")) return { id: "settings-vision-detail" };
   if (inPathFamily(path, "audio")) return { id: "settings-audio" };

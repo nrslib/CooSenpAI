@@ -1,4 +1,4 @@
-import type { CompanionReminder, ConfigPatch, CooSenpaiConfig, PopupQuickAction, ProviderName, WatchAppConfig, WorkAllowedRoot } from "./types.js";
+import type { CaptureAllowedApp, CompanionReminder, ConfigPatch, CooSenpaiConfig, PopupQuickAction, ProviderName, WatchAppConfig, WorkAllowedRoot } from "./types.js";
 import { t, type Locale, type TranslationKey } from "./i18n/index.js";
 import type { SettingsCategory } from "./settings-categories.js";
 
@@ -27,6 +27,8 @@ export interface FormState {
   watchFullscreen: boolean;
   watchFocusElement: boolean;
   watchApps: readonly WatchAppConfig[];
+  captureAllowlistEnabled: boolean;
+  captureAllowlistApps: readonly CaptureAllowedApp[];
   voiceOutputEnabled: boolean;
   voiceOutputProvider: CooSenpaiConfig["voiceOutput"]["provider"];
   voiceOutputRate: string;
@@ -150,7 +152,7 @@ const pageFields: Readonly<Record<SettingsCategory, readonly ConfigFormKey[]>> =
     "memoryEnabled", "memoryProviderConsent", "checkForUpdates", "launchAtLogin", "reviewTime", "reminders", "whileThinking",
     "memoryDailyRetentionDays", "memoryWeeklyRetentionWeeks", "factPromptDailyLimit", "observationDays", "conversationDays",
   ],
-  vision: ["watchFullscreen", "watchApps", "watchFocusElement"],
+  vision: ["watchFullscreen", "watchApps", "watchFocusElement", "captureAllowlistEnabled", "captureAllowlistApps"],
   hearing: ["audioMicrophoneCommandsEnabled", "audioMic", "audioSpeaker", "audioSpeakerDevices", "audioSpeakerIdentificationEnabled"],
   speech: ["speechLocale", "speechInputDevice", "speechMode", "speechConfirmBeforeSend", "voiceOutputEnabled", "voiceOutputProvider", "voiceOutputRate", "voicevoxStyleId"],
   notifications: ["notificationMode", "bubblePosition", "bubbleDisplay", "bubbleEdgeRecall", "thoughtBubble", "bubbleKeepLatest", "textQuickActions", "imageQuickActions", "minPriority", "bubbleDurationMs"],
@@ -202,6 +204,8 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     watchFullscreen: config.watch.fullscreen,
     watchFocusElement: config.watch.focusElement,
     watchApps: config.watch.apps.map((app) => ({ ...app })),
+    captureAllowlistEnabled: config.capture.allowlist.enabled,
+    captureAllowlistApps: config.capture.allowlist.apps.map((app) => ({ ...app })),
     voiceOutputEnabled: config.voiceOutput.enabled,
     voiceOutputProvider: config.voiceOutput.provider,
     voiceOutputRate: String(config.voiceOutput.rate),
@@ -376,6 +380,7 @@ export function toPatch(form: FormState): ConfigPatch {
 
 function toBasePatch(form: FormState): ConfigPatch {
   return {
+    capture: { allowlist: { enabled: form.captureAllowlistEnabled, apps: form.captureAllowlistApps } },
     watch: {
       enabled: form.watchEnabled,
       fullscreen: form.watchFullscreen,

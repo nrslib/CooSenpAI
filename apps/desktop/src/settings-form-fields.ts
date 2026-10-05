@@ -12,6 +12,7 @@ const paths = {
   emotionsEnabled: "companion.emotionsEnabled", displayName: "companion.displayName",
   avatarColor: "ui.avatarColor", avatarPath: "ui.avatarPath", persona: "companion.persona",
   watchEnabled: "watch.enabled", watchFullscreen: "watch.fullscreen", watchFocusElement: "watch.focusElement", watchApps: "watch.apps",
+  captureAllowlistEnabled: "capture.allowlist.enabled", captureAllowlistApps: "capture.allowlist.apps",
   voiceOutputEnabled: "voiceOutput.enabled", voiceOutputProvider: "voiceOutput.provider",
   voiceOutputRate: "voiceOutput.rate", voicevoxStyleId: "voiceOutput.voicevoxStyleId",
   audioMicrophoneCommandsEnabled: "audio.microphoneCommandsEnabled",

@@ -1,10 +1,10 @@
 use super::defaults::default_observer_daily_limit;
 use super::{
-    issue, AgentConfig, AppConfig, AudioConfig, BatteryConfig, BubbleConfig, ChatConfig,
-    CompanionConfig, Config, ConfigError, ConfigValidationIssue, DebugConfig, JudgeComposition,
-    JudgeConfig, JudgeModuleConfig, MemoryConfig, NotificationConfig, ObserverConfig,
-    ObserverProfile, OcrGateConfig, PopupConfig, RetentionConfig, SpeechConfig, TriggerConfig,
-    UiConfig, VoiceOutputConfig, WatchConfig,
+    issue, AgentConfig, AppConfig, AudioConfig, BatteryConfig, BubbleConfig, CaptureAllowedApp,
+    CaptureAllowlist, CaptureConfig, ChatConfig, CompanionConfig, Config, ConfigError,
+    ConfigValidationIssue, DebugConfig, JudgeComposition, JudgeConfig, JudgeModuleConfig,
+    MemoryConfig, NotificationConfig, ObserverConfig, ObserverProfile, OcrGateConfig, PopupConfig,
+    RetentionConfig, SpeechConfig, TriggerConfig, UiConfig, VoiceOutputConfig, WatchConfig,
 };
 #[path = "config_parse_helpers.rs"]
 mod helpers;
@@ -179,6 +179,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
             "work",
             "revision",
             "watch",
+            "capture",
             "observer",
             "companion",
             "chat",
@@ -217,6 +218,13 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         "watch",
         &mut issues,
         parse_watch,
+    );
+    let capture = parse_section(
+        object.get("capture"),
+        CaptureConfig::default(),
+        "capture",
+        &mut issues,
+        parse_capture,
     );
     let revision = nonnegative_u64(object, "revision", 0, "revision", &mut issues);
     let observer = parse_section(
@@ -331,6 +339,7 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
             config_version: 3,
             revision,
             watch,
+            capture,
             observer,
             companion,
             chat,
@@ -648,6 +657,67 @@ fn parse_watch(
         ));
     }
     result
+}
+
+fn parse_capture(
+    object: &Map<String, Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> CaptureConfig {
+    issues.extend(unknown_keys(object, &["allowlist"], "capture"));
+    let allowlist = parse_section(
+        object.get("allowlist"),
+        CaptureAllowlist::default(),
+        "capture.allowlist",
+        issues,
+        parse_capture_allowlist,
+    );
+    CaptureConfig { allowlist }
+}
+
+fn parse_capture_allowlist(
+    object: &Map<String, Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> CaptureAllowlist {
+    issues.extend(unknown_keys(
+        object,
+        &["enabled", "apps"],
+        "capture.allowlist",
+    ));
+    let apps: Vec<CaptureAllowedApp> = match object.get("apps") {
+        None => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let path = format!("capture.allowlist.apps[{index}]");
+                let Some(app) = value.as_object() else {
+                    issues.push(issue(path, "オブジェクトで指定してください。"));
+                    return None;
+                };
+                issues.extend(unknown_keys(app, &["bundleId", "name"], &path));
+                Some(CaptureAllowedApp {
+                    bundle_id: string(app, "bundleId", "", &format!("{path}.bundleId"), issues),
+                    name: string(app, "name", "", &format!("{path}.name"), issues),
+                })
+            })
+            .collect(),
+        Some(_) => {
+            issues.push(issue("capture.allowlist.apps", "配列で指定してください。"));
+            Vec::new()
+        }
+    };
+    let allowlist = CaptureAllowlist {
+        enabled: boolean(
+            object,
+            "enabled",
+            false,
+            "capture.allowlist.enabled",
+            issues,
+        ),
+        apps,
+    };
+    super::validate::validate_capture_allowlist(&allowlist, issues);
+    allowlist
 }
 
 fn parse_triggers(

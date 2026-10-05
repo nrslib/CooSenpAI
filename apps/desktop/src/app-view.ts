@@ -22,6 +22,7 @@ export interface AppView {
 }
 export type AppInput = { readonly type: "mounted" | "retry" | "startupSettings" | "openSettings" | "closeSettings" | "toggleHistory" | "resetOpen" | "resetCancel" | "resetConfirm" | "menuToggle" | "menuDismiss" | "menuModel" | "menuReset" | "toggleWatch" | "toggleAudio" | "tutorialNext" | "tutorialFinish" | "recover" | "dismissBanner" }
   | { readonly type: "settingsPresented"; readonly generation: number }
+  | { readonly type: "thoughtControlsChanged"; readonly insideAllowed: boolean; readonly top: number | null; readonly bottom: number | null }
   | { readonly type: "report"; readonly error: string | null };
 export interface ThoughtView { readonly text: UiText; readonly leaving: boolean }
 export interface BannerView { readonly tone: "error" | "warning" | "info"; readonly message: UiText; readonly action: "settings" | "screen-capture" | "system-audio" | "microphone" | "recognition" | "relaunch" | null; readonly actionLabel: UiText | null; readonly dismissible: boolean }
@@ -30,4 +31,4 @@ export interface StatusView {
   readonly banner: BannerView | null;
   readonly observerError: { readonly message: UiText; readonly occurrence: number } | null;
 }
-export interface ThoughtWindowView { readonly thought: ThoughtView | null; readonly bubbleTail: boolean; readonly theme: CooSenpaiConfig["ui"]["theme"]; readonly font: string; readonly language: Locale }
+export interface ThoughtWindowView { readonly generation: number; readonly thought: ThoughtView | null; readonly bubbleTail: boolean; readonly theme: CooSenpaiConfig["ui"]["theme"]; readonly font: string; readonly language: Locale }

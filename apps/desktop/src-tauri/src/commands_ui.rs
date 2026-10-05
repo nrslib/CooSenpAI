@@ -28,6 +28,26 @@ pub(crate) async fn ui_view_mounted<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+pub(crate) async fn thought_rendered(
+    window: WebviewWindow,
+    ui: State<'_, crate::ui_root::UiHandle>,
+    generation: u64,
+) -> TauriIpcResult<()> {
+    if window.label() != "thought" {
+        return Err("思考吹き出し以外からの描画報告です".to_owned());
+    }
+    Ok(
+        match ui
+            .request(UiView::Thought, UiEvent::ThoughtRendered(generation))
+            .await
+        {
+            Ok(_) => IpcResult::success(()),
+            Err(message) => IpcResult::failure(message),
+        },
+    )
+}
+
+#[tauri::command]
 pub(crate) async fn settings_close(
     window: WebviewWindow,
     state: State<'_, Arc<DesktopState>>,

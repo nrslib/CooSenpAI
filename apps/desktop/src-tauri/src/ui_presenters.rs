@@ -47,6 +47,9 @@ impl ChatPresenter {
             UiEvent::Mounted(crate::ui_events::UiView::Thought) => {
                 Handling::Handled(self.app.thought_window_mounted())
             }
+            UiEvent::ThoughtRendered(generation) => {
+                Handling::Handled(self.app.thought_rendered(generation))
+            }
             UiEvent::Mounted(_) => Handling::Handled(self.app.handle(
                 crate::app_presenter::AppEvent::Input(crate::app_presenter::AppInput::Mounted),
                 self.snapshot.as_ref(),

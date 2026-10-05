@@ -1315,6 +1315,13 @@ export const en = {
       speaker: "Speaker",
       soon: "Coming soon",
     },
+    captureAllowlist: {
+      heading: "Apps allowed in captures",
+      help: "Applies only to automatic Watch captures (full screen and app targets). Disallowed windows are blacked out in full-screen captures and skipped for app targets. Automatic capture stops if the list is empty. Manual region selection is unaffected.",
+      enabled: "Enable capture allowlist",
+      requiresMacOS14: "Watch capture with an allowlist requires macOS 14 or later. You cannot enable it on macOS 13. If already enabled, you can turn it off here.",
+      empty: "No apps are allowed.",
+    },
     setup: {
       heading: "Setup",
       restartTutorial: "Run the tutorial again",

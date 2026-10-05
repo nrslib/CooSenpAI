@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import type { AppSnapshot, ConfigIssue, ConfigPatch, CooSenpaiConfig, DebugWakeResult, IpcResult, MergedSpeakers, PersonaDocument, SpeakerDirectory, SpeakerManagementPayload, SpeakerRenamePayload, SpeakerSummary } from "./types.js";
+import type { AppSnapshot, ConfigIssue, ConfigPatch, CooSenpaiConfig, DebugWakeResult, IpcResult, MergedSpeakers, PersonaDocument, RunningApplication, SpeakerDirectory, SpeakerManagementPayload, SpeakerRenamePayload, SpeakerSummary } from "./types.js";
 import type { SettingsCategory } from "./settings-categories.js";
 import type { SettingsResetRequest } from "./settings-form.js";
 import type { SettingsResetFields } from "./settings-form-fields.js";
@@ -33,6 +33,15 @@ export interface DebugWakeView {
   readonly error: string | null;
 }
 
+export interface AppPickerView {
+  readonly target: "watch" | "allowlist" | null;
+  readonly query: string;
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly applications: readonly RunningApplication[];
+  readonly candidateBundleIds: readonly string[];
+}
+
 export interface SettingsView {
   readonly feedbackExport: { readonly busy: boolean; readonly path: string | null; readonly error: string | null };
   readonly escapeEnabled: boolean;
@@ -57,6 +66,7 @@ export interface SettingsView {
   readonly vrmControlsOpen: boolean;
   readonly speakerManagement: SpeakerManagementView;
   readonly debugWake: DebugWakeView;
+  readonly appPicker: AppPickerView;
 }
 type SettingsCommand = PanelCommand & (
   | { kind: "save"; payload: { patch: ConfigPatch; avatarImage: readonly number[] | null; baseConfigRevision: number } }
@@ -68,6 +78,7 @@ type SettingsCommand = PanelCommand & (
   | { kind: "speakerManagement"; payload: SpeakerManagementPayload }
   | { kind: "speakerRename"; payload: SpeakerRenamePayload }
   | { kind: "debugWake"; payload: { readonly image: readonly number[]; readonly context: string } }
+  | { kind: "listRunningApps"; payload: null }
   | { kind: "focusFirst" | "resetConversation" | "reloadConflict" | "clearPreview" | "close" | "speakerDirectory" | "feedbackExport"; payload: null }
 );
 interface SettingsPort {
@@ -82,6 +93,7 @@ interface SettingsPort {
   readonly speakerDirectory: () => Promise<IpcResult<SpeakerDirectory>>;
   readonly speakerRename: (payload: SpeakerRenamePayload) => Promise<IpcResult<SpeakerDirectory>>;
   readonly debugWake: (image: readonly number[], context: string) => Promise<IpcResult<DebugWakeResult>>;
+  readonly listRunningApps: () => Promise<IpcResult<readonly RunningApplication[]>>;
   readonly close: () => void;
   readonly reflect: (value: SettingsReflection) => void;
   readonly resetDraft: (payload: Extract<SettingsCommand, { kind: "resetDraft" }>['payload']) => void;
@@ -107,6 +119,7 @@ export function useSettingsPresenter(snapshot: AppSnapshot, focusSection: "watch
       case "speakerDirectory": return port.speakerDirectory();
       case "speakerRename": return port.speakerRename(command.payload);
       case "debugWake": return port.debugWake(command.payload.image, command.payload.context);
+      case "listRunningApps": return port.listRunningApps();
       case "reflect": port.reflect(command.payload); break;
       case "resetDraft": port.resetDraft(command.payload); break;
       case "restoreReset": port.restoreReset(command.payload); break;

@@ -116,7 +116,12 @@ pub(crate) fn command_for_config_patch(
 }
 
 fn command_for_config_change(current: &Config, next: &Config) -> DesktopCommand {
-    if current.watch != next.watch {
+    let watch_scope_changed = current.watch != next.watch
+        || current
+            .capture
+            .allowlist
+            .effective_scope_changed(&next.capture.allowlist);
+    if watch_scope_changed {
         DesktopCommand::ConfigWatchUpdate
     } else if current.keymap != next.keymap {
         DesktopCommand::ConfigKeymapUpdate
@@ -148,6 +153,10 @@ pub(crate) fn validate_work_config_change(
 pub(crate) fn invalidates_running_operations(current: &Config, next: &Config) -> bool {
     (current.work != next.work && !work_config_is_only_difference(current, next))
         || watch_runtime_settings_changed(current, next)
+        || current
+            .capture
+            .allowlist
+            .effective_scope_changed(&next.capture.allowlist)
         || current.ui.language != next.ui.language
         || current.observer != next.observer
         || current.companion.provider != next.companion.provider

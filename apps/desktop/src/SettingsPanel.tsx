@@ -125,6 +125,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
     speakerDirectory: onSpeakerDirectory ?? (async () => ({ ok: false, error: { message: "Speaker directory unavailable" } })),
     speakerRename: onSpeakerRename ?? (async () => ({ ok: false, error: { message: "Speaker names unavailable" } })),
     feedbackExport: desktopApi.exportUtteranceFeedback,
+    listRunningApps: desktopApi.listRunningApps,
     debugWake: desktopApi.debugWake,
     save: onSave, selectPersona: onSelectPersona, getPersona: onGetPersona, reload: onReloadConfig,
     resetConversation: onResetConversation, clearPreview: () => onAppearancePreview(undefined), close: onClose,
@@ -307,7 +308,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
         content = !searching && showTutorialPersonaSettings ? <TutorialPersonaSettings general={generalProps} provider={providerProps} /> : <GeneralSettings {...generalProps} />;
         break;
       case "vision":
-        content = <VisionSettings {...categoryProps} highlight={focusSection === "watch"} onOpenSystemSettings={onOpenSystemSettings} onOpenAccessibilitySettings={onOpenAccessibilitySettings} onRelaunch={onRelaunch} />;
+        content = state?.appPicker === undefined ? <></> : <VisionSettings {...categoryProps} appPicker={state.appPicker} onAppPickerAction={action} highlight={focusSection === "watch"} onOpenSystemSettings={onOpenSystemSettings} onOpenAccessibilitySettings={onOpenAccessibilitySettings} onRelaunch={onRelaunch} />;
         break;
       case "hearing":
         content = <HearingSettings {...categoryProps} onOpenSpeechSettings={onOpenSpeechSettings} speaker={state?.speakerManagement} speakerConfirmation={confirmation === "speaker-delete" || confirmation === "speaker-delete-all" ? confirmation : null} onSpeakerAction={action} />;

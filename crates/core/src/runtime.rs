@@ -395,6 +395,7 @@ pub struct RuntimeActor {
     memory_run_at: Option<Instant>,
     operation_cancellation: std::sync::Arc<OperationCancellation>,
     watch_scope_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    watch_scope_cancellation: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
     user_input_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     watch_scope_commit_lock: std::sync::Arc<std::sync::Mutex<()>>,
     turn_commit_lock: std::sync::Arc<std::sync::Mutex<()>>,
@@ -697,11 +698,14 @@ impl RuntimeActor {
         let operation_cancellation =
             std::sync::Arc::new(OperationCancellation::new(cancellation.clone()));
         let watch_scope_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let watch_scope_cancellation =
+            std::sync::Arc::new(std::sync::Mutex::new(cancellation.child_token()));
         let user_input_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let watch_scope_commit_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
         let turn_commit_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
         let actor_operation_cancellation = operation_cancellation.clone();
         let actor_watch_scope_generation = watch_scope_generation.clone();
+        let actor_watch_scope_cancellation = watch_scope_cancellation.clone();
         let actor_user_input_sequence = user_input_sequence.clone();
         let actor_watch_scope_commit_lock = watch_scope_commit_lock.clone();
         let actor_turn_commit_lock = turn_commit_lock.clone();
@@ -745,6 +749,7 @@ impl RuntimeActor {
                 memory,
                 operation_cancellation: actor_operation_cancellation,
                 watch_scope_generation: actor_watch_scope_generation,
+                watch_scope_cancellation: actor_watch_scope_cancellation,
                 user_input_sequence: actor_user_input_sequence,
                 watch_scope_commit_lock: actor_watch_scope_commit_lock,
                 turn_commit_lock: actor_turn_commit_lock,
@@ -1150,7 +1155,7 @@ impl RuntimeActor {
                             PriorityCommand::UpdateConfigWithoutFactory { config, response } => {
                                 let result = actor.update_config_without_factory(*config).await;
                                 if result.is_ok() {
-                                    let _ = config_tx.send(actor.config.clone());
+                                    actor.publish_config(&config_tx);
                                 }
                                 let _ = response.send(result);
                                 actor.publish(&snapshot_tx);
@@ -1343,6 +1348,7 @@ impl RuntimeActor {
             cancellation,
             operation_cancellation,
             watch_scope_generation,
+            watch_scope_cancellation,
             user_input_sequence,
             watch_scope_commit_lock,
             turn_commit_lock,
@@ -1415,7 +1421,6 @@ impl RuntimeActor {
                 let _ = response.send(result);
             }
             PriorityCommand::UpdateConfig { config, response } => {
-                self.advance_watch_scope_generation(&config);
                 let result = if interrupted_operation && self.factory.is_none() {
                     Err(RuntimeError::Factory(
                         text(
@@ -1428,7 +1433,7 @@ impl RuntimeActor {
                     self.update_config(*config).await
                 };
                 if result.is_ok() {
-                    let _ = config_tx.send(self.config.clone());
+                    self.publish_config(config_tx);
                 } else if let Err(error) = &result {
                     if !matches!(
                         error,
@@ -1446,7 +1451,7 @@ impl RuntimeActor {
             PriorityCommand::UpdateConfigWithoutFactory { config, response } => {
                 let result = self.update_config_without_factory(*config).await;
                 if result.is_ok() {
-                    let _ = config_tx.send(self.config.clone());
+                    self.publish_config(config_tx);
                 }
                 let _ = response.send(result);
                 self.publish(snapshot_tx);
@@ -1456,10 +1461,9 @@ impl RuntimeActor {
                 agents,
                 response,
             } => {
-                self.advance_watch_scope_generation(&config);
                 let result = self.replace_config(*config, *agents).await;
                 if result.is_ok() {
-                    let _ = config_tx.send(self.config.clone());
+                    self.publish_config(config_tx);
                 }
                 let _ = response.send(result);
                 self.publish(snapshot_tx);

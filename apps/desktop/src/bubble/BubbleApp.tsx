@@ -14,9 +14,47 @@ export function BubbleApp(): ReactElement {
   const [typing, setTyping] = useState<{ id: string; revealed: number | null }>();
   const [snapshot, setSnapshot] = useState<BubbleSnapshot>();
   const [pendingAck, setPendingAck] = useState<{ readonly generation: number; readonly sequence: number }>();
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const stackRef = useRef<HTMLDivElement>(null);
   const generationRef = useRef(-1);
   const layoutQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
+
+  const updateHover = (point: { x: number; y: number } | null): boolean => {
+    lastPointRef.current = point;
+    const stack = stackRef.current;
+    const article = stackRef.current?.querySelector<HTMLElement>(".speech-item") ?? null;
+    const record = controls?.record;
+    const overCard = point !== null && stack !== null && article !== null && !controls?.exiting &&
+      [".speech-bubble", ".speaker", ".bubble-close-lane"].some((selector) => {
+        const element = article.querySelector(selector);
+        if (element === null) return false;
+        return containsVisiblePoint(element, stack, point);
+      });
+    const id = overCard && record !== undefined && record !== null ? record.id : null;
+    setHoveredId(id);
+    return overCard;
+  };
+
+  useEffect(() => {
+    const receive = (event: Event): void => {
+      const point = (event as CustomEvent<{ x: number; y: number } | null>).detail;
+      const overCard = updateHover(point);
+      if (point !== null && !overCard && ![".deck-edge", ".deck-latest"].some((selector) => {
+        const element = stackRef.current?.querySelector(selector);
+        return element !== null && element !== undefined && stackRef.current !== null && containsVisiblePoint(element, stackRef.current, point);
+      })) void bubbleApi.passThrough();
+    };
+    window.addEventListener("coosenpai:bubble:pointer-position", receive);
+    updateHover(lastPointRef.current);
+    return () => window.removeEventListener("coosenpai:bubble:pointer-position", receive);
+  }, [controls, snapshot]);
+
+  useEffect(() => {
+    if (hoveredId === null) return;
+    void bubbleApi.hover(hoveredId, true);
+    return () => { void bubbleApi.hover(hoveredId, false); };
+  }, [hoveredId]);
 
   useEffect(() => {
     const controls = bubbleApi.subscribeControls(setControls);
@@ -55,11 +93,12 @@ export function BubbleApp(): ReactElement {
     className={`bubble-stack position-${snapshot.position}`}
     onClick={(event) => { if (event.target === event.currentTarget) void bubbleApi.fastForward(); }}
     onPointerMove={(event) => {
-      if (!(event.target instanceof Element) || event.target.closest(".speech-bubble,.speaker,.deck-edge,.deck-latest") === null) void bubbleApi.passThrough();
+      updateHover({ x: event.clientX, y: event.clientY });
+      if (!(event.target instanceof Element) || event.target.closest(".bubble-surface,.bubble-close-lane,.speaker,.deck-edge,.deck-latest") === null) void bubbleApi.passThrough();
     }}
+    onPointerLeave={() => updateHover(null)}
   >
-    {controls === undefined ? null : <BubbleDeck snapshot={snapshot} controls={controls} typing={typing}
-      onHover={(id, hovering) => { void bubbleApi.hover(id, hovering); }}
+    {controls === undefined ? null : <BubbleDeck snapshot={snapshot} controls={controls} typing={typing} hoveredId={hoveredId}
       onEvent={(event) => {
         void bubbleApi.input(event).then((result) => {
           if (!result.ok) console.error("Bubble input IPC error", event.type, result.error.message);
@@ -67,4 +106,14 @@ export function BubbleApp(): ReactElement {
       }} />}
 
   </div></I18nProvider>;
+}
+
+function containsPoint(element: Element, point: { x: number; y: number }): boolean {
+  const rect = element.getBoundingClientRect();
+  return point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom;
+}
+
+function containsVisiblePoint(element: Element, stack: Element, point: { x: number; y: number }): boolean {
+  const face = element.closest(".deck-face");
+  return containsPoint(element, point) && containsPoint(stack, point) && (face === null || containsPoint(face, point));
 }

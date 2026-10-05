@@ -4,7 +4,8 @@
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; background: transparent; }
 button, select { color: inherit; font: inherit; }
-.bubble-stack { width: 100%; padding: 8px 10px 12px; overscroll-behavior: contain; }
+.bubble-stack { --bubble-side-space: 24px; width: 100%; max-height: 100dvh; padding: 8px 0 12px; overflow-y: auto; overscroll-behavior: contain; }
+.position-top-left, .position-bottom-left { --bubble-side-space: 42px; }
 .bubble-deck { position: relative; padding-top: 16px; }
 .deck-face { position: relative; z-index: 3; pointer-events: none; max-height: 620px; overflow-y: auto; scrollbar-width: thin; overscroll-behavior: contain; }
 .deck-edge { position: absolute; inset: 28px 28px 26px 10px; padding: 0; border: 1px solid var(--color-line-strong); border-radius: var(--radius-bubble); background: var(--color-bubble); cursor: pointer; }
@@ -14,18 +15,18 @@ button, select { color: inherit; font: inherit; }
 .position-top-left .deck-edge, .position-bottom-left .deck-edge { right: 10px; left: 28px; }
 .deck-latest { display: block; position: relative; z-index: 4; margin: 4px 18px 0 auto; padding: 3px 8px; color: var(--color-bubble-accent-ink); background: var(--color-bubble); border: 1px solid var(--color-line-strong); border-radius: var(--radius-control); font-size: 11px; cursor: pointer; }
 .typing-caret { color: var(--color-bubble-accent-ink); animation: typing-pulse 800ms ease-in-out infinite alternate; }
-.speech-item { display: flex; flex-direction: column; align-items: flex-end; transform-origin: calc(100% - 20px) 18px; animation: bubble-enter 200ms ease-out both; }
+.speech-item { position: relative; display: flex; flex-direction: column; align-items: flex-end; width: max-content; max-width: 100%; margin-left: auto; pointer-events: none; transform-origin: calc(100% - 20px) 18px; animation: bubble-enter 200ms ease-out both; }
 .position-bottom-right .speech-item, .position-bottom-left .speech-item { flex-direction: column-reverse; transform-origin: calc(100% - 20px) calc(100% - 18px); }
-.position-top-left .speech-item, .position-bottom-left .speech-item { align-items: flex-start; transform-origin: 20px 18px; }
+.position-top-left .speech-item, .position-bottom-left .speech-item { align-items: flex-start; margin-left: 0; transform-origin: 20px 18px; }
 .position-bottom-left .speech-item { transform-origin: 20px calc(100% - 18px); }
 .speech-item.is-exiting { pointer-events: none; animation: bubble-exit 180ms ease-out both; }
-.speaker { z-index: 1; display: flex; align-items: center; gap: 7px; margin: 0 2px 5px 0; color: var(--color-bubble-accent-ink); font-size: 11px; font-weight: 650; }
-.position-bottom-right .speaker, .position-bottom-left .speaker { margin: 5px 2px 0 0; }
+.speaker { z-index: 1; display: flex; align-items: center; gap: 7px; margin: 0 2px 0 0; color: var(--color-bubble-accent-ink); font-size: 11px; font-weight: 650; }
 .position-top-left .speaker, .position-bottom-left .speaker { flex-direction: row-reverse; margin-right: 0; margin-left: 2px; }
+.bubble-surface { position: relative; max-width: 100%; pointer-events: none; }
+.bubble-surface.has-close { padding-right: 24px; }
+.position-top-left .bubble-surface, .position-bottom-left .bubble-surface { padding-left: 18px; }
 .speech-bubble, .speaker { pointer-events: auto; }
-.speech-item.is-exiting .speech-bubble, .speech-item.is-exiting .speaker { pointer-events: none; }
-.speech-bubble { position: relative; width: min(350px, calc(100vw - 32px)); margin-right: 18px; padding: 13px 32px 10px 15px; color: var(--color-text); background: var(--color-bubble); border: 1px solid var(--color-line-strong); border-radius: var(--radius-bubble); cursor: pointer; }
-.position-top-left .speech-bubble, .position-bottom-left .speech-bubble { margin-right: 0; margin-left: 18px; }
+.speech-bubble { position: relative; width: min(350px, calc(100vw - var(--bubble-side-space))); max-width: 100%; padding: 13px 32px 10px 15px; color: var(--color-text); background: var(--color-bubble); border: 1px solid var(--color-line-strong); border-radius: var(--radius-bubble); cursor: pointer; }
 .speech-bubble.is-interactive { cursor: default; }
 .bubble-tail { position: absolute; z-index: -1; top: -14px; right: -8px; width: 34px; height: 24px; overflow: visible; fill: var(--color-bubble); stroke: var(--color-line-strong); stroke-width: 1; stroke-linejoin: round; }
 .position-top-left .bubble-tail { right: auto; left: -8px; transform: scaleX(-1); }
@@ -36,13 +37,16 @@ button, select { color: inherit; font: inherit; }
 .speech-item.is-thought { opacity: .72; animation-name: thought-bubble-enter; }
 .speech-item.is-thought.is-exiting { animation-name: bubble-exit; }
 .speech-item.is-thought .speaker { margin-bottom: 3px; color: var(--color-muted); font-size: 10px; font-weight: 500; opacity: .82; }
-.speech-item.is-thought .speech-bubble { width: min(290px, calc(100vw - 44px)); padding: 9px 27px 8px 12px; background: color-mix(in srgb, var(--color-bubble) 72%, transparent); border-color: color-mix(in srgb, var(--color-line-strong) 62%, transparent); border-style: dashed; border-radius: calc(var(--radius-bubble) * .82); }
+.speech-item.is-thought .speech-bubble { width: min(290px, calc(100vw - var(--bubble-side-space))); padding: 9px 27px 8px 12px; background: color-mix(in srgb, var(--color-bubble) 72%, transparent); border-color: color-mix(in srgb, var(--color-line-strong) 62%, transparent); border-style: dashed; border-radius: calc(var(--radius-bubble) * .82); }
 .speech-item.is-thought .speech-bubble p { color: var(--color-muted); font-size: 13px; line-height: 1.4; }
 .speech-item.is-thought .bubble-tail { width: 27px; height: 19px; opacity: .62; }
 .speech-item.is-thought .speech-bubble time { margin-top: 4px; font-size: 9px; }
-.bubble-close { position: absolute; z-index: 1; top: 5px; right: 6px; display: grid; width: 24px; height: 24px; padding: 0; place-items: center; color: var(--color-muted); background: transparent; border: 0; border-radius: var(--radius-control); cursor: pointer; opacity: 0; pointer-events: none; transition: opacity 120ms ease-out, color 120ms ease-out, background-color 120ms ease-out; }
-.speech-item:hover .bubble-close, .speech-item:focus-within .bubble-close { opacity: .72; pointer-events: auto; }
-.bubble-close:hover, .bubble-close:focus-visible { color: var(--color-text); background: var(--color-surface-step); opacity: 1; }
+.bubble-close-lane { position: absolute; z-index: 2; top: 0; right: 0; bottom: 0; width: 24px; pointer-events: none; }
+.speech-item.is-pointer-over .bubble-close-lane { pointer-events: auto; }
+.bubble-close { position: absolute; z-index: 3; top: 0; right: 0; display: grid; width: 24px; height: 24px; padding: 0; place-items: center; color: var(--color-muted); background: var(--color-surface); border: 1px solid var(--color-line-strong); border-radius: var(--radius-control); cursor: pointer; opacity: 0; visibility: hidden; pointer-events: none; transition: color 120ms ease-out, background-color 120ms ease-out; }
+.speech-item.is-pointer-over .bubble-close { opacity: .72; visibility: visible; pointer-events: auto; }
+.speech-item.is-pointer-over .bubble-close:hover { color: var(--color-text); background: var(--color-surface-step); opacity: 1; }
+.speech-item.is-exiting .bubble-surface, .speech-item.is-exiting .speech-bubble, .speech-item.is-exiting .speaker, .speech-item.is-exiting .bubble-close-lane, .speech-item.is-exiting .bubble-close { pointer-events: none; }
 .tutorial-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
 .tutorial-actions button, .bubble-select button { padding: 6px 9px; color: var(--color-text); background: var(--color-accent-face); border: 1px solid var(--color-accent-ink); border-radius: var(--radius-control); cursor: pointer; }
 .bubble-select { display: flex; gap: 6px; margin-top: 10px; }

@@ -2,19 +2,23 @@ import type { ReactElement } from "react";
 
 import { useI18n } from "../i18n/index.js";
 import { WatchTargets } from "./WatchTargets.js";
+import { CaptureAllowlist } from "./CaptureAllowlist.js";
 import type { SettingsCategoryProps } from "./SettingsCategoryProps.js";
+import type { AppPickerView } from "../useSettingsPresenter.js";
 import { BooleanInput } from "./SettingsControls.js";
 import { tutorialSettingsHighlight } from "../tutorial-ui.js";
 import { permissionLabel } from "../settings-form.js";
 
 interface Props extends SettingsCategoryProps {
+  readonly appPicker: AppPickerView;
+  readonly onAppPickerAction: (name: string, value: unknown) => void;
   readonly onOpenSystemSettings: () => void;
   readonly onOpenAccessibilitySettings?: () => void;
   readonly onRelaunch: () => void;
   readonly highlight: boolean;
 }
 
-export function VisionSettings({ form, snapshot, update, onOpenSystemSettings, onOpenAccessibilitySettings, onRelaunch, highlight }: Props): ReactElement {
+export function VisionSettings({ form, snapshot, update, appPicker, onAppPickerAction, onOpenSystemSettings, onOpenAccessibilitySettings, onRelaunch, highlight }: Props): ReactElement {
   const { locale, t } = useI18n();
   return <>
     <WatchTargets
@@ -23,6 +27,17 @@ export function VisionSettings({ form, snapshot, update, onOpenSystemSettings, o
       highlight={highlight || tutorialSettingsHighlight(snapshot.onboarding, "watch")}
       updateFullscreen={(value) => update("watchFullscreen", value)}
       updateApps={(value) => update("watchApps", value)}
+      picker={appPicker}
+      onPickerAction={onAppPickerAction}
+    />
+    <CaptureAllowlist
+      enabled={form.captureAllowlistEnabled}
+      apps={form.captureAllowlistApps}
+      osMajorVersion={snapshot.osVersion.major}
+      updateEnabled={(value) => update("captureAllowlistEnabled", value)}
+      updateApps={(value) => update("captureAllowlistApps", value)}
+      picker={appPicker}
+      onPickerAction={onAppPickerAction}
     />
     <fieldset id="settings-vision-permissions">
       <legend>{t("settings.vision.permission")}</legend>

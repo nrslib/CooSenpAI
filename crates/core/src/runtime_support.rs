@@ -496,7 +496,7 @@ impl RuntimeActor {
             self.config.revision = config_revision;
         }
         self.revision = self.revision.saturating_add(1);
-        config_tx.send_replace(self.config.clone());
+        self.publish_config(config_tx);
         self.publish(snapshot_tx);
         self.revision
     }
@@ -516,7 +516,7 @@ impl RuntimeActor {
                 self.config.revision = config_revision;
             }
             self.revision = self.revision.saturating_add(1);
-            let _ = config_tx.send(self.config.clone());
+            self.publish_config(config_tx);
             self.publish(snapshot_tx);
         }
         self.revision
@@ -532,7 +532,7 @@ impl RuntimeActor {
         self.config.keymap = keymap;
         self.config.revision = config_revision;
         self.revision = self.revision.saturating_add(1);
-        config_tx.send_replace(self.config.clone());
+        self.publish_config(config_tx);
         self.publish(snapshot_tx);
         self.revision
     }
@@ -559,7 +559,7 @@ impl RuntimeActor {
         validate_config(&config)?;
         self.config = config;
         self.revision = self.revision.saturating_add(1);
-        config_tx.send_replace(self.config.clone());
+        self.publish_config(config_tx);
         self.publish(snapshot_tx);
         Ok(self.revision)
     }
@@ -913,6 +913,7 @@ impl RuntimeActor {
                 observer.update_observer_config(config.observer.clone());
             }
         }
+        self.invalidate_watch_context_if_allowlist_changed(&config)?;
         self.refresh_judge(&config).await;
         self.operation_cancellation.renew();
         self.full_config_revision = config_revision;
@@ -960,6 +961,7 @@ impl RuntimeActor {
                 observer.update_observer_config(config.observer.clone());
             }
         }
+        self.invalidate_watch_context_if_allowlist_changed(&config)?;
         self.refresh_judge(&config).await;
         self.full_config_revision = config_revision;
         self.config = config;
@@ -1033,6 +1035,7 @@ impl RuntimeActor {
         self.refresh_user_preparer();
         self.memory = agents.memory.take();
         self.memory_run_at = self.memory.as_ref().map(|_| Instant::now());
+        self.invalidate_watch_context_if_allowlist_changed(&config)?;
         self.refresh_judge(&config).await;
         self.full_config_revision = config_revision;
         self.config = config;
@@ -1061,6 +1064,31 @@ impl RuntimeActor {
         }
         validate_config(&config)?;
         Ok(config)
+    }
+
+    fn invalidate_watch_context_if_allowlist_changed(
+        &mut self,
+        next: &Config,
+    ) -> Result<(), RuntimeError> {
+        if !self
+            .config
+            .capture
+            .allowlist
+            .effective_scope_changed(&next.capture.allowlist)
+        {
+            return Ok(());
+        }
+        let since = chrono::Utc::now();
+        if let Some(companion) = self.companion.as_mut() {
+            companion.invalidate_watch_context(since)?;
+        }
+        if let Some(observer) = self.observer.as_mut() {
+            observer.persist_watch_context_cutoff(since)?;
+            observer.invalidate_previous_watch_context();
+        }
+        self.pending_observations
+            .retain(ObservationRecord::is_audio);
+        Ok(())
     }
 
     pub(super) async fn refresh_judge(&mut self, config: &Config) {

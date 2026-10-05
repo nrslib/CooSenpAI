@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use coosenpai_core::config::CaptureAllowlist;
 use coosenpai_core::ports::{
     ApplicationCapture, CapturedScreen, RuntimeLogger, ScreenDisplay, WindowBounds,
 };
@@ -20,14 +21,24 @@ pub async fn capture_screen(
     destination_directory: PathBuf,
     cancellation: CancellationToken,
 ) -> Result<Vec<CapturedScreen>> {
-    capture_screen_with_logger(destination_directory, cancellation, None).await
+    capture_screen_with_logger(
+        destination_directory,
+        CaptureAllowlist::default(),
+        cancellation,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn capture_screen_with_logger(
     destination_directory: PathBuf,
+    allowlist: CaptureAllowlist,
     cancellation: CancellationToken,
     logger: Option<Arc<dyn RuntimeLogger>>,
 ) -> Result<Vec<CapturedScreen>> {
+    if allowlist.enabled && allowlist.apps.is_empty() {
+        anyhow::bail!("撮影許可リストが空のため撮影を停止しました");
+    }
     let enumeration_logger = logger.clone();
     capture_screens_to_directory(
         destination_directory,
@@ -43,13 +54,9 @@ pub(crate) async fn capture_screen_with_logger(
             }
             result
         },
-        move |display, cancellation| {
-            capture_watch_png(
-                CaptureTarget::Display(display.id),
-                cancellation,
-                logger.clone(),
-            )
-        },
+        move |display, cancellation| capture_watch_png(
+            CaptureTarget::Display(display.id), cancellation, logger.clone(), &allowlist,
+        ),
     )
     .await
 }
@@ -107,6 +114,7 @@ pub async fn capture_application_window(
         bundle_id,
         destination_directory,
         window_limit,
+        CaptureAllowlist::default(),
         cancellation,
         None,
     )
@@ -117,10 +125,27 @@ pub(crate) async fn capture_application_window_with_logger(
     bundle_id: &str,
     destination_directory: PathBuf,
     window_limit: usize,
+    allowlist: CaptureAllowlist,
     cancellation: CancellationToken,
     logger: Option<Arc<dyn RuntimeLogger>>,
 ) -> Result<Vec<ApplicationCapture>> {
     ensure_not_cancelled(&cancellation)?;
+    if allowlist.enabled && allowlist.apps.is_empty() {
+        anyhow::bail!("撮影許可リストが空のため撮影を停止しました");
+    }
+    if !allowlist.permits(bundle_id) {
+        anyhow::bail!("撮影対象のアプリが許可リストにありません");
+    }
+    if allowlist.enabled && !crate::display_capture::screenshot_manager_available() {
+        anyhow::bail!("許可リスト撮影には macOS 14 以降が必要です");
+    }
+    if allowlist.enabled
+        && objc2_app_kit::NSRunningApplication::currentApplication()
+            .bundleIdentifier()
+            .is_some_and(|own| own.to_string() == bundle_id)
+    {
+        anyhow::bail!("自アプリのウィンドウは撮影許可リストの対象外です");
+    }
     let windows = crate::window_info::application_capture_windows(bundle_id, window_limit)?;
     if windows.is_empty() {
         return Ok(Vec::new());
@@ -142,6 +167,7 @@ pub(crate) async fn capture_application_window_with_logger(
                 })
                 .collect(),
             expected_ids.clone(),
+            allowlist.enabled.then(|| bundle_id.to_owned()),
             cancellation.clone(),
             logger.clone(),
         )
@@ -196,6 +222,7 @@ fn application_windows_are_unchanged(
 async fn capture_application_pngs_to_files(
     destinations: Vec<PathBuf>,
     window_ids: Vec<u32>,
+    expected_bundle_id: Option<String>,
     cancellation: CancellationToken,
     logger: Option<Arc<dyn RuntimeLogger>>,
 ) -> Result<Vec<PathBuf>> {
@@ -208,7 +235,12 @@ async fn capture_application_pngs_to_files(
     ensure_not_cancelled(&cancellation)?;
     let task_cancellation = cancellation.clone();
     let task = tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
-        let pngs = capture_application_watch_pngs(&window_ids, &task_cancellation, logger)?;
+        let pngs = capture_application_watch_pngs(
+            &window_ids,
+            expected_bundle_id.as_deref(),
+            &task_cancellation,
+            logger,
+        )?;
         anyhow::ensure!(
             pngs.len() == destinations.len(),
             "撮影画像と保存先の数が一致しません"

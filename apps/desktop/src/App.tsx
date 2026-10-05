@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
 
 import { AppUpdatePanel } from "./components/AppUpdatePanel.js";
 import { VoiceOutputPanel } from "./components/VoiceOutputPanel.js";
@@ -28,6 +28,7 @@ export function App(): ReactElement {
   const [providerApiKeysError, setProviderApiKeysError] = useState<string>();
   const send = (event: AppInput): void => { void desktopApi.appInput(event); };
   const [appearancePreview, setAppearancePreview] = useState<SettingsAppearancePreview>();
+  const shellRef = useRef<HTMLElement>(null);
   const snapshot = view?.snapshot ?? undefined;
 
   useEffect(() => {
@@ -46,6 +47,37 @@ export function App(): ReactElement {
   useLayoutEffect(() => {
     if (view !== undefined) send({ type: "settingsPresented", generation: view.settingsGeneration });
   }, [view?.settings, view?.settingsGeneration]);
+
+  useLayoutEffect(() => {
+    const shell = shellRef.current;
+    let last: string | undefined;
+    const report = (): void => {
+      const frontContentOpen = shell !== null && shell.querySelector(".header-menu-list, .debug-drawer, .attachment-overlay") !== null;
+      const insideAllowed = view?.screen === "chat" && view.settings === "closed" && !view.resetConfirmOpen && !view.historyOpen && !frontContentOpen;
+      const conversation = insideAllowed ? shell?.querySelector<HTMLElement>(".conversation") ?? null : null;
+      const composer = shell?.querySelector<HTMLElement>(".composer") ?? null;
+      const top = shell !== null && conversation !== null && composer !== null
+        ? Math.ceil(conversation.getBoundingClientRect().top - shell.getBoundingClientRect().top) : null;
+      const bottom = shell !== null && conversation !== null && composer !== null
+        ? Math.floor(composer.getBoundingClientRect().top - shell.getBoundingClientRect().top) : null;
+      const next = `${insideAllowed}:${top}:${bottom}`;
+      if (next === last) return;
+      last = next;
+      void desktopApi.appInput({ type: "thoughtControlsChanged", insideAllowed, top, bottom });
+    };
+    if (shell === null) { report(); return; }
+    const resize = new ResizeObserver(report);
+    const observe = (): void => {
+      resize.disconnect();
+      resize.observe(shell);
+      for (const child of shell.children) resize.observe(child);
+      report();
+    };
+    const mutation = new MutationObserver(observe);
+    mutation.observe(shell, { childList: true, subtree: true });
+    observe();
+    return () => { mutation.disconnect(); resize.disconnect(); };
+  }, [view?.screen, view?.settings, view?.resetConfirmOpen, view?.historyOpen, view?.menuOpen]);
 
   const previewAppearance = useCallback((preview?: SettingsAppearancePreview): Promise<IpcResult<null>> => {
     setAppearancePreview(preview);
@@ -117,7 +149,7 @@ export function App(): ReactElement {
   );
   const text = (value: import("./app-view.js").UiText) => renderUiText(value, (key, args) => t(locale, key, args));
 
-  return <I18nProvider locale={locale}><main className="app-shell">
+  return <I18nProvider locale={locale}><main className="app-shell" ref={shellRef}>
     {view.screen === "finish" ? <FinishRecoveryScreen error={view.error ?? undefined} busy={view.finishBusy} onRetry={() => send({ type: "tutorialFinish" })} /> : view.screen === "setup" ? null : <>
       <Header
       avatarColor={appearancePreview?.avatarColor ?? currentSnapshot.config.ui.avatarColor}

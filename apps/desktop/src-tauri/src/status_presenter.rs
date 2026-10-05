@@ -88,6 +88,7 @@ struct ObserverErrorIncident {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThoughtWindowView {
+    pub generation: u64,
     pub thought: Option<ThoughtView>,
     pub bubble_tail: bool,
     pub theme: String,
@@ -110,6 +111,7 @@ pub(crate) struct StatusPresenter {
     main_visible: bool,
     main_on_active_space: bool,
     main_geometry: Option<crate::window_thought::MainWindowGeometry>,
+    main_controls: Option<crate::window_thought::MainControls>,
     thought_position: Option<crate::window_thought::ScreenPoint>,
     thought_window_visible: bool,
     thought_window_state_unknown: bool,
@@ -118,7 +120,9 @@ pub(crate) struct StatusPresenter {
     thought_window_retry_generation: u64,
     thought_window_retry_failures: u8,
     thought_bubble_tail: bool,
-    thought_render_after_position: bool,
+    thought_render_pending: bool,
+    thought_render_generation: u64,
+    thought_render_waiting: Option<u64>,
     initialized: bool,
     candidate: Option<PresenceView>,
     presence_generation: u64,
@@ -148,6 +152,7 @@ impl Default for StatusPresenter {
             main_visible: false,
             main_on_active_space: true,
             main_geometry: None,
+            main_controls: None,
             thought_position: None,
             thought_window_visible: false,
             thought_window_state_unknown: false,
@@ -156,7 +161,9 @@ impl Default for StatusPresenter {
             thought_window_retry_generation: 0,
             thought_window_retry_failures: 0,
             thought_bubble_tail: false,
-            thought_render_after_position: false,
+            thought_render_pending: false,
+            thought_render_generation: 0,
+            thought_render_waiting: None,
             initialized: false,
             candidate: None,
             presence_generation: 0,
@@ -411,6 +418,13 @@ impl StatusPresenter {
     pub(crate) fn thought_window_mounted(&mut self) -> Vec<UiEffect> {
         self.sync_thought_window(true)
     }
+    pub(crate) fn thought_rendered(&mut self, generation: u64) -> Vec<UiEffect> {
+        if self.thought_render_waiting != Some(generation) {
+            return vec![];
+        }
+        self.thought_render_waiting = None;
+        self.sync_thought_window(false)
+    }
     pub(crate) fn main_visibility(&mut self, visible: bool) -> Vec<UiEffect> {
         if self.main_visible == visible {
             return vec![];
@@ -432,15 +446,29 @@ impl StatusPresenter {
         geometry: crate::window_thought::MainWindowGeometry,
     ) -> Vec<UiEffect> {
         let changed = self.main_geometry != Some(geometry);
-        let should_render = self.thought_window_should_be_visible() && !self.thought_window_visible;
         self.main_geometry = Some(geometry);
+        let should_render = self.thought_window_should_be_visible() && !self.thought_window_visible;
         if changed {
             self.restart_thought_window_retry_cycle();
         }
         self.sync_thought_window(should_render)
     }
-    fn render_thought(&self) -> UiEffect {
+    pub(crate) fn main_controls_changed(
+        &mut self,
+        controls: Option<crate::window_thought::MainControls>,
+    ) -> Vec<UiEffect> {
+        if self.main_controls == controls {
+            return vec![];
+        }
+        self.main_controls = controls;
+        self.restart_thought_window_retry_cycle();
+        self.sync_thought_window(!self.thought_window_visible)
+    }
+    fn render_thought(&mut self) -> UiEffect {
+        self.thought_render_generation = self.thought_render_generation.wrapping_add(1);
+        self.thought_render_waiting = Some(self.thought_render_generation);
         UiEffect::ThoughtRender(Box::new(ThoughtWindowView {
+            generation: self.thought_render_generation,
             thought: self.thought.clone(),
             bubble_tail: self.thought_bubble_tail,
             theme: self.thought_theme.clone(),
@@ -451,14 +479,17 @@ impl StatusPresenter {
     fn thought_window_should_be_visible(&self) -> bool {
         self.main_visible
             && self.main_on_active_space
-            && self.main_geometry.is_some()
+            && self
+                .main_geometry
+                .and_then(|geometry| {
+                    crate::window_thought::target_placement(geometry, self.main_controls)
+                })
+                .is_some()
             && self.thought.is_some()
     }
     fn sync_thought_window(&mut self, render: bool) -> Vec<UiEffect> {
+        self.thought_render_pending |= render;
         if self.thought_window_operation_pending {
-            if render && self.thought_window_should_be_visible() {
-                self.thought_render_after_position = true;
-            }
             return vec![];
         }
 
@@ -478,18 +509,16 @@ impl StatusPresenter {
         let Some(geometry) = self.main_geometry else {
             return effects;
         };
-        let placement = crate::window_thought::target_placement(geometry);
+        let placement = crate::window_thought::target_placement(geometry, self.main_controls)
+            .expect("visible thought has a valid placement");
         if self.thought_window_state_unknown {
-            self.thought_render_after_position |= render;
             return self.inspect_thought_window();
         }
         if self.thought_window_inspection_pending {
-            self.thought_render_after_position |= render;
             return effects;
         }
         let position_changed = self.thought_position != Some(placement.position);
         if position_changed {
-            self.thought_render_after_position |= render;
             self.thought_window_operation_pending = true;
             effects.push(UiEffect::ThoughtWindowPosition(placement));
             return effects;
@@ -498,13 +527,15 @@ impl StatusPresenter {
         if tail_changed {
             self.thought_bubble_tail = placement.bubble_tail;
         }
-        let deferred_render = std::mem::take(&mut self.thought_render_after_position);
-        if render || deferred_render || tail_changed {
+        let deferred_render = std::mem::take(&mut self.thought_render_pending);
+        if deferred_render || tail_changed {
             effects.push(self.render_thought());
         }
         if !self.thought_window_visible {
-            self.thought_window_operation_pending = true;
-            effects.push(UiEffect::ThoughtWindowShow);
+            if self.thought_render_waiting.is_none() {
+                self.thought_window_operation_pending = true;
+                effects.push(UiEffect::ThoughtWindowShow);
+            }
         } else {
             self.mark_thought_window_reconciled();
         }
@@ -577,12 +608,12 @@ impl StatusPresenter {
             crate::window_thought::ThoughtWindowOperation::Position(placement) => {
                 self.thought_position = Some(placement.position);
                 let tail_changed = self.thought_bubble_tail != placement.bubble_tail;
-                let render = std::mem::take(&mut self.thought_render_after_position)
-                    && self.thought_window_should_be_visible();
+                let visible = self.thought_window_should_be_visible();
+                let render = visible && std::mem::take(&mut self.thought_render_pending);
                 if tail_changed {
                     self.thought_bubble_tail = placement.bubble_tail;
                 }
-                if self.thought_window_should_be_visible() && (tail_changed || render) {
+                if visible && (tail_changed || render) {
                     effects.push(self.render_thought());
                 }
             }

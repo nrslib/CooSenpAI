@@ -188,7 +188,7 @@ impl WatchWorker for DesktopWatchWorker {
             tutorial_initial_capture_pending,
         } = self;
         let generation = *generation;
-        let config = state.runtime_config();
+        let (config, scope_generation) = state.core_runtime().watch_capture_config();
         let next_helper = resolve_desktop_ocr_helper(state, &config);
         if next_helper != *helper {
             ocr.set_helper(next_helper.clone())?;
@@ -270,6 +270,7 @@ impl WatchWorker for DesktopWatchWorker {
                     semaphore,
                     memory,
                     trigger,
+                    scope_generation,
                     generation,
                     cancellation.clone(),
                 )
@@ -311,6 +312,7 @@ impl WatchWorker for DesktopWatchWorker {
                 ocr,
                 semaphore,
                 memory,
+                scope_generation,
                 generation,
                 cancellation.clone(),
             )

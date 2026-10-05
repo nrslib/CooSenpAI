@@ -160,6 +160,7 @@ pub struct RuntimeHandle {
     pub(super) cancellation: CancellationToken,
     pub(super) operation_cancellation: std::sync::Arc<OperationCancellation>,
     pub(super) watch_scope_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(super) watch_scope_cancellation: std::sync::Arc<std::sync::Mutex<CancellationToken>>,
     pub(super) user_input_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(super) watch_scope_commit_lock: std::sync::Arc<std::sync::Mutex<()>>,
     pub(super) turn_commit_lock: std::sync::Arc<std::sync::Mutex<()>>,

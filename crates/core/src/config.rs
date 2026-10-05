@@ -24,7 +24,7 @@ use defaults::*;
 pub use paths::ConfigPaths;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::ops::{Deref, DerefMut};
 pub use storage::{
@@ -113,6 +113,8 @@ pub struct Config {
     #[serde(default)]
     pub watch: WatchConfig,
     #[serde(default)]
+    pub capture: CaptureConfig,
+    #[serde(default)]
     pub observer: ObserverConfig,
     #[serde(default)]
     pub companion: CompanionConfig,
@@ -152,6 +154,7 @@ impl Default for Config {
             config_version: CONFIG_VERSION,
             revision: 0,
             watch: WatchConfig::default(),
+            capture: CaptureConfig::default(),
             observer: ObserverConfig::default(),
             companion: CompanionConfig::default(),
             chat: ChatConfig::default(),
@@ -169,6 +172,41 @@ impl Default for Config {
             popup: PopupConfig::default(),
             app: AppConfig::default(),
         }
+    }
+}
+
+impl Config {
+    pub fn inactive_allowlist_is_only_difference(&self, next: &Self) -> bool {
+        if self.capture.allowlist.enabled
+            || next.capture.allowlist.enabled
+            || self.capture.allowlist.apps == next.capture.allowlist.apps
+        {
+            return false;
+        }
+        let mut comparable = self.clone();
+        comparable.revision = next.revision;
+        comparable.capture.allowlist.apps = next.capture.allowlist.apps.clone();
+        comparable == *next
+    }
+
+    pub fn watch_capture_scope_changed(&self, next: &Self) -> bool {
+        fn active_apps(config: &Config) -> BTreeSet<&str> {
+            config
+                .watch
+                .apps
+                .iter()
+                .filter(|app| app.enabled)
+                .map(|app| app.bundle_id.as_str())
+                .collect::<BTreeSet<_>>()
+        }
+
+        self.watch.fullscreen != next.watch.fullscreen
+            || active_apps(self) != active_apps(next)
+            || self.watch.app_window_limit != next.watch.app_window_limit
+            || self
+                .capture
+                .allowlist
+                .effective_scope_changed(&next.capture.allowlist)
     }
 }
 
@@ -347,6 +385,54 @@ pub struct WatchAppConfig {
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CaptureConfig {
+    #[serde(default)]
+    pub allowlist: CaptureAllowlist,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CaptureAllowlist {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub apps: Vec<CaptureAllowedApp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CaptureAllowedApp {
+    pub bundle_id: String,
+    pub name: String,
+}
+
+impl CaptureAllowlist {
+    pub fn effective_scope_changed(&self, next: &Self) -> bool {
+        fn bundle_ids(allowlist: &CaptureAllowlist) -> BTreeSet<&str> {
+            allowlist
+                .apps
+                .iter()
+                .map(|app| app.bundle_id.as_str())
+                .collect::<BTreeSet<_>>()
+        }
+        self.enabled != next.enabled || self.enabled && bundle_ids(self) != bundle_ids(next)
+    }
+
+    pub fn redact_front_app(&self, front_app: Option<String>) -> Option<String> {
+        if self.enabled {
+            None
+        } else {
+            front_app
+        }
+    }
+
+    pub fn permits(&self, bundle_id: &str) -> bool {
+        !self.enabled || self.apps.iter().any(|app| app.bundle_id == bundle_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -153,7 +153,7 @@ pub(super) struct WatchMemory {
 
 struct PendingCaptureSet {
     scope_generation: u64,
-    config_revision: u64,
+    config: Config,
     user_input_sequence: u64,
     accepted_at: Instant,
     frames: Vec<ObservationFrameInput>,
@@ -163,7 +163,7 @@ struct PendingCaptureSet {
 pub(super) struct PendingCaptureSetInput {
     pub(super) target: String,
     pub(super) scope_generation: u64,
-    pub(super) config_revision: u64,
+    pub(super) config: Config,
     pub(super) user_input_sequence: u64,
     pub(super) accepted_at: Instant,
     pub(super) frames: Vec<ObservationFrameInput>,
@@ -185,7 +185,7 @@ impl PendingCaptureSets {
             input.target,
             PendingCaptureSet {
                 scope_generation: input.scope_generation,
-                config_revision: input.config_revision,
+                config: input.config,
                 user_input_sequence: input.user_input_sequence,
                 accepted_at: input.accepted_at,
                 frames: input.frames,
@@ -199,12 +199,12 @@ impl PendingCaptureSets {
         &mut self,
         config: &Config,
         scope_generation: u64,
-        config_revision: u64,
         user_input_sequence: u64,
+        invalidation_revision: u64,
     ) {
         self.by_target.retain(|target, set| {
             set.scope_generation == scope_generation
-                && set.config_revision == config_revision
+                && capture_config_is_current(&set.config, config, invalidation_revision)
                 && set.user_input_sequence == user_input_sequence
                 && frame_target_is_enabled(config, target)
                 && set
@@ -238,6 +238,17 @@ impl PendingCaptureSets {
     }
 }
 
+fn capture_config_is_current(
+    captured: &Config,
+    current: &Config,
+    invalidation_revision: u64,
+) -> bool {
+    // 保存 revision は競合検出に使うため、無効な許可リストの一覧だけを照合の例外にする。
+    captured.revision >= invalidation_revision
+        && (captured.revision == current.revision
+            || captured.inactive_allowlist_is_only_difference(current))
+}
+
 impl WatchMemory {
     pub(super) fn enqueue_capture_set(&mut self, input: PendingCaptureSetInput) {
         self.pending.enqueue(input);
@@ -247,14 +258,14 @@ impl WatchMemory {
         &mut self,
         config: &Config,
         scope_generation: u64,
-        config_revision: u64,
         user_input_sequence: u64,
+        invalidation_revision: u64,
     ) {
         self.pending.retain_current_capture_sets(
             config,
             scope_generation,
-            config_revision,
             user_input_sequence,
+            invalidation_revision,
         );
     }
 
@@ -365,6 +376,7 @@ async fn capture(
     semaphore: &Arc<Semaphore>,
     memory: &mut WatchMemory,
     trigger: ActivityTriggerKind,
+    scope_generation: u64,
     generation: u64,
     cancellation: CancellationToken,
 ) -> Result<CaptureDisposition> {
@@ -393,7 +405,6 @@ async fn capture(
         return Err(anyhow::anyhow!("見守りの撮影が取り消されました"));
     };
     let runtime = state.core_runtime();
-    let scope_generation = runtime.watch_scope_generation();
     let user_input_sequence = runtime.user_input_sequence();
     ensure_capture_active(&cancellation)?;
     let directory = tempfile::tempdir()?;
@@ -412,7 +423,7 @@ async fn capture(
         let _ = state.logger.write("INFO", "見守り: 段階=capture-start target=fullscreen backend=in-process");
         user_response_in_progress =
             Some(state.snapshot().await.active_user_message_id.is_some());
-        let captured = screen_capture.capture(&source, cancellation.clone()).await;
+        let captured = screen_capture.capture(&source, &config.capture.allowlist, cancellation.clone()).await;
         let _ = state.logger.write("INFO", &format!(
             "見守り: 段階=capture-done target=fullscreen backend=in-process elapsed-ms={} success={} display-count={}",
             capture_started.elapsed().as_millis(), captured.is_ok(), captured.as_ref().map_or(0, Vec::len),
@@ -430,7 +441,8 @@ async fn capture(
     let focus = match focus_task {
         Some(task) => task.await.ok().flatten(),
         None => None,
-    };
+    }
+    .filter(|element| config.capture.allowlist.permits(&element.bundle_id));
     let stable = match stable {
         Ok(stable) => stable,
         Err(CaptureWithMaskError::Capture(error)) => return Err(anyhow::Error::new(error)),
@@ -489,7 +501,10 @@ async fn capture(
                 .duration_since(memory.window_start)
                 .as_secs_f64(),
             trigger,
-            memory.front_app.clone(),
+            config
+                .capture
+                .allowlist
+                .redact_front_app(memory.front_app.clone()),
             focus.clone(),
             config.debug.enabled,
         );
@@ -536,6 +551,7 @@ async fn capture(
     }
     ensure_capture_active(&cancellation)?;
     for frame in &frames {
+        let _scope_guard = runtime.lock_current_watch_scope(scope_generation)?;
         state.core_runtime().register_pending_frame_context(
             PendingFrameContext::bounded_with_focus(
                 frame.context_id.clone(),
@@ -563,7 +579,7 @@ async fn capture(
     memory.enqueue_capture_set(PendingCaptureSetInput {
         target: "fullscreen".to_owned(),
         scope_generation,
-        config_revision: config.revision,
+        config: config.clone(),
         user_input_sequence,
         frames,
         directory,
@@ -599,15 +615,18 @@ fn should_skip_self_application(front_app: Option<&str>, tutorial_watch: bool) -
 
 fn pending_capture_batch_is_current(
     state: &DesktopState,
-    config_revision: u64,
+    captured_config: &Config,
     scope_generation: u64,
     user_input_sequence: u64,
     frames: &[ObservationFrameInput],
 ) -> bool {
     let config = state.runtime_config();
     let runtime = state.core_runtime();
-    config.revision == config_revision
-        && runtime.watch_scope_generation() == scope_generation
+    capture_config_is_current(
+        captured_config,
+        &config,
+        state.config_update.watch_invalidation_revision(),
+    ) && runtime.watch_scope_generation() == scope_generation
         && runtime.user_input_sequence() == user_input_sequence
         && frames.iter().all(|frame| {
             frame.scope_generation == scope_generation
@@ -769,8 +788,8 @@ async fn flush_if_due(
     memory.retain_current_capture_sets(
         &latest_config,
         current_scope_generation,
-        latest_config.revision,
         user_input_sequence,
+        state.config_update.watch_invalidation_revision(),
     );
     let mut completed_work = false;
     if memory
@@ -843,8 +862,8 @@ async fn flush_if_due(
     memory.retain_current_capture_sets(
         &current_config,
         current_scope_generation,
-        current_config.revision,
         user_input_sequence,
+        state.config_update.watch_invalidation_revision(),
     );
     if !memory.has_pending_capture_sets() {
         state
@@ -853,7 +872,7 @@ async fn flush_if_due(
         memory.window_start = Instant::now();
         return Ok(());
     }
-    let batch_config_revision = current_config.revision;
+    let batch_config = current_config;
     let batch_scope_generation = current_scope_generation;
     let batch_user_input_sequence = user_input_sequence;
     let (frames, directories) = memory.take_pending_capture_sets();
@@ -873,7 +892,7 @@ async fn flush_if_due(
         }
         if !pending_capture_batch_is_current(
             &state,
-            batch_config_revision,
+            &batch_config,
             batch_scope_generation,
             batch_user_input_sequence,
             &frames,
