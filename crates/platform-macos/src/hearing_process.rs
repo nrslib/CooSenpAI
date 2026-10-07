@@ -6,11 +6,64 @@ use coosenpai_core::interactive_process::{
 use coosenpai_core::ports::{decode_hearing_event, HearingEvent, PortError, RuntimeLogger};
 use coosenpai_core::state::AudioObservationSource;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc as sync_mpsc, Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const MAX_RESTART_ATTEMPTS: u8 = 3;
+const DIAGNOSTIC_LOG_CAPACITY: usize = 128;
+const SPEAKER_LOAD_STOP_EXIT_CODE: i32 = 21;
+
+struct BufferedDiagnosticLogger {
+    sender: sync_mpsc::SyncSender<(String, String)>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl BufferedDiagnosticLogger {
+    fn new(logger: Arc<dyn RuntimeLogger>) -> Self {
+        let (sender, receiver) =
+            sync_mpsc::sync_channel::<(String, String)>(DIAGNOSTIC_LOG_CAPACITY);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let worker_dropped = dropped.clone();
+        tokio::task::spawn_blocking(move || {
+            while let Ok((level, message)) = receiver.recv() {
+                let count = worker_dropped.swap(0, Ordering::Relaxed);
+                if count > 0 {
+                    let _ = logger.write(
+                        "WARN",
+                        &format!("聴覚観察 helper 診断ログを破棄しました dropped={count}"),
+                    );
+                }
+                let _ = logger.write(&level, &message);
+            }
+            let count = worker_dropped.swap(0, Ordering::Relaxed);
+            if count > 0 {
+                let _ = logger.write(
+                    "WARN",
+                    &format!("聴覚観察 helper 診断ログを破棄しました dropped={count}"),
+                );
+            }
+        });
+        Self { sender, dropped }
+    }
+}
+
+impl RuntimeLogger for BufferedDiagnosticLogger {
+    fn write(&self, level: &str, message: &str) -> std::io::Result<()> {
+        match self.sender.try_send((level.to_owned(), message.to_owned())) {
+            Ok(()) => Ok(()),
+            Err(sync_mpsc::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(sync_mpsc::TrySendError::Disconnected(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "聴覚観察 helper 診断ログの処理が終了しました",
+            )),
+        }
+    }
+}
 
 pub(crate) struct SourceProcessSpec {
     pub(crate) source: AudioObservationSource,
@@ -30,8 +83,13 @@ pub(crate) struct SourceProcessEvent {
 pub(crate) enum SourceProcessEventKind {
     Restarting,
     Event(HearingEvent),
-    Unavailable { error: Option<PortError> },
-    Exhausted { error: Option<PortError> },
+    Unavailable {
+        error: Option<PortError>,
+    },
+    Exhausted {
+        error: Option<PortError>,
+        speaker_stop_reason: Option<String>,
+    },
 }
 
 enum ProcessOutcome {
@@ -40,6 +98,43 @@ enum ProcessOutcome {
         reset_restart_budget: bool,
     },
     Stopped(Result<(), PortError>),
+}
+
+struct PersistentCaptureFailure {
+    kind: String,
+    message: String,
+}
+
+impl PersistentCaptureFailure {
+    fn from_event(event: &HearingEvent) -> Option<Self> {
+        let HearingEvent::Error { kind, message } = event else {
+            return None;
+        };
+        if !(kind == "system-audio" || kind.starts_with("system-audio-"))
+            || matches!(
+                kind.as_str(),
+                "system-audio-overflow" | "system-audio-restored"
+            )
+        {
+            return None;
+        }
+        Some(Self {
+            kind: kind.clone(),
+            message: message.clone(),
+        })
+    }
+
+    fn error(&self, exhausted: bool) -> PortError {
+        let reason = format!("source=speaker kind={}: {}", self.kind, self.message);
+        if exhausted {
+            PortError::SpeakerCaptureExhausted(format!(
+                "取り込み口の失敗が{}回に達したため停止しました: {reason}",
+                MAX_RESTART_ATTEMPTS + 1
+            ))
+        } else {
+            PortError::Unavailable(reason)
+        }
+    }
 }
 
 struct ForwardSanitizedFinalContext<'a> {
@@ -54,10 +149,14 @@ pub(crate) async fn run_source_process(
     cancellation: CancellationToken,
 ) -> Result<(), PortError> {
     let mut restart_attempts = 0;
+    let mut capture_restart_attempts = 0;
+    let diagnostic_logger = BufferedDiagnosticLogger::new(spec.logger.clone());
     let mut initial_process = spec.initial_process.take();
     let mut initial_error = spec.initial_error.take();
 
     loop {
+        let mut load_stop_seen = false;
+        let mut persistent_failure = None;
         if cancellation.is_cancelled() || spec.parent_cancellation.is_cancelled() {
             if let Some(mut process) = initial_process.take() {
                 return match monitor_process(
@@ -66,7 +165,9 @@ pub(crate) async fn run_source_process(
                     &events,
                     &cancellation,
                     &spec.parent_cancellation,
-                    spec.logger.as_ref(),
+                    &diagnostic_logger,
+                    &mut load_stop_seen,
+                    &mut persistent_failure,
                 )
                 .await
                 {
@@ -94,10 +195,11 @@ pub(crate) async fn run_source_process(
                     spec.source,
                     Some(error),
                     &mut restart_attempts,
+                    false,
                     &events,
                     &cancellation,
                     &spec.parent_cancellation,
-                    spec.logger.as_ref(),
+                    &diagnostic_logger,
                 )
                 .await
                 {
@@ -113,26 +215,42 @@ pub(crate) async fn run_source_process(
             &events,
             &cancellation,
             &spec.parent_cancellation,
-            spec.logger.as_ref(),
+            &diagnostic_logger,
+            &mut load_stop_seen,
+            &mut persistent_failure,
         )
         .await;
         match outcome {
             ProcessOutcome::Stopped(result) => return result,
             ProcessOutcome::Restart {
-                error,
+                mut error,
                 reset_restart_budget,
             } => {
-                if reset_restart_budget {
+                if let Some(failure) = persistent_failure.as_ref() {
+                    error = Some(failure.error(capture_restart_attempts >= MAX_RESTART_ATTEMPTS));
+                } else if load_stop_seen && error.is_none() {
+                    error = Some(PortError::SpeakerOverflow(
+                        "スピーカー音声の負荷による停止".to_owned(),
+                    ));
+                }
+                if reset_restart_budget && !load_stop_seen {
                     restart_attempts = 0;
                 }
+                let capture_failure = persistent_failure.is_some() || load_stop_seen;
+                let attempts = if capture_failure {
+                    &mut capture_restart_attempts
+                } else {
+                    &mut restart_attempts
+                };
                 if !schedule_restart(
                     spec.source,
                     error,
-                    &mut restart_attempts,
+                    attempts,
+                    capture_failure,
                     &events,
                     &cancellation,
                     &spec.parent_cancellation,
-                    spec.logger.as_ref(),
+                    &diagnostic_logger,
                 )
                 .await
                 {
@@ -163,6 +281,7 @@ async fn schedule_restart(
     source: AudioObservationSource,
     error: Option<PortError>,
     restart_attempts: &mut u8,
+    capture_failure: bool,
     events: &mpsc::Sender<SourceProcessEvent>,
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
@@ -177,6 +296,18 @@ async fn schedule_restart(
             ),
         );
     }
+    let speaker_stop_reason = if capture_failure && *restart_attempts >= MAX_RESTART_ATTEMPTS {
+        let error = error.as_ref().expect("capture failure has a reason");
+        Some(match error {
+            PortError::SpeakerCaptureExhausted(message) => message.clone(),
+            _ => format!(
+                "取り込み口の失敗が{}回に達したためスピーカー入力を停止しました: {error}",
+                MAX_RESTART_ATTEMPTS + 1
+            ),
+        })
+    } else {
+        None
+    };
     if !send_source_event(
         events,
         source,
@@ -190,7 +321,10 @@ async fn schedule_restart(
         let _ = send_source_event(
             events,
             source,
-            SourceProcessEventKind::Exhausted { error: None },
+            SourceProcessEventKind::Exhausted {
+                error: None,
+                speaker_stop_reason,
+            },
         )
         .await;
         return false;
@@ -252,6 +386,7 @@ fn speaker_metadata_reason_class(reason: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn monitor_process(
     source: AudioObservationSource,
     process: &mut InteractiveProcess,
@@ -259,6 +394,8 @@ async fn monitor_process(
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
+    load_stop_seen: &mut bool,
+    persistent_failure: &mut Option<PersistentCaptureFailure>,
 ) -> ProcessOutcome {
     let control = process.control();
     let mut valid_final_seen = false;
@@ -379,6 +516,19 @@ async fn monitor_process(
                                 .await;
                             }
                             event => {
+                                if source == AudioObservationSource::Speaker {
+                                    if let Some(failure) =
+                                        PersistentCaptureFailure::from_event(&event)
+                                    {
+                                        *persistent_failure = Some(failure);
+                                    }
+                                }
+                                if source == AudioObservationSource::Speaker
+                                    && matches!(&event, HearingEvent::Error { kind, .. } if kind == "system-audio-overflow")
+                                {
+                                    *load_stop_seen = true;
+                                    *persistent_failure = None;
+                                }
                                 if matches!(event, HearingEvent::Final { .. }) {
                                     valid_final_seen = true;
                                 }
@@ -422,7 +572,30 @@ async fn monitor_process(
                 if stopping || cancellation.is_cancelled() || parent_cancellation.is_cancelled() {
                     return ProcessOutcome::Stopped(cancel_write_error.map_or(Ok(()), Err));
                 }
-                let error = (status != Some(0)).then(|| helper_exit_error(&stderr));
+                if source == AudioObservationSource::Speaker {
+                    *load_stop_seen |= status == Some(SPEAKER_LOAD_STOP_EXIT_CODE);
+                    if status == Some(SPEAKER_LOAD_STOP_EXIT_CODE) {
+                        *persistent_failure = None;
+                    }
+                    if status != Some(0) && !*load_stop_seen && persistent_failure.is_none() {
+                        *persistent_failure = Some(PersistentCaptureFailure {
+                            kind: "system-audio-helper-exit".to_owned(),
+                            message: "停止理由を受信できないまま helper が異常終了しました"
+                                .to_owned(),
+                        });
+                    }
+                }
+                let error = if status == Some(SPEAKER_LOAD_STOP_EXIT_CODE)
+                    && source == AudioObservationSource::Speaker
+                {
+                    Some(PortError::SpeakerOverflow(
+                        "スピーカー音声の負荷による停止中に helper が終了しました".to_owned(),
+                    ))
+                } else if status != Some(0) {
+                    Some(helper_exit_error(&stderr))
+                } else {
+                    None
+                };
                 return ProcessOutcome::Restart {
                     reset_restart_budget: valid_final_seen,
                     error,

@@ -19,6 +19,10 @@ pub enum PortError {
     Protocol(String),
     #[error("platform adapter の話者プロトコルが不正です: {0}")]
     SpeakerProtocol(String),
+    #[error("スピーカー音声の処理が追いつかず停止しました: {0}")]
+    SpeakerOverflow(String),
+    #[error("スピーカー音声の取り込み口を停止しました: {0}")]
+    SpeakerCaptureExhausted(String),
     #[error("画面収録の権限がありません: {0}")]
     ScreenCapturePermission(String),
     #[error("platform adapter が timeout しました")]

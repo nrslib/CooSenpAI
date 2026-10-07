@@ -2,6 +2,8 @@ import AVFoundation
 import Foundation
 
 final class SpeakerAudioTap: @unchecked Sendable {
+    private static let captureFailureExitCode: Int32 = 20
+    private static let loadFailureExitCode: Int32 = 21
     private let worker = DispatchQueue(label: "dev.nrslib.coosenpai.hearing.speaker", qos: .userInitiated)
     private let cancellation = SpeakerAudioCancellation()
     private let makeDevice: () throws -> SpeakerAudioCapture
@@ -12,6 +14,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
     private enum Phase { case opening, running, waitingForDevice, stopped }
     private var phase = Phase.opening
     private var hasStarted = false
+    private var reconfigurationCount = 0
     private var onBuffer: ((SpeakerCapturedBuffer) -> Void)?
 
     // Lifecycle completions and deadlines are confined to the main queue.
@@ -19,6 +22,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
     private var stopDeadline: DispatchWorkItem?
     private var stopCompletions: [() -> Void] = []
     private var stopFinished = false
+    private var stopForLoadFailure = false
     private var onReady: ((AVAudioFormat, Bool) -> Void)?
     private var onInterruption: ((SpeakerAudioTapError) -> Void)?
     private var onFailure: ((SpeakerAudioTapError) -> Void)?
@@ -55,8 +59,9 @@ final class SpeakerAudioTap: @unchecked Sendable {
         }
     }
 
-    func stop(_ completion: @escaping () -> Void) {
+    func stop(forLoadFailure: Bool = false, _ completion: @escaping () -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
+        stopForLoadFailure = stopForLoadFailure || forLoadFailure
         if stopFinished { completion(); return }
         stopCompletions.append(completion)
         if cancellation.isCancelled { return }
@@ -115,24 +120,27 @@ final class SpeakerAudioTap: @unchecked Sendable {
     private func drain() {
         guard !cancellation.isCancelled, let device,
               phase == .running || phase == .waitingForDevice else { return }
-        if device.takeConfigurationChange() {
-            reconfigureDevice()
-            return
-        }
-        guard phase == .running else { return }
         do {
+            if let reason = try device.takeConfigurationChange() {
+                reconfigureDevice(reason: reason)
+                return
+            }
+            guard phase == .running else { return }
             for _ in 0..<32 {
                 guard !cancellation.isCancelled, let buffer = try device.nextBuffer() else { break }
                 onBuffer?(buffer)
             }
         } catch SpeakerAudioTapError.noOutputDevice {
-            reconfigureDevice()
+            reconfigureDevice(reason: "output-device-missing")
         } catch SpeakerAudioTapError.speakerDevicesMissing {
-            reconfigureDevice()
+            reconfigureDevice(reason: "selected-output-device-missing")
         } catch { reportFailure(error) }
     }
 
-    private func reconfigureDevice() {
+    private func reconfigureDevice(reason: String) {
+        reconfigurationCount += 1
+        emitSpeakerLoadDiagnostic("audio-tap-reconfigure count=\(reconfigurationCount) reason=\(reason)",
+                                  via: diagnostic)
         phase = .opening
         DispatchQueue.main.async { [self] in
             guard !cancellation.isCancelled else { return }
@@ -152,7 +160,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
         let failure = (error as? SpeakerAudioTapError) ?? .unexpected(error)
         DispatchQueue.main.async { [self] in
             guard !cancellation.isCancelled else { return }
-            stop {}
+            // The owner publishes load failures before requesting HAL teardown.
             onFailure?(failure)
         }
     }
@@ -161,7 +169,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
         startupDeadline?.cancel()
         let deadline = DispatchWorkItem { [weak self] in
             guard let self, !self.cancellation.isCancelled else { return }
-            self.stop {}
+            self.stop(forLoadFailure: false) {}
             self.onFailure?(.startupTimeout)
         }
         startupDeadline = deadline
@@ -173,7 +181,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
     private func terminateForCleanupFailure(_ reason: String) -> Never {
         // A blocked HAL call cannot be cancelled safely. Never announce release or reuse this process.
         diagnostic("audio-tap-cleanup operation=\(reason) action=terminate-process")
-        exit(1)
+        exit(stopForLoadFailure ? Self.loadFailureExitCode : Self.captureFailureExitCode)
     }
 
     private func finishStop() {

@@ -3,11 +3,86 @@ import AudioToolbox
 import CoreAudio
 import CoreMedia
 import CoreGraphics
+import Darwin
 import Foundation
 @preconcurrency import ScreenCaptureKit
 import Speech
 
-private let outputLock = NSLock()
+final class HearingDiagnosticOutput {
+    static let maximumPending = 128
+
+    private let queue = DispatchQueue(label: "dev.nrslib.coosenpai.hearing.stderr", qos: .utility)
+    private let lock = NSLock()
+    private let write: (Data) -> Bool
+    private var pending = 0
+    private var dropped: UInt64 = 0
+    private var totalDropped: UInt64 = 0
+    private var finished = false
+
+    init(write: @escaping (Data) -> Bool) { self.write = write }
+
+    func emit(_ message: String) {
+        lock.lock()
+        guard !finished, pending < Self.maximumPending else {
+            dropped += 1
+            totalDropped += 1
+            lock.unlock()
+            return
+        }
+        pending += 1
+        queue.async { [self] in
+            let written = write(Data("\(message)\n".utf8))
+            lock.lock()
+            pending -= 1
+            if !written { totalDropped += 1 }
+            let omitted = dropped
+            dropped = 0
+            lock.unlock()
+            if omitted > 0 {
+                if !write(Data("diagnostic-output dropped=\(omitted)\n".utf8)) {
+                    lock.lock()
+                    totalDropped += 1
+                    lock.unlock()
+                }
+            }
+        }
+        lock.unlock()
+    }
+
+    func finish(_ completion: @escaping (UInt64) -> Void) {
+        lock.lock()
+        finished = true
+        queue.async { [self] in
+            lock.lock()
+            let count = totalDropped
+            lock.unlock()
+            completion(count)
+        }
+        lock.unlock()
+    }
+}
+
+private let stderrIsNonblocking: Bool = {
+    let flags = fcntl(STDERR_FILENO, F_GETFL)
+    return flags >= 0 && fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK) == 0
+}()
+
+private func writeDiagnostic(_ data: Data) -> Bool {
+    guard stderrIsNonblocking else { return false }
+    return data.withUnsafeBytes { bytes in
+        guard let base = bytes.baseAddress else { return true }
+        var written = 0
+        while written < bytes.count {
+            let count = Darwin.write(STDERR_FILENO, base.advanced(by: written), bytes.count - written)
+            if count > 0 { written += count; continue }
+            if count < 0 && errno == EINTR { continue }
+            return false
+        }
+        return true
+    }
+}
+
+private let hearingDiagnosticOutput = HearingDiagnosticOutput(write: writeDiagnostic)
 private let debugInputPlaybackRate = 1.0
 private let hearingEventLineLimit = 256 * 1024
 private let maximumCorrectionsPerFinal = 32
@@ -41,14 +116,181 @@ private struct EnqueuedAudioBufferAppendTarget: AudioBufferAppendTarget {
     }
 }
 
+final class HearingEventOutput {
+    static let maximumPending = 64
+
+    struct Snapshot {
+        let pending: Int
+        let peak: Int
+        let rejected: UInt64
+    }
+
+    private let queue = DispatchQueue(label: "dev.nrslib.coosenpai.hearing.events", qos: .utility)
+    private let lock = NSLock()
+    private let write: (Data) -> Void
+    private var pending = 0
+    private var peak = 0
+    private var rejected: UInt64 = 0
+    private var overloaded = false
+    private var onOverload: ((@escaping () -> Void) -> Void)?
+    private var overloadSources: [AudioSource] = []
+    private var finished = false
+
+    init(write: @escaping (Data) -> Void) {
+        self.write = write
+    }
+
+    func setOverloadHandler(
+        for sources: Set<AudioSource>, _ handler: @escaping (@escaping () -> Void) -> Void
+    ) {
+        precondition(!sources.isEmpty)
+        lock.lock()
+        overloadSources = AudioSource.allCases.filter { sources.contains($0) }
+        onOverload = handler
+        lock.unlock()
+    }
+
+    private static func overloadEvent(for source: AudioSource, rejected: UInt64) -> [String: Any] {
+        return [
+            "event": "error", "kind": source.outputOverloadKind,
+            "message": "source=\(source.rawValue) 標準出力の取り込みが追いつかず停止しました rejected=\(rejected)",
+        ]
+    }
+
+    @discardableResult
+    func emit(_ value: [String: Any], afterWrite: (() -> Void)? = nil) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: value) else { return false }
+        lock.lock()
+        guard !finished else { lock.unlock(); return false }
+        if overloaded || pending >= Self.maximumPending {
+            rejected += 1
+            let first = !overloaded
+            overloaded = true
+            if first {
+                let sources = overloadSources
+                pending += max(1, sources.count)
+                peak = max(peak, pending)
+                queue.async { [self] in
+                    lock.lock()
+                    let count = rejected
+                    rejected = 0
+                    lock.unlock()
+                    if sources.isEmpty {
+                        let failure: [String: Any] = [
+                            "event": "error", "kind": "helper-output-overflow",
+                            "message": "標準出力の取り込みが追いつかず停止しました rejected=\(count)",
+                        ]
+                        write(try! JSONSerialization.data(withJSONObject: failure) + Data("\n".utf8))
+                    } else {
+                        for source in sources {
+                            let failure = Self.overloadEvent(for: source, rejected: count)
+                            write(try! JSONSerialization.data(withJSONObject: failure) + Data("\n".utf8))
+                        }
+                    }
+                    lock.lock()
+                    pending -= max(1, sources.count)
+                    lock.unlock()
+                }
+            }
+            let handler = first ? onOverload : nil
+            lock.unlock()
+            handler? { [self] in
+                // 停止通知が先に届いても、過負荷エラーの書き込み後に受け付けを再開する。
+                queue.async { [self] in
+                    lock.lock()
+                    overloaded = false
+                    lock.unlock()
+                }
+            }
+            return false
+        }
+        pending += 1
+        peak = max(peak, pending)
+        queue.async { [self] in
+            write(data + Data("\n".utf8))
+            lock.lock()
+            pending -= 1
+            lock.unlock()
+            afterWrite?()
+        }
+        lock.unlock()
+        return true
+    }
+
+    func whenDrained(_ completion: @escaping () -> Void) {
+        lock.lock()
+        queue.async(execute: completion)
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(pending: pending, peak: peak, rejected: rejected)
+    }
+
+    func finish(with event: [String: Any], completion: @escaping () -> Void) {
+        guard let data = try? JSONSerialization.data(withJSONObject: event) else {
+            preconditionFailure("closed event must be serializable")
+        }
+        lock.lock()
+        precondition(!finished)
+        finished = true
+        pending += 1
+        peak = max(peak, pending)
+        queue.async { [self] in
+            write(data + Data("\n".utf8))
+            lock.lock()
+            pending -= 1
+            lock.unlock()
+            completion()
+        }
+        lock.unlock()
+    }
+
+    func drainSynchronously() {
+        lock.lock()
+        finished = true
+        lock.unlock()
+        queue.sync {}
+    }
+}
+
+extension AudioSource {
+    var outputOverloadKind: String {
+        self == .speaker ? "system-audio-overflow" : "microphone-audio-overflow"
+    }
+}
+
+func configureHearingOutputOverload(
+    _ output: HearingEventOutput, sources: Set<AudioSource>,
+    disable: @escaping (AudioSource, @escaping () -> Void) -> Void
+) {
+    output.setOverloadHandler(for: sources) { completion in
+        let lock = NSLock()
+        var remaining = sources.count
+        for source in AudioSource.allCases where sources.contains(source) {
+            disable(source) {
+                lock.lock()
+                remaining -= 1
+                let allStopped = remaining == 0
+                lock.unlock()
+                if allStopped { completion() }
+            }
+        }
+    }
+}
+
+let hearingEventOutput = HearingEventOutput { FileHandle.standardOutput.write($0) }
+
 @discardableResult
 private func emit(_ value: [String: Any]) -> Bool {
-    guard let data = try? JSONSerialization.data(withJSONObject: value) else { return false }
-    outputLock.lock()
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write(Data("\n".utf8))
-    outputLock.unlock()
-    return true
+    hearingEventOutput.emit(value)
+}
+
+private func exitAfterEmittedErrors() -> Never {
+    hearingEventOutput.drainSynchronously()
+    exit(2)
 }
 
 func boundedSpeakerCorrectionEvent(_ event: [String: Any]) -> ([String: Any], Int) {
@@ -78,9 +320,69 @@ func boundedSpeakerCorrectionEvent(_ event: [String: Any]) -> ([String: Any], In
 }
 
 private func emitStderr(_ message: String) {
-    outputLock.lock()
-    FileHandle.standardError.write(Data("\(message)\n".utf8))
-    outputLock.unlock()
+    hearingDiagnosticOutput.emit(message)
+}
+
+private let speakerLoadLogQueue = DispatchQueue(
+    label: "dev.nrslib.coosenpai.hearing.speaker-load-log", qos: .utility
+)
+
+func emitSpeakerLoadDiagnostic(_ message: String, via diagnostic: @escaping (String) -> Void) {
+    speakerLoadLogQueue.async { diagnostic(message) }
+}
+
+final class SpeakerProcessingLoad {
+    enum Admission: Equatable {
+        case accepted
+        case rejected
+        case stopRequired
+    }
+
+    struct Snapshot {
+        let pending: Int
+        let peak: Int
+        let rejected: UInt64
+    }
+
+    static let maximumPending = 32
+    private let lock = NSLock()
+    private var pending = 0
+    private var peak = 0
+    private var rejected: UInt64 = 0
+    private var stopRequested = false
+    private var reportedAt = Date.distantPast
+
+    func reserve() -> Admission {
+        lock.lock()
+        defer { lock.unlock() }
+        if stopRequested {
+            rejected += 1
+            return .rejected
+        }
+        guard pending < Self.maximumPending else {
+            rejected += 1
+            stopRequested = true
+            return .stopRequired
+        }
+        pending += 1
+        peak = max(peak, pending)
+        return .accepted
+    }
+
+    func finish() {
+        lock.lock()
+        pending -= 1
+        lock.unlock()
+    }
+
+    func snapshotIfDue(force: Bool) -> Snapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = Date()
+        guard force || now.timeIntervalSince(reportedAt) >= 5 else { return nil }
+        reportedAt = now
+        return Snapshot(pending: pending, peak: peak, rejected: rejected)
+    }
 }
 
 private func permissionName(_ status: AVAuthorizationStatus) -> String {
@@ -147,6 +449,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         qos: .userInitiated
     )
     private let audioProcessingQueueKey = DispatchSpecificKey<Void>()
+    private let speakerProcessingLoad = SpeakerProcessingLoad()
     private var nextTranscriptPublication: [AudioSource: Int] = [:]
     private var nextTranscriptToEmit: [AudioSource: Int] = [:]
     private var readyTranscriptPublications: [AudioSource: [Int: () -> Void]] = [:]
@@ -327,12 +630,17 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     func whenTranscriptsPublished(_ completion: @escaping () -> Void) {
-        syncOnAudioProcessingQueue {
+        let register = { [self] in
             if hasUnpublishedTranscripts() {
                 transcriptDrainCallbacks.append(completion)
             } else {
                 completion()
             }
+        }
+        if DispatchQueue.getSpecific(key: audioProcessingQueueKey) != nil {
+            register()
+        } else {
+            audioProcessingQueue.async(execute: register)
         }
     }
 
@@ -962,7 +1270,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             onBuffer: { [weak self] captured in
                 guard let self, !self.isTerminal(), self.isSourceActive(.speaker) else { return }
                 self.recordFirstAudioSample(for: .speaker)
-                self.receive(captured.buffer, for: .speaker, at: captured.timestamp)
+                self.receiveSpeakerCapturedBuffer(captured)
             },
             onInterruption: { [weak self] error in
                 guard let self, !self.isTerminal(), self.isSourceActive(.speaker) else { return }
@@ -1317,11 +1625,13 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                             )
                         }
                         let (boundedEvent, sentCorrectionCount) = boundedSpeakerCorrectionEvent(event)
-                        if emit(boundedEvent), sentCorrectionCount > 0,
-                           let speakerIdentificationResult {
-                            speakerIdentifier?.markCorrectionsDelivered(
-                                Array(speakerIdentificationResult.corrections.prefix(sentCorrectionCount))
-                            )
+                        if sentCorrectionCount > 0, let speakerIdentificationResult {
+                            let corrections = Array(speakerIdentificationResult.corrections.prefix(sentCorrectionCount))
+                            hearingEventOutput.emit(boundedEvent) { [self] in
+                                speakerIdentifier?.markCorrectionsDelivered(corrections)
+                            }
+                        } else {
+                            emit(boundedEvent)
                         }
                     } else {
                         emit(["event": "no-speech", "source": source.rawValue,
@@ -1697,7 +2007,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     func disableSource(
         _ source: AudioSource, kind: String, message: String,
-        inputGeneration: MicrophoneInputGeneration? = nil
+        inputGeneration: MicrophoneInputGeneration? = nil,
+        completion: (() -> Void)? = nil,
+        errorAlreadyEmitted: Bool = false
     ) {
         sourceLock.lock()
         let originGeneration = source == .microphone
@@ -1706,12 +2018,14 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         guard Thread.isMainThread else {
             // Never synchronously wait for main: teardown drains the audio queue.
             DispatchQueue.main.async { [weak self] in
-                self?.disableSource(source, kind: kind, message: message,
-                                    inputGeneration: originGeneration)
+                guard let self else { completion?(); return }
+                self.disableSource(source, kind: kind, message: message,
+                                   inputGeneration: originGeneration, completion: completion,
+                                   errorAlreadyEmitted: errorAlreadyEmitted)
             }
             return
         }
-        guard originGeneration?.isValid != false else { return }
+        guard originGeneration?.isValid != false else { completion?(); return }
         let timeoutWorkItem: DispatchWorkItem?
         let cancellationWorkItem: DispatchWorkItem?
         let noActiveSources: Bool
@@ -1719,6 +2033,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         guard !terminal, sourceAvailability.disable(source) else {
             pendingSourceDisables.remove(source)
             sourceLock.unlock()
+            completion?()
             return
         }
         pendingSourceDisables.remove(source)
@@ -1733,63 +2048,98 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
         timeoutWorkItem?.cancel()
         cancellationWorkItem?.cancel()
+        let earlySpeakerFailure = source == .speaker && [
+            "system-audio-overflow", "system-audio-format", "system-audio-clock",
+            "system-audio-permission", "system-audio-cleanup", "system-audio-no-audio",
+        ].contains(kind)
+        if earlySpeakerFailure && !errorAlreadyEmitted {
+            hearingEventOutput.emit([
+                "event": "error", "kind": kind,
+                "message": "source=\(source.rawValue) \(message)",
+            ])
+        }
+        stopDisabledSource(source, kind: kind, message: message,
+                           noActiveSources: noActiveSources, completion: completion,
+                           errorAlreadyEmitted: errorAlreadyEmitted || earlySpeakerFailure)
+    }
+
+    private func stopDisabledSource(
+        _ source: AudioSource, kind: String, message: String,
+        noActiveSources: Bool, completion: (() -> Void)?, errorAlreadyEmitted: Bool
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if isTerminal() { completion?(); return }
+        let stopping = DispatchGroup()
         switch source {
         case .microphone:
             debugInputPlayer?.stop()
             debugInputPlayer = nil
             stopMicrophoneInput()
         case .speaker:
-            if !noActiveSources {
-                speakerAudioTap?.stop {}
-                speakerAudioTap = nil
+            if let speakerAudioTap {
+                stopping.enter()
+                speakerAudioTap.stop(forLoadFailure: kind == "system-audio-overflow") { stopping.leave() }
+            }
+            if let speakerScreenCapture {
+                stopping.enter()
+                speakerScreenCapture.stop { stopping.leave() }
             }
             if !noActiveSources {
-                speakerScreenCapture?.stop {}
+                speakerAudioTap = nil
+                speakerScreenCapture = nil
             }
             speakerStarted = false
         }
 
-        let recognitionState = syncOnAudioProcessingQueue {
+        stopping.enter()
+        audioProcessingQueue.async { [self] in
             let state = recognitionStates.resetInput(for: source)
-            self.pendingDrainWorkItems[source]?.cancel()
-            self.pendingDrainWorkItems.removeValue(forKey: source)
-            self.voiceActivity[source]?.resetToWaiting()
+            pendingDrainWorkItems[source]?.cancel()
+            pendingDrainWorkItems.removeValue(forKey: source)
+            voiceActivity[source]?.resetToWaiting()
             if source == .speaker {
-                self.speakerMusicGate = nil
-                self.speakerMusicGatePreRollCount = 0
+                speakerMusicGate = nil
+                speakerMusicGatePreRollCount = 0
             }
-            if self.speakerIdentificationEnabled, let generation = state?.generation {
-                self.discardSpeakerIdentification(generation: generation)
+            if speakerIdentificationEnabled, let generation = state?.generation {
+                discardSpeakerIdentification(generation: generation)
             }
-            return state
+            DispatchQueue.main.async { [self] in
+                defer { stopping.leave() }
+                guard !isTerminal() else { return }
+                appendedAudioDump?.close(source: source)
+                if let state,
+                   !state.sessionTerminalArrived,
+                   !state.sessionCancellationRequested {
+                    cancelRecognitionSession(
+                        state.session,
+                        for: state.source,
+                        generation: state.generation,
+                        reason: .sourceDisabled
+                    )
+                }
+                if !errorAlreadyEmitted {
+                    emit([
+                        "event": "error",
+                        "kind": kind,
+                        "message": "source=\(source.rawValue) \(message)",
+                    ])
+                }
+                if noActiveSources {
+                    emit([
+                        "event": "error",
+                        "kind": "no-input-source",
+                        "message": "利用可能な音声入力源がありません",
+                    ])
+                    close()
+                } else if let microphoneAuthorization,
+                          let recognitionAuthorization {
+                    emitReadyIfPossible(microphoneAuthorization, recognitionAuthorization)
+                }
+            }
         }
-        appendedAudioDump?.close(source: source)
-        if let state = recognitionState,
-           !state.sessionTerminalArrived,
-           !state.sessionCancellationRequested {
-            cancelRecognitionSession(
-                state.session,
-                for: state.source,
-                generation: state.generation,
-                reason: .sourceDisabled
-            )
-        }
-
-        emit([
-            "event": "error",
-            "kind": kind,
-            "message": "source=\(source.rawValue) \(message)",
-        ])
-        if noActiveSources {
-            emit([
-                "event": "error",
-                "kind": "no-input-source",
-                "message": "利用可能な音声入力源がありません",
-            ])
-            close()
-        } else if let microphoneAuthorization,
-                  let recognitionAuthorization {
-            emitReadyIfPossible(microphoneAuthorization, recognitionAuthorization)
+        if let completion {
+            stopping.notify(queue: .main, execute: completion)
         }
     }
 
@@ -1817,7 +2167,25 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         debugDumpOnly = false
         debugDumpOnlyGeneration = nil
         sourceLock.unlock()
-        let recognitionStatesToCancel = syncOnAudioProcessingQueue {
+        for workItem in recognitionTimeouts { workItem.cancel() }
+        for workItem in recognitionCancellations { workItem.cancel() }
+        debugInputPlayer?.stop()
+        debugInputPlayer = nil
+        stopMicrophoneInput()
+        let speakerCapture = speakerAudioTap
+        speakerAudioTap = nil
+        let screenCapture = speakerScreenCapture
+        speakerScreenCapture = nil
+        let closing = DispatchGroup()
+        if let speakerCapture {
+            closing.enter()
+            speakerCapture.stop(forLoadFailure: false) { closing.leave() }
+        } else if let screenCapture {
+            closing.enter()
+            screenCapture.stop { closing.leave() }
+        }
+        closing.enter()
+        audioProcessingQueue.async { [self] in
             for source in AudioSource.allCases {
                 pendingDrainWorkItems[source]?.cancel()
                 pendingDrainWorkItems.removeValue(forKey: source)
@@ -1832,49 +2200,46 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                     discardSpeakerIdentification(generation: state.generation)
                 }
             }
-            return states
-        }
-        for workItem in recognitionTimeouts { workItem.cancel() }
-        for workItem in recognitionCancellations { workItem.cancel() }
-        for state in recognitionStatesToCancel
-            where !state.sessionTerminalArrived && !state.sessionCancellationRequested {
-            cancelRecognitionSession(
-                state.session,
-                for: state.source,
-                generation: state.generation,
-                reason: .sessionClosed
-            )
-        }
-        debugInputPlayer?.stop()
-        debugInputPlayer = nil
-        stopMicrophoneInput()
-        let speakerCapture = speakerAudioTap
-        speakerAudioTap = nil
-        let screenCapture = speakerScreenCapture
-        appendedAudioDump?.close()
-        let closing = DispatchGroup()
-        if let speakerCapture {
-            closing.enter()
-            speakerCapture.stop { closing.leave() }
-        } else if let screenCapture {
-            closing.enter()
-            screenCapture.stop { closing.leave() }
-        }
-        closing.enter()
-        whenTranscriptsPublished { [self] in
-            if let speakerIdentifier {
-                speakerIdentifier.shutdownAsync { closing.leave() }
-            } else {
-                closing.leave()
+            DispatchQueue.main.async { [self] in
+                for state in states
+                    where !state.sessionTerminalArrived && !state.sessionCancellationRequested {
+                    cancelRecognitionSession(
+                        state.session,
+                        for: state.source,
+                        generation: state.generation,
+                        reason: .sessionClosed
+                    )
+                }
+                appendedAudioDump?.close()
+                whenTranscriptsPublished { [self] in
+                    hearingEventOutput.whenDrained {
+                        DispatchQueue.main.async { [self] in
+                            if let speakerIdentifier {
+                                speakerIdentifier.shutdownAsync { closing.leave() }
+                            } else {
+                                closing.leave()
+                            }
+                        }
+                    }
+                }
             }
         }
         closing.notify(queue: .main) { self.emitClosedAndExit() }
     }
 
     private func emitClosedAndExit() {
-        emit(["event": "closed"])
-        fflush(stdout)
-        exit(0)
+        hearingDiagnosticOutput.finish { dropped in
+            if dropped > 0 {
+                emit([
+                    "event": "warning", "kind": "diagnostic-output-dropped",
+                    "message": "stderr の診断を破棄しました dropped=\(dropped)",
+                ])
+            }
+            hearingEventOutput.finish(with: ["event": "closed"]) {
+                fflush(stdout)
+                exit(0)
+            }
+        }
     }
 
     private func isTerminal() -> Bool {
@@ -2637,16 +3002,58 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         )
     }
 
-    private func receive(_ buffer: AVAudioPCMBuffer, for source: AudioSource, at timestamp: UInt64) {
-        guard !isTerminal(), isSourceActive(source) else { return }
-        processReceivedAudioBuffer(
-            buffer,
-            for: source,
-            frameCount: UInt64(buffer.frameLength),
-            appendTo: EnqueuedAudioBufferAppendTarget { [weak self] buffer, rms in
-                self?.enqueue(buffer, for: source, rms: rms, at: timestamp)
+    private func receiveSpeakerCapturedBuffer(_ captured: SpeakerCapturedBuffer) {
+        let admission = speakerProcessingLoad.reserve()
+        if admission != .accepted {
+            reportSpeakerProcessingLoad(force: admission == .stopRequired)
+            if admission == .stopRequired {
+                DispatchQueue.main.async { [weak self] in
+                    self?.disableSource(.speaker, kind: "system-audio-overflow",
+                        message: "スピーカー音声の前処理が追いつかず、バッファが上限に達しました")
+                }
             }
-        )
+            return
+        }
+        reportSpeakerProcessingLoad(force: false)
+        let owned: AVAudioPCMBuffer
+        do {
+            owned = try deepCopyAudioBuffer(captured.buffer)
+        } catch {
+            finishSpeakerCapturedBuffer()
+            reportAudioBufferCopyError(error, for: .speaker)
+            return
+        }
+        let timestamp = captured.timestamp
+        audioProcessingQueue.async { [weak self] in
+            guard let self else { return }
+            defer { self.finishSpeakerCapturedBuffer() }
+            guard !self.isTerminal(), self.isSourceActive(.speaker) else { return }
+            var prepared: (buffer: AVAudioPCMBuffer, rms: Double)?
+            self.processReceivedAudioBuffer(
+                owned, for: .speaker, frameCount: UInt64(owned.frameLength),
+                ownership: .owned,
+                appendTo: EnqueuedAudioBufferAppendTarget { buffer, rms in
+                    prepared = (buffer, rms)
+                }
+            )
+            if let prepared {
+                self.processAudioBuffer(prepared.buffer, for: .speaker,
+                    rms: prepared.rms, at: timestamp)
+            }
+        }
+    }
+
+    private func reportSpeakerProcessingLoad(force: Bool) {
+        guard let snapshot = speakerProcessingLoad.snapshotIfDue(force: force) else { return }
+        let output = hearingEventOutput.snapshot()
+        emitSpeakerLoadDiagnostic("speaker-processing-load queue-depth=\(snapshot.pending) "
+            + "max-queue-depth=\(snapshot.peak) rejected=\(snapshot.rejected) "
+            + "output-pending=\(output.pending) max-output-pending=\(output.peak) "
+            + "output-rejected=\(output.rejected)", via: emitStderr)
+    }
+
+    private func finishSpeakerCapturedBuffer() {
+        speakerProcessingLoad.finish()
     }
 
     func processReceivedAudioBuffer(
@@ -2654,6 +3061,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         for source: AudioSource,
         frameCount: UInt64,
         generation: MicrophoneInputGeneration? = nil,
+        ownership: ReceivedAudioBufferOwnership = .borrowed,
         appendTo target: AudioBufferAppendTarget
     ) {
         guard !isTerminal(), isSourceActive(source) else { return }
@@ -2664,6 +3072,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 mixing: source == .speaker && speakerBackend == .processTap
                     && !speakerDevices.isEmpty && buffer.format.channelCount > 1
                     ? .volumeWeighted : .average,
+                ownership: ownership,
                 appendTo: target
             )
         } catch let error as ReceivedAudioBufferProcessingError {
@@ -3358,7 +3767,7 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
           arguments[2] == "--input-device",
           arguments[4] == "--sources" else {
         emit(["event": "error", "kind": "arguments", "message": "--locale、--input-device、--sources を指定してください。任意で --engine auto|analyzer|sf、--debug-input-wav <path>、--debug-dump-appended <dir>、--speaker-identification、--speaker-model <path>、--speaker-ledger <path>、--debug-request-auth、または --debug-request-screen-capture-auth を追加できます"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     var debugInputWavPath: String?
     var debugDumpAppendedPath: String?
@@ -3377,14 +3786,14 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
         case "--engine":
             guard engineSelection == nil, index + 1 < arguments.count else {
                 emit(["event": "error", "kind": "arguments", "message": "--engine は値を付けて一度だけ指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             engineSelection = arguments[index + 1]
             index += 2
         case "--speaker-backend":
             guard backendSelection == nil, index + 1 < arguments.count else {
                 emit(["event": "error", "kind": "arguments", "message": "--speaker-backend は値を付けて一度だけ指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             backendSelection = arguments[index + 1]
             index += 2
@@ -3394,7 +3803,7 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
                   uid.utf8.count <= 512,
                   !uid.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
                 emit(["event": "error", "kind": "arguments", "message": "--speaker-device の UID が無効です"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             if !speakerDevices.contains(uid) { speakerDevices.append(uid) }
             index += 1
@@ -3404,7 +3813,7 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
                   !arguments[index + 1].isEmpty,
                   !arguments[index + 1].hasPrefix("--") else {
                 emit(["event": "error", "kind": "arguments", "message": "デバッグ入力は --debug-input-wav <path> で指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             debugInputWavPath = arguments[index + 1]
             index += 2
@@ -3414,28 +3823,28 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
                   !arguments[index + 1].isEmpty,
                   !arguments[index + 1].hasPrefix("--") else {
                 emit(["event": "error", "kind": "arguments", "message": "追加音声ダンプは --debug-dump-appended <dir> で指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             debugDumpAppendedPath = arguments[index + 1]
             index += 2
         case "--debug-request-auth":
             guard !debugRequestAuth else {
                 emit(["event": "error", "kind": "arguments", "message": "--debug-request-auth は一度だけ指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             debugRequestAuth = true
             index += 1
         case "--debug-request-screen-capture-auth":
             guard !debugRequestScreenCaptureAuth else {
                 emit(["event": "error", "kind": "arguments", "message": "--debug-request-screen-capture-auth は一度だけ指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             debugRequestScreenCaptureAuth = true
             index += 1
         case "--speaker-identification":
             guard !speakerIdentificationEnabled else {
                 emit(["event": "error", "kind": "arguments", "message": "--speaker-identification は一度だけ指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             speakerIdentificationEnabled = true
             index += 1
@@ -3445,7 +3854,7 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
                   !arguments[index + 1].isEmpty,
                   !arguments[index + 1].hasPrefix("--") else {
                 emit(["event": "error", "kind": "arguments", "message": "話者識別モデルは --speaker-model <path> で指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             speakerModelPath = arguments[index + 1]
             index += 2
@@ -3455,7 +3864,7 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
                   !arguments[index + 1].isEmpty,
                   !arguments[index + 1].hasPrefix("--") else {
                 emit(["event": "error", "kind": "arguments", "message": "話者台帳は --speaker-ledger <path> で指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             speakerLedgerPath = arguments[index + 1]
             index += 2
@@ -3464,24 +3873,24 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
                   index + 1 < arguments.count,
                   UUID(uuidString: arguments[index + 1]) != nil else {
                 emit(["event": "error", "kind": "arguments", "message": "--speaker-session-id は UUID を一度だけ指定してください"])
-                exit(2)
+                exitAfterEmittedErrors()
             }
             speakerSessionID = arguments[index + 1].lowercased()
             index += 2
         default:
             emit(["event": "error", "kind": "arguments", "message": "未対応の引数です: \(arguments[index])"])
-            exit(2)
+            exitAfterEmittedErrors()
         }
     }
     let sourceValues = arguments[5].split(separator: ",").compactMap { AudioSource(rawValue: String($0)) }
     let sources = Set(sourceValues)
     guard !sources.isEmpty, sources.count == sourceValues.count else {
         emit(["event": "error", "kind": "arguments", "message": "--sources は microphone または speaker で指定してください"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     guard debugInputWavPath == nil || sources.contains(.microphone) else {
         emit(["event": "error", "kind": "arguments", "message": "--debug-input-wav は microphone source と一緒に指定してください"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     let locale = arguments[1] == "system" ? Locale.current : Locale(identifier: arguments[1])
     let engine: SpeechEngine
@@ -3489,41 +3898,41 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
         engine = try SpeechEngine.resolve(engineSelection ?? "auto")
     } catch let failure as SpeechAnalysisFailure {
         emit(["event": "error", "kind": failure.kind, "message": failure.message])
-        exit(2)
+        exitAfterEmittedErrors()
     } catch {
         emit(["event": "error", "kind": "arguments", "message": "音声認識 engine を選択できませんでした"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     let speakerBackend: SpeakerBackend
     do {
         speakerBackend = try SpeakerBackend.select(backendSelection ?? "auto")
     } catch {
         emit(["event": "error", "kind": "arguments", "message": error.localizedDescription])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     guard backendSelection == nil || sources.contains(.speaker) else {
         emit(["event": "error", "kind": "arguments", "message": "--speaker-backend は speaker source と一緒に指定してください"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     guard speakerDevices.isEmpty || sources.contains(.speaker) else {
         emit(["event": "error", "kind": "arguments", "message": "--speaker-device は speaker source と一緒に指定してください"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     guard speakerDevices.isEmpty || speakerBackend == .processTap else {
         emit(["event": "error", "kind": "speaker-device-unsupported", "message": "出力デバイス指定には macOS 14.2 以降が必要です"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     guard !speakerIdentificationEnabled || sources.count == 1 else {
         emit(["event": "error", "kind": "arguments", "message": "--speaker-identification には入力源を一つ指定してください"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     guard speakerModelPath == nil || !sources.isEmpty else {
         emit(["event": "error", "kind": "arguments", "message": "--speaker-model には入力源が必要です"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     guard speakerLedgerPath == nil || !sources.isEmpty else {
         emit(["event": "error", "kind": "arguments", "message": "--speaker-ledger には入力源が必要です"])
-        exit(2)
+        exitAfterEmittedErrors()
     }
     return Arguments(
         locale: locale,

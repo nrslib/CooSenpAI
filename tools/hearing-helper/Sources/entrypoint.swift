@@ -23,6 +23,16 @@ struct HearingHelperApp {
             speakerSessionID: arguments.speakerSessionID,
             debugRequestScreenCaptureAuth: arguments.debugRequestScreenCaptureAuth
         )
+        configureHearingOutputOverload(hearingEventOutput, sources: arguments.sources) { [weak session] source, completion in
+            DispatchQueue.main.async {
+                guard let session else { completion(); return }
+                session.disableSource(
+                    source, kind: source.outputOverloadKind,
+                    message: "標準出力の取り込みが追いつかず、\(source.rawValue) 入力を停止しました",
+                    completion: completion, errorAlreadyEmitted: true
+                )
+            }
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             while let line = readLine() {
                 guard let data = line.data(using: .utf8),

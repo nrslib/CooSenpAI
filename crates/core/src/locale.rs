@@ -244,6 +244,7 @@ pub enum TextKey {
     AudioSystemFormatFailed,
     AudioSystemClockUnavailable,
     AudioSystemOverflow,
+    AudioSystemCaptureExhausted,
     AudioSystemStartupTimeout,
     AudioProtocolInvalid,
     AudioSpeakerProtocolInvalid,
@@ -1195,6 +1196,8 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::AudioSystemClockUnavailable, Locale::En) => "Could not read the speaker audio capture time. Restart Hearing AI.",
         (TextKey::AudioSystemOverflow, Locale::Ja) => "スピーカー音声の処理が追いつかず停止しました。負荷を減らして Hearing AI を入れ直してください。",
         (TextKey::AudioSystemOverflow, Locale::En) => "Speaker capture stopped because processing could not keep up. Reduce system load and restart Hearing AI.",
+        (TextKey::AudioSystemCaptureExhausted, Locale::Ja) => "スピーカー音声の取り込みが4回失敗したため停止しました。Hearing AI を入れ直してください。",
+        (TextKey::AudioSystemCaptureExhausted, Locale::En) => "Speaker capture stopped after four input failures. Restart Hearing AI to retry.",
         (TextKey::AudioSystemStartupTimeout, Locale::Ja) => "スピーカー音声の開始がタイムアウトしました。システムオーディオ録音の許可と出力デバイスを確認してください。",
         (TextKey::AudioSystemStartupTimeout, Locale::En) => "Speaker capture timed out during startup. Check System Audio Recording permission and the output device.",
         (TextKey::AudioProtocolInvalid, Locale::Ja) => {
@@ -1932,6 +1935,9 @@ pub fn localize_capture_message(message: &str, locale: Locale) -> String {
 }
 
 pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> String {
+    if kind == "system-audio-exhausted" && matches!(locale, Locale::En) {
+        return text(TextKey::AudioSystemCaptureExhausted, locale).to_owned();
+    }
     if kind == "speaker-device-missing" {
         if let Some(count) = speaker_missing_device_count(message) {
             return localize_speaker_missing_device_count(count, locale);

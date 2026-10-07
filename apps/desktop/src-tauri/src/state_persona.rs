@@ -230,6 +230,9 @@ impl DesktopState {
         } else {
             transaction.commit_config_while_holding(config.revision)?;
         }
+        self.hearing
+            .clear_speaker_capture_if_disabled(&config.audio)
+            .await;
         if watch_enabled_is_only_difference || work_mode_only || audio_only {
             self.activate_runtime();
             self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
@@ -361,6 +364,9 @@ impl DesktopState {
         ))
         .await;
         applied?;
+        self.hearing
+            .clear_speaker_capture_if_disabled(&config.audio)
+            .await;
         self.config_update
             .record_watch_invalidation(config.revision);
         self.activate_runtime();

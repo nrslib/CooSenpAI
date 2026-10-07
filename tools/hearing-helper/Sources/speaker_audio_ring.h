@@ -26,12 +26,19 @@ enum {
 
 CoosenpaiAudioRing * _Nullable coosenpai_audio_ring_create(const AudioStreamBasicDescription *format,
     uint32_t frame_capacity, uint32_t slot_count, CoosenpaiAudioChanges *changes);
+CoosenpaiAudioRing * _Nullable coosenpai_audio_ring_create_tap_mix(
+    const AudioStreamBasicDescription *input_format, const uint32_t *buffer_channels,
+    uint32_t buffer_count, const uint32_t *tap_channels, uint32_t tap_count,
+    uint32_t frame_capacity, uint32_t slot_count, CoosenpaiAudioChanges *changes);
 void coosenpai_audio_ring_destroy(CoosenpaiAudioRing * _Nullable ring);
 uint32_t coosenpai_audio_ring_fault(const CoosenpaiAudioRing *ring);
 uint64_t coosenpai_audio_ring_received(const CoosenpaiAudioRing *ring);
+uint64_t coosenpai_audio_ring_overflows(const CoosenpaiAudioRing *ring);
+uint64_t coosenpai_audio_ring_max_depth(const CoosenpaiAudioRing *ring);
+uint64_t coosenpai_audio_ring_max_callback_host_ticks(const CoosenpaiAudioRing *ring);
+void coosenpai_audio_ring_record_callback_host_ticks(CoosenpaiAudioRing *ring, uint64_t ticks);
+void coosenpai_audio_ring_accept_configuration(CoosenpaiAudioRing *ring, uint64_t sequence);
 void coosenpai_audio_ring_push(CoosenpaiAudioRing *ring, const AudioBufferList *input, uint64_t host_time);
-void coosenpai_audio_ring_push_tap_suffix(CoosenpaiAudioRing *ring, const AudioBufferList *input,
-    uint64_t host_time, uint32_t preceding_channels);
 uint32_t coosenpai_audio_ring_pop(CoosenpaiAudioRing *ring, AudioBufferList *output, uint64_t *host_time);
 CF_ASSUME_NONNULL_END
 

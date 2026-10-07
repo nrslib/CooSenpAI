@@ -4706,6 +4706,9 @@ final class SpeakerIdentificationCoordinator {
     private var rejectedGenerations: Set<Int> = []
     private let commitState = SpeakerCommitStateMachine()
     private var pendingBufferCount = 0
+    private var maxPendingBufferCount = 0
+    private var windowCount = 0
+    private var maxWindowNanoseconds: UInt64 = 0
     private let maximumPendingBuffers = 8
 
     private func ledgerGeneration(_ generation: Int) -> Int {
@@ -4923,13 +4926,6 @@ final class SpeakerIdentificationCoordinator {
     }
 
     func append(_ buffer: AVAudioPCMBuffer, generation: Int) {
-        let copiedBuffer: AVAudioPCMBuffer
-        do {
-            copiedBuffer = try deepCopyAudioBuffer(buffer)
-        } catch {
-            reject(generation: generation)
-            return
-        }
         stateLock.lock()
         guard currentGeneration == generation,
               !cancelledGenerations.contains(generation),
@@ -4943,7 +4939,18 @@ final class SpeakerIdentificationCoordinator {
             return
         }
         pendingBufferCount += 1
+        maxPendingBufferCount = max(maxPendingBufferCount, pendingBufferCount)
         stateLock.unlock()
+        let copiedBuffer: AVAudioPCMBuffer
+        do {
+            copiedBuffer = try deepCopyAudioBuffer(buffer)
+        } catch {
+            stateLock.lock()
+            pendingBufferCount -= 1
+            stateLock.unlock()
+            reject(generation: generation)
+            return
+        }
         worker.async { [weak self, copiedBuffer] in
             guard let self else { return }
             defer {
@@ -5004,6 +5011,7 @@ final class SpeakerIdentificationCoordinator {
         }
         stateLock.unlock()
         if shouldReturnUnavailable {
+            worker.async { [weak self] in self?.reportLoad(rejected: true) }
             clearSegmentLater(generation: generation, discardPendingCandidates: true)
             completion(fallback)
             return
@@ -5024,6 +5032,7 @@ final class SpeakerIdentificationCoordinator {
                 completion(self.finalizeSegmentResult(generation: generation, result: fallback, fallback: fallback))
                 return
             }
+            self.reportLoad(rejected: false)
             self.segment = nil
             self.ledgerWorker.async {
                 var result = fallback
@@ -5333,6 +5342,7 @@ final class SpeakerIdentificationCoordinator {
         while segment.samples.count >= sampleCounts.window,
               segment.nextWindowStartSample <= segment.samples.count - sampleCounts.window {
             let sourceStart = segment.nextWindowStartSample
+            let started = DispatchTime.now().uptimeNanoseconds
             if let window = try makeSpeakerEmbeddingWindow(
                 from: segment.samples,
                 sampleRate: segment.sampleRate,
@@ -5343,8 +5353,23 @@ final class SpeakerIdentificationCoordinator {
                     window
                 )
             }
+            windowCount += 1
+            maxWindowNanoseconds = max(maxWindowNanoseconds,
+                DispatchTime.now().uptimeNanoseconds - started)
             segment.nextWindowStartSample += sampleCounts.interval
         }
+    }
+
+    private func reportLoad(rejected: Bool) {
+        stateLock.lock()
+        let queuePeak = maxPendingBufferCount
+        maxPendingBufferCount = pendingBufferCount
+        stateLock.unlock()
+        log("speaker-identification-load source=\(generationNamespace == 1 ? "microphone" : "speaker") "
+            + "windows=\(windowCount) max-window-us=\(maxWindowNanoseconds / 1_000) "
+            + "max-queue-depth=\(queuePeak) rejected=\(rejected ? 1 : 0)")
+        windowCount = 0
+        maxWindowNanoseconds = 0
     }
 
     private func unavailableResult(

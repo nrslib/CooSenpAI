@@ -245,6 +245,11 @@ impl HearingAggregation {
 
     fn mark_ready(&mut self, source: AudioObservationSource, event: HearingEvent) {
         if let Some(status) = self.status_mut(source) {
+            if status.ready.is_none()
+                && matches!(status.last_error, Some(PortError::SpeakerOverflow(_)))
+            {
+                status.last_error = None;
+            }
             status.required = true;
             status.ready = Some(event);
         }
@@ -261,6 +266,12 @@ impl HearingAggregation {
             return;
         }
         if let Some(status) = self.status_mut(source) {
+            if matches!(
+                status.last_error.as_ref(),
+                Some(PortError::SpeakerOverflow(_))
+            ) {
+                return;
+            }
             let protocol_error = status.last_error.as_ref().is_some_and(is_protocol_error);
             if !protocol_error || matches!(event, HearingEvent::Final { .. }) {
                 status.last_error = None;
@@ -322,10 +333,18 @@ fn prefer_error(current: &mut Option<PortError>, candidate: Option<PortError>) {
     let Some(candidate) = candidate else {
         return;
     };
-    if current
-        .as_ref()
-        .is_some_and(|existing| is_protocol_error(existing) && !is_protocol_error(&candidate))
-    {
+    if matches!(candidate, PortError::SpeakerCaptureExhausted(_)) {
+        if !current.as_ref().is_some_and(is_protocol_error) {
+            *current = Some(candidate);
+        }
+        return;
+    }
+    if current.as_ref().is_some_and(|existing| {
+        matches!(
+            existing,
+            PortError::SpeakerOverflow(_) | PortError::SpeakerCaptureExhausted(_)
+        ) || (is_protocol_error(existing) && !is_protocol_error(&candidate))
+    }) {
         return;
     }
     *current = Some(candidate);
@@ -506,12 +525,19 @@ async fn run_session(
                         event @ HearingEvent::Warning { .. }
                         | event @ HearingEvent::Error { .. } => {
                             if let HearingEvent::Error { ref kind, ref message } = event {
-                                aggregation.record_error(
-                                    source_event.source,
+                                let error = if source_event.source == AudioObservationSource::Speaker
+                                    && kind == "system-audio-overflow"
+                                {
+                                    PortError::SpeakerOverflow(message.clone())
+                                } else {
                                     PortError::Unavailable(format!(
                                         "source={} kind={kind}: {message}",
                                         source_name(source_event.source)
-                                    )),
+                                    ))
+                                };
+                                aggregation.record_error(
+                                    source_event.source,
+                                    error,
                                 );
                                 if source_event.source == AudioObservationSource::Speaker
                                     && (kind == "system-audio" || kind.starts_with("system-audio-"))
@@ -582,6 +608,7 @@ async fn run_session(
                     }
                     SourceProcessEventKind::Exhausted {
                         error: process_error,
+                        speaker_stop_reason,
                     } => {
                         let source_error = aggregation
                             .status_mut(source_event.source)
@@ -590,6 +617,20 @@ async fn run_session(
                         prefer_error(&mut error, process_error);
                         aggregation.mark_unavailable(source_event.source, None);
                         prefer_error(&mut terminal_error, error);
+                        if let Some(message) = speaker_stop_reason {
+                            if !send_hearing_event(
+                                &events,
+                                Ok(HearingEvent::Warning {
+                                    kind: "system-audio-exhausted".to_owned(),
+                                    message,
+                                }),
+                                &cancel_requested,
+                                &parent_cancellation,
+                            ).await {
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                return;
+                            }
+                        }
                         if aggregation.no_required_sources() {
                             let mut error = terminal_error.take();
                             for status in &mut aggregation.sources {

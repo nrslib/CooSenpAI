@@ -10,6 +10,11 @@ enum ReceivedAudioBufferProcessingError: Error {
     case volumeUnavailable(AVAudioFormat)
 }
 
+enum ReceivedAudioBufferOwnership {
+    case borrowed
+    case owned
+}
+
 struct ReceivedAudioBufferProcessingResult {
     let receivedFormat: AVAudioFormat
     let buffer: AVAudioPCMBuffer
@@ -22,13 +27,19 @@ enum ReceivedAudioBufferProcessor {
     static func processReceivedAudioBuffer(
         _ source: AVAudioPCMBuffer,
         mixing: AudioChannelMixing,
+        ownership: ReceivedAudioBufferOwnership,
         appendTo target: AudioBufferAppendTarget
     ) throws -> ReceivedAudioBufferProcessingResult {
         let ownedBuffer: AVAudioPCMBuffer
-        do {
-            ownedBuffer = try deepCopyAudioBuffer(source)
-        } catch let error as AudioBufferCopyError {
-            throw ReceivedAudioBufferProcessingError.copy(error)
+        switch ownership {
+        case .borrowed:
+            do {
+                ownedBuffer = try deepCopyAudioBuffer(source)
+            } catch let error as AudioBufferCopyError {
+                throw ReceivedAudioBufferProcessingError.copy(error)
+            }
+        case .owned:
+            ownedBuffer = source
         }
 
         let normalizedBuffer: AVAudioPCMBuffer
@@ -42,7 +53,8 @@ enum ReceivedAudioBufferProcessor {
             throw ReceivedAudioBufferProcessingError.volumeUnavailable(normalizedBuffer.format)
         }
         let clampSummary = clampAudioSamples(in: normalizedBuffer)
-        let clampedVolume = audioVolume(from: normalizedBuffer)
+        let clampedVolume = clampSummary.hasAnomaly
+            ? audioVolume(from: normalizedBuffer) : rawVolume
         if let clampedVolume {
             target.append(normalizedBuffer, rms: clampedVolume.rms)
         }

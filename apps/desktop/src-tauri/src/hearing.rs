@@ -191,6 +191,7 @@ pub(crate) struct HearingController {
     lifecycle: Mutex<HearingLifecycle>,
     projection: Mutex<()>,
     restart_attempts: Mutex<u8>,
+    speaker_capture_exhausted: Mutex<Option<String>>,
 }
 
 impl HearingController {
@@ -223,6 +224,7 @@ impl HearingController {
             lifecycle: Mutex::new(HearingLifecycle::default()),
             projection: Mutex::new(()),
             restart_attempts: Mutex::new(0),
+            speaker_capture_exhausted: Mutex::new(None),
         }
     }
 
@@ -231,6 +233,15 @@ impl HearingController {
         tauri::async_runtime::spawn(async move {
             controller.reconcile(state).await;
         });
+    }
+
+    pub(crate) async fn clear_speaker_capture_if_disabled(
+        &self,
+        audio: &coosenpai_core::config::AudioConfig,
+    ) {
+        if !audio.enabled || !audio.speaker {
+            *self.speaker_capture_exhausted.lock().await = None;
+        }
     }
 
     pub(crate) async fn cancel_and_wait(&self, state: &DesktopState) {
@@ -293,6 +304,7 @@ impl HearingController {
             "INFO",
             &format!("hearing-speaker-model: source={model_source}"),
         );
+        self.clear_speaker_capture_if_disabled(&config.audio).await;
         if !config.audio.enabled || !state.is_runtime_active() || state.voice_output.is_active() {
             *self.restart_attempts.lock().await = 0;
             self.stop_locked(&state).await;
@@ -316,6 +328,14 @@ impl HearingController {
             )
             .await;
             return;
+        }
+        if settings.sources == [AudioObservationSource::Speaker] {
+            let stop_reason = self.speaker_capture_exhausted.lock().await.clone();
+            if let Some(message) = stop_reason {
+                self.stop_locked(&state).await;
+                publish_audio_error(&state, None, "system-audio-exhausted", &message).await;
+                return;
+            }
         }
         if self.lifecycle.lock().await.same_settings(&settings) {
             return;
@@ -432,7 +452,10 @@ impl HearingController {
             return;
         }
         let mut helper_sources = settings.sources.clone();
-        if settings.sources.contains(&AudioObservationSource::Speaker)
+        if self.speaker_capture_exhausted.lock().await.is_some() {
+            helper_sources = sources_without_speaker(&helper_sources);
+        }
+        if helper_sources.contains(&AudioObservationSource::Speaker)
             && crate::platform::speaker_requires_screen_recording()
         {
             let _ = state.logger.write("INFO", &format!("hearing-start: generation={generation} stage=screen-permission phase=begin elapsed-ms={}", started.elapsed().as_millis()));
@@ -691,6 +714,21 @@ impl HearingController {
         let mut cancel_task = None;
         self.publish_active_result(&state, generation, HearingResult::Restarted(generation))
             .await;
+        if settings.sources.contains(&AudioObservationSource::Speaker) {
+            let stop_reason = self.speaker_capture_exhausted.lock().await.clone();
+            if let Some(message) = stop_reason {
+                self.publish_active_result(
+                    &state,
+                    generation,
+                    HearingResult::Warning {
+                        generation,
+                        kind: "system-audio-exhausted".to_owned(),
+                        message,
+                    },
+                )
+                .await;
+            }
+        }
         while let Some(next) = active_session
             .next_context_event(
                 &context_session,
@@ -818,6 +856,9 @@ impl HearingController {
                 }
                 Ok(HearingEvent::Warning { kind, message }) => {
                     if self.accepts_events(generation).await {
+                        if kind == "system-audio-exhausted" {
+                            *self.speaker_capture_exhausted.lock().await = Some(message.clone());
+                        }
                         state
                             .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
                                 HearingResult::Warning {
@@ -1089,6 +1130,9 @@ impl HearingController {
         let Some(cleanup) = self.take_failure(generation).await else {
             return;
         };
+        if kind == "system-audio-exhausted" {
+            *self.speaker_capture_exhausted.lock().await = Some(message.to_owned());
+        }
         cleanup.cancellation.cancel();
         publish_audio_error(state, Some(generation), kind, message).await;
         if retryable_audio_error(kind) {
@@ -1389,6 +1433,12 @@ fn retryable_audio_error(kind: &str) -> bool {
 
 fn hearing_port_error(error: &coosenpai_core::ports::PortError) -> (&'static str, String) {
     match error {
+        coosenpai_core::ports::PortError::SpeakerOverflow(message) => {
+            ("system-audio-overflow", message.clone())
+        }
+        coosenpai_core::ports::PortError::SpeakerCaptureExhausted(message) => {
+            ("system-audio-exhausted", message.clone())
+        }
         coosenpai_core::ports::PortError::SpeakerProtocol(message) => {
             ("speaker-protocol", message.clone())
         }
