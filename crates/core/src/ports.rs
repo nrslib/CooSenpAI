@@ -428,6 +428,18 @@ pub enum HearingEvent {
         protocol_version: u8,
         #[serde(rename = "speakerIdentification", default)]
         speaker_identification: bool,
+        #[serde(rename = "inputGeneration")]
+        input_generation: u64,
+        #[serde(
+            rename = "readySources",
+            default,
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        ready_sources: Vec<AudioObservationSource>,
+    },
+    SourceState {
+        source: AudioObservationSource,
+        state: HearingSourceState,
     },
     SpeakerIdentification {
         status: SpeakerIdentificationPreparationStatus,
@@ -447,6 +459,8 @@ pub enum HearingEvent {
         source: AudioObservationSource,
         generation: u64,
         sequence: u64,
+        #[serde(rename = "inputGeneration")]
+        input_generation: u64,
         text: String,
         #[serde(flatten)]
         speaker: Option<Box<HearingSpeakerMetadata>>,
@@ -460,6 +474,23 @@ pub enum HearingEvent {
         message: String,
     },
     Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum HearingSourceState {
+    Ready {
+        input_generation: u64,
+    },
+    Waiting {
+        kind: String,
+        message: String,
+    },
+    Failed {
+        kind: String,
+        message: String,
+        retrying: bool,
+    },
 }
 
 fn default_hearing_protocol_version() -> u8 {
@@ -523,6 +554,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
         source,
         generation,
         sequence,
+        input_generation,
         text,
         speaker: _,
     } = required_event
@@ -536,6 +568,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
                 source,
                 generation,
                 sequence,
+                input_generation,
                 text,
                 speaker: None,
             },
@@ -549,6 +582,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
                 source,
                 generation,
                 sequence,
+                input_generation,
                 text,
                 speaker: Some(Box::new(metadata)),
             },
@@ -560,6 +594,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
                 source,
                 generation,
                 sequence,
+                input_generation,
                 text,
                 speaker: None,
             },
@@ -846,12 +881,14 @@ impl HearingEvent {
                 source: event_source,
                 generation,
                 sequence,
+                input_generation,
                 text,
                 ..
             } => {
                 event_source == &source
                     && *generation > 0
                     && *sequence > 0
+                    && *input_generation > 0
                     && !text.trim().is_empty()
             }
             _ => true,
@@ -863,6 +900,10 @@ impl HearingEvent {
             return false;
         }
         match self {
+            HearingEvent::SourceState { .. } => false,
+            HearingEvent::Ready {
+                input_generation, ..
+            } => *input_generation > 0,
             HearingEvent::Final { speaker, .. } => speaker
                 .as_ref()
                 .is_none_or(|metadata| metadata.validation_reason().is_none()),
@@ -882,6 +923,7 @@ impl HearingEvent {
             source: event_source,
             generation,
             sequence,
+            input_generation,
             text,
             speaker: Some(metadata),
         } = self
@@ -894,6 +936,7 @@ impl HearingEvent {
                 source: event_source,
                 generation,
                 sequence,
+                input_generation,
                 text,
                 speaker: None,
             },

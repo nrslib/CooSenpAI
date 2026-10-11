@@ -31,6 +31,7 @@ pub(crate) enum AppInput {
     MenuReset,
     ToggleWatch,
     ToggleAudio,
+    ResumeSpeaker,
     TutorialNext,
     TutorialFinish,
     Recover,
@@ -561,6 +562,33 @@ impl AppPresenter {
             }
             ToggleWatch => self.toggle(true, snapshot),
             ToggleAudio => self.toggle(false, snapshot),
+            ResumeSpeaker
+                if snapshot.is_some_and(|s| {
+                    !s.config.audio.enabled
+                        && s.config.audio.speaker
+                        && matches!(
+                            s.audio.speaker_capture,
+                            crate::snapshot::SpeakerCapture::Stopped { .. }
+                        )
+                }) =>
+            {
+                self.toggle(false, snapshot)
+            }
+            ResumeSpeaker
+                if snapshot.is_some_and(|s| {
+                    s.config.audio.enabled
+                        && s.config.audio.speaker
+                        && matches!(
+                            s.audio.speaker_capture,
+                            crate::snapshot::SpeakerCapture::Stopped { .. }
+                        )
+                }) =>
+            {
+                vec![self.operation(
+                    AppOperation::Recover(RecoveryAction::SpeakerResume),
+                    config_revision(snapshot),
+                )]
+            }
             TutorialNext => match self.view.tutorial.as_ref().and_then(|t| t.next) {
                 Some("retry") => {
                     vec![self.operation(AppOperation::RetryChat, config_revision(snapshot))]
@@ -924,6 +952,10 @@ async fn operation_result(
             )?;
         }
         AppOperation::Recover(action) => {
+            if matches!(action, RecoveryAction::SpeakerResume) {
+                state.resume_speaker().await?;
+                return Ok(Arc::new(state.snapshot().await));
+            }
             use coosenpai_core::ports::SystemSettingsPane;
             let pane = match action {
                 RecoveryAction::Microphone => SystemSettingsPane::Microphone,

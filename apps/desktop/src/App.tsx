@@ -210,6 +210,7 @@ export function App(): ReactElement {
       onOpenAccessibilitySettings={() => void handle(desktopApi.openAccessibilitySettings())}
       onOpenLicenseDocument={(document) => void handle(desktopApi.openLicenseDocument(document))}
       onOpenSpeechSettings={(kind) => void handle(desktopApi.openSpeechSettings(kind))}
+      onResumeSpeaker={() => send({ type: "resumeSpeaker" })}
       onSpeakerManagement={(payload) => handle(desktopApi.speakerManagement(payload))}
       onSpeakerDirectory={() => desktopApi.speakerDirectory()}
       onSpeakerRename={(payload) => handle(desktopApi.speakerRename(payload))}

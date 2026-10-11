@@ -69,6 +69,8 @@ export function lastVisualActivity(snapshot: AppSnapshot, locale: Locale = "ja")
 export function audioStatus(snapshot: AppSnapshot, locale: Locale = "ja"): string {
   const audio = snapshot.audio;
   if (audio === undefined) return t(locale, "view.noSetting");
+  const speaker = speakerCaptureStatus(snapshot, locale);
+  if (speaker !== null) return speaker;
   const sourceCount = Number(snapshot.config.audio.mic) + Number(snapshot.config.audio.speaker);
   if (!snapshot.config.audio.enabled) return t(locale, "view.stopped");
   if (sourceCount === 0) return t(locale, "view.noInputSource");
@@ -78,7 +80,22 @@ export function audioStatus(snapshot: AppSnapshot, locale: Locale = "ja"): strin
     case "stopping": return t(locale, "view.stopped");
     case "error": return audio.message ?? t(locale, "view.error");
     case "off": return t(locale, "view.waiting");
+  }
 }
+
+export function speakerCaptureStatus(snapshot: AppSnapshot, locale: Locale = "ja"): string | null {
+  if (!snapshot.config.audio.speaker) return null;
+  const capture = snapshot.audio.speakerCapture;
+  switch (capture.phase) {
+    case "starting": return t(locale, "view.speakerStarting");
+    case "running": return null;
+    case "paused": return t(locale, "view.speakerPaused");
+    case "waiting": return t(locale, "view.speakerWaiting", { reason: capture.reason });
+    case "restarting": return t(locale, "view.speakerRestarting", { reason: capture.reason });
+    case "stopped": return capture.reason
+      ? t(locale, "view.speakerStopped", { reason: capture.reason })
+      : t(locale, "view.speakerStoppedPlain");
+  }
 }
 
 function relativeCaptureTime(value: string | undefined, now: number, locale: Locale): string {

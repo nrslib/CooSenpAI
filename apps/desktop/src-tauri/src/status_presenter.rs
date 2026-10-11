@@ -51,6 +51,7 @@ pub(crate) struct ThoughtView {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum RecoveryAction {
     Settings,
+    SpeakerResume,
     ScreenCapture,
     SystemAudio,
     Microphone,
@@ -721,6 +722,7 @@ fn banner(tone: &'static str, message: UiText, action: Option<RecoveryAction>) -
     let action_label = action.map(|action| {
         UiText::message(match action {
             RecoveryAction::Settings => "view.actionSettings",
+            RecoveryAction::SpeakerResume => "view.actionResumeSpeaker",
             RecoveryAction::Relaunch => "view.relaunch",
             RecoveryAction::SystemAudio => "view.actionSystemAudioSettings",
             _ => "view.actionSystemSettings",
@@ -732,7 +734,10 @@ fn banner(tone: &'static str, message: UiText, action: Option<RecoveryAction>) -
         action,
         action_label,
         dismissible: matches!(tone, "error" | "warning")
-            && action != Some(RecoveryAction::SystemAudio),
+            && !matches!(
+                action,
+                Some(RecoveryAction::SystemAudio | RecoveryAction::SpeakerResume)
+            ),
     }
 }
 fn observer_error_banner(error: &ObserverErrorView) -> BannerView {
@@ -811,6 +816,41 @@ fn status_banner(s: &AppSnapshot) -> Option<BannerView> {
     }
     if let Some(error) = &s.capture_shortcut_error {
         return Some(banner("warning", Text::literal(error), Some(Settings)));
+    }
+    if s.config.audio.enabled && s.config.audio.speaker {
+        match &s.audio.speaker_capture {
+            crate::snapshot::SpeakerCapture::Waiting { reason, .. } => {
+                return Some(banner(
+                    "warning",
+                    Text::message("view.speakerWaiting").arg("reason", Text::literal(reason)),
+                    None,
+                ));
+            }
+            crate::snapshot::SpeakerCapture::Paused => {
+                return Some(banner("warning", Text::message("view.speakerPaused"), None));
+            }
+            crate::snapshot::SpeakerCapture::Restarting { reason, .. } => {
+                return Some(banner(
+                    "warning",
+                    Text::message("view.speakerRestarting").arg("reason", Text::literal(reason)),
+                    None,
+                ));
+            }
+            crate::snapshot::SpeakerCapture::Stopped { reason, .. } => {
+                return Some(banner(
+                    "warning",
+                    Text::message("view.speakerStopped").arg("reason", Text::literal(reason)),
+                    if s.audio.warning_kind.as_deref() == Some("screen-capture")
+                        && s.audio.screen_capture_permission != "granted"
+                    {
+                        Some(ScreenCapture)
+                    } else {
+                        Some(SpeakerResume)
+                    },
+                ));
+            }
+            _ => {}
+        }
     }
     if let Some(message) = &s.speech.message {
         let action = if s.speech.microphone_permission != "granted" {

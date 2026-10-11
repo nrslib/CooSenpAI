@@ -20,12 +20,12 @@ export interface AppView {
   // AppPresenter が観測した最新 snapshot の投影。View はこの値だけを描画・送信に使う。
   readonly snapshot: AppSnapshot | null;
 }
-export type AppInput = { readonly type: "mounted" | "retry" | "startupSettings" | "openSettings" | "closeSettings" | "toggleHistory" | "resetOpen" | "resetCancel" | "resetConfirm" | "menuToggle" | "menuDismiss" | "menuModel" | "menuReset" | "toggleWatch" | "toggleAudio" | "tutorialNext" | "tutorialFinish" | "recover" | "dismissBanner" }
+export type AppInput = { readonly type: "mounted" | "retry" | "startupSettings" | "openSettings" | "closeSettings" | "toggleHistory" | "toggleAudio" | "resumeSpeaker" | "resetOpen" | "resetCancel" | "resetConfirm" | "menuToggle" | "menuDismiss" | "menuModel" | "menuReset" | "toggleWatch" | "tutorialNext" | "tutorialFinish" | "recover" | "dismissBanner" }
   | { readonly type: "settingsPresented"; readonly generation: number }
   | { readonly type: "thoughtControlsChanged"; readonly insideAllowed: boolean; readonly top: number | null; readonly bottom: number | null }
   | { readonly type: "report"; readonly error: string | null };
 export interface ThoughtView { readonly text: UiText; readonly leaving: boolean }
-export interface BannerView { readonly tone: "error" | "warning" | "info"; readonly message: UiText; readonly action: "settings" | "screen-capture" | "system-audio" | "microphone" | "recognition" | "relaunch" | null; readonly actionLabel: UiText | null; readonly dismissible: boolean }
+export interface BannerView { readonly tone: "error" | "warning" | "info"; readonly message: UiText; readonly action: "settings" | "speaker-resume" | "screen-capture" | "system-audio" | "microphone" | "recognition" | "relaunch" | null; readonly actionLabel: UiText | null; readonly dismissible: boolean }
 export interface StatusView {
   readonly presence: { readonly mode: "resting" | "watching" | "thinking" | "attention" | "switching"; readonly text: UiText };
   readonly banner: BannerView | null;

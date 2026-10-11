@@ -21,6 +21,10 @@ impl DesktopState {
         self.hearing.sync(self.clone());
     }
 
+    pub(crate) async fn resume_speaker(self: &Arc<Self>) -> Result<(), String> {
+        self.hearing.resume_speaker(self.clone()).await
+    }
+
     pub(crate) fn activate_runtime(self: &Arc<Self>) {
         self.runtime_active
             .store(true, std::sync::atomic::Ordering::Release);

@@ -244,7 +244,10 @@ pub enum TextKey {
     AudioSystemFormatFailed,
     AudioSystemClockUnavailable,
     AudioSystemOverflow,
+    AudioSystemReconfiguring,
+    AudioSystemHelperExited,
     AudioSystemCaptureExhausted,
+    AudioHelperExhausted,
     AudioSystemStartupTimeout,
     AudioProtocolInvalid,
     AudioSpeakerProtocolInvalid,
@@ -1194,10 +1197,16 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         (TextKey::AudioSystemFormatFailed, Locale::En) => "Could not read the speaker audio format. Check the output device and restart Hearing AI.",
         (TextKey::AudioSystemClockUnavailable, Locale::Ja) => "スピーカー音声の取得時刻を取得できません。Hearing AI を入れ直してください。",
         (TextKey::AudioSystemClockUnavailable, Locale::En) => "Could not read the speaker audio capture time. Restart Hearing AI.",
-        (TextKey::AudioSystemOverflow, Locale::Ja) => "スピーカー音声の処理が追いつかず停止しました。負荷を減らして Hearing AI を入れ直してください。",
-        (TextKey::AudioSystemOverflow, Locale::En) => "Speaker capture stopped because processing could not keep up. Reduce system load and restart Hearing AI.",
-        (TextKey::AudioSystemCaptureExhausted, Locale::Ja) => "スピーカー音声の取り込みが4回失敗したため停止しました。Hearing AI を入れ直してください。",
-        (TextKey::AudioSystemCaptureExhausted, Locale::En) => "Speaker capture stopped after four input failures. Restart Hearing AI to retry.",
+        (TextKey::AudioSystemOverflow, Locale::Ja) => "音声処理が追いつかないため、自動再開を試みています。",
+        (TextKey::AudioSystemOverflow, Locale::En) => "Processing could not keep up; trying to restart automatically.",
+        (TextKey::AudioSystemReconfiguring, Locale::Ja) => "スピーカー音声の取得を再構成しています。",
+        (TextKey::AudioSystemReconfiguring, Locale::En) => "Reconfiguring speaker audio capture.",
+        (TextKey::AudioSystemHelperExited, Locale::Ja) => "スピーカー音声の helper が終了したため、自動再開しています。",
+        (TextKey::AudioSystemHelperExited, Locale::En) => "The speaker audio helper exited; restarting automatically.",
+        (TextKey::AudioSystemCaptureExhausted, Locale::Ja) => "取り込みが4回失敗しました。再開を押すか Hearing を入れ直してください。",
+        (TextKey::AudioSystemCaptureExhausted, Locale::En) => "Capture failed four times. Press Resume or turn Hearing off and on again.",
+        (TextKey::AudioHelperExhausted, Locale::Ja) => "helper が4回失敗しました。再開を押すか Hearing を入れ直してください。",
+        (TextKey::AudioHelperExhausted, Locale::En) => "The hearing helper failed four times. Press Resume or turn Hearing off and on again.",
         (TextKey::AudioSystemStartupTimeout, Locale::Ja) => "スピーカー音声の開始がタイムアウトしました。システムオーディオ録音の許可と出力デバイスを確認してください。",
         (TextKey::AudioSystemStartupTimeout, Locale::En) => "Speaker capture timed out during startup. Check System Audio Recording permission and the output device.",
         (TextKey::AudioProtocolInvalid, Locale::Ja) => {
@@ -1935,8 +1944,26 @@ pub fn localize_capture_message(message: &str, locale: Locale) -> String {
 }
 
 pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> String {
+    if kind == "helper-exhausted" {
+        return if matches!(locale, Locale::En) {
+            text(TextKey::AudioHelperExhausted, locale).to_owned()
+        } else {
+            message.to_owned()
+        };
+    }
     if kind == "system-audio-exhausted" && matches!(locale, Locale::En) {
         return text(TextKey::AudioSystemCaptureExhausted, locale).to_owned();
+    }
+    if kind == "speaker-device-waiting" {
+        if let Some(count) = speaker_missing_device_count(message) {
+            return localize_speaker_missing_device_count(count, locale);
+        }
+        if message == "出力デバイス一覧を取得できません"
+            || matches_text(message, TextKey::AudioOutputDeviceListUnavailable)
+        {
+            return text(TextKey::AudioOutputDeviceListUnavailable, locale).to_owned();
+        }
+        return message.to_owned();
     }
     if kind == "speaker-device-missing" {
         if let Some(count) = speaker_missing_device_count(message) {
@@ -1954,6 +1981,8 @@ pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> Stri
         "system-audio-format" => Some(TextKey::AudioSystemFormatFailed),
         "system-audio-clock" => Some(TextKey::AudioSystemClockUnavailable),
         "system-audio-overflow" => Some(TextKey::AudioSystemOverflow),
+        "system-audio-reconfiguring" => Some(TextKey::AudioSystemReconfiguring),
+        "system-audio-helper-exit" => Some(TextKey::AudioSystemHelperExited),
         "system-audio-start-timeout" => Some(TextKey::AudioSystemStartupTimeout),
         "hearing-protocol" => Some(TextKey::AudioProtocolInvalid),
         "speaker-protocol" => Some(TextKey::AudioSpeakerProtocolInvalid),
@@ -2024,9 +2053,15 @@ pub fn localize_audio_message(kind: &str, message: &str, locale: Locale) -> Stri
 }
 
 pub fn speaker_missing_device_count(message: &str) -> Option<usize> {
-    message
-        .strip_prefix("指定した出力デバイスのうち ")?
-        .strip_suffix(" 台が未接続です")?
+    let japanese = message
+        .strip_prefix("指定した出力デバイスのうち ")
+        .and_then(|count| count.strip_suffix(" 台が未接続です"));
+    japanese
+        .or_else(|| {
+            message
+                .strip_prefix("Disconnected selected output devices: ")?
+                .strip_suffix('.')
+        })?
         .parse()
         .ok()
 }

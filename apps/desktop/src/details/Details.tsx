@@ -9,13 +9,14 @@ import type { DataFlowRecord } from "../dataflow.js";
 import { usePanelPresenter, deliverPanelUpdates, type PanelCommand } from "../usePanelPresenter.js";
 import { NowDetails } from "../components/NowDetails.js";
 import { DebugDrawer } from "../components/DebugDrawer.js";
-import { detailsApi, ipcTransportError, setIpcLocale } from "../ipc.js";
+import { desktopApi, detailsApi, ipcTransportError, setIpcLocale } from "../ipc.js";
 import { I18nProvider, t, useI18n, type Locale, type TranslationKey } from "../i18n/index.js";
 import type { AppSnapshot, ConversationLogState, DebugDetail, IpcResult } from "../types.js";
 import { ConversationLogPanel } from "./ConversationLogPanel.js";
 import { presentSpeakerDetails } from "./speaker-details-presenter.js";
 import { ConversationsPanel } from "./ConversationsPanel.js";
 import { currentMountGeneration } from "./renderer-error-listeners.js";
+import { speakerCaptureStatus } from "../view-model.js";
 
 export type DetailsTab = "state" | "emotions" | "conversation" | "dataflow" | "log";
 
@@ -58,6 +59,10 @@ function DetailsContent({ state, loadError, action, logListRef, logScrollGenerat
   const dataFlow = state === undefined ? undefined : renderDataFlowEvents(state.dataFlow, locale);
   const debugDetail = state?.debugDetail ?? undefined;
   const panelId = `details-panel-${activeTab}`;
+  const speakerStatus = snapshot === undefined ? null : speakerCaptureStatus(snapshot, locale);
+  const resumeSpeaker = snapshot?.config.audio.speaker === true && snapshot.audio.speakerCapture.phase === "stopped"
+    ? <button type="button" onClick={() => { void desktopApi.appInput({ type: "resumeSpeaker" }); }}>{t("view.actionResumeSpeaker")}</button>
+    : null;
 
   const panel = snapshot === undefined ? null : activeTab === "state"
     ? <section className="details-tab-panel" role="tabpanel" id={panelId} aria-labelledby="details-tab-state">
@@ -77,6 +82,7 @@ function DetailsContent({ state, loadError, action, logListRef, logScrollGenerat
         : activeTab === "log"
           ? <section className="details-tab-panel details-dataflow-panel" role="tabpanel" id={panelId} aria-labelledby="details-tab-log">
             <h2 id="details-log-heading">{t("details.conversationLog")}</h2>
+            {speakerStatus === null ? null : <p role="status">{speakerStatus} {resumeSpeaker}</p>}
             {state === undefined ? null : <>
               <ConversationLogPanel log={state.conversationLog} details={presentSpeakerDetails(state.conversationLog.speakerDetails, locale)} action={action} listRef={logListRef} scrollGeneration={logScrollGeneration} />
               {state.conversationLog.deleteConfirmation === null ? null : <ConfirmationDialog
@@ -92,6 +98,7 @@ function DetailsContent({ state, loadError, action, logListRef, logScrollGenerat
           </section>
           : <section className="details-tab-panel" role="tabpanel" id={panelId} aria-labelledby="details-tab-conversation">
           <h2 id="details-conversation-heading">{t("details.conversation")}</h2>
+          {speakerStatus === null ? null : <p role="status">{speakerStatus} {resumeSpeaker}</p>}
           <ConversationsPanel
             generations={snapshot.conversationGenerations}
             selectedGeneration={snapshot.selectedConversationGeneration}

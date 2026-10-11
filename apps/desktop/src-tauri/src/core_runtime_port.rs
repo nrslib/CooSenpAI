@@ -94,6 +94,10 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
         &self,
         context: coosenpai_core::hearing_context::HearingContext,
     ) -> Result<bool, RuntimeError>;
+    fn accept_late_speaker_final(
+        &self,
+        context: coosenpai_core::hearing_context::HearingContext,
+    ) -> Result<bool, RuntimeError>;
     fn register_pending_frame_context(
         &self,
         context: PendingFrameContext,
@@ -178,6 +182,13 @@ impl CoreRuntimePort for RuntimeHandle {
         context: coosenpai_core::hearing_context::HearingContext,
     ) -> Result<bool, RuntimeError> {
         RuntimeHandle::update_hearing_context(self, context)
+    }
+
+    fn accept_late_speaker_final(
+        &self,
+        context: coosenpai_core::hearing_context::HearingContext,
+    ) -> Result<bool, RuntimeError> {
+        RuntimeHandle::accept_late_speaker_final(self, context)
     }
 
     fn config(&self) -> Config {

@@ -4696,6 +4696,7 @@ final class SpeakerIdentificationCoordinator {
     private let stateLock = NSLock()
     private let log: (String) -> Void
     private let preparationStatus: (SpeakerIdentificationPreparationStatus) -> Void
+    private let finishingStarted: (() -> Void)?
     private var preparationState: SpeakerIdentificationPreparationStatus = .preparing
     private var preparationFailure: SpeakerIdentificationFailure?
     private var preparationCancelled = false
@@ -4708,8 +4709,16 @@ final class SpeakerIdentificationCoordinator {
     private var pendingBufferCount = 0
     private var maxPendingBufferCount = 0
     private var windowCount = 0
+    private var skippedWindowCount = 0
     private var maxWindowNanoseconds: UInt64 = 0
     private let maximumPendingBuffers = 8
+
+    static func shouldSkipWindow(index: Int, pendingBufferCount: Int, maximumPendingBuffers: Int) -> Bool {
+        let waitingBuffers = max(0, pendingBufferCount - 1)
+        let stride = waitingBuffers >= maximumPendingBuffers * 3 / 4 ? 4
+            : waitingBuffers >= maximumPendingBuffers / 2 ? 2 : 1
+        return index % stride != 0
+    }
 
     private func ledgerGeneration(_ generation: Int) -> Int {
         generation * 2 + generationNamespace
@@ -4743,6 +4752,7 @@ final class SpeakerIdentificationCoordinator {
         generationNamespace = source == .microphone ? 1 : 0
         self.log = log
         self.preparationStatus = status
+        finishingStarted = nil
         log("speaker-identification model status=preparing")
         status(.preparing)
         let cacheDirectory = speakerModelCacheDirectory(for: ledgerPath)
@@ -4762,6 +4772,7 @@ final class SpeakerIdentificationCoordinator {
         persistenceReserved: @escaping () -> Void = {},
         persistenceBegan: @escaping () -> Void = {},
         commitReserved: @escaping () -> Void = {},
+        finishingStarted: @escaping () -> Void = {},
         shouldFailAliasWrite: @escaping () -> Bool = { false },
         sessionID: String? = nil,
         source: AudioSource = .speaker,
@@ -4790,6 +4801,7 @@ final class SpeakerIdentificationCoordinator {
         generationNamespace = source == .microphone ? 1 : 0
         self.log = log
         preparationStatus = { _ in }
+        self.finishingStarted = finishingStarted
         self.preparationState = preparationState
         if preparationState == .ready {
             self.predictor = predictor
@@ -4985,6 +4997,10 @@ final class SpeakerIdentificationCoordinator {
         }
     }
 
+    func waitForPendingAudioProcessing() {
+        worker.sync {}
+    }
+
     func finishSegmentAsync(
         generation: Int,
         audioEndNanoseconds: UInt64,
@@ -5016,6 +5032,8 @@ final class SpeakerIdentificationCoordinator {
             completion(fallback)
             return
         }
+
+        finishingStarted?()
 
         worker.async { [weak self] in
             guard let self else {
@@ -5342,6 +5360,16 @@ final class SpeakerIdentificationCoordinator {
         while segment.samples.count >= sampleCounts.window,
               segment.nextWindowStartSample <= segment.samples.count - sampleCounts.window {
             let sourceStart = segment.nextWindowStartSample
+            stateLock.lock()
+            let pendingBuffers = pendingBufferCount
+            stateLock.unlock()
+            if Self.shouldSkipWindow(index: sourceStart / sampleCounts.interval,
+                                     pendingBufferCount: pendingBuffers,
+                                     maximumPendingBuffers: maximumPendingBuffers) {
+                skippedWindowCount += 1
+                segment.nextWindowStartSample += sampleCounts.interval
+                continue
+            }
             let started = DispatchTime.now().uptimeNanoseconds
             if let window = try makeSpeakerEmbeddingWindow(
                 from: segment.samples,
@@ -5367,8 +5395,10 @@ final class SpeakerIdentificationCoordinator {
         stateLock.unlock()
         log("speaker-identification-load source=\(generationNamespace == 1 ? "microphone" : "speaker") "
             + "windows=\(windowCount) max-window-us=\(maxWindowNanoseconds / 1_000) "
-            + "max-queue-depth=\(queuePeak) rejected=\(rejected ? 1 : 0)")
+            + "max-queue-depth=\(queuePeak) rejected=\(rejected ? 1 : 0) "
+            + "skipped=\(skippedWindowCount)")
         windowCount = 0
+        skippedWindowCount = 0
         maxWindowNanoseconds = 0
     }
 

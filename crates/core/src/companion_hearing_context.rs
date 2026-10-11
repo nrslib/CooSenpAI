@@ -70,4 +70,31 @@ impl UserMessagePreparer {
         }
         Ok(true)
     }
+
+    pub(crate) fn accept_late_speaker_final(
+        &self,
+        context: HearingContext,
+    ) -> Result<bool, CompanionError> {
+        let mut buffer = self
+            .hearing_context
+            .lock()
+            .map_err(|_| PersistenceError::Invalid("音声文脈のロックが壊れています".to_owned()))?;
+        if !buffer.accepts_late_speaker_final(&context) {
+            return Ok(false);
+        }
+        let audio = context
+            .confirmed_audio(chrono::Utc::now())
+            .map_err(|_| PersistenceError::Invalid("確定した音声が不正です".to_owned()))?;
+        if buffer
+            .pending_audio()
+            .iter()
+            .any(|pending| pending.id == audio.id)
+        {
+            return Ok(false);
+        }
+        if !buffer.record_late_audio(audio) {
+            return Err(CompanionError::AudioPendingOverflow);
+        }
+        Ok(true)
+    }
 }

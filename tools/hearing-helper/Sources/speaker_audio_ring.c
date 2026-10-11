@@ -71,7 +71,7 @@ OSStatus coosenpai_audio_property_changed(AudioObjectID object, UInt32 count,
 
 CoosenpaiAudioRing *coosenpai_audio_ring_create(const AudioStreamBasicDescription *format,
     uint32_t frame_capacity, uint32_t slot_count, CoosenpaiAudioChanges *changes) {
-    if (changes == NULL || frame_capacity == 0 || frame_capacity > 65536 || slot_count < 2 || slot_count > 1024
+    if (changes == NULL || frame_capacity == 0 || frame_capacity > 65536 || slot_count < 2 || slot_count > 8192
         || format->mFormatID != kAudioFormatLinearPCM || format->mBytesPerFrame == 0 || format->mBytesPerFrame > 128
         || format->mChannelsPerFrame == 0) return NULL;
     CoosenpaiAudioRing *ring = calloc(1, sizeof(*ring));
@@ -118,7 +118,7 @@ CoosenpaiAudioRing *coosenpai_audio_ring_create_tap_mix(
         || input_format->mChannelsPerFrame == 0
         || input_format->mBytesPerPacket != input_format->mBytesPerFrame
         || buffer_count == 0 || tap_count == 0 || frame_capacity == 0 || frame_capacity > 65536
-        || slot_count < 2 || slot_count > 1024) return NULL;
+        || slot_count < 2 || slot_count > 8192) return NULL;
     uint64_t expected_frame_bytes = input_format->mFormatFlags & kAudioFormatFlagIsNonInterleaved
         ? sizeof(float) : (uint64_t)input_format->mChannelsPerFrame * sizeof(float);
     if (input_format->mBytesPerFrame != expected_frame_bytes) return NULL;

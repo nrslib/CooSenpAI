@@ -639,6 +639,7 @@ export interface SpeechView {
 
 export type AudioLogEvent = {
   readonly id: string;
+  readonly generation: number;
   readonly createdAt: string;
   readonly source: "microphone" | "speaker";
   readonly transcriptPath?: string;
@@ -653,6 +654,11 @@ export interface AudioView {
   readonly outputDevicesMonitorFailed: boolean;
   readonly generation: number;
   readonly phase: "off" | "starting" | "listening" | "stopping" | "error";
+  readonly speakerCapture: { readonly phase: "starting" | "running" | "paused" } | {
+    readonly phase: "waiting" | "restarting" | "stopped";
+    readonly reason: string;
+    readonly reasonKind?: string;
+  };
   readonly microphonePermission: "not-determined" | "granted" | "denied" | "restricted" | "unavailable";
   readonly recognitionPermission: "not-determined" | "granted" | "denied" | "restricted" | "unavailable";
   readonly screenCapturePermission: "granted" | "not-granted" | "unknown" | "not-required";

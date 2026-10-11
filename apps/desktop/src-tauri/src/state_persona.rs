@@ -138,9 +138,16 @@ impl DesktopState {
             self.work.set_roots(config.work.allowed_roots.clone());
         }
         self.config_update.observe_config_revision(config.revision);
-        self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
-            config.clone(),
-        ))
+        cancel_audio_before_config_saved(
+            Self::audio_session_needs_stop(&persisted_before, &config),
+            self.cancel_audio(),
+            async {
+                self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
+                    config.clone(),
+                ))
+                .await;
+            },
+        )
         .await;
         if let Some(error) = saved.avatar_cleanup_error.as_deref() {
             let _ = self.logger.write(
@@ -204,9 +211,6 @@ impl DesktopState {
             return Err(error);
         }
         let config = self.runtime.config();
-        if Self::audio_session_needs_stop(&persisted_before, &config) {
-            self.cancel_audio().await;
-        }
         if !provider_update {
             self.work.approvals.set_mode(config.work.approval_mode);
             self.work.set_roots(config.work.allowed_roots.clone());
@@ -231,14 +235,14 @@ impl DesktopState {
             transaction.commit_config_while_holding(config.revision)?;
         }
         self.hearing
-            .clear_speaker_capture_if_disabled(&config.audio)
+            .reset_restart_attempts_if_disabled(&config.audio)
             .await;
         if watch_enabled_is_only_difference || work_mode_only || audio_only {
-            self.activate_runtime();
             self.publish_event(crate::snapshot_presenter::SnapshotEvent::ConfigSaved(
                 config.clone(),
             ))
             .await;
+            self.activate_runtime();
             if avatar_updated {
                 self.refresh_avatar_image().await;
             }
@@ -365,7 +369,7 @@ impl DesktopState {
         .await;
         applied?;
         self.hearing
-            .clear_speaker_capture_if_disabled(&config.audio)
+            .reset_restart_attempts_if_disabled(&config.audio)
             .await;
         self.config_update
             .record_watch_invalidation(config.revision);
@@ -517,6 +521,17 @@ impl DesktopState {
         .await;
     }
 
+}
+
+async fn cancel_audio_before_config_saved(
+    stop_required: bool,
+    cancel: impl std::future::Future<Output = ()>,
+    publish: impl std::future::Future<Output = ()>,
+) {
+    if stop_required {
+        cancel.await;
+    }
+    publish.await;
 }
 
 async fn record_companion_model_history(

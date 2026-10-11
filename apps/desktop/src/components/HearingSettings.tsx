@@ -6,7 +6,7 @@ import { useI18n } from "../i18n/index.js";
 import { SettingsSearchItem } from "../settings-search.js";
 import { audioPhaseLabel, permissionLabel } from "../settings-form.js";
 import type { MergedSpeakers, SpeakerSummary } from "../types.js";
-import { speakerDisplayName } from "../view-model.js";
+import { speakerCaptureStatus, speakerDisplayName } from "../view-model.js";
 import type { SpeakerManagementView } from "../useSettingsPresenter.js";
 import { ConfirmationDialog } from "./ConfirmationDialog.js";
 import type { SettingsCategoryProps } from "./SettingsCategoryProps.js";
@@ -14,6 +14,7 @@ import { BooleanInput } from "./SettingsControls.js";
 
 interface Props extends SettingsCategoryProps {
   readonly onOpenSpeechSettings: (kind: "microphone" | "recognition") => void;
+  readonly onResumeSpeaker: () => void;
   readonly speaker?: SpeakerManagementView;
   readonly speakerConfirmation?: "speaker-delete" | "speaker-delete-all" | null;
   readonly onSpeakerAction?: (name: string, value?: unknown) => void;
@@ -133,10 +134,11 @@ function SpeakerManagementSection({ speaker, confirmation, onSpeakerAction }: {
   </fieldset>;
 }
 
-export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings, speaker, speakerConfirmation, onSpeakerAction }: Props): ReactElement {
+export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings, onResumeSpeaker, speaker, speakerConfirmation, onSpeakerAction }: Props): ReactElement {
   const { locale, t } = useI18n();
   const { major, minor } = snapshot.osVersion;
   const supportsDeviceSelection = major > 14 || (major === 14 && minor >= 2);
+  const speakerStatus = speakerCaptureStatus(snapshot, locale);
   return <>
     <fieldset id="settings-audio"><legend>{t("settings.hearing.source")}</legend>
       <BooleanInput label={t("settings.hearing.microphone")} path="audio.mic" value={form.audioMic} update={(value) => update("audioMic", value)} />
@@ -163,6 +165,8 @@ export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings, 
       <BooleanInput label={t("settings.hearing.speakerIdentification")} path="audio.speakerIdentification.enabled" value={form.audioSpeakerIdentificationEnabled} update={(value) => update("audioSpeakerIdentificationEnabled", value)} />
       <p className="field-help">{t("settings.hearing.help")}</p>
       <p className="field-help">{t("settings.hearing.speakerIdentificationHelp")}</p>
+      {speakerStatus === null ? null : <p className="field-help" role="status">{speakerStatus} {snapshot.audio.speakerCapture.phase === "stopped"
+        ? <button type="button" onClick={onResumeSpeaker}>{t("view.actionResumeSpeaker")}</button> : null}</p>}
       {snapshot.audio.screenCapturePermission === "not-required" ? <>
         <p className="field-help">{t("settings.hearing.systemAudioStatus", { phase: audioPhaseLabel(snapshot.audio.phase, locale), microphone: permissionLabel(snapshot.audio.microphonePermission, locale) })}</p>
         <p className="field-help">{t("settings.hearing.systemAudioPermissionHelp")}</p>

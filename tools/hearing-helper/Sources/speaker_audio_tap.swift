@@ -5,6 +5,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
     private static let captureFailureExitCode: Int32 = 20
     private static let loadFailureExitCode: Int32 = 21
     private let worker = DispatchQueue(label: "dev.nrslib.coosenpai.hearing.speaker", qos: .userInitiated)
+    private let drainQueue = DispatchQueue(label: "dev.nrslib.coosenpai.hearing.speaker.drain", qos: .userInitiated)
     private let cancellation = SpeakerAudioCancellation()
     private let makeDevice: () throws -> SpeakerAudioCapture
     private let startupTimeout: TimeInterval
@@ -13,9 +14,14 @@ final class SpeakerAudioTap: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private enum Phase { case opening, running, waitingForDevice, stopped }
     private var phase = Phase.opening
+    private var consuming = false
     private var hasStarted = false
     private var reconfigurationCount = 0
     private var onBuffer: ((SpeakerCapturedBuffer) -> Void)?
+    private var onPrepared: ((AVAudioFormat, SpeakerBufferCapacity) throws -> Void)?
+    private var onBeforeReopen: ((@escaping () -> Void) -> Void)?
+    private var awaitingReady = false
+    private var discardedBeforeReady: UInt64 = 0
 
     // Lifecycle completions and deadlines are confined to the main queue.
     private var startupDeadline: DispatchWorkItem?
@@ -34,11 +40,15 @@ final class SpeakerAudioTap: @unchecked Sendable {
         self.startupTimeout = startupTimeout
     }
 
-    func start(onReady: @escaping (AVAudioFormat, Bool) -> Void,
+    func start(onPrepared: @escaping (AVAudioFormat, SpeakerBufferCapacity) throws -> Void = { _, _ in },
+               onBeforeReopen: @escaping (@escaping () -> Void) -> Void = { completion in completion() },
+               onReady: @escaping (AVAudioFormat, Bool) -> Void,
                onBuffer: @escaping (SpeakerCapturedBuffer) -> Void,
                onInterruption: @escaping (SpeakerAudioTapError) -> Void,
                onFailure: @escaping (SpeakerAudioTapError) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
+        self.onPrepared = onPrepared
+        self.onBeforeReopen = onBeforeReopen
         self.onReady = onReady
         self.onBuffer = onBuffer
         self.onInterruption = onInterruption
@@ -48,11 +58,11 @@ final class SpeakerAudioTap: @unchecked Sendable {
             guard !cancellation.isCancelled else { return }
             do {
                 device = try makeDevice()
-                let timer = DispatchSource.makeTimerSource(queue: worker)
+                let timer = DispatchSource.makeTimerSource(queue: drainQueue)
                 // The real-time callback only copies. This cadence drains the bounded ring off that thread.
                 timer.schedule(deadline: .now(), repeating: .milliseconds(5), leeway: .milliseconds(1))
                 timer.setEventHandler { [weak self] in self?.drain() }
-                self.timer = timer
+                drainQueue.sync { self.timer = timer }
                 timer.resume()
                 openDevice()
             } catch { reportFailure(error) }
@@ -74,9 +84,12 @@ final class SpeakerAudioTap: @unchecked Sendable {
         stopDeadline = deadline
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(2), execute: deadline)
         worker.async { [self] in
-            phase = .stopped
-            timer?.cancel()
-            timer = nil
+            drainQueue.sync {
+                phase = .stopped
+                consuming = false
+                timer?.cancel()
+                timer = nil
+            }
             do {
                 try device?.close()
                 device = nil
@@ -89,11 +102,22 @@ final class SpeakerAudioTap: @unchecked Sendable {
 
     private func openDevice() {
         guard !cancellation.isCancelled, let device else { return }
-        phase = .opening
+        guard let onPrepared else { preconditionFailure("speaker capture preparation is missing") }
+        drainQueue.sync {
+            phase = .opening
+            consuming = false
+        }
         do {
-            let format = try device.start()
+            let format = try device.start(onPrepared: onPrepared, onCapturing: { [self] in
+                drainQueue.sync {
+                    awaitingReady = true
+                    discardedBeforeReady = 0
+                    consuming = true
+                }
+            })
             let reconfigured = hasStarted
             hasStarted = true
+            drainQueue.sync { phase = .running }
             DispatchQueue.main.async { [self] in
                 guard !cancellation.isCancelled else { return }
                 startupDeadline?.cancel()
@@ -101,14 +125,21 @@ final class SpeakerAudioTap: @unchecked Sendable {
                 if device.missingDeviceCount > 0 {
                     onInterruption?(.speakerDevicesMissing(device.missingDeviceCount))
                 }
-                worker.async { [self] in
-                    if !cancellation.isCancelled { phase = .running }
+                drainQueue.async { [self] in
+                    guard !cancellation.isCancelled else { return }
+                    emitSpeakerLoadDiagnostic(
+                        "speaker-capture-startup-discarded buffers=\(discardedBeforeReady)", via: diagnostic
+                    )
+                    awaitingReady = false
                 }
             }
         } catch let error as SpeakerAudioTapError where error.isRecoverableDeviceInterruption(hasStarted: hasStarted) {
             if case .speakerDevicesMissing = error { hasStarted = true }
             if case .outputDeviceListUnavailable = error { hasStarted = true }
-            phase = .waitingForDevice
+            drainQueue.sync {
+                consuming = false
+                phase = .waitingForDevice
+            }
             DispatchQueue.main.async { [self] in
                 guard !cancellation.isCancelled else { return }
                 startupDeadline?.cancel()
@@ -118,17 +149,23 @@ final class SpeakerAudioTap: @unchecked Sendable {
     }
 
     private func drain() {
-        guard !cancellation.isCancelled, let device,
-              phase == .running || phase == .waitingForDevice else { return }
+        guard !cancellation.isCancelled,
+              phase == .running || phase == .waitingForDevice || consuming,
+              let device else { return }
         do {
-            if let reason = try device.takeConfigurationChange() {
+            if phase != .opening, let reason = try device.takeConfigurationChange() {
                 reconfigureDevice(reason: reason)
                 return
             }
-            guard phase == .running else { return }
+            guard consuming else { return }
             for _ in 0..<32 {
-                guard !cancellation.isCancelled, let buffer = try device.nextBuffer() else { break }
-                onBuffer?(buffer)
+                guard !cancellation.isCancelled,
+                      let buffer = try device.nextBuffer(checkDelivery: phase == .running) else { break }
+                if awaitingReady {
+                    discardedBeforeReady += 1
+                } else {
+                    onBuffer?(buffer)
+                }
             }
         } catch SpeakerAudioTapError.noOutputDevice {
             reconfigureDevice(reason: "output-device-missing")
@@ -142,26 +179,37 @@ final class SpeakerAudioTap: @unchecked Sendable {
         emitSpeakerLoadDiagnostic("audio-tap-reconfigure count=\(reconfigurationCount) reason=\(reason)",
                                   via: diagnostic)
         phase = .opening
+        consuming = false
         DispatchQueue.main.async { [self] in
             guard !cancellation.isCancelled else { return }
+            onInterruption?(.reconfiguring)
             armStartupDeadline()
             worker.async { [self] in
                 do {
                     try device?.stop()
-                    openDevice()
+                    guard let onBeforeReopen else { preconditionFailure("reopen preparation is missing") }
+                    onBeforeReopen { [self] in
+                        worker.async { [self] in
+                            guard !cancellation.isCancelled else { return }
+                            openDevice()
+                        }
+                    }
                 } catch { reportFailure(error) }
             }
         }
     }
 
     private func reportFailure(_ error: Error) {
-        phase = .stopped
-        timer?.cancel()
         let failure = (error as? SpeakerAudioTapError) ?? .unexpected(error)
-        DispatchQueue.main.async { [self] in
-            guard !cancellation.isCancelled else { return }
-            // The owner publishes load failures before requesting HAL teardown.
-            onFailure?(failure)
+        drainQueue.async { [self] in
+            phase = .stopped
+            consuming = false
+            timer?.cancel()
+            DispatchQueue.main.async { [self] in
+                guard !cancellation.isCancelled else { return }
+                // The owner publishes load failures before requesting HAL teardown.
+                onFailure?(failure)
+            }
         }
     }
 

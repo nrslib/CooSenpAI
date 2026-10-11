@@ -82,13 +82,18 @@ pub(crate) struct SourceProcessEvent {
 
 pub(crate) enum SourceProcessEventKind {
     Restarting,
-    Event(HearingEvent),
+    Event {
+        event: HearingEvent,
+        source_retrying: bool,
+    },
     Unavailable {
         error: Option<PortError>,
+        retrying: bool,
     },
     Exhausted {
         error: Option<PortError>,
-        speaker_stop_reason: Option<String>,
+        stop_reason: String,
+        capture_failure: bool,
     },
 }
 
@@ -110,7 +115,9 @@ impl PersistentCaptureFailure {
         let HearingEvent::Error { kind, message } = event else {
             return None;
         };
-        if !(kind == "system-audio" || kind.starts_with("system-audio-"))
+        if !(kind == "screen-capture"
+            || kind == "system-audio"
+            || kind.starts_with("system-audio-"))
             || matches!(
                 kind.as_str(),
                 "system-audio-overflow" | "system-audio-restored"
@@ -296,34 +303,46 @@ async fn schedule_restart(
             ),
         );
     }
-    let speaker_stop_reason = if capture_failure && *restart_attempts >= MAX_RESTART_ATTEMPTS {
-        let error = error.as_ref().expect("capture failure has a reason");
-        Some(match error {
-            PortError::SpeakerCaptureExhausted(message) => message.clone(),
-            _ => format!(
-                "取り込み口の失敗が{}回に達したためスピーカー入力を停止しました: {error}",
+    let stop_reason = if *restart_attempts >= MAX_RESTART_ATTEMPTS {
+        let detail = error
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "helper が終了しました".to_owned());
+        Some(if capture_failure {
+            match error.as_ref() {
+                Some(PortError::SpeakerCaptureExhausted(message)) => message.clone(),
+                _ => format!(
+                    "取り込み口の失敗が{}回に達したためスピーカー入力を停止しました: {detail}",
+                    MAX_RESTART_ATTEMPTS + 1
+                ),
+            }
+        } else {
+            format!(
+                "helper の失敗が{}回に達したため入力を停止しました: {detail}",
                 MAX_RESTART_ATTEMPTS + 1
-            ),
+            )
         })
     } else {
         None
     };
+    let retrying = *restart_attempts < MAX_RESTART_ATTEMPTS;
     if !send_source_event(
         events,
         source,
-        SourceProcessEventKind::Unavailable { error },
+        SourceProcessEventKind::Unavailable { error, retrying },
     )
     .await
     {
         return false;
     }
-    if *restart_attempts >= MAX_RESTART_ATTEMPTS {
+    if !retrying {
         let _ = send_source_event(
             events,
             source,
             SourceProcessEventKind::Exhausted {
                 error: None,
-                speaker_stop_reason,
+                stop_reason: stop_reason.expect("exhaustion has a stop reason"),
+                capture_failure,
             },
         )
         .await;
@@ -363,7 +382,10 @@ async fn forward_sanitized_final(
     send_source_event(
         context.events,
         context.source,
-        SourceProcessEventKind::Event(event),
+        SourceProcessEventKind::Event {
+            event,
+            source_retrying: false,
+        },
     )
     .await
 }
@@ -444,6 +466,17 @@ async fn monitor_process(
                 match decode_hearing_event(&line) {
                     Ok(decoded) => {
                         let (event, wire_metadata_reason) = decoded.into_parts();
+                        if source == AudioObservationSource::Speaker
+                            && *load_stop_seen
+                            && matches!(
+                                event,
+                                HearingEvent::Recognizing { .. }
+                                    | HearingEvent::NoSpeech { .. }
+                                    | HearingEvent::Final { .. }
+                            )
+                        {
+                            continue;
+                        }
                         if let Some(reason) = wire_metadata_reason {
                             if event.is_valid_required_final_for_source(source)
                                 && event.is_valid_for_source(source)
@@ -493,7 +526,10 @@ async fn monitor_process(
                                 if !send_source_event(
                                     events,
                                     source,
-                                    SourceProcessEventKind::Event(event),
+                                    SourceProcessEventKind::Event {
+                                        event,
+                                        source_retrying: false,
+                                    },
                                 )
                                 .await
                                 {
@@ -516,6 +552,10 @@ async fn monitor_process(
                                 .await;
                             }
                             event => {
+                                let source_retrying = source == AudioObservationSource::Speaker
+                                    && matches!(&event, HearingEvent::Error { .. });
+                                let terminal_error = source == AudioObservationSource::Microphone
+                                    && matches!(&event, HearingEvent::Error { .. });
                                 if source == AudioObservationSource::Speaker {
                                     if let Some(failure) =
                                         PersistentCaptureFailure::from_event(&event)
@@ -535,10 +575,18 @@ async fn monitor_process(
                                 if !send_source_event(
                                     events,
                                     source,
-                                    SourceProcessEventKind::Event(event),
+                                    SourceProcessEventKind::Event {
+                                        event,
+                                        source_retrying,
+                                    },
                                 )
                                 .await
                                 {
+                                    return ProcessOutcome::Stopped(
+                                        cancel_and_reap(process, &control, logger).await,
+                                    );
+                                }
+                                if terminal_error {
                                     return ProcessOutcome::Stopped(
                                         cancel_and_reap(process, &control, logger).await,
                                     );
@@ -577,11 +625,10 @@ async fn monitor_process(
                     if status == Some(SPEAKER_LOAD_STOP_EXIT_CODE) {
                         *persistent_failure = None;
                     }
-                    if status != Some(0) && !*load_stop_seen && persistent_failure.is_none() {
+                    if !*load_stop_seen && persistent_failure.is_none() {
                         *persistent_failure = Some(PersistentCaptureFailure {
                             kind: "system-audio-helper-exit".to_owned(),
-                            message: "停止理由を受信できないまま helper が異常終了しました"
-                                .to_owned(),
+                            message: "closed を受信できないまま helper が終了しました".to_owned(),
                         });
                     }
                 }

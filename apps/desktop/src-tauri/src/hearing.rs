@@ -2,6 +2,7 @@ use crate::hearing_lifecycle::{
     AttachOutcome, HearingLifecycle, HearingSessionSettings, StopOutcome,
 };
 use crate::hearing_presenter::HearingResult;
+use crate::snapshot::SpeakerCapture;
 use crate::state::DesktopState;
 use coosenpai_core::config::ConfigPaths;
 use coosenpai_core::hearing_ingestion::{HearingAudioIngestion, HearingAudioRecord};
@@ -40,9 +41,15 @@ async fn output_devices_event(
 
 enum AudioIngestionRequest {
     Final {
+        generation: u64,
         observation: Box<AudioObservation>,
         corrections: Vec<HearingSpeakerCorrection>,
     },
+}
+
+struct AudioIngestionResult {
+    generation: u64,
+    result: Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>,
 }
 
 fn hearing_context_for_event(
@@ -62,6 +69,7 @@ fn hearing_context_for_event(
             sequence,
             text,
             speaker,
+            ..
         } => (
             *source,
             *generation,
@@ -88,22 +96,54 @@ fn hearing_context_for_event(
     })
 }
 
-async fn next_hearing_context_event(
+fn log_stale_hearing_event(logger: &dyn RuntimeLogger, generation: u64) {
+    let _ = logger.write("INFO", &format!(
+        "聴覚観察: 世代または更新順序の古いイベントを破棄しました: error-type=audio-stale-generation generation={generation}"
+    ));
+}
+
+async fn next_hearing_context_event<F, Fut>(
     session: &mut coosenpai_core::ports::HearingSession,
     session_id: &str,
     runtime: &dyn crate::core_runtime_port::CoreRuntimePort,
     logger: &dyn RuntimeLogger,
     generation: u64,
-) -> Option<Result<HearingEvent, coosenpai_core::ports::PortError>> {
+    accept_final: F,
+) -> Option<Result<HearingEvent, coosenpai_core::ports::PortError>>
+where
+    F: Fn(AudioObservationSource, u64) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     while let Some(event) = session.next_event().await {
         if let Ok(event) = &event {
+            if let HearingEvent::Final {
+                source,
+                input_generation,
+                ..
+            } = event
+            {
+                if !accept_final(*source, *input_generation).await {
+                    log_stale_hearing_event(logger, generation);
+                    continue;
+                }
+            }
             if let Some(context) = hearing_context_for_event(session_id, event) {
-                match runtime.update_hearing_context(context) {
+                let mut result = runtime.update_hearing_context(context.clone());
+                if matches!(result, Ok(false))
+                    && matches!(
+                        event,
+                        HearingEvent::Final {
+                            source: AudioObservationSource::Speaker,
+                            ..
+                        }
+                    )
+                {
+                    result = runtime.accept_late_speaker_final(context);
+                }
+                match result {
                     Ok(true) => {}
                     Ok(false) => {
-                        let _ = logger.write("INFO", &format!(
-                            "聴覚観察: 世代または更新順序の古いイベントを破棄しました: error-type=audio-stale-generation generation={generation}"
-                        ));
+                        log_stale_hearing_event(logger, generation);
                         continue;
                     }
                     Err(coosenpai_core::runtime::RuntimeError::Companion(
@@ -137,17 +177,113 @@ struct AudioIngestionHandle {
 
 struct ActiveHearingSession {
     session: coosenpai_core::ports::HearingSession,
+    sources: Vec<AudioObservationSource>,
     stop_events: oneshot::Receiver<()>,
 }
 
+struct SourceErrorTracker {
+    sources: Vec<AudioObservationSource>,
+    terminal_sources: Vec<AudioObservationSource>,
+    pending_source_error: bool,
+}
+
+impl SourceErrorTracker {
+    fn new(sources: Vec<AudioObservationSource>) -> Self {
+        Self {
+            sources,
+            terminal_sources: Vec::new(),
+            pending_source_error: false,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        event: &Result<HearingEvent, coosenpai_core::ports::PortError>,
+        control: &coosenpai_core::ports::HearingSessionControl,
+        terminal_failure: &mut Option<(String, String)>,
+        cancel_task: &mut Option<
+            tauri::async_runtime::JoinHandle<Result<(), coosenpai_core::ports::PortError>>,
+        >,
+    ) -> bool {
+        let failure = match event {
+            Ok(HearingEvent::Ready { .. }) => {
+                self.pending_source_error = false;
+                None
+            }
+            Ok(HearingEvent::SourceState {
+                source,
+                state:
+                    coosenpai_core::ports::HearingSourceState::Failed {
+                        kind,
+                        message,
+                        retrying,
+                    },
+            }) => {
+                self.pending_source_error = true;
+                if *retrying {
+                    self.terminal_sources.retain(|existing| existing != source);
+                    None
+                } else {
+                    if !self.terminal_sources.contains(source) {
+                        self.terminal_sources.push(*source);
+                    }
+                    self.sources
+                        .iter()
+                        .all(|source| self.terminal_sources.contains(source))
+                        .then(|| (kind.clone(), message.clone()))
+                }
+            }
+            Ok(HearingEvent::SourceState {
+                source,
+                state: coosenpai_core::ports::HearingSourceState::Ready { .. },
+            }) => {
+                self.pending_source_error = false;
+                self.terminal_sources.retain(|existing| existing != source);
+                None
+            }
+            Ok(HearingEvent::Error { kind, message }) => {
+                let source_local = std::mem::take(&mut self.pending_source_error);
+                if source_local {
+                    return true;
+                }
+                Some((kind.clone(), message.clone()))
+            }
+            Err(error) => {
+                self.pending_source_error = false;
+                let (kind, message) = hearing_port_error(error);
+                Some((kind.to_owned(), message))
+            }
+            _ => {
+                self.pending_source_error = false;
+                None
+            }
+        };
+        if let Some((kind, message)) = failure {
+            if terminal_failure.is_none() {
+                *terminal_failure = Some((kind, message));
+                let control = control.clone();
+                *cancel_task = Some(tauri::async_runtime::spawn(async move {
+                    control.cancel().await
+                }));
+            }
+        }
+        false
+    }
+}
+
 impl ActiveHearingSession {
-    async fn next_context_event(
+    async fn next_context_event<F, Fut>(
         &mut self,
         session_id: &str,
         runtime: &dyn crate::core_runtime_port::CoreRuntimePort,
         logger: &dyn RuntimeLogger,
         generation: u64,
-    ) -> Option<Result<HearingEvent, coosenpai_core::ports::PortError>> {
+        accept_final: F,
+    ) -> Option<Result<HearingEvent, coosenpai_core::ports::PortError>>
+    where
+        F: Fn(AudioObservationSource, u64) -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         tokio::select! {
             biased;
             _ = &mut self.stop_events => None,
@@ -157,6 +293,7 @@ impl ActiveHearingSession {
                 runtime,
                 logger,
                 generation,
+                accept_final,
             ) => event,
         }
     }
@@ -191,7 +328,6 @@ pub(crate) struct HearingController {
     lifecycle: Mutex<HearingLifecycle>,
     projection: Mutex<()>,
     restart_attempts: Mutex<u8>,
-    speaker_capture_exhausted: Mutex<Option<String>>,
 }
 
 impl HearingController {
@@ -224,7 +360,6 @@ impl HearingController {
             lifecycle: Mutex::new(HearingLifecycle::default()),
             projection: Mutex::new(()),
             restart_attempts: Mutex::new(0),
-            speaker_capture_exhausted: Mutex::new(None),
         }
     }
 
@@ -235,13 +370,40 @@ impl HearingController {
         });
     }
 
-    pub(crate) async fn clear_speaker_capture_if_disabled(
+    pub(crate) async fn reset_restart_attempts_if_disabled(
         &self,
         audio: &coosenpai_core::config::AudioConfig,
     ) {
-        if !audio.enabled || !audio.speaker {
-            *self.speaker_capture_exhausted.lock().await = None;
+        if !audio.enabled {
+            *self.restart_attempts.lock().await = 0;
         }
+    }
+
+    pub(crate) async fn resume_speaker(
+        self: &Arc<Self>,
+        state: Arc<DesktopState>,
+    ) -> Result<(), String> {
+        let _projection = self.projection.lock().await;
+        let snapshot = state.snapshot().await;
+        if !snapshot.config.audio.enabled
+            || !snapshot.config.audio.speaker
+            || !matches!(
+                snapshot.audio.speaker_capture,
+                SpeakerCapture::Stopped { .. }
+            )
+        {
+            return Err("再開できるスピーカー入力がありません".to_owned());
+        }
+        self.stop_locked(&state).await;
+        *self.restart_attempts.lock().await = 0;
+        state
+            .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
+                HearingResult::SpeakerResumed,
+            ))
+            .await;
+        drop(_projection);
+        self.sync(state);
+        Ok(())
     }
 
     pub(crate) async fn cancel_and_wait(&self, state: &DesktopState) {
@@ -304,9 +466,8 @@ impl HearingController {
             "INFO",
             &format!("hearing-speaker-model: source={model_source}"),
         );
-        self.clear_speaker_capture_if_disabled(&config.audio).await;
+        self.reset_restart_attempts_if_disabled(&config.audio).await;
         if !config.audio.enabled || !state.is_runtime_active() || state.voice_output.is_active() {
-            *self.restart_attempts.lock().await = 0;
             self.stop_locked(&state).await;
             state
                 .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
@@ -329,13 +490,14 @@ impl HearingController {
             .await;
             return;
         }
-        if settings.sources == [AudioObservationSource::Speaker] {
-            let stop_reason = self.speaker_capture_exhausted.lock().await.clone();
-            if let Some(message) = stop_reason {
-                self.stop_locked(&state).await;
-                publish_audio_error(&state, None, "system-audio-exhausted", &message).await;
-                return;
-            }
+        if settings.sources == [AudioObservationSource::Speaker]
+            && matches!(
+                state.snapshot().await.audio.speaker_capture,
+                SpeakerCapture::Stopped { .. }
+            )
+        {
+            self.stop_locked(&state).await;
+            return;
         }
         if self.lifecycle.lock().await.same_settings(&settings) {
             return;
@@ -451,10 +613,10 @@ impl HearingController {
         if cancellation.is_cancelled() {
             return;
         }
-        let mut helper_sources = settings.sources.clone();
-        if self.speaker_capture_exhausted.lock().await.is_some() {
-            helper_sources = sources_without_speaker(&helper_sources);
-        }
+        let mut helper_sources = sources_for_capture(
+            &settings.sources,
+            &state.snapshot().await.audio.speaker_capture,
+        );
         if helper_sources.contains(&AudioObservationSource::Speaker)
             && crate::platform::speaker_requires_screen_recording()
         {
@@ -548,7 +710,7 @@ impl HearingController {
             .start_with_options(
                 &settings.locale,
                 &settings.input_device,
-                helper_sources,
+                helper_sources.clone(),
                 settings.debug_dump_dir.as_deref(),
                 HearingStartOptions {
                     speaker_devices: settings.speaker_devices.clone(),
@@ -649,7 +811,6 @@ impl HearingController {
                     run_audio_result_worker(
                         result_controller,
                         result_state,
-                        generation,
                         result_cancellation,
                         result_rx,
                         ingestion_done_tx,
@@ -668,6 +829,7 @@ impl HearingController {
                             cancellation,
                             ActiveHearingSession {
                                 session,
+                                sources: helper_sources,
                                 stop_events: stop_events_rx,
                             },
                             restart_settings,
@@ -712,37 +874,42 @@ impl HearingController {
         let mut terminal_barrier = terminal_barrier;
         let mut terminal_failure: Option<(String, String)> = None;
         let mut cancel_task = None;
+        let mut source_errors = SourceErrorTracker::new(active_session.sources.clone());
+        let accept_controller = self.as_ref();
+        let capture_state = state.as_ref();
         self.publish_active_result(&state, generation, HearingResult::Restarted(generation))
             .await;
-        if settings.sources.contains(&AudioObservationSource::Speaker) {
-            let stop_reason = self.speaker_capture_exhausted.lock().await.clone();
-            if let Some(message) = stop_reason {
-                self.publish_active_result(
-                    &state,
-                    generation,
-                    HearingResult::Warning {
-                        generation,
-                        kind: "system-audio-exhausted".to_owned(),
-                        message,
-                    },
-                )
-                .await;
-            }
-        }
         while let Some(next) = active_session
             .next_context_event(
                 &context_session,
                 state.core_runtime(),
                 state.logger.as_ref(),
                 generation,
+                |source, input_generation| async move {
+                    accept_controller.accepts_events(generation).await
+                        && (source != AudioObservationSource::Speaker || {
+                            let snapshot = capture_state.snapshot().await;
+                            snapshot.audio.generation == generation
+                                && snapshot
+                                    .audio
+                                    .accepts_speaker_input_generation(input_generation)
+                        })
+                },
             )
             .await
         {
             let event = next;
+            let source_local_error = source_errors.observe(
+                &event,
+                &active_session.session.control(),
+                &mut terminal_failure,
+                &mut cancel_task,
+            );
             match event {
                 Ok(HearingEvent::Ready {
                     microphone,
                     recognition,
+                    ready_sources,
                     ..
                 }) => {
                     self.publish_active_result(
@@ -752,6 +919,22 @@ impl HearingController {
                             generation,
                             microphone,
                             recognition,
+                            ready_sources,
+                        },
+                    )
+                    .await;
+                }
+                Ok(HearingEvent::SourceState {
+                    source,
+                    state: source_state,
+                }) => {
+                    self.publish_active_result(
+                        &state,
+                        generation,
+                        HearingResult::SourceState {
+                            generation,
+                            source,
+                            state: source_state,
                         },
                     )
                     .await;
@@ -820,9 +1003,10 @@ impl HearingController {
                     text,
                     generation: recognition_generation,
                     sequence,
+                    input_generation: _,
                     speaker,
                 }) => {
-                    // 文脈への登録時点で受理済みなので、停止要求後でも保存キューへ渡す。
+                    // 文脈への登録前に取り込み状態と helper 世代を検証済み。
                     let Some(ingestion_sender) = ingestion_tx.as_ref() else {
                         return;
                     };
@@ -841,8 +1025,13 @@ impl HearingController {
                             .logger
                             .write("WARN", &format!("マイク指示の受付に失敗しました: {error}"));
                     }
-                    if !queue_audio_final_with_corrections(ingestion_sender, &context, &corrections)
-                        .await
+                    if !queue_audio_final_with_corrections(
+                        ingestion_sender,
+                        generation,
+                        &context,
+                        &corrections,
+                    )
+                    .await
                     {
                         if !cancellation.is_cancelled() {
                             let _ = state.logger.write(
@@ -856,9 +1045,6 @@ impl HearingController {
                 }
                 Ok(HearingEvent::Warning { kind, message }) => {
                     if self.accepts_events(generation).await {
-                        if kind == "system-audio-exhausted" {
-                            *self.speaker_capture_exhausted.lock().await = Some(message.clone());
-                        }
                         state
                             .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
                                 HearingResult::Warning {
@@ -879,37 +1065,11 @@ impl HearingController {
                     }
                 }
                 Ok(HearingEvent::Error { kind, message }) => {
-                    if is_non_fatal_audio_source_error(&kind) {
-                        if self.accepts_events(generation).await && !cancellation.is_cancelled() {
-                            let _ = state.logger.write("WARN", &format!(
-                                "聴覚観察 source-local warning: kind={kind} generation={generation} {message}"
-                            ));
-                            state
-                                .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
-                                    HearingResult::Warning {
-                                        generation,
-                                        kind,
-                                        message,
-                                    },
-                                ))
-                                .await;
-                            let audio = state.snapshot().await.audio;
-                            let _ = state.logger.write(
-                                "WARN",
-                                &format!(
-                                    "聴覚観察 warning UI: phase={} kind={:?} generation={}",
-                                    audio.phase, audio.warning_kind, audio.generation
-                                ),
-                            );
-                        }
-                        continue;
-                    }
-                    if terminal_failure.is_none() {
-                        terminal_failure = Some((kind, message));
-                        let control = active_session.session.control();
-                        cancel_task = Some(tauri::async_runtime::spawn(async move {
-                            control.cancel().await
-                        }));
+                    if source_local_error {
+                        let _ = state.logger.write(
+                            "WARN",
+                            &format!("聴覚観察 source-local error: kind={kind} generation={generation} {message}"),
+                        );
                     }
                 }
                 Ok(HearingEvent::Closed) => {
@@ -937,16 +1097,7 @@ impl HearingController {
                     }
                     return;
                 }
-                Err(error) => {
-                    if terminal_failure.is_none() {
-                        let (kind, message) = hearing_port_error(&error);
-                        terminal_failure = Some((kind.to_owned(), message));
-                        let control = active_session.session.control();
-                        cancel_task = Some(tauri::async_runtime::spawn(async move {
-                            control.cancel().await
-                        }));
-                    }
-                }
+                Err(_) => {}
             }
         }
         finish_audio_ingestion(&mut ingestion_tx, &mut ingestion_done).await;
@@ -989,16 +1140,21 @@ impl HearingController {
     async fn handle_audio_result(
         &self,
         state: &Arc<DesktopState>,
-        generation: u64,
-        result: Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>,
+        completed: AudioIngestionResult,
         cancellation: &CancellationToken,
     ) {
+        let AudioIngestionResult { generation, result } = completed;
         if let Ok(HearingAudioRecord {
             observation,
             transcript_path,
         }) = &result
         {
-            if self.accepts_events(generation).await && !cancellation.is_cancelled() {
+            let current = state.snapshot().await.audio;
+            if self.accepts_events(generation).await
+                && !cancellation.is_cancelled()
+                && (observation.source != AudioObservationSource::Speaker
+                    || matches!(current.speaker_capture, SpeakerCapture::Running))
+            {
                 self.reset_restart_attempts().await;
                 state
                     .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
@@ -1009,16 +1165,16 @@ impl HearingController {
                         },
                     ))
                     .await;
-                state
-                    .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
-                        HearingResult::Observed {
-                            generation,
-                            observation: observation.clone(),
-                            transcript_path: transcript_path.clone(),
-                        },
-                    ))
-                    .await;
             }
+            state
+                .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
+                    HearingResult::Observed {
+                        generation,
+                        observation: observation.clone(),
+                        transcript_path: transcript_path.clone(),
+                    },
+                ))
+                .await;
         }
         if result.is_err() {
             if cancellation.is_cancelled() || !self.accepts_events(generation).await {
@@ -1130,9 +1286,6 @@ impl HearingController {
         let Some(cleanup) = self.take_failure(generation).await else {
             return;
         };
-        if kind == "system-audio-exhausted" {
-            *self.speaker_capture_exhausted.lock().await = Some(message.to_owned());
-        }
         cleanup.cancellation.cancel();
         publish_audio_error(state, Some(generation), kind, message).await;
         if retryable_audio_error(kind) {
@@ -1155,6 +1308,16 @@ impl HearingController {
                 "WARN",
                 "聴覚観察 helper の自動再起動上限に達したため phase=error で停止します: error-type=restart-limit",
             );
+            state
+                .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
+                    HearingResult::Failed {
+                        generation: None,
+                        kind: "restart-limit".to_owned(),
+                        message: "聴覚観察 helper の自動再起動上限に達しました".to_owned(),
+                        recognition: None,
+                    },
+                ))
+                .await;
             return;
         };
         let delay = restart_delay(attempt);
@@ -1192,7 +1355,7 @@ async fn run_audio_ingestion(
     retention_days: u64,
     ingestion: HearingAudioIngestion,
     mut requests: mpsc::Receiver<AudioIngestionRequest>,
-    results: mpsc::Sender<Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>>,
+    results: mpsc::Sender<AudioIngestionResult>,
     barrier: Option<AudioIngestionBarrier>,
 ) {
     let mut barrier = barrier;
@@ -1204,9 +1367,13 @@ async fn run_audio_ingestion(
         }
         let paths = paths.clone();
         let ingestion = ingestion.clone();
+        let generation = match &request {
+            AudioIngestionRequest::Final { generation, .. } => *generation,
+        };
         let result = tokio::task::spawn_blocking(move || {
             let result = match request {
                 AudioIngestionRequest::Final {
+                    generation: _,
                     observation,
                     corrections,
                 } => ingestion.record_with_corrections(
@@ -1235,7 +1402,11 @@ async fn run_audio_ingestion(
             Err(error) => Err(error),
         };
         if let Some(sender) = results.as_ref() {
-            if sender.send(result).await.is_err() {
+            if sender
+                .send(AudioIngestionResult { generation, result })
+                .await
+                .is_err()
+            {
                 results = None;
             }
         }
@@ -1244,6 +1415,7 @@ async fn run_audio_ingestion(
 
 async fn queue_audio_final_with_corrections(
     ingestion_tx: &mpsc::Sender<AudioIngestionRequest>,
+    generation: u64,
     context: &coosenpai_core::hearing_context::HearingContext,
     corrections: &[HearingSpeakerCorrection],
 ) -> bool {
@@ -1252,6 +1424,7 @@ async fn queue_audio_final_with_corrections(
     };
     ingestion_tx
         .send(AudioIngestionRequest::Final {
+            generation,
             observation: Box::new(observation),
             corrections: corrections.to_vec(),
         })
@@ -1271,41 +1444,16 @@ fn final_corrections(
 async fn run_audio_result_worker(
     controller: Arc<HearingController>,
     state: Arc<DesktopState>,
-    generation: u64,
     cancellation: CancellationToken,
-    mut results: mpsc::Receiver<Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>>,
+    mut results: mpsc::Receiver<AudioIngestionResult>,
     ingestion_done: oneshot::Sender<()>,
 ) {
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                drain_stopped_audio_results(&mut results, state.logger.as_ref(), None).await;
-                break;
-            }
-            result = results.recv() => match result {
-                Some(result) if cancellation.is_cancelled() => {
-                    drain_stopped_audio_results(&mut results, state.logger.as_ref(), Some(result)).await;
-                    break;
-                }
-                Some(result) => controller.handle_audio_result(&state, generation, result, &cancellation).await,
-                None => break,
-            },
-        }
+    while let Some(result) = results.recv().await {
+        controller
+            .handle_audio_result(&state, result, &cancellation)
+            .await;
     }
     let _ = ingestion_done.send(());
-}
-
-async fn drain_stopped_audio_results(
-    results: &mut mpsc::Receiver<Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>>,
-    logger: &dyn RuntimeLogger,
-    first: Option<Result<HearingAudioRecord, coosenpai_core::runtime::RuntimeError>>,
-) {
-    let mut failed = usize::from(first.is_some_and(|result| result.is_err()));
-    while let Some(result) = results.recv().await {
-        failed += usize::from(result.is_err());
-    }
-    log_stopped_audio_failures(logger, failed);
 }
 
 fn log_stopped_audio_failures(logger: &dyn RuntimeLogger, failed: usize) {
@@ -1424,10 +1572,15 @@ async fn observe_pending_audio(
         .map(Some)
 }
 
-fn retryable_audio_error(kind: &str) -> bool {
+pub(crate) fn retryable_audio_error(kind: &str) -> bool {
     matches!(
         kind,
-        "recognition" | "helper" | "helper-closed" | "helper-start"
+        "recognition"
+            | "recognition-microphone"
+            | "audio-microphone"
+            | "helper"
+            | "helper-closed"
+            | "helper-start"
     )
 }
 
@@ -1449,25 +1602,6 @@ fn hearing_port_error(error: &coosenpai_core::ports::PortError) -> (&'static str
     }
 }
 
-fn is_non_fatal_audio_source_error(kind: &str) -> bool {
-    matches!(
-        kind,
-        "audio-buffer-copy"
-            | "audio-conversion"
-            | "audio-format"
-            | "audio-input-failure"
-            | "audio-microphone"
-            | "debug-dump-source"
-            | "debug-input"
-            | "input-device"
-            | "permission-microphone"
-            | "screen-capture"
-            | "audio-pending-overflow"
-    ) || kind.starts_with("recognition-")
-        || kind == "system-audio"
-        || kind.starts_with("system-audio-")
-}
-
 fn restart_delay(attempt: u8) -> std::time::Duration {
     std::time::Duration::from_millis(match attempt {
         1 => 250,
@@ -1482,6 +1616,17 @@ fn sources_without_speaker(sources: &[AudioObservationSource]) -> Vec<AudioObser
         .copied()
         .filter(|source| *source != AudioObservationSource::Speaker)
         .collect()
+}
+
+fn sources_for_capture(
+    sources: &[AudioObservationSource],
+    capture: &SpeakerCapture,
+) -> Vec<AudioObservationSource> {
+    if matches!(capture, SpeakerCapture::Stopped { .. }) {
+        sources_without_speaker(sources)
+    } else {
+        sources.to_vec()
+    }
 }
 
 pub(crate) fn selected_sources(

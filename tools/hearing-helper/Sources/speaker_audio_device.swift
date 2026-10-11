@@ -7,9 +7,10 @@ import Foundation
 
 protocol SpeakerAudioCapture: AnyObject {
     var missingDeviceCount: Int { get }
-    func start() throws -> AVAudioFormat
+    func start(onPrepared: (AVAudioFormat, SpeakerBufferCapacity) throws -> Void,
+               onCapturing: () -> Void) throws -> AVAudioFormat
     func takeConfigurationChange() throws -> String?
-    func nextBuffer() throws -> SpeakerCapturedBuffer?
+    func nextBuffer(checkDelivery: Bool) throws -> SpeakerCapturedBuffer?
     func stop() throws
     func close() throws
 }
@@ -19,7 +20,55 @@ struct SpeakerCapturedBuffer {
     let timestamp: UInt64
 }
 
+struct SpeakerBufferCapacity {
+    static let durationSeconds = 2.0
+    static let maximumSlots = 8_192
+    // PCM とリングの既知の確保量を 60 MiB に抑え、残り 4 MiB を AVAudioPCMBuffer 等の管理領域に残す。
+    static let maximumPreallocatedBytes: UInt64 = 64 * 1_024 * 1_024
+    private static let allocationReserveBytes: UInt64 = 4 * 1_024 * 1_024
+    let slotCount: UInt32
+    let frameCapacity: AVAudioFrameCount
+    let preallocatedBytes: UInt64
+
+    init(sampleRate: Double, callbackFrames: UInt32,
+         ringBytesPerFrame: UInt64, ringBufferCount: UInt64,
+         outputBytesPerFrame: UInt64, outputBufferCount: UInt64) throws {
+        guard sampleRate.isFinite, sampleRate > 0,
+              callbackFrames > 0, callbackFrames <= 16_384,
+              ringBytesPerFrame > 0, ringBufferCount > 0,
+              outputBytesPerFrame > 0, outputBufferCount > 0 else { throw SpeakerAudioTapError.invalidFormat }
+        let slots = ceil(sampleRate * Self.durationSeconds / Double(callbackFrames))
+        guard slots.isFinite, slots >= 1 else {
+            throw SpeakerAudioTapError.invalidFormat
+        }
+        let slotsWithinCountLimit = Int(min(Double(Self.maximumSlots), max(2, slots)))
+        let frames = UInt64(min(16_384, max(1_024, Int(callbackFrames) * 8)))
+        let (ringFrameBytes, ringOverflow) = ringBytesPerFrame.multipliedReportingOverflow(by: ringBufferCount)
+        let (outputFrameBytes, outputOverflow) = outputBytesPerFrame.multipliedReportingOverflow(by: outputBufferCount)
+        let (combinedFrameBytes, combinedOverflow) = ringFrameBytes.addingReportingOverflow(outputFrameBytes)
+        let (slotPCMBytes, slotOverflow) = combinedFrameBytes.multipliedReportingOverflow(by: frames)
+        let (outputBufferBytes, bufferOverflow) = outputFrameBytes.multipliedReportingOverflow(by: frames)
+        guard !ringOverflow, !outputOverflow, !combinedOverflow, !slotOverflow, !bufferOverflow,
+              slotPCMBytes <= UInt64.max - 12 else { throw SpeakerAudioTapError.capacityLimit }
+        let slotBytes = slotPCMBytes + 12 // ring の frameLength と timestamp
+        let budget = Self.maximumPreallocatedBytes - Self.allocationReserveBytes
+        guard outputBufferBytes < budget else { throw SpeakerAudioTapError.capacityLimit }
+        let boundedSlots = min(slotsWithinCountLimit, Int((budget - outputBufferBytes) / slotBytes))
+        guard boundedSlots >= 2 else { throw SpeakerAudioTapError.capacityLimit }
+        slotCount = UInt32(boundedSlots)
+        frameCapacity = AVAudioFrameCount(frames)
+        preallocatedBytes = outputBufferBytes + UInt64(boundedSlots) * slotBytes
+    }
+}
+
 struct SpeakerAggregateInputLayout {
+    static func ringFrameBytes(bufferChannels: [UInt32]) throws -> UInt64 {
+        let channels = bufferChannels.reduce(UInt64(0)) { $0 + UInt64($1) }
+        guard channels > 0, channels <= UInt64(UInt32.max) else { throw SpeakerAudioTapError.invalidFormat }
+        // tap_mix は入力の配置に関係なく、全チャンネルを Float32 として保存する。
+        return channels * UInt64(MemoryLayout<Float>.size)
+    }
+
     static func tapChannels(
         tapFormats: [AudioStreamBasicDescription],
         aggregateFormat: AudioStreamBasicDescription,
@@ -128,6 +177,7 @@ extension SpeakerAudioCapture {
 enum SpeakerAudioTapError: LocalizedError {
     case operation(String, OSStatus)
     case noOutputDevice
+    case reconfiguring
     case speakerDevicesMissing(Int)
     case outputDeviceListUnavailable
     case currentProcessUnavailable
@@ -137,6 +187,7 @@ enum SpeakerAudioTapError: LocalizedError {
     case invalidBuffer
     case invalidTimestamp
     case allocation
+    case capacityLimit
     case overflow
     case startupTimeout
     case noAudio
@@ -155,9 +206,11 @@ enum SpeakerAudioTapError: LocalizedError {
         switch self {
         case .operation(_, kAudioDevicePermissionsError): return "system-audio-permission"
         case .noOutputDevice: return "system-audio-device"
+        case .reconfiguring: return "system-audio-reconfiguring"
         case .speakerDevicesMissing: return "speaker-device-missing"
         case .outputDeviceListUnavailable: return "system-audio-device-list"
         case .invalidFormat, .invalidBuffer, .unsupportedAggregateInput: return "system-audio-format"
+        case .capacityLimit: return "system-audio-capacity"
         case .invalidTimestamp, .invalidAggregateClock: return "system-audio-clock"
         case .overflow: return "system-audio-overflow"
         case .startupTimeout: return "system-audio-start-timeout"
@@ -172,6 +225,7 @@ enum SpeakerAudioTapError: LocalizedError {
         case .operation(_, kAudioDevicePermissionsError): return "システムオーディオ録音が許可されていません。システム設定の「プライバシーとセキュリティ」→「画面収録とシステムオーディオ録音」で許可し、Hearing を入れ直してください"
         case let .operation(operation, status): return "Core Audio operation=\(operation) status=\(status)"
         case .noOutputDevice: return "利用可能な音声出力デバイスがありません"
+        case .reconfiguring: return "スピーカー取り込みを再構成しています"
         case let .speakerDevicesMissing(count): return "指定した出力デバイスのうち \(count) 台が未接続です"
         case .outputDeviceListUnavailable: return "出力デバイス一覧を取得できません"
         case .currentProcessUnavailable: return "音声除外対象のプロセスを取得できませんでした"
@@ -181,6 +235,7 @@ enum SpeakerAudioTapError: LocalizedError {
         case .invalidBuffer: return "スピーカー音声のバッファ形式が変わりました"
         case .invalidTimestamp: return "スピーカー音声の取得時刻を取得できませんでした"
         case .allocation: return "スピーカー音声のバッファを確保できませんでした"
+        case .capacityLimit: return "スピーカー音声の事前確保が 64 MiB の上限に収まりません"
         case .overflow: return "スピーカー音声の処理が追いつかず、バッファが上限に達しました"
         case .startupTimeout: return "スピーカー音声の開始処理が時間内に完了しませんでした"
         case .noAudio: return "再生中のスピーカー音声を受信できませんでした"
@@ -212,8 +267,6 @@ private struct CoreAudioSystemPropertyListener: SpeakerSystemPropertyListening {
 
 @available(macOS 14.2, *)
 final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
-    // 32 HAL callbacks are buffered; an overrun is reported instead of silently losing speech.
-    private static let frameCapacity: UInt32 = 16_384
     private let diagnostic: (String) -> Void
     private let onStage: (String, String) -> Void
     private let systemListener: any SpeakerSystemPropertyListening
@@ -228,6 +281,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     private var ioProcID: AudioDeviceIOProcID?
     private var ring: OpaquePointer?
     private var buffer: AVAudioPCMBuffer?
+    private let ringLock = NSLock()
     private var listeners: [(AudioObjectID, AudioObjectPropertyAddress)] = []
     private var outputListenerInstalled = false
     private var deviceListListenerInstalled = false
@@ -279,7 +333,8 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         }
     }
 
-    func start() throws -> AVAudioFormat {
+    func start(onPrepared: (AVAudioFormat, SpeakerBufferCapacity) throws -> Void,
+               onCapturing: () -> Void) throws -> AVAudioFormat {
         guard !cleanupFailed else { throw SpeakerAudioTapError.operation("previous-cleanup", kAudioHardwareUnspecifiedError) }
         if !selectedUIDs.isEmpty && (tapCreateCount > 0 || aggregateCreateCount > 0) {
             rebuildCount += 1
@@ -396,15 +451,32 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             } else {
                 format = AVAudioFormat(streamDescription: &streamDescription)
             }
-            guard let format,
-                  format.sampleRate > 0, format.channelCount > 0,
-                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: Self.frameCapacity) else {
+            let callbackFrames = try uint32Property(deviceID, kAudioDevicePropertyBufferFrameSize)
+            guard let format, format.channelCount > 0 else {
                 throw SpeakerAudioTapError.invalidFormat
             }
-            self.buffer = buffer
+            let ringBufferCount = selectedUIDs.isEmpty
+                ? (streamDescription.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+                    ? UInt64(streamDescription.mChannelsPerFrame) : 1)
+                : 1
+            let ringBytesPerFrame = try selectedUIDs.isEmpty
+                ? UInt64(streamDescription.mBytesPerFrame)
+                : SpeakerAggregateInputLayout.ringFrameBytes(bufferChannels: inputChannels)
+            let outputDescription = format.streamDescription.pointee
+            let outputBufferCount = outputDescription.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+                ? UInt64(outputDescription.mChannelsPerFrame) : 1
+            let capacities = try SpeakerBufferCapacity(
+                sampleRate: format.sampleRate, callbackFrames: callbackFrames,
+                ringBytesPerFrame: ringBytesPerFrame, ringBufferCount: ringBufferCount,
+                outputBytesPerFrame: UInt64(outputDescription.mBytesPerFrame), outputBufferCount: outputBufferCount
+            )
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacities.frameCapacity) else {
+                throw SpeakerAudioTapError.allocation
+            }
             let ring: OpaquePointer?
             if selectedUIDs.isEmpty {
-                ring = coosenpai_audio_ring_create(&streamDescription, Self.frameCapacity, 32, changes)
+                ring = coosenpai_audio_ring_create(&streamDescription, capacities.frameCapacity,
+                                                  capacities.slotCount, changes)
             } else {
                 guard var inputDescription = aggregateInputDescription else { throw SpeakerAudioTapError.invalidFormat }
                 ring = inputChannels.withUnsafeBufferPointer { buffers in
@@ -414,7 +486,8 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
                         }
                         return coosenpai_audio_ring_create_tap_mix(
                             &inputDescription, bufferAddress, UInt32(buffers.count),
-                            tapAddress, UInt32(taps.count), Self.frameCapacity, 32, changes
+                            tapAddress, UInt32(taps.count), capacities.frameCapacity,
+                            capacities.slotCount, changes
                         )
                     }
                 }
@@ -422,7 +495,10 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             guard let ring else {
                 throw SpeakerAudioTapError.allocation
             }
+            ringLock.lock()
+            self.buffer = buffer
             self.ring = ring
+            ringLock.unlock()
             onStage("aggregate-create", "end")
             onStage("add-output", "begin")
             try check(AudioDeviceCreateIOProcIDWithBlock(
@@ -435,9 +511,6 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
                 coosenpai_audio_ring_record_callback_host_ticks(ring, mach_absolute_time() - started)
             }, "create-io-proc")
             onStage("add-output", "end")
-            onStage("start-capture", "begin")
-            try check(AudioDeviceStart(deviceID, ioProcID), "start-device")
-            deviceStarted = true
             if tapIDs.count > 1 {
                 if #available(macOS 15.0, *) {
                     try alignTapDriftCompensation(tapUIDs: tapUIDs, tapDeviceUIDs: tapTargets.map(\.uid))
@@ -446,8 +519,6 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
                     diagnostic("audio-tap-clock verification=unavailable basis=configured-tap-0")
                 }
             }
-            if !selectedUIDs.isEmpty { startCount += 1; reportSelectedLifecycle() }
-            onStage("start-capture", "end")
             for tapID in tapIDs { try observe(tapID, kAudioTapPropertyFormat) }
             for address in Self.aggregateMonitorAddresses() {
                 try observe(deviceID, address.mSelector, scope: address.mScope)
@@ -465,6 +536,16 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             activityCheckAt = .distantPast
             metricsReportedAt = .distantPast
             receivedCount = 0
+            diagnostic("speaker-buffer-capacity sample-rate=\(Int(format.sampleRate)) "
+                + "callback-frames=\(callbackFrames) slots=\(capacities.slotCount) "
+                + "frame-capacity=\(capacities.frameCapacity) preallocated-bytes=\(capacities.preallocatedBytes)")
+            try onPrepared(format, capacities)
+            onStage("start-capture", "begin")
+            onCapturing()
+            try check(AudioDeviceStart(deviceID, ioProcID), "start-device")
+            deviceStarted = true
+            if !selectedUIDs.isEmpty { startCount += 1; reportSelectedLifecycle() }
+            onStage("start-capture", "end")
             return format
         } catch {
             let failure = classifyCaptureFailure(error)
@@ -769,7 +850,9 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         catch SpeakerAudioTapError.operation(_, kAudioHardwareBadDeviceError) { return 0 }
     }
 
-    func nextBuffer() throws -> SpeakerCapturedBuffer? {
+    func nextBuffer(checkDelivery: Bool) throws -> SpeakerCapturedBuffer? {
+        ringLock.lock()
+        defer { ringLock.unlock() }
         guard let ring, let buffer else { return nil }
         reportRingMetrics(ring, force: false)
         switch coosenpai_audio_ring_fault(ring) {
@@ -785,7 +868,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
             buffer.frameLength = frames
             return SpeakerCapturedBuffer(buffer: buffer, timestamp: AudioConvertHostTimeToNanos(hostTime))
         }
-        try checkAudioDelivery(ring)
+        if checkDelivery { try checkAudioDelivery(ring) }
         return nil
     }
 
@@ -822,7 +905,9 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     }
 
     func stop() throws {
+        ringLock.lock()
         if let ring { reportRingMetrics(ring, force: true) }
+        ringLock.unlock()
         var failures: [String] = []
         func recordFailure(_ status: OSStatus, _ operation: String) {
             guard !Self.cleanupReleased(status) else { return }
@@ -860,11 +945,13 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         // IOProc が残っている場合だけ callback の保存領域を残す。aggregate と tap の
         // 解除は別の資源なので、別の解除失敗があっても必ず試みる。
         if ioProcID == nil {
+            ringLock.lock()
             if let ring {
                 coosenpai_audio_ring_destroy(ring)
                 self.ring = nil
             }
             buffer = nil
+            ringLock.unlock()
         } else {
             failures.append("operation=retain-callback-storage reason=io-proc-active")
         }

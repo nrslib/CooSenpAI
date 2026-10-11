@@ -78,6 +78,20 @@ impl RuntimeHandle {
             .map_err(RuntimeError::from)
     }
 
+    pub fn accept_late_speaker_final(
+        &self,
+        context: crate::hearing_context::HearingContext,
+    ) -> Result<bool, RuntimeError> {
+        self.ensure_open()?;
+        self.user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .as_ref()
+            .ok_or(RuntimeError::CompanionUnavailable)?
+            .accept_late_speaker_final(context)
+            .map_err(RuntimeError::from)
+    }
+
     pub fn register_pending_frame_context(
         &self,
         context: crate::state::PendingFrameContext,

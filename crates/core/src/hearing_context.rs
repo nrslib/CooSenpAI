@@ -298,24 +298,47 @@ impl HearingContextBuffer {
         Some(context)
     }
 
+    pub(crate) fn accepts_late_speaker_final(&self, context: &HearingContext) -> bool {
+        context.source == AudioObservationSource::Speaker
+            && context.confirmed
+            && context.generation != 0
+            && context.sequence != 0
+            && self.accepts_session(&context.session_id)
+            && self.latest.iter().any(|previous| {
+                previous.source == AudioObservationSource::Speaker
+                    && previous.generation > context.generation
+            })
+    }
+
+    pub(crate) fn record_late_audio(&mut self, audio: crate::state::AudioObservation) -> bool {
+        self.push_pending_audio(audio)
+    }
+
+    fn push_pending_audio(&mut self, audio: crate::state::AudioObservation) -> bool {
+        if self.pending_audio.len() >= MAX_PENDING_AUDIO_COUNT
+            || self
+                .pending_audio
+                .iter()
+                .map(|record| record.text.len())
+                .sum::<usize>()
+                + audio.text.len()
+                > MAX_PENDING_AUDIO_BYTES
+        {
+            return false;
+        }
+        self.pending_audio.push(audio);
+        true
+    }
+
     pub(crate) fn record(
         &mut self,
         context: HearingContext,
         audio: Option<crate::state::AudioObservation>,
     ) -> bool {
         if let Some(audio) = audio {
-            if self.pending_audio.len() >= MAX_PENDING_AUDIO_COUNT
-                || self
-                    .pending_audio
-                    .iter()
-                    .map(|record| record.text.len())
-                    .sum::<usize>()
-                    + audio.text.len()
-                    > MAX_PENDING_AUDIO_BYTES
-            {
+            if !self.push_pending_audio(audio) {
                 return false;
             }
-            self.pending_audio.push(audio);
         }
         self.latest
             .retain(|previous| previous.source != context.source);

@@ -3,6 +3,7 @@ import AVFoundation
 enum AudioBufferCopyError: LocalizedError {
     case emptyBuffer
     case allocationFailed
+    case destinationCapacity(expected: AVAudioFrameCount, actual: AVAudioFrameCount)
     case bufferCountMismatch(expected: Int, actual: Int)
     case channelCountMismatch(index: Int, expected: Int, actual: Int)
     case missingSourceData(index: Int)
@@ -16,6 +17,8 @@ enum AudioBufferCopyError: LocalizedError {
             return "音声バッファにフレームがありません"
         case .allocationFailed:
             return "音声バッファの複製先を確保できません"
+        case let .destinationCapacity(expected, actual):
+            return "音声バッファの複製先が短すぎます: expected=\(expected) actual=\(actual)"
         case let .bufferCountMismatch(expected, actual):
             return "音声バッファの数が一致しません: expected=\(expected) actual=\(actual)"
         case let .channelCountMismatch(index, expected, actual):
@@ -42,6 +45,16 @@ func deepCopyAudioBuffer(_ source: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer 
         frameCapacity: frameLength
     ) else {
         throw AudioBufferCopyError.allocationFailed
+    }
+    try copyAudioBuffer(source, into: destination)
+    return destination
+}
+
+func copyAudioBuffer(_ source: AVAudioPCMBuffer, into destination: AVAudioPCMBuffer) throws {
+    let frameLength = source.frameLength
+    guard frameLength > 0 else { throw AudioBufferCopyError.emptyBuffer }
+    guard destination.frameCapacity >= frameLength else {
+        throw AudioBufferCopyError.destinationCapacity(expected: frameLength, actual: destination.frameCapacity)
     }
     destination.frameLength = frameLength
 
@@ -94,5 +107,4 @@ func deepCopyAudioBuffer(_ source: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer 
             byteCount: expectedByteCount
         )
     }
-    return destination
 }

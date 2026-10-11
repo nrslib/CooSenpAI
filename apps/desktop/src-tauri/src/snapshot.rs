@@ -193,6 +193,9 @@ pub struct AudioView {
     pub output_devices_monitor_failed: bool,
     pub generation: u64,
     pub phase: String,
+    pub speaker_capture: SpeakerCapture,
+    #[serde(skip)]
+    pub(crate) speaker_input_generations: Option<(u64, u64)>,
     pub microphone_permission: String,
     pub recognition_permission: String,
     pub screen_capture_permission: String,
@@ -209,6 +212,123 @@ pub struct AudioView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "phase", rename_all = "kebab-case")]
+pub enum SpeakerCapture {
+    Starting,
+    Running,
+    Waiting {
+        reason: String,
+        #[serde(
+            rename = "reasonKind",
+            default,
+            skip_serializing_if = "String::is_empty"
+        )]
+        reason_kind: String,
+        #[serde(skip)]
+        reason_message: String,
+    },
+    Restarting {
+        reason: String,
+        #[serde(
+            rename = "reasonKind",
+            default,
+            skip_serializing_if = "String::is_empty"
+        )]
+        reason_kind: String,
+        #[serde(skip)]
+        reason_message: String,
+    },
+    Paused,
+    Stopped {
+        reason: String,
+        #[serde(
+            rename = "reasonKind",
+            default,
+            skip_serializing_if = "String::is_empty"
+        )]
+        reason_kind: String,
+        #[serde(skip)]
+        reason_message: String,
+    },
+}
+
+impl SpeakerCapture {
+    pub(crate) fn waiting(kind: &str, message: &str, locale: Locale) -> Self {
+        Self::Waiting {
+            reason: localize_audio_message(kind, message, locale),
+            reason_kind: kind.to_owned(),
+            reason_message: message.to_owned(),
+        }
+    }
+
+    pub(crate) fn restarting(kind: &str, message: &str, locale: Locale) -> Self {
+        Self::Restarting {
+            reason: localize_audio_message(kind, message, locale),
+            reason_kind: kind.to_owned(),
+            reason_message: message.to_owned(),
+        }
+    }
+
+    pub(crate) fn stopped(kind: &str, message: &str, locale: Locale) -> Self {
+        Self::Stopped {
+            reason: localize_audio_message(kind, message, locale),
+            reason_kind: kind.to_owned(),
+            reason_message: message.to_owned(),
+        }
+    }
+
+    pub(crate) fn stopped_without_reason() -> Self {
+        Self::Stopped {
+            reason: String::new(),
+            reason_kind: String::new(),
+            reason_message: String::new(),
+        }
+    }
+
+    fn relocalize(&self, locale: Locale) -> Self {
+        match self {
+            Self::Waiting {
+                reason_kind,
+                reason_message,
+                ..
+            } => Self::waiting(reason_kind, reason_message, locale),
+            Self::Restarting {
+                reason_kind,
+                reason_message,
+                ..
+            } => Self::restarting(reason_kind, reason_message, locale),
+            Self::Stopped {
+                reason_kind,
+                reason_message,
+                ..
+            } if !reason_kind.is_empty() => Self::stopped(reason_kind, reason_message, locale),
+            other => other.clone(),
+        }
+    }
+
+    fn reason_source(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Waiting {
+                reason_kind,
+                reason_message,
+                ..
+            }
+            | Self::Restarting {
+                reason_kind,
+                reason_message,
+                ..
+            }
+            | Self::Stopped {
+                reason_kind,
+                reason_message,
+                ..
+            } if !reason_kind.is_empty() => Some((reason_kind, reason_message)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "stage", rename_all = "kebab-case")]
 pub enum AudioLogStage {
     Recognizing,
@@ -220,6 +340,7 @@ pub enum AudioLogStage {
 #[serde(rename_all = "camelCase")]
 pub struct AudioLogEvent {
     pub id: String,
+    pub generation: u64,
     pub created_at: String,
     pub source: AudioObservationSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,6 +350,20 @@ pub struct AudioLogEvent {
 }
 
 impl AudioView {
+    pub(crate) fn accepts_speaker_input_generation(&self, generation: u64) -> bool {
+        !matches!(self.speaker_capture, SpeakerCapture::Stopped { .. })
+            && self
+                .speaker_input_generations
+                .is_some_and(|(first, last)| (first..=last).contains(&generation))
+    }
+
+    pub(crate) fn accept_speaker_input_generation(&mut self, generation: u64) {
+        self.speaker_input_generations = Some(match self.speaker_input_generations {
+            Some((first, last)) => (first, last.max(generation)),
+            None => (generation, generation),
+        });
+    }
+
     pub fn push_event(&mut self, event: AudioLogEvent) {
         const RECENT_AUDIO_EVENT_LIMIT: usize = 100;
         if self
@@ -443,6 +578,11 @@ impl AppSnapshot {
     ) -> Self {
         let config_revision = config.revision;
         let locale = coosenpai_core::locale::Locale::from_config(&config.ui.language);
+        let speaker_capture = if config.audio.enabled && config.audio.speaker {
+            SpeakerCapture::Starting
+        } else {
+            SpeakerCapture::stopped_without_reason()
+        };
         let permission_presentation = permission.presentation_for_locale(locale);
         let memory_status = MemoryStatus {
             enabled: config.memory.enabled,
@@ -544,6 +684,8 @@ impl AppSnapshot {
                 output_devices_monitor_failed: false,
                 generation: 0,
                 phase: "off".to_owned(),
+                speaker_capture,
+                speaker_input_generations: None,
                 microphone_permission: speech_permission_name(audio_permissions.hearing.microphone),
                 recognition_permission: speech_permission_name(
                     audio_permissions.hearing.recognition,
@@ -646,7 +788,15 @@ impl AppSnapshot {
         if config.revision < self.config.revision.max(self.config_revision) {
             return false;
         }
+        if !config.audio.enabled || !config.audio.speaker {
+            self.audio.speaker_capture = SpeakerCapture::stopped_without_reason();
+        } else if !self.config.audio.enabled || !self.config.audio.speaker {
+            self.audio.speaker_capture = SpeakerCapture::Starting;
+        }
         let locale = Locale::from_config(&config.ui.language);
+        if self.config.ui.language != config.ui.language {
+            self.audio.speaker_capture = self.audio.speaker_capture.relocalize(locale);
+        }
         self.observer_provider_label = provider_label(&config.observer.vision.provider);
         self.companion_provider_label = provider_label(&config.companion.provider);
         self.companion_display_name = config.companion.display_name.clone();
@@ -679,9 +829,15 @@ impl AppSnapshot {
             )
         });
         let audio_warning_kind = self.audio.warning_kind.as_deref().unwrap_or_default();
+        let capture_reason_source = self.audio.speaker_capture.reason_source();
         self.audio.message = self.audio.message.take().map(|message| {
             self.audio.missing_speaker_device_count.map_or_else(
-                || localize_audio_message(audio_warning_kind, &message, locale),
+                || match capture_reason_source {
+                    Some((kind, original)) if kind == audio_warning_kind => {
+                        localize_audio_message(kind, original, locale)
+                    }
+                    _ => localize_audio_message(audio_warning_kind, &message, locale),
+                },
                 |count| localize_speaker_missing_device_count(count, locale),
             )
         });
