@@ -98,6 +98,7 @@ interface Props {
   readonly onOpenLicenseDocument: (document: LicenseDocument) => void;
   readonly onOpenSpeechSettings: (kind: "microphone" | "recognition") => void;
   readonly onResumeSpeaker: () => void;
+  readonly onDismissHearingWarning: () => void;
   readonly onSpeakerManagement?: (payload: SpeakerManagementPayload) => Promise<IpcResult<null>>;
   readonly onSpeakerDirectory?: () => Promise<IpcResult<SpeakerDirectory>>;
   readonly onSpeakerRename?: (payload: SpeakerRenamePayload) => Promise<IpcResult<SpeakerDirectory>>;
@@ -110,7 +111,7 @@ interface Props {
 
 export { SettingsDiscardDialog } from "./components/SettingsDiscardDialog.js";
 
-export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, focusGeneration = 0, onClose, onSave, onSelectPersona, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRefreshPersonas, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenAccessibilitySettings, onOpenLicenseDocument, onOpenSpeechSettings, onResumeSpeaker, onSpeakerManagement, onSpeakerDirectory, onSpeakerRename, onToggleAvatar, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
+export function SettingsPanel({ snapshot, personas, providerModels, providerModelsError, providerApiKeys, providerApiKeysError, focusSection, focusGeneration = 0, onClose, onSave, onSelectPersona, onReloadConfig, onReloadPersona, onGetPersona, onSavePersona, onDeletePersona, onRestorePersona, onRefreshPersonas, onRestartTutorial, onRestartSetup, onResetConversation, onOpenSystemSettings, onOpenAccessibilitySettings, onOpenLicenseDocument, onOpenSpeechSettings, onResumeSpeaker, onDismissHearingWarning, onSpeakerManagement, onSpeakerDirectory, onSpeakerRename, onToggleAvatar, onRelaunch, onAppearancePreview, onSaveProviderApiKey, onDeleteProviderApiKey }: Props): ReactElement {
   const { locale, t } = useI18n();
   const [formSync] = useState(() => new SettingsFormSync(toForm(snapshot.config, snapshot.avatarImageLoadFailed), snapshot.configRevision));
   const [form, setForm] = useState(formSync.form);
@@ -312,7 +313,7 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
         content = state?.appPicker === undefined ? <></> : <VisionSettings {...categoryProps} appPicker={state.appPicker} onAppPickerAction={action} highlight={focusSection === "watch"} onOpenSystemSettings={onOpenSystemSettings} onOpenAccessibilitySettings={onOpenAccessibilitySettings} onRelaunch={onRelaunch} />;
         break;
       case "hearing":
-        content = <HearingSettings {...categoryProps} onOpenSpeechSettings={onOpenSpeechSettings} onResumeSpeaker={onResumeSpeaker} speaker={state?.speakerManagement} speakerConfirmation={confirmation === "speaker-delete" || confirmation === "speaker-delete-all" ? confirmation : null} onSpeakerAction={action} />;
+        content = <HearingSettings {...categoryProps} onOpenSpeechSettings={onOpenSpeechSettings} onResumeSpeaker={onResumeSpeaker} onDismissHearingWarning={onDismissHearingWarning} speaker={state?.speakerManagement} speakerConfirmation={confirmation === "speaker-delete" || confirmation === "speaker-delete-all" ? confirmation : null} onSpeakerAction={action} />;
         break;
       case "speech":
         content = <SpeechSettings {...categoryProps} />;

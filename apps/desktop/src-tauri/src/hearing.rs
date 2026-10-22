@@ -1,7 +1,7 @@
 use crate::hearing_lifecycle::{
     AttachOutcome, HearingLifecycle, HearingSessionSettings, StopOutcome,
 };
-use crate::hearing_presenter::HearingResult;
+use crate::hearing_presenter::{HearingResult, StopFailureKind};
 use crate::snapshot::SpeakerCapture;
 use crate::state::DesktopState;
 use coosenpai_core::config::ConfigPaths;
@@ -21,6 +21,37 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_RESTART_ATTEMPTS: u8 = 3;
 const AUDIO_INGESTION_QUEUE_CAPACITY: usize = 128;
+const HEARING_STOP_LIMIT: std::time::Duration = std::time::Duration::from_secs(4);
+const HEARING_FORCE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn stop_failure_kind(error: &coosenpai_core::ports::PortError) -> StopFailureKind {
+    use coosenpai_core::ports::PortError;
+    match error {
+        PortError::HearingStopTimeout => StopFailureKind::TimedOut,
+        PortError::HearingStopCleanupFailed => StopFailureKind::CleanupFailed,
+        PortError::HearingStopUnconfirmed => StopFailureKind::Unconfirmed,
+        _ => StopFailureKind::Other,
+    }
+}
+
+struct StopSessionResult {
+    helper: Result<(), coosenpai_core::ports::PortError>,
+    initialization_timed_out: bool,
+    ingestion_timed_out: bool,
+}
+
+impl StopSessionResult {
+    fn warning(&self, generation: u64) -> Option<HearingResult> {
+        let helper_failure = self.helper.as_ref().err().map(stop_failure_kind);
+        (helper_failure.is_some() || self.initialization_timed_out || self.ingestion_timed_out)
+            .then_some(HearingResult::StopWarning {
+                generation,
+                helper_failure,
+                initialization_timed_out: self.initialization_timed_out,
+                ingestion_timed_out: self.ingestion_timed_out,
+            })
+    }
+}
 
 async fn output_devices_event(
     port: Option<Arc<dyn HearingPort>>,
@@ -445,11 +476,17 @@ impl HearingController {
                 HearingResult::Cancelled(outcome.generation),
             ))
             .await;
-        if let Err(error) = self.stop_session(outcome).await {
+        let generation = outcome.generation;
+        let stopped = self.stop_session(outcome).await;
+        if let Some(warning) = stopped.warning(generation) {
+            state
+                .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(warning))
+                .await;
             let _ = state.logger.write(
                 "WARN",
                 &format!(
-                    "聴覚観察 helper の停止を確認できませんでした: error-type=audio-cancel error={error}"
+                    "聴覚観察の停止が完了しませんでした: error-type=audio-cancel helper={:?} initialization-timeout={} ingestion-timeout={}",
+                    stopped.helper, stopped.initialization_timed_out, stopped.ingestion_timed_out
                 ),
             );
         }
@@ -511,6 +548,26 @@ impl HearingController {
         state: Arc<DesktopState>,
         settings: HearingSessionSettings,
     ) {
+        let pending_exit = {
+            let mut lifecycle = self.lifecycle.lock().await;
+            if lifecycle.helper_exit_pending() {
+                lifecycle.defer_start_until_helper_exits()
+            } else {
+                None
+            }
+        };
+        if let Some(completed) = pending_exit {
+            let controller = self.clone();
+            tauri::async_runtime::spawn(async move {
+                completed.cancelled().await;
+                controller.lifecycle.lock().await.helper_exit_confirmed();
+                controller.sync(state);
+            });
+            return;
+        }
+        if self.lifecycle.lock().await.helper_exit_pending() {
+            return;
+        }
         let cancellation = CancellationToken::new();
         let (initialization_completed, initialization_finished) = oneshot::channel();
         let generation = {
@@ -846,7 +903,13 @@ impl HearingController {
             }
             AttachOutcome::Cancel(control) => {
                 cancellation.cancel();
-                let _ = control.cancel().await;
+                if tokio::time::timeout(HEARING_STOP_LIMIT, control.cancel())
+                    .await
+                    .is_err()
+                {
+                    control.force_cancel();
+                }
+                control.wait_for_exit().await;
                 self.complete_stop(generation).await;
             }
         }
@@ -1097,6 +1160,12 @@ impl HearingController {
                     }
                     return;
                 }
+                Ok(HearingEvent::MicrophoneDevice { .. } | HearingEvent::SpeakerFormat { .. }) => {
+                    let _ = state.logger.write(
+                        "WARN",
+                        "聴覚観察の内部デバイスイベントが集約層を通過しました",
+                    );
+                }
                 Err(_) => {}
             }
         }
@@ -1236,34 +1305,83 @@ impl HearingController {
             ))
             .await;
         let generation = outcome.generation;
-        let _ = self.stop_session(outcome).await;
+        let stopped = self.stop_session(outcome).await;
         state
             .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
                 HearingResult::Stopped(generation),
             ))
             .await;
+        if let Some(warning) = stopped.warning(generation) {
+            state
+                .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(warning))
+                .await;
+        }
     }
 
-    async fn stop_session(
-        &self,
-        outcome: StopOutcome,
-    ) -> Result<(), coosenpai_core::ports::PortError> {
-        let result = if let Some(control) = outcome.control {
-            control.cancel().await
+    async fn stop_session(&self, outcome: StopOutcome) -> StopSessionResult {
+        let mut helper_timed_out = false;
+        let force_control = outcome.control.clone();
+        let helper = if let Some(control) = outcome.control {
+            match tokio::time::timeout(HEARING_STOP_LIMIT, control.cancel()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    helper_timed_out = true;
+                    if let Some(control) = &force_control {
+                        control.force_cancel();
+                        let _ = tokio::time::timeout(HEARING_FORCE_WAIT, control.cancel()).await;
+                    }
+                    Err(coosenpai_core::ports::PortError::HearingStopTimeout)
+                }
+            }
         } else {
             Ok(())
         };
         if let Some(stop_events) = outcome.stop_events {
             let _ = stop_events.send(());
         }
-        if let Some(initialization_completed) = outcome.initialization_completed {
-            let _ = initialization_completed.await;
+        let mut pending_initialization = None;
+        let mut initialization_timed_out = false;
+        if let Some(mut initialization_completed) = outcome.initialization_completed {
+            if tokio::time::timeout(HEARING_STOP_LIMIT, &mut initialization_completed)
+                .await
+                .is_err()
+            {
+                initialization_timed_out = true;
+                pending_initialization = Some(initialization_completed);
+            }
         }
+        let mut ingestion_timed_out = false;
         if let Some(ingestion_completed) = outcome.ingestion_completed {
-            let _ = ingestion_completed.await;
+            if tokio::time::timeout(HEARING_STOP_LIMIT, ingestion_completed)
+                .await
+                .is_err()
+            {
+                ingestion_timed_out = true;
+            }
+        }
+        if (helper_timed_out || initialization_timed_out)
+            && (force_control.is_some() || pending_initialization.is_some())
+        {
+            let completed = CancellationToken::new();
+            self.lifecycle
+                .lock()
+                .await
+                .record_pending_helper_exit(completed.clone());
+            tokio::spawn(async move {
+                if let Some(control) = force_control {
+                    control.wait_for_exit().await;
+                } else if let Some(initialization) = pending_initialization {
+                    let _ = initialization.await;
+                }
+                completed.cancel();
+            });
         }
         self.complete_stop(outcome.generation).await;
-        result
+        StopSessionResult {
+            helper,
+            initialization_timed_out,
+            ingestion_timed_out,
+        }
     }
 
     async fn complete_stop(&self, generation: u64) {

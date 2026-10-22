@@ -662,6 +662,7 @@ export interface AudioView {
   readonly microphonePermission: "not-determined" | "granted" | "denied" | "restricted" | "unavailable";
   readonly recognitionPermission: "not-determined" | "granted" | "denied" | "restricted" | "unavailable";
   readonly screenCapturePermission: "granted" | "not-granted" | "unknown" | "not-required";
+  readonly bluetoothCallMode: boolean;
   readonly warningKind?: string;
   readonly message?: string;
   readonly recentEvents: readonly AudioLogEvent[];

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use coosenpai_core::config::shortcut_identity;
 use coosenpai_core::ports::{
     ClipboardReader, ClipboardWriter, PortError, SelectedTextCopyOutcome, SelectedTextCopyPort,
     SELECTED_TEXT_POLL_INTERVAL, SELECTED_TEXT_POLL_TIMEOUT,
@@ -16,6 +17,39 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const KEY_CODE_C: u16 = 8;
+
+#[derive(Clone, Copy)]
+struct ShortcutKeys {
+    key_code: Option<u16>,
+    modifiers: u64,
+}
+
+fn shortcut_keys(shortcut: &str) -> Result<ShortcutKeys, PortError> {
+    let identity = shortcut_identity(shortcut).ok_or_else(|| {
+        PortError::Unavailable(format!(
+            "文章取り込みのショートカットが不正です: {shortcut}"
+        ))
+    })?;
+    let key = identity
+        .rsplit('+')
+        .next()
+        .expect("shortcut identity has a key");
+    let key_code = crate::speech_devices::key_code(key);
+    let modifiers = identity.split('+').fold(0, |flags, part| {
+        flags
+            | match part {
+                "super" => ObjcCGEventFlags::MaskCommand.0,
+                "alt" => ObjcCGEventFlags::MaskAlternate.0,
+                "shift" => ObjcCGEventFlags::MaskShift.0,
+                "control" => ObjcCGEventFlags::MaskControl.0,
+                _ => 0,
+            }
+    });
+    Ok(ShortcutKeys {
+        key_code,
+        modifiers,
+    })
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MacClipboardReader;
@@ -73,7 +107,8 @@ trait SelectedTextCopySystem: Send + Sync {
     type PreparedCopy;
 
     fn event_access_allowed(&self) -> bool;
-    fn shortcut_input_is_pressed(&self) -> bool;
+    fn key_pressed(&self, key_code: u16) -> bool;
+    fn modifier_flags(&self) -> u64;
     fn prepare_copy(&self) -> Result<Self::PreparedCopy, PortError>;
     fn clipboard_change_count(&self) -> i64;
     fn post_copy(&self, prepared: Self::PreparedCopy);
@@ -99,23 +134,12 @@ impl SelectedTextCopySystem for MacSelectedTextCopySystem {
         CGPreflightPostEventAccess() || CGRequestPostEventAccess()
     }
 
-    fn shortcut_input_is_pressed(&self) -> bool {
-        let flags = ObjcCGEventSource::flags_state(ObjcCGEventSourceStateID::CombinedSessionState);
-        let modifier_pressed = [
-            ObjcCGEventFlags::MaskCommand,
-            ObjcCGEventFlags::MaskAlternate,
-            ObjcCGEventFlags::MaskShift,
-            ObjcCGEventFlags::MaskControl,
-        ]
-        .into_iter()
-        .any(|modifier| flags.contains(modifier));
-        modifier_pressed
-            || (0_u16..=127).any(|key_code| {
-                ObjcCGEventSource::key_state(
-                    ObjcCGEventSourceStateID::CombinedSessionState,
-                    key_code,
-                )
-            })
+    fn key_pressed(&self, key_code: u16) -> bool {
+        ObjcCGEventSource::key_state(ObjcCGEventSourceStateID::CombinedSessionState, key_code)
+    }
+
+    fn modifier_flags(&self) -> u64 {
+        ObjcCGEventSource::flags_state(ObjcCGEventSourceStateID::CombinedSessionState).0
     }
 
     fn prepare_copy(&self) -> Result<Self::PreparedCopy, PortError> {
@@ -159,20 +183,30 @@ enum ShortcutReleaseOutcome {
     TimedOut,
 }
 
+fn shortcut_input_is_pressed(system: &impl SelectedTextCopySystem, keys: ShortcutKeys) -> bool {
+    keys.key_code
+        .is_some_and(|key_code| system.key_pressed(key_code))
+        || system.modifier_flags() & keys.modifiers != 0
+}
+
 async fn synthesize_copy_with<S: SelectedTextCopySystem>(
     system: &S,
     clock: &dyn SelectedTextCopyClock,
+    shortcut: Option<&str>,
     cancellation: &CancellationToken,
 ) -> Result<SelectedTextCopyOutcome, PortError> {
     if !system.event_access_allowed() {
         return Ok(SelectedTextCopyOutcome::PermissionDenied);
     }
 
+    let keys = shortcut.map(shortcut_keys).transpose()?;
     let deadline = clock.now() + SELECTED_TEXT_POLL_TIMEOUT;
-    match wait_for_shortcut_release(system, clock, cancellation, deadline).await {
-        ShortcutReleaseOutcome::Cancelled => return Ok(SelectedTextCopyOutcome::Cancelled),
-        ShortcutReleaseOutcome::TimedOut => return Ok(SelectedTextCopyOutcome::ReleaseTimeout),
-        ShortcutReleaseOutcome::Released => {}
+    if let Some(keys) = keys {
+        match wait_for_shortcut_release(system, clock, keys, cancellation, deadline).await {
+            ShortcutReleaseOutcome::Cancelled => return Ok(SelectedTextCopyOutcome::Cancelled),
+            ShortcutReleaseOutcome::TimedOut => return Ok(SelectedTextCopyOutcome::ReleaseTimeout),
+            ShortcutReleaseOutcome::Released => {}
+        }
     }
     if cancellation.is_cancelled() {
         return Ok(SelectedTextCopyOutcome::Cancelled);
@@ -197,6 +231,7 @@ async fn synthesize_copy_with<S: SelectedTextCopySystem>(
 async fn wait_for_shortcut_release<S: SelectedTextCopySystem>(
     system: &S,
     clock: &dyn SelectedTextCopyClock,
+    keys: ShortcutKeys,
     cancellation: &CancellationToken,
     deadline: tokio::time::Instant,
 ) -> ShortcutReleaseOutcome {
@@ -208,7 +243,7 @@ async fn wait_for_shortcut_release<S: SelectedTextCopySystem>(
         if now >= deadline {
             return ShortcutReleaseOutcome::TimedOut;
         }
-        if !system.shortcut_input_is_pressed() {
+        if !shortcut_input_is_pressed(system, keys) {
             return ShortcutReleaseOutcome::Released;
         }
         let sleep_duration = SELECTED_TEXT_POLL_INTERVAL.min(deadline - now);
@@ -223,11 +258,13 @@ async fn wait_for_shortcut_release<S: SelectedTextCopySystem>(
 impl SelectedTextCopyPort for MacSelectedTextCopier {
     async fn synthesize_copy(
         &self,
+        shortcut: Option<&str>,
         cancellation: &CancellationToken,
     ) -> Result<SelectedTextCopyOutcome, PortError> {
         synthesize_copy_with(
             &MacSelectedTextCopySystem,
             &TokioSelectedTextCopyClock,
+            shortcut,
             cancellation,
         )
         .await

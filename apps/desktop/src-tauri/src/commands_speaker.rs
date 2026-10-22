@@ -10,6 +10,7 @@ use coosenpai_core::speaker_name_proposals::{
 };
 use coosenpai_core::speaker_names::{load_speaker_names, save_speaker_name, validate_speaker_name};
 use coosenpai_core::state::{ConversationEntry, ConversationMessageKind, ConversationRole};
+use coosenpai_platform_macos::run_hearing_helper_command;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -170,13 +171,26 @@ async fn spawn_speaker_helper(
         return Err("話者管理 helper が見つかりません".to_owned());
     };
     let ledger = state.paths.speakers.join("registry.enc");
-    tokio::process::Command::new(helper)
-        .args(arguments)
-        .arg("--speaker-ledger")
-        .arg(ledger)
-        .output()
+    run_speaker_management_command(
+        &helper,
+        &ledger,
+        arguments,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+}
+
+async fn run_speaker_management_command(
+    helper: &std::path::Path,
+    ledger: &std::path::Path,
+    arguments: Vec<String>,
+    limit: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    let mut arguments: Vec<std::ffi::OsString> = arguments.into_iter().map(Into::into).collect();
+    arguments.extend(["--speaker-ledger".into(), ledger.as_os_str().to_owned()]);
+    run_hearing_helper_command(helper, &arguments, limit)
         .await
-        .map_err(|error| format!("話者管理 helper を起動できません: {error}"))
+        .map_err(|error| format!("話者管理 helper を実行できません: {error}"))
 }
 
 fn helper_failure_message(output: &std::process::Output) -> String {

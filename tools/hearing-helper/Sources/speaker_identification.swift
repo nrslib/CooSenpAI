@@ -5536,8 +5536,7 @@ private func emitSpeakerManagement(_ value: [String: Any]) {
     speakerManagementOutputLock.unlock()
 }
 
-func runSpeakerManagementCommandIfRequested() -> Bool {
-    let arguments = Array(CommandLine.arguments.dropFirst())
+func runSpeakerManagementCommandIfRequested(arguments: [String]) -> Bool {
     guard arguments.contains("--speaker-management") else { return false }
 
     var operation: String?
@@ -6635,8 +6634,7 @@ func parseSpeakerDiagnosisThresholdOverride(
     ))
 }
 
-func runSpeakerDiagnosisCommandIfRequested() -> Bool {
-    let arguments = Array(CommandLine.arguments.dropFirst())
+func runSpeakerDiagnosisCommandIfRequested(arguments: [String]) -> Bool {
     guard arguments.contains("--speaker-diagnose") else { return false }
 
     let thresholdOverride: SpeakerDiagnosisThresholdOverride

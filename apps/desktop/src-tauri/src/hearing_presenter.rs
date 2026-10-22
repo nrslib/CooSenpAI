@@ -5,6 +5,14 @@ use coosenpai_core::locale::{localize_audio_message, speaker_missing_device_coun
 use coosenpai_core::ports::{HearingSourceState, SpeechPermissionKind};
 use coosenpai_core::state::{AudioObservation, AudioObservationSource};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopFailureKind {
+    TimedOut,
+    CleanupFailed,
+    Unconfirmed,
+    Other,
+}
+
 #[derive(Debug)]
 pub(crate) enum HearingResult {
     SpeakerResumed,
@@ -54,6 +62,13 @@ pub(crate) enum HearingResult {
     },
     Stopping(u64),
     Stopped(u64),
+    StopWarning {
+        generation: u64,
+        helper_failure: Option<StopFailureKind>,
+        initialization_timed_out: bool,
+        ingestion_timed_out: bool,
+    },
+    StopWarningDismissed(u64),
     Restarted(u64),
     Failed {
         generation: Option<u64>,
@@ -72,7 +87,18 @@ fn can_replace_protocol_warning(current: Option<&str>, incoming: &str) -> bool {
     }
 }
 
+pub(crate) fn is_stop_warning_kind(kind: &str) -> bool {
+    kind.starts_with("helper-stop-") || kind.starts_with("hearing-stop-")
+}
+
 fn clear_warning_after_stop(view: &mut AudioView, audio_enabled: bool) {
+    if view
+        .warning_kind
+        .as_deref()
+        .is_some_and(is_stop_warning_kind)
+    {
+        return;
+    }
     if audio_enabled
         && matches!(view.speaker_capture, SpeakerCapture::Stopped { ref reason, .. } if !reason.is_empty())
     {
@@ -106,6 +132,7 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
         }
         HearingResult::Inactive => {
             view.phase = "off".to_owned();
+            view.bluetooth_call_mode = false;
             view.speaker_input_generations = None;
             if !snapshot.config.audio.enabled {
                 view.speaker_capture = SpeakerCapture::stopped_without_reason();
@@ -116,6 +143,7 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
         }
         HearingResult::Cancelled(generation) if view.generation == generation => {
             view.phase = "off".to_owned();
+            view.bluetooth_call_mode = false;
             view.speaker_input_generations = None;
             if !matches!(view.speaker_capture, SpeakerCapture::Stopped { .. }) {
                 view.speaker_capture = SpeakerCapture::Paused;
@@ -125,7 +153,16 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
         HearingResult::Started(generation) => {
             view.generation = generation;
             view.phase = "starting".to_owned();
+            view.bluetooth_call_mode = false;
             view.speaker_input_generations = None;
+            if view
+                .warning_kind
+                .as_deref()
+                .is_some_and(is_stop_warning_kind)
+            {
+                view.warning_kind = None;
+                view.message = None;
+            }
             if snapshot.config.audio.speaker
                 && !matches!(view.speaker_capture, SpeakerCapture::Restarting { .. })
                 && !matches!(view.speaker_capture, SpeakerCapture::Stopped { ref reason, .. } if !reason.is_empty())
@@ -242,18 +279,25 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
                 view.missing_speaker_device_count = None;
             }
         }
-        HearingResult::Warning { generation, .. }
-            if view.generation == generation
-                && matches!(
-                    view.warning_kind.as_deref(),
-                    Some("system-audio-exhausted" | "helper-exhausted")
-                ) => {}
+        HearingResult::Warning {
+            generation,
+            ref kind,
+            ..
+        } if view.generation == generation
+            && kind != "bluetooth-call-mode"
+            && kind != "bluetooth-call-mode-ended"
+            && matches!(
+                view.warning_kind.as_deref(),
+                Some("system-audio-exhausted" | "helper-exhausted")
+            ) => {}
         HearingResult::Warning {
             generation,
             kind,
             message,
         } if view.generation == generation && view.phase != "stopping" && view.phase != "off" => {
-            if kind == "system-audio-restored" {
+            if kind == "bluetooth-call-mode-ended" {
+                view.bluetooth_call_mode = false;
+            } else if kind == "system-audio-restored" {
                 if view.warning_kind.as_deref().is_some_and(|kind| {
                     kind == "speaker-device-missing"
                         || kind == "screen-capture"
@@ -290,6 +334,8 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
                 view.missing_speaker_device_count = speaker_missing_device_count(&message);
                 view.message = Some(localize_audio_message(&kind, &message, locale));
                 view.warning_kind = Some(kind);
+            } else if kind == "bluetooth-call-mode" {
+                view.bluetooth_call_mode = true;
             } else if kind.starts_with("system-audio-") {
                 if !matches!(view.speaker_capture, SpeakerCapture::Stopped { .. }) {
                     view.speaker_capture = SpeakerCapture::restarting(&kind, &message, locale);
@@ -371,11 +417,78 @@ pub(crate) fn adopt(snapshot: &mut AppSnapshot, result: HearingResult) -> bool {
             if view.generation == generation && view.phase == "stopping" =>
         {
             view.phase = "off".to_owned();
+            view.bluetooth_call_mode = false;
             view.speaker_input_generations = None;
             if !matches!(view.speaker_capture, SpeakerCapture::Stopped { .. }) {
                 view.speaker_capture = SpeakerCapture::Paused;
             }
             clear_warning_after_stop(view, snapshot.config.audio.enabled);
+        }
+        HearingResult::StopWarning {
+            generation,
+            helper_failure,
+            initialization_timed_out,
+            ingestion_timed_out,
+        } if view.generation == generation => {
+            view.phase = "off".to_owned();
+            let mut messages = Vec::new();
+            let warning_kind = if let Some(kind) = helper_failure {
+                let (warning_kind, ja, en) = match kind {
+                StopFailureKind::TimedOut => (
+                    "helper-stop-timeout",
+                    "聴覚観察 helper の停止が上限内に終わらなかったため、強制終了しました。",
+                    "The Hearing helper did not stop within the time limit and was force quit.",
+                ),
+                StopFailureKind::CleanupFailed => (
+                    "helper-stop-cleanup-failed",
+                    "聴覚観察 helper の音声デバイスを解放できませんでした。",
+                    "The Hearing helper could not release the audio device.",
+                ),
+                StopFailureKind::Unconfirmed => (
+                    "helper-stop-unconfirmed",
+                    "聴覚観察 helper が完了通知を送らずに終了したため、後始末を確認できませんでした。",
+                    "The Hearing helper exited without a completion signal, so cleanup could not be confirmed.",
+                ),
+                StopFailureKind::Other => (
+                    "helper-stop-failed",
+                    "聴覚観察 helper の停止を確認できませんでした。",
+                    "The Hearing helper's shutdown could not be confirmed.",
+                ),
+            };
+                messages.push(match locale {
+                    Locale::Ja => ja,
+                    Locale::En => en,
+                });
+                warning_kind
+            } else if initialization_timed_out {
+                "hearing-stop-initialization-timeout"
+            } else {
+                "hearing-stop-save-timeout"
+            };
+            if initialization_timed_out {
+                messages.push(match locale {
+                    Locale::Ja => "聴覚観察の初期化完了待ちが上限を超えました。",
+                    Locale::En => "Waiting for Hearing initialization exceeded the time limit.",
+                });
+            }
+            if ingestion_timed_out {
+                messages.push(match locale {
+                    Locale::Ja => "音声保存の完了待ちが上限を超えました。",
+                    Locale::En => "Waiting for audio saving exceeded the time limit.",
+                });
+            }
+            view.warning_kind = Some(warning_kind.to_owned());
+            view.message = Some(messages.join(" "));
+        }
+        HearingResult::StopWarningDismissed(generation)
+            if view.generation == generation
+                && view
+                    .warning_kind
+                    .as_deref()
+                    .is_some_and(is_stop_warning_kind) =>
+        {
+            view.warning_kind = None;
+            view.message = None;
         }
         HearingResult::Restarted(generation)
             if snapshot.config.audio.enabled

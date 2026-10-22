@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Error)]
@@ -27,6 +27,12 @@ pub enum PortError {
     ScreenCapturePermission(String),
     #[error("platform adapter が timeout しました")]
     Timeout,
+    #[error("聴覚観察 helper の停止が期限を超えたため強制終了しました")]
+    HearingStopTimeout,
+    #[error("聴覚観察 helper の後始末に失敗しました")]
+    HearingStopCleanupFailed,
+    #[error("聴覚観察 helper の後始末完了を確認できませんでした")]
+    HearingStopUnconfirmed,
 }
 
 pub trait Clock: Send + Sync {
@@ -165,6 +171,7 @@ pub trait ClipboardWriter: Send + Sync {
 pub trait SelectedTextCopyPort: Send + Sync {
     async fn synthesize_copy(
         &self,
+        shortcut: Option<&str>,
         cancellation: &CancellationToken,
     ) -> Result<SelectedTextCopyOutcome, PortError>;
 }
@@ -443,6 +450,13 @@ pub enum HearingEvent {
     },
     SpeakerIdentification {
         status: SpeakerIdentificationPreparationStatus,
+    },
+    MicrophoneDevice {
+        bluetooth: bool,
+    },
+    SpeakerFormat {
+        #[serde(rename = "sampleRate")]
+        sample_rate: u32,
     },
     Recognizing {
         source: AudioObservationSource,
@@ -908,6 +922,10 @@ impl HearingEvent {
                 .as_ref()
                 .is_none_or(|metadata| metadata.validation_reason().is_none()),
             HearingEvent::SpeakerIdentification { .. } => true,
+            HearingEvent::MicrophoneDevice { .. } => source == AudioObservationSource::Microphone,
+            HearingEvent::SpeakerFormat { sample_rate } => {
+                source == AudioObservationSource::Speaker && *sample_rate > 0
+            }
             _ => true,
         }
     }
@@ -951,10 +969,41 @@ pub enum HearingCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HearingStopStatus {
+    Succeeded,
+    TimedOut,
+    CleanupFailed,
+    Unconfirmed,
+}
+
+impl HearingStopStatus {
+    pub fn from_result(result: &Result<(), PortError>) -> Self {
+        match result {
+            Ok(()) => Self::Succeeded,
+            Err(PortError::HearingStopTimeout) => Self::TimedOut,
+            Err(PortError::HearingStopUnconfirmed) => Self::Unconfirmed,
+            Err(_) => Self::CleanupFailed,
+        }
+    }
+
+    fn into_result(self) -> Result<(), PortError> {
+        match self {
+            Self::Succeeded => Ok(()),
+            Self::TimedOut => Err(PortError::HearingStopTimeout),
+            Self::CleanupFailed => Err(PortError::HearingStopCleanupFailed),
+            Self::Unconfirmed => Err(PortError::HearingStopUnconfirmed),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HearingSessionControl {
     commands: mpsc::Sender<HearingCommand>,
     cancel_requested: CancellationToken,
+    force_requested: CancellationToken,
+    completed: Option<CancellationToken>,
+    stop_status: Option<watch::Receiver<Option<HearingStopStatus>>>,
 }
 
 pub struct HearingSession {
@@ -975,10 +1024,73 @@ impl HearingSession {
         events: mpsc::Receiver<Result<HearingEvent, PortError>>,
         cancel_requested: CancellationToken,
     ) -> Self {
+        Self::from_channels_with_force(commands, events, cancel_requested, CancellationToken::new())
+    }
+
+    pub fn from_channels_with_force(
+        commands: mpsc::Sender<HearingCommand>,
+        events: mpsc::Receiver<Result<HearingEvent, PortError>>,
+        cancel_requested: CancellationToken,
+        force_requested: CancellationToken,
+    ) -> Self {
+        Self::from_channels_with_optional_completion(
+            commands,
+            events,
+            cancel_requested,
+            force_requested,
+            None,
+        )
+    }
+
+    pub fn from_channels_with_force_and_completion(
+        commands: mpsc::Sender<HearingCommand>,
+        events: mpsc::Receiver<Result<HearingEvent, PortError>>,
+        cancel_requested: CancellationToken,
+        force_requested: CancellationToken,
+        completed: CancellationToken,
+    ) -> Self {
+        Self::from_channels_with_optional_completion(
+            commands,
+            events,
+            cancel_requested,
+            force_requested,
+            Some(completed),
+        )
+    }
+
+    pub fn from_channels_with_stop_status(
+        commands: mpsc::Sender<HearingCommand>,
+        events: mpsc::Receiver<Result<HearingEvent, PortError>>,
+        cancel_requested: CancellationToken,
+        force_requested: CancellationToken,
+        completed: CancellationToken,
+        stop_status: watch::Receiver<Option<HearingStopStatus>>,
+    ) -> Self {
+        let mut session = Self::from_channels_with_force_and_completion(
+            commands,
+            events,
+            cancel_requested,
+            force_requested,
+            completed,
+        );
+        session.control.stop_status = Some(stop_status);
+        session
+    }
+
+    fn from_channels_with_optional_completion(
+        commands: mpsc::Sender<HearingCommand>,
+        events: mpsc::Receiver<Result<HearingEvent, PortError>>,
+        cancel_requested: CancellationToken,
+        force_requested: CancellationToken,
+        completed: Option<CancellationToken>,
+    ) -> Self {
         Self {
             control: HearingSessionControl {
                 commands,
                 cancel_requested,
+                force_requested,
+                completed,
+                stop_status: None,
             },
             events,
         }
@@ -994,20 +1106,82 @@ impl HearingSession {
 }
 
 impl HearingSessionControl {
+    pub async fn wait_for_exit(&self) {
+        if let Some(completed) = &self.completed {
+            completed.cancelled().await;
+        }
+    }
+    pub fn force_cancel(&self) {
+        self.force_requested.cancel();
+    }
+
     pub async fn cancel(&self) -> Result<(), PortError> {
         let (completed, result) = oneshot::channel();
         self.cancel_requested.cancel();
+        if self.stop_status.is_some() {
+            let _ = self.commands.try_send(HearingCommand::Cancel { completed });
+            return self.wait_for_stop_status().await;
+        }
         if self
             .commands
             .send(HearingCommand::Cancel { completed })
             .await
             .is_err()
         {
-            return Ok(());
+            return self.wait_after_missing_ack().await;
         }
         match result.await {
-            Ok(result) => result,
-            Err(_) => Ok(()),
+            Ok(result) => {
+                self.wait_for_exit().await;
+                result
+            }
+            Err(_) => self.wait_after_missing_ack().await,
+        }
+    }
+
+    async fn wait_for_stop_status(&self) -> Result<(), PortError> {
+        let completed = self
+            .completed
+            .as_ref()
+            .expect("stop status requires completion");
+        let timed_out =
+            tokio::time::timeout(std::time::Duration::from_secs(5), completed.cancelled())
+                .await
+                .is_err();
+        if timed_out {
+            self.force_cancel();
+            completed.cancelled().await;
+        }
+        let status = self
+            .stop_status
+            .as_ref()
+            .and_then(|status| *status.borrow());
+        if self.force_requested.is_cancelled()
+            && matches!(status, None | Some(HearingStopStatus::Succeeded))
+        {
+            return Err(PortError::HearingStopCleanupFailed);
+        }
+        status
+            .unwrap_or(HearingStopStatus::Unconfirmed)
+            .into_result()
+    }
+
+    async fn wait_after_missing_ack(&self) -> Result<(), PortError> {
+        let Some(completed) = &self.completed else {
+            return Err(PortError::HearingStopUnconfirmed);
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(3), completed.cancelled())
+            .await
+            .is_err()
+        {
+            self.force_cancel();
+            completed.cancelled().await;
+            return Err(PortError::HearingStopCleanupFailed);
+        }
+        if self.force_requested.is_cancelled() {
+            Err(PortError::HearingStopCleanupFailed)
+        } else {
+            Ok(())
         }
     }
 }

@@ -20,7 +20,7 @@ export interface AppView {
   // AppPresenter が観測した最新 snapshot の投影。View はこの値だけを描画・送信に使う。
   readonly snapshot: AppSnapshot | null;
 }
-export type AppInput = { readonly type: "mounted" | "retry" | "startupSettings" | "openSettings" | "closeSettings" | "toggleHistory" | "toggleAudio" | "resumeSpeaker" | "resetOpen" | "resetCancel" | "resetConfirm" | "menuToggle" | "menuDismiss" | "menuModel" | "menuReset" | "toggleWatch" | "tutorialNext" | "tutorialFinish" | "recover" | "dismissBanner" }
+export type AppInput = { readonly type: "mounted" | "retry" | "startupSettings" | "openSettings" | "closeSettings" | "toggleHistory" | "toggleAudio" | "resumeSpeaker" | "dismissHearingWarning" | "resetOpen" | "resetCancel" | "resetConfirm" | "menuToggle" | "menuDismiss" | "menuModel" | "menuReset" | "toggleWatch" | "tutorialNext" | "tutorialFinish" | "recover" | "dismissBanner" }
   | { readonly type: "settingsPresented"; readonly generation: number }
   | { readonly type: "thoughtControlsChanged"; readonly insideAllowed: boolean; readonly top: number | null; readonly bottom: number | null }
   | { readonly type: "report"; readonly error: string | null };

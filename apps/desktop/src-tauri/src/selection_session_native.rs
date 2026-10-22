@@ -84,12 +84,14 @@ impl crate::selection_session::SelectionSessionPort for NativeSelectionPort {
     }
     async fn selected_text(
         &self,
+        shortcut: Option<String>,
         cancellation: CancellationToken,
     ) -> Result<Option<crate::selection_session::SelectionData>, String> {
         super::text::select(
             self.copier.as_ref(),
             self.reader.as_ref(),
             self.logger.as_ref(),
+            shortcut.as_deref(),
             &cancellation,
         )
         .await

@@ -28,6 +28,7 @@ async fn prepare_selected_text_attachment(
     copier: &dyn SelectedTextCopyPort,
     reader: &dyn ClipboardReader,
     logger: &dyn RuntimeLogger,
+    shortcut: Option<&str>,
     cancellation: &CancellationToken,
 ) -> Result<Option<PreparedSelectedTextAttachment>, SelectedTextAttachmentError> {
     if cancellation.is_cancelled() {
@@ -40,7 +41,7 @@ async fn prepare_selected_text_attachment(
         return Ok(None);
     }
     let copy_outcome = copier
-        .synthesize_copy(cancellation)
+        .synthesize_copy(shortcut, cancellation)
         .await
         .map_err(|_| SelectedTextAttachmentError::CopyEvent)?;
     let change_count_before_post = match copy_outcome {
@@ -150,9 +151,10 @@ pub(super) async fn select(
     copier: &dyn SelectedTextCopyPort,
     reader: &dyn ClipboardReader,
     logger: &dyn RuntimeLogger,
+    shortcut: Option<&str>,
     cancellation: &CancellationToken,
 ) -> Result<Option<super::SelectionData>, String> {
-    prepare_selected_text_attachment(copier, reader, logger, cancellation)
+    prepare_selected_text_attachment(copier, reader, logger, shortcut, cancellation)
         .await
         .map(|value| {
             value.map(|value| super::SelectionData::Text {

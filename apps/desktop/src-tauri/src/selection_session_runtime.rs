@@ -95,7 +95,12 @@ impl<P: SelectionSessionPort> SessionRuntime<P> {
         }
         self.generation = generation;
         match request {
-            Request::Open { kind, reply, .. } => {
+            Request::Open {
+                kind,
+                shortcut,
+                reply,
+                ..
+            } => {
                 if self.image.is_some() || self.text.is_some() {
                     self.port
                         .log("selection-session: Open rejected reason=not-closed");
@@ -109,7 +114,7 @@ impl<P: SelectionSessionPort> SessionRuntime<P> {
                     });
                     let port = self.port.clone();
                     self.text_tasks
-                        .spawn(async move { port.selected_text(cancellation).await });
+                        .spawn(async move { port.selected_text(shortcut, cancellation).await });
                 } else if kind == CaptureKind::Image {
                     self.image = Some(ImageOperation {
                         reply,

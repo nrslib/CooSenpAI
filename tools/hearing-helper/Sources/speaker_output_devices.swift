@@ -105,7 +105,8 @@ enum SpeakerOutputDevices {
 }
 
 func runSpeakerOutputDevicesCommandIfRequested() -> Bool {
-    guard CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--list-output-devices" else { return false }
+    guard CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--list-output-devices",
+          CommandLine.arguments[2] == "--parent-pid" else { return false }
     do {
         let data = try JSONEncoder().encode(SpeakerOutputDevices.available())
         FileHandle.standardOutput.write(data)

@@ -1,20 +1,22 @@
 #[path = "hearing_process.rs"]
 mod hearing_process;
 
+use crate::hearing_command::{run_hearing_helper_command, HearingHelperCommandError};
 use async_trait::async_trait;
 use coosenpai_core::interactive_process::{InteractiveProcess, InteractiveProcessRequest};
 use coosenpai_core::ports::{
     HearingCommand, HearingEvent, HearingPort, HearingSession, HearingSourceState,
-    HearingStartOptions, PortError, RuntimeLogger,
+    HearingStartOptions, HearingStopStatus, PortError, RuntimeLogger,
 };
 use coosenpai_core::state::AudioObservationSource;
 use hearing_process::{
-    process_error, run_source_process, SourceProcessEvent, SourceProcessEventKind,
+    process_error, register_helper, run_source_process, SourceProcessEvent, SourceProcessEventKind,
     SourceProcessSpec,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 type HearingEventResult = Result<HearingEvent, PortError>;
@@ -41,11 +43,20 @@ impl HearingPort for MacHearing {
     async fn output_devices(
         &self,
     ) -> Result<Vec<coosenpai_core::ports::AudioOutputDevice>, PortError> {
-        let output = tokio::process::Command::new(&self.helper)
-            .arg("--list-output-devices")
-            .output()
-            .await
-            .map_err(|_| PortError::Unavailable("出力デバイス一覧を取得できません".to_owned()))?;
+        let output = run_hearing_helper_command(
+            &self.helper,
+            &["--list-output-devices".into()],
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .map_err(|error| match error {
+            HearingHelperCommandError::Timeout => {
+                PortError::Unavailable("出力デバイス一覧の取得が時間内に終わりません".to_owned())
+            }
+            HearingHelperCommandError::Io(_) => {
+                PortError::Unavailable("出力デバイス一覧を取得できません".to_owned())
+            }
+        })?;
         if !output.status.success() {
             return Err(PortError::Unavailable(
                 "出力デバイス一覧を取得できません".to_owned(),
@@ -90,9 +101,10 @@ impl HearingPort for MacHearing {
         }
 
         let mut specs = Vec::with_capacity(sources.len());
+        let active_helpers = hearing_process::ActiveHelpers::default();
         let speaker_session_id = uuid::Uuid::new_v4().to_string();
         for source in sources {
-            let args = helper_arguments_with_options(
+            let mut args = helper_arguments_with_options(
                 locale,
                 input_device,
                 source,
@@ -100,6 +112,18 @@ impl HearingPort for MacHearing {
                 &options,
                 Some(&speaker_session_id),
             );
+            args.push("--parent-pid".to_owned());
+            args.push(std::process::id().to_string());
+            if source == AudioObservationSource::Speaker {
+                for pid in specs.iter().filter_map(|spec: &SourceProcessSpec| {
+                    spec.initial_process
+                        .as_ref()
+                        .and_then(|process| process.control().pid())
+                }) {
+                    args.push("--exclude-pid".to_owned());
+                    args.push(pid.to_string());
+                }
+            }
             let started = std::time::Instant::now();
             let _ = self.logger.write(
                 "INFO",
@@ -112,13 +136,16 @@ impl HearingPort for MacHearing {
                     env: Vec::new(),
                     cwd: None,
                 },
-                cancellation.clone(),
+                CancellationToken::new(),
             )
             .await;
             let (initial_process, initial_error) = match initial_process {
                 Ok(process) => (Some(process), None),
                 Err(error) => (None, Some(process_error(error))),
             };
+            if let Some(process) = initial_process.as_ref() {
+                register_helper(source, process.control(), &active_helpers).await;
+            }
             let _ = self.logger.write("INFO", &format!("hearing-start: source={source:?} stage=spawn phase=end elapsed-ms={} success={}", started.elapsed().as_millis(), initial_process.is_some()));
             specs.push(SourceProcessSpec {
                 source,
@@ -128,6 +155,7 @@ impl HearingPort for MacHearing {
                 initial_error,
                 parent_cancellation: cancellation.clone(),
                 logger: self.logger.clone(),
+                active_helpers: active_helpers.clone(),
             });
         }
         if specs.iter().all(|spec| spec.initial_process.is_none()) {
@@ -141,18 +169,50 @@ impl HearingPort for MacHearing {
         let (command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, event_rx) = mpsc::channel(64);
         let cancel_requested = CancellationToken::new();
-        tokio::spawn(run_session(
-            specs,
-            command_rx,
-            event_tx,
-            cancel_requested.clone(),
-            cancellation,
-            options.speaker_identification_enabled,
-        ));
-        Ok(HearingSession::from_channels_with_cancellation(
+        let force_requested = CancellationToken::new();
+        let session_done = CancellationToken::new();
+        let (stop_status_tx, stop_status_rx) = watch::channel(None);
+        let force_helpers = active_helpers.clone();
+        let force_signal = force_requested.clone();
+        let force_done = session_done.clone();
+        let session_done_for_task = session_done.clone();
+        let session_cancel = cancel_requested.clone();
+        let task_helpers = active_helpers.clone();
+        let panic_force = force_requested.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = force_signal.cancelled() => hearing_process::force_kill_hearing_helpers(&force_helpers).await,
+                _ = force_done.cancelled() => {},
+            }
+        });
+        let session_task = tokio::spawn(async move {
+            run_session(
+                specs,
+                SessionChannels {
+                    commands: command_rx,
+                    events: event_tx,
+                    stop_status: stop_status_tx,
+                },
+                session_cancel,
+                cancellation,
+                options.speaker_identification_enabled,
+            )
+            .await;
+        });
+        tokio::spawn(async move {
+            if session_task.await.is_err() {
+                panic_force.cancel();
+            }
+            hearing_process::wait_for_hearing_helpers(&task_helpers).await;
+            session_done_for_task.cancel();
+        });
+        Ok(HearingSession::from_channels_with_stop_status(
             command_tx,
             event_rx,
             cancel_requested,
+            force_requested,
+            session_done,
+            stop_status_rx,
         ))
     }
 }
@@ -173,6 +233,9 @@ struct SourceStatus {
 struct HearingAggregation {
     sources: Vec<SourceStatus>,
     aggregate_ready: bool,
+    microphone_bluetooth: Option<bool>,
+    speaker_low_rate: Option<bool>,
+    bluetooth_warning_active: bool,
 }
 
 impl HearingAggregation {
@@ -195,15 +258,44 @@ impl HearingAggregation {
                 })
                 .collect(),
             aggregate_ready: false,
+            microphone_bluetooth: None,
+            speaker_low_rate: None,
+            bluetooth_warning_active: false,
         }
     }
 
     fn mark_restarting(&mut self, source: AudioObservationSource) {
+        match source {
+            AudioObservationSource::Microphone => self.microphone_bluetooth = None,
+            AudioObservationSource::Speaker => self.speaker_low_rate = None,
+        }
         if let Some(status) = self.status_mut(source) {
             status.generation_offset = status.latest_generation;
             status.input_generation_offset = status.latest_input_generation;
         }
         self.suspend_source(source);
+    }
+
+    fn bluetooth_warning(&mut self) -> Option<HearingEvent> {
+        let active = self.microphone_bluetooth == Some(true) && self.speaker_low_rate == Some(true);
+        if active == self.bluetooth_warning_active {
+            return None;
+        }
+        self.bluetooth_warning_active = active;
+        Some(HearingEvent::Warning {
+            kind: if active {
+                "bluetooth-call-mode"
+            } else {
+                "bluetooth-call-mode-ended"
+            }
+            .to_owned(),
+            message: if active {
+                "Bluetooth マイク使用中にスピーカー入力が通話用モードになりました"
+            } else {
+                "Bluetooth 通話用モードは終了しました"
+            }
+            .to_owned(),
+        })
     }
 
     fn suspend_source(&mut self, source: AudioObservationSource) {
@@ -325,6 +417,10 @@ impl HearingAggregation {
         error: Option<PortError>,
         terminal: bool,
     ) {
+        match source {
+            AudioObservationSource::Microphone => self.microphone_bluetooth = None,
+            AudioObservationSource::Speaker => self.speaker_low_rate = None,
+        }
         if let Some(error) = error {
             self.record_error(source, error);
         }
@@ -338,6 +434,9 @@ impl HearingAggregation {
     }
 
     fn mark_waiting(&mut self, source: AudioObservationSource) {
+        if source == AudioObservationSource::Speaker {
+            self.speaker_low_rate = None;
+        }
         let changed = if let Some(status) = self.status_mut(source) {
             let changed = status.required || status.ready.is_some();
             status.required = false;
@@ -411,6 +510,22 @@ fn prefer_error(current: &mut Option<PortError>, candidate: Option<PortError>) {
     let Some(candidate) = candidate else {
         return;
     };
+    fn stop_failure_priority(error: &PortError) -> u8 {
+        match error {
+            PortError::HearingStopTimeout => 3,
+            PortError::HearingStopCleanupFailed => 2,
+            PortError::HearingStopUnconfirmed => 1,
+            _ => 0,
+        }
+    }
+    let incoming_priority = stop_failure_priority(&candidate);
+    let current_priority = current.as_ref().map_or(0, stop_failure_priority);
+    if incoming_priority > 0 || current_priority > 0 {
+        if incoming_priority > current_priority {
+            *current = Some(candidate);
+        }
+        return;
+    }
     if matches!(candidate, PortError::SpeakerCaptureExhausted(_)) {
         if !current.as_ref().is_some_and(is_protocol_error) {
             *current = Some(candidate);
@@ -428,28 +543,44 @@ fn prefer_error(current: &mut Option<PortError>, candidate: Option<PortError>) {
     *current = Some(candidate);
 }
 
+struct SessionChannels {
+    commands: mpsc::Receiver<HearingCommand>,
+    events: mpsc::Sender<HearingEventResult>,
+    stop_status: watch::Sender<Option<HearingStopStatus>>,
+}
+
 async fn run_session(
     specs: Vec<SourceProcessSpec>,
-    mut commands: mpsc::Receiver<HearingCommand>,
-    events: mpsc::Sender<HearingEventResult>,
+    channels: SessionChannels,
     cancel_requested: CancellationToken,
     parent_cancellation: CancellationToken,
     speaker_identification_enabled: bool,
 ) {
+    let SessionChannels {
+        mut commands,
+        events,
+        stop_status,
+    } = channels;
     let mut terminal_event = match events.clone().reserve_owned().await {
         Ok(permit) => Some(permit),
-        Err(_) => return,
+        Err(_) => {
+            for mut spec in specs {
+                if let Some(process) = spec.initial_process.take() {
+                    let _ = process.control().terminate(true).await;
+                    process.wait_for_completion().await;
+                }
+            }
+            return;
+        }
     };
     let source_list = specs.iter().map(|spec| spec.source).collect::<Vec<_>>();
     let (source_events_tx, mut source_events_rx) = mpsc::channel(64);
     let worker_cancellation = CancellationToken::new();
-    let mut workers = Vec::with_capacity(specs.len());
+    let mut workers = JoinSet::new();
     for spec in specs {
         let source_events = source_events_tx.clone();
         let worker_stop = worker_cancellation.clone();
-        workers.push(tokio::spawn(async move {
-            run_source_process(spec, source_events, worker_stop).await
-        }));
+        workers.spawn(async move { run_source_process(spec, source_events, worker_stop).await });
     }
     drop(source_events_tx);
 
@@ -460,18 +591,18 @@ async fn run_session(
             biased;
             command = commands.recv() => match command {
                 Some(HearingCommand::Cancel { completed }) => {
-                    let result = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                    let result = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                     send_terminal_event(&mut terminal_event, Ok(HearingEvent::Closed));
                     let _ = completed.send(result);
                     return;
                 }
                 None => {
-                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                     return;
                 }
             },
             _ = cancel_requested.cancelled() => {
-                let result = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                let result = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                 send_terminal_event(&mut terminal_event, Ok(HearingEvent::Closed));
                 if let Some(HearingCommand::Cancel { completed }) = commands.recv().await {
                     let _ = completed.send(result);
@@ -479,7 +610,7 @@ async fn run_session(
                 return;
             }
             _ = parent_cancellation.cancelled() => {
-                let result = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                let result = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                 send_terminal_event(&mut terminal_event, Ok(HearingEvent::Closed));
                 if let Ok(HearingCommand::Cancel { completed }) = commands.try_recv() {
                     let _ = completed.send(result);
@@ -497,15 +628,39 @@ async fn run_session(
                 match source_event.kind {
                     SourceProcessEventKind::Restarting => {
                         aggregation.mark_restarting(source_event.source);
+                        if let Some(warning) = aggregation.bluetooth_warning() {
+                            if !send_hearing_event(&events, Ok(warning), &cancel_requested, &parent_cancellation).await {
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
+                                return;
+                            }
+                        }
                     }
                     SourceProcessEventKind::Event { mut event, source_retrying } => {
                         if let Err(error) = aggregation.normalize_generation(source_event.source, &mut event) {
-                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                             send_terminal_event(&mut terminal_event, Err(error));
                             return;
                         }
                         aggregation.mark_recovered(source_event.source, &event);
                         match event {
+                        HearingEvent::MicrophoneDevice { bluetooth } => {
+                            aggregation.microphone_bluetooth = Some(bluetooth);
+                            if let Some(warning) = aggregation.bluetooth_warning() {
+                                if !send_hearing_event(&events, Ok(warning), &cancel_requested, &parent_cancellation).await {
+                                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
+                                    return;
+                                }
+                            }
+                        }
+                        HearingEvent::SpeakerFormat { sample_rate } => {
+                            aggregation.speaker_low_rate = Some(sample_rate <= 16_000);
+                            if let Some(warning) = aggregation.bluetooth_warning() {
+                                if !send_hearing_event(&events, Ok(warning), &cancel_requested, &parent_cancellation).await {
+                                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
+                                    return;
+                                }
+                            }
+                        }
                         event @ HearingEvent::Ready { input_generation, .. } => {
                             if speaker_identification_enabled
                                 && matches!(
@@ -526,7 +681,7 @@ async fn run_session(
                                 )
                                 .await
                             {
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                             let restored = aggregation.status_mut(source_event.source)
@@ -541,7 +696,7 @@ async fn run_session(
                                 &cancel_requested,
                                 &parent_cancellation,
                             ).await {
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                             if restored && !send_hearing_event(
@@ -553,7 +708,7 @@ async fn run_session(
                                 &cancel_requested,
                                 &parent_cancellation,
                             ).await {
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                             if !emit_ready_if_possible(
@@ -569,7 +724,7 @@ async fn run_session(
                                 {
                                     continue;
                                 }
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                         }
@@ -587,7 +742,7 @@ async fn run_session(
                                 {
                                     continue;
                                 }
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                         }
@@ -606,7 +761,7 @@ async fn run_session(
                                 {
                                     continue;
                                 }
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                         }
@@ -627,6 +782,12 @@ async fn run_session(
                                 && matches!(&event, HearingEvent::Warning { kind, .. } if kind == "speaker-device-waiting");
                             if speaker_waiting {
                                 aggregation.mark_waiting(source_event.source);
+                                if let Some(warning) = aggregation.bluetooth_warning() {
+                                    if !send_hearing_event(&events, Ok(warning), &cancel_requested, &parent_cancellation).await {
+                                        let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
+                                        return;
+                                    }
+                                }
                             }
                             if let HearingEvent::Error { ref kind, ref message } = event {
                                 let error = if source_event.source == AudioObservationSource::Speaker
@@ -659,7 +820,7 @@ async fn run_session(
                                     &cancel_requested,
                                     &parent_cancellation,
                                 ).await {
-                                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                     return;
                                 }
                             }
@@ -676,7 +837,7 @@ async fn run_session(
                                     {
                                         continue;
                                     }
-                                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                     return;
                                 }
                             if terminal_source_error {
@@ -686,7 +847,7 @@ async fn run_session(
                                     for status in &mut aggregation.sources {
                                         prefer_error(&mut error, status.last_error.take());
                                     }
-                                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                    let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                     send_terminal_event(&mut terminal_event, error.map(Err).unwrap_or_else(|| Ok(HearingEvent::Closed)));
                                     return;
                                 }
@@ -697,13 +858,13 @@ async fn run_session(
                                 &cancel_requested,
                                 &parent_cancellation,
                             ).await {
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                         }
                         HearingEvent::Closed => {}
                         HearingEvent::SourceState { .. } => {
-                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                             send_terminal_event(&mut terminal_event, Err(invalid_event_protocol_error(source_event.source)));
                             return;
                         }
@@ -720,7 +881,7 @@ async fn run_session(
                             &cancel_requested,
                             &parent_cancellation,
                         ).await {
-                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                             return;
                         }
                         if retrying && source_event.source == AudioObservationSource::Speaker
@@ -744,7 +905,7 @@ async fn run_session(
                             )
                             .await
                             {
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                             if let Some(status) = aggregation.status_mut(source_event.source) {
@@ -755,6 +916,12 @@ async fn run_session(
                             .as_ref()
                             .and_then(protocol_warning_for_error);
                         aggregation.mark_unavailable(source_event.source, error, false);
+                        if let Some(warning) = aggregation.bluetooth_warning() {
+                            if !send_hearing_event(&events, Ok(warning), &cancel_requested, &parent_cancellation).await {
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
+                                return;
+                            }
+                        }
                         if let Some((kind, message)) = protocol_warning {
                             if !send_hearing_event(
                                 &events,
@@ -769,7 +936,7 @@ async fn run_session(
                                 {
                                     continue;
                                 }
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                         }
@@ -786,7 +953,7 @@ async fn run_session(
                                 {
                                     continue;
                                 }
-                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                                 return;
                             }
                     }
@@ -821,6 +988,12 @@ async fn run_session(
                             retrying: false,
                         };
                         aggregation.mark_unavailable(source_event.source, None, true);
+                        if let Some(warning) = aggregation.bluetooth_warning() {
+                            if !send_hearing_event(&events, Ok(warning), &cancel_requested, &parent_cancellation).await {
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
+                                return;
+                            }
+                        }
                         prefer_error(&mut terminal_error, error);
                         if !send_hearing_event(
                             &events,
@@ -831,7 +1004,7 @@ async fn run_session(
                             &cancel_requested,
                             &parent_cancellation,
                         ).await {
-                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                             return;
                         }
                         if source_event.source == AudioObservationSource::Speaker
@@ -844,7 +1017,7 @@ async fn run_session(
                                 &cancel_requested,
                                 &parent_cancellation,
                             ).await {
-                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                             return;
                         }
                         if aggregation.all_sources_exhausted() {
@@ -855,7 +1028,7 @@ async fn run_session(
                             let event = error
                                 .map(Err)
                                 .unwrap_or_else(|| Ok(HearingEvent::Closed));
-                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                             send_terminal_event(&mut terminal_event, event);
                             return;
                         }
@@ -872,7 +1045,7 @@ async fn run_session(
                             {
                                 continue;
                             }
-                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx).await;
+                            let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                             return;
                         }
                     }
@@ -967,14 +1140,15 @@ fn send_terminal_event(permit: &mut Option<TerminalEventPermit>, event: HearingE
 
 async fn stop_workers(
     cancellation: &CancellationToken,
-    workers: Vec<tokio::task::JoinHandle<Result<(), PortError>>>,
+    mut workers: JoinSet<Result<(), PortError>>,
     source_events: &mut mpsc::Receiver<SourceProcessEvent>,
+    stop_status: &watch::Sender<Option<HearingStopStatus>>,
 ) -> Result<(), PortError> {
     cancellation.cancel();
     source_events.close();
     let mut error = None;
-    for worker in workers {
-        match worker.await {
+    while let Some(worker) = workers.join_next().await {
+        match worker {
             Ok(Ok(())) => {}
             Ok(Err(worker_error)) => prefer_error(&mut error, Some(worker_error)),
             Err(worker_error) => prefer_error(
@@ -985,7 +1159,9 @@ async fn stop_workers(
             ),
         }
     }
-    error.map_or(Ok(()), Err)
+    let result = error.map_or(Ok(()), Err);
+    stop_status.send_replace(Some(HearingStopStatus::from_result(&result)));
+    result
 }
 
 fn helper_arguments_with_options(

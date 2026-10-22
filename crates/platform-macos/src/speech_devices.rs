@@ -52,7 +52,7 @@ impl SpeechKeyStatePort for MacSpeechKeyState {
     }
 }
 
-fn key_code(key: &str) -> Option<u16> {
+pub(crate) fn key_code(key: &str) -> Option<u16> {
     let normalized = key.to_ascii_uppercase();
     Some(match normalized.as_str() {
         "BACKQUOTE" | "`" => 50,

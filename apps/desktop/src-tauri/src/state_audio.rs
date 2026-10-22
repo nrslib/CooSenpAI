@@ -9,6 +9,7 @@ impl DesktopState {
         previous.audio.enabled
             && (!next.audio.enabled
                 || previous.audio.mic != next.audio.mic
+                || (previous.audio.mic && previous.speech.input_device != next.speech.input_device)
                 || previous.audio.speaker != next.audio.speaker
                 || (previous.audio.speaker
                     && previous.audio.speaker_devices != next.audio.speaker_devices)

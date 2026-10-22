@@ -228,6 +228,7 @@ trait SelectionSessionPort: Send + Sync + 'static {
         -> Result<(), String>;
     async fn selected_text(
         &self,
+        shortcut: Option<String>,
         cancellation: CancellationToken,
     ) -> Result<Option<SelectionData>, String>;
     fn log(&self, message: &str);
@@ -266,6 +267,7 @@ enum Request {
     Open {
         generation: u64,
         kind: CaptureKind,
+        shortcut: Option<String>,
         reply: SelectionReply,
     },
     Close {
@@ -307,11 +309,21 @@ impl SelectionSessionHandle {
         generation: u64,
         kind: CaptureKind,
     ) -> Result<SelectionEvents, String> {
+        self.open_with_shortcut(generation, kind, None)
+    }
+
+    pub(crate) fn open_with_shortcut(
+        &self,
+        generation: u64,
+        kind: CaptureKind,
+        shortcut: Option<String>,
+    ) -> Result<SelectionEvents, String> {
         let (reply, result) = mpsc::unbounded_channel();
         self.sender
             .send(Request::Open {
                 generation,
                 kind,
+                shortcut,
                 reply: SelectionReply(reply),
             })
             .map_err(|_| "選択セッションが終了しました".to_owned())?;

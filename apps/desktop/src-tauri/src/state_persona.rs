@@ -523,7 +523,7 @@ impl DesktopState {
 
 }
 
-async fn cancel_audio_before_config_saved(
+pub(crate) async fn cancel_audio_before_config_saved(
     stop_required: bool,
     cancel: impl std::future::Future<Output = ()>,
     publish: impl std::future::Future<Output = ()>,

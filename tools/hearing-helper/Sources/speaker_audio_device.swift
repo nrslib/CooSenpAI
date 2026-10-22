@@ -5,6 +5,90 @@ import CoreAudio
 import CoreAudioTypes
 import Foundation
 
+func speakerExcludedProcessObjects(current: AudioObjectID, additional: [AudioObjectID]) -> [AudioObjectID] {
+    var seen: Set<AudioObjectID> = []
+    return ([current] + additional).filter { $0 != kAudioObjectUnknown && seen.insert($0).inserted }
+}
+
+struct SpeakerProcessExclusions {
+    let objects: [AudioObjectID]
+    let appliedPIDs: Set<pid_t>
+    let failedPIDs: Set<pid_t>
+
+    static func resolve(
+        requested: Set<pid_t>, currentPID: pid_t, currentObject: AudioObjectID,
+        processObject: (pid_t) -> AudioObjectID?
+    ) -> Self {
+        var objects: [AudioObjectID] = []
+        var applied: Set<pid_t> = []
+        var failed: Set<pid_t> = []
+        for pid in requested where pid != currentPID {
+            if let object = processObject(pid), object != kAudioObjectUnknown {
+                objects.append(object)
+                applied.insert(pid)
+            } else {
+                failed.insert(pid)
+            }
+        }
+        return Self(objects: speakerExcludedProcessObjects(current: currentObject, additional: objects),
+                    appliedPIDs: applied, failedPIDs: failed)
+    }
+
+    func needsRebuild(resolved: Self) -> Bool {
+        Set(objects) != Set(resolved.objects)
+    }
+}
+
+func isCurrentSiblingHelper(_ pid: pid_t, parentPID: pid_t) -> Bool {
+    guard pid > 1, pid != getpid() else { return false }
+    var ownPath = [CChar](repeating: 0, count: 4_096)
+    var candidatePath = [CChar](repeating: 0, count: 4_096)
+    guard proc_pidpath(getpid(), &ownPath, UInt32(ownPath.count)) > 0,
+          proc_pidpath(pid, &candidatePath, UInt32(candidatePath.count)) > 0 else { return false }
+    var info = proc_bsdinfo()
+    let size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+    return size == MemoryLayout<proc_bsdinfo>.size
+        && info.pbi_ppid == parentPID
+        && String(cString: candidatePath) == String(cString: ownPath)
+}
+
+func siblingHearingPIDs(
+    parentPID: pid_t,
+    diagnostic: (String) -> Void,
+    listChildren: (pid_t, UnsafeMutableRawPointer?, Int32) -> Int32 = proc_listchildpids
+) -> Set<pid_t>? {
+    let requiredCount = listChildren(parentPID, nil, 0)
+    guard requiredCount >= 0 else {
+        diagnostic("audio-tap-exclusion child-pids=0 status=\(requiredCount)")
+        return nil
+    }
+    if requiredCount == 0 {
+        diagnostic("audio-tap-exclusion child-pids=0 matched=0")
+        return []
+    }
+    let capacity = Int(requiredCount) + 8
+    var children = [pid_t](repeating: 0, count: capacity)
+    let count = listChildren(parentPID, &children, Int32(capacity * MemoryLayout<pid_t>.stride))
+    guard count >= 0, Int(count) <= capacity else {
+        diagnostic("audio-tap-exclusion child-pids=0 status=\(count)")
+        return nil
+    }
+    let siblings = Set(children.prefix(Int(count)).filter {
+        isCurrentSiblingHelper($0, parentPID: parentPID)
+    })
+    diagnostic("audio-tap-exclusion child-pids=\(count) matched=\(siblings.count)")
+    return siblings
+}
+
+func speakerCurrentExclusionPIDs(
+    configured: [pid_t], parentPID: pid_t?, siblings: Set<pid_t>,
+    isSibling: (pid_t, pid_t) -> Bool
+) -> Set<pid_t> {
+    guard let parentPID else { return [] }
+    let verified = configured.filter { isSibling($0, parentPID) }
+    return Set([parentPID]).union(siblings).union(verified)
+}
+
 protocol SpeakerAudioCapture: AnyObject {
     var missingDeviceCount: Int { get }
     func start(onPrepared: (AVAudioFormat, SpeakerBufferCapacity) throws -> Void,
@@ -13,6 +97,7 @@ protocol SpeakerAudioCapture: AnyObject {
     func nextBuffer(checkDelivery: Bool) throws -> SpeakerCapturedBuffer?
     func stop() throws
     func close() throws
+    func updateExcludedProcessPIDs(_ pids: [pid_t])
 }
 
 struct SpeakerCapturedBuffer {
@@ -274,6 +359,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     private let changes: OpaquePointer
     private var observedSequence: UInt64 = 0
     private var observedDeviceListSequence: UInt64 = 0
+    private var observedProcessListSequence: UInt64 = 0
     private var configuration: SpeakerConfigurationSnapshot?
     private var outputID = AudioObjectID(kAudioObjectUnknown)
     private var tapIDs: [AudioObjectID] = []
@@ -285,6 +371,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     private var listeners: [(AudioObjectID, AudioObjectPropertyAddress)] = []
     private var outputListenerInstalled = false
     private var deviceListListenerInstalled = false
+    private var processListListenerInstalled = false
     private var deviceStarted = false
     private var cleanupFailed = false
     private var activityCheckAt = Date.distantPast
@@ -299,9 +386,19 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     private var stopCount = 0
     private var rebuildCount = 0
 
-    init(selectedUIDs: [String], diagnostic: @escaping (String) -> Void, onStage: @escaping (String, String) -> Void,
+    private let exclusionLock = NSLock()
+    private var excludedProcessPIDs: [pid_t]
+    private var exclusionCommandSequence: UInt64 = 0
+    private var observedExclusionCommandSequence: UInt64 = 0
+    private let parentPID: pid_t?
+    private var activeExclusions: SpeakerProcessExclusions?
+    private var siblingCheckAt = Date.distantPast
+
+    init(selectedUIDs: [String], excludedProcessPIDs: [pid_t] = [], parentPID: pid_t? = nil, diagnostic: @escaping (String) -> Void, onStage: @escaping (String, String) -> Void,
          systemListener: any SpeakerSystemPropertyListening = CoreAudioSystemPropertyListener()) throws {
         self.selectedUIDs = selectedUIDs
+        self.excludedProcessPIDs = excludedProcessPIDs
+        self.parentPID = parentPID
         self.diagnostic = diagnostic
         self.onStage = onStage
         self.systemListener = systemListener
@@ -331,6 +428,26 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
                 throw error
             }
         }
+        address = Self.address(kAudioHardwarePropertyProcessObjectList)
+        let status = systemListener.add(&address, changes: changes)
+        if status == noErr {
+            processListListenerInstalled = true
+        } else {
+            diagnostic("audio-tap-exclusion operation=observe-process-list status=\(status)")
+        }
+    }
+
+    func updateExcludedProcessPIDs(_ pids: [pid_t]) {
+        exclusionLock.lock()
+        excludedProcessPIDs = pids
+        exclusionCommandSequence &+= 1
+        exclusionLock.unlock()
+    }
+
+    private func currentExclusionCommand() -> (pids: [pid_t], sequence: UInt64) {
+        exclusionLock.lock()
+        defer { exclusionLock.unlock() }
+        return (excludedProcessPIDs, exclusionCommandSequence)
     }
 
     func start(onPrepared: (AVAudioFormat, SpeakerBufferCapacity) throws -> Void,
@@ -343,6 +460,7 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         selectedOutputIDs.removeAll()
         observedSequence = coosenpai_audio_changes_sequence(changes)
         observedDeviceListSequence = coosenpai_audio_device_list_sequence(changes)
+        observedProcessListSequence = coosenpai_audio_process_list_sequence(changes)
         do {
             let tapTargets: [(uid: String, stream: UInt)]
             if selectedUIDs.isEmpty {
@@ -376,12 +494,27 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
                 UInt32(MemoryLayout<pid_t>.size), &pid, &size, &processID
             ), "resolve-current-process")
             guard processID != kAudioObjectUnknown else { throw SpeakerAudioTapError.currentProcessUnavailable }
+            let siblings = parentPID.flatMap { siblingHearingPIDs(parentPID: $0, diagnostic: diagnostic) } ?? []
+            siblingCheckAt = Date()
+            let command = currentExclusionCommand()
+            observedExclusionCommandSequence = command.sequence
+            let requested = speakerCurrentExclusionPIDs(
+                configured: command.pids, parentPID: parentPID, siblings: siblings,
+                isSibling: isCurrentSiblingHelper
+            )
+            let resolution = SpeakerProcessExclusions.resolve(
+                requested: requested, currentPID: getpid(), currentObject: processID,
+                processObject: processObject(for:)
+            )
+            activeExclusions = resolution
+            let excluded = resolution.objects
+            diagnostic("audio-tap-exclusion process-count=\(excluded.count) failed-pid-count=\(resolution.failedPIDs.count)")
             var tapUIDs: [String] = []
             let targets: [(uid: String, stream: UInt)?] = selectedUIDs.isEmpty ? [nil] : tapTargets.map(Optional.some)
             for target in targets {
                 let description = target.map {
-                    CATapDescription(excludingProcesses: [processID], deviceUID: $0.uid, stream: $0.stream)
-                } ?? CATapDescription(stereoGlobalTapButExcludeProcesses: [processID])
+                    CATapDescription(excludingProcesses: excluded, deviceUID: $0.uid, stream: $0.stream)
+                } ?? CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
                 description.name = "CooSenpAI Hearing"
                 description.isPrivate = true
                 description.muteBehavior = .unmuted
@@ -747,7 +880,51 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
         )
     }
 
+    private func processObject(for pid: pid_t) -> AudioObjectID? {
+        var address = Self.address(kAudioHardwarePropertyTranslatePIDToProcessObject)
+        var candidatePID = pid
+        var object = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address,
+            UInt32(MemoryLayout<pid_t>.size), &candidatePID, &size, &object
+        )
+        guard status == noErr, object != kAudioObjectUnknown else {
+            diagnostic("audio-tap-exclusion pid=\(pid) unavailable status=\(status)")
+            return nil
+        }
+        return object
+    }
+
     func takeConfigurationChange() throws -> String? {
+        let processListSequence = coosenpai_audio_process_list_sequence(changes)
+        let processListChanged = processListSequence != observedProcessListSequence
+        observedProcessListSequence = processListSequence
+        let command = currentExclusionCommand()
+        let commandChanged = command.sequence != observedExclusionCommandSequence
+        observedExclusionCommandSequence = command.sequence
+        if let parentPID,
+           commandChanged || processListChanged || Date().timeIntervalSince(siblingCheckAt) >= 1 {
+            siblingCheckAt = Date()
+            let siblings = siblingHearingPIDs(parentPID: parentPID, diagnostic: diagnostic) ?? []
+            let current = speakerCurrentExclusionPIDs(
+                configured: command.pids, parentPID: parentPID, siblings: siblings,
+                isSibling: isCurrentSiblingHelper
+            )
+            if let activeExclusions {
+                let resolved = SpeakerProcessExclusions.resolve(
+                    requested: current, currentPID: getpid(), currentObject: activeExclusions.objects[0],
+                    processObject: processObject(for:)
+                )
+                if activeExclusions.needsRebuild(resolved: resolved) {
+                    return "session-helper-processes-changed"
+                }
+                if activeExclusions.failedPIDs != resolved.failedPIDs {
+                    diagnostic("audio-tap-exclusion process-count=\(resolved.objects.count) failed-pid-count=\(resolved.failedPIDs.count)")
+                }
+                self.activeExclusions = resolved
+            }
+        }
         let sequence = coosenpai_audio_changes_sequence(changes)
         let listSequence = coosenpai_audio_device_list_sequence(changes)
         let propertyChanged = sequence != observedSequence
@@ -1008,6 +1185,16 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
                 failures.append("operation=remove-device-list-observer status=\(status)")
             }
         }
+        if processListListenerInstalled {
+            var address = Self.address(kAudioHardwarePropertyProcessObjectList)
+            let status = systemListener.remove(&address, changes: changes)
+            if Self.cleanupReleased(status) {
+                processListListenerInstalled = false
+            } else {
+                diagnostic("audio-tap-cleanup operation=remove-process-list-observer status=\(status)")
+                failures.append("operation=remove-process-list-observer status=\(status)")
+            }
+        }
         if !failures.isEmpty {
             throw SpeakerAudioTapError.cleanup(failures)
         }
@@ -1016,7 +1203,8 @@ final class CoreAudioSpeakerDevice: SpeakerAudioCapture {
     deinit {
         do { try close() }
         catch { diagnostic("audio-tap-cleanup operation=deinit detail=\(error.localizedDescription)") }
-        if !outputListenerInstalled && !deviceListListenerInstalled && listeners.isEmpty && ring == nil {
+        if !outputListenerInstalled && !deviceListListenerInstalled && !processListListenerInstalled
+            && listeners.isEmpty && ring == nil {
             coosenpai_audio_changes_destroy(changes)
         }
     }

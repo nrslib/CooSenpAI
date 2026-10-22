@@ -84,6 +84,8 @@ pub(crate) enum Lifecycle {
 pub(crate) struct HearingLifecycle {
     state: Lifecycle,
     next_generation: u64,
+    pending_helper_exit: Option<CancellationToken>,
+    pending_helper_exit_waiting: bool,
 }
 
 pub(crate) struct StopOutcome {
@@ -106,18 +108,46 @@ impl Default for HearingLifecycle {
         Self {
             state: Lifecycle::Idle,
             next_generation: 0,
+            pending_helper_exit: None,
+            pending_helper_exit_waiting: false,
         }
     }
 }
 
 impl HearingLifecycle {
+    pub(crate) fn defer_start_until_helper_exits(&mut self) -> Option<CancellationToken> {
+        if self.pending_helper_exit_waiting {
+            return None;
+        }
+        let control = self.pending_helper_exit.clone()?;
+        self.pending_helper_exit_waiting = true;
+        Some(control)
+    }
+
+    pub(crate) fn helper_exit_pending(&self) -> bool {
+        self.pending_helper_exit.is_some()
+    }
+
+    pub(crate) fn record_pending_helper_exit(&mut self, completed: CancellationToken) {
+        self.pending_helper_exit = Some(completed);
+        self.pending_helper_exit_waiting = false;
+    }
+
+    pub(crate) fn helper_exit_confirmed(&mut self) {
+        self.pending_helper_exit = None;
+        self.pending_helper_exit_waiting = false;
+    }
+
     pub(crate) fn start(
         &mut self,
         cancellation: CancellationToken,
         settings: HearingSessionSettings,
         initialization_completed: oneshot::Receiver<()>,
     ) -> Option<u64> {
-        if !matches!(self.state, Lifecycle::Idle) || settings.sources.is_empty() {
+        if !matches!(self.state, Lifecycle::Idle)
+            || self.pending_helper_exit.is_some()
+            || settings.sources.is_empty()
+        {
             return None;
         }
         let generation = self.next_generation.saturating_add(1);

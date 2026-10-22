@@ -1124,6 +1124,7 @@ export const en = {
     hearing: {
       source: "Audio sources",
       microphone: "Listen to the microphone",
+      bluetoothCallMode: "The Bluetooth headset microphone has put output in call mode. Select another input device.",
       speaker: "Listen to the speakers",
       outputDevices: "Output devices to hear",
       outputDevicesUnsupported: "Selecting individual output devices requires macOS 14.2 or later.",

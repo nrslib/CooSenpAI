@@ -14,6 +14,7 @@ CoosenpaiAudioChanges * _Nullable coosenpai_audio_changes_create(void);
 void coosenpai_audio_changes_destroy(CoosenpaiAudioChanges *changes);
 uint64_t coosenpai_audio_changes_sequence(const CoosenpaiAudioChanges *changes);
 uint64_t coosenpai_audio_device_list_sequence(const CoosenpaiAudioChanges *changes);
+uint64_t coosenpai_audio_process_list_sequence(const CoosenpaiAudioChanges *changes);
 OSStatus coosenpai_audio_property_changed(AudioObjectID object, UInt32 count,
     const AudioObjectPropertyAddress * _Nonnull addresses, void * _Nullable context);
 

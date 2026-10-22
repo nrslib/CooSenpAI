@@ -6,6 +6,7 @@
 struct CoosenpaiAudioChanges {
     _Atomic uint64_t sequence;
     _Atomic uint64_t device_list_sequence;
+    _Atomic uint64_t process_list_sequence;
 };
 
 struct CoosenpaiAudioRing {
@@ -54,15 +55,23 @@ uint64_t coosenpai_audio_device_list_sequence(const CoosenpaiAudioChanges *chang
     return atomic_load_explicit(&changes->device_list_sequence, memory_order_acquire);
 }
 
+uint64_t coosenpai_audio_process_list_sequence(const CoosenpaiAudioChanges *changes) {
+    return atomic_load_explicit(&changes->process_list_sequence, memory_order_acquire);
+}
+
 OSStatus coosenpai_audio_property_changed(AudioObjectID object, UInt32 count,
     const AudioObjectPropertyAddress *addresses, void *context) {
     CoosenpaiAudioChanges *changes = context;
     bool device_list_only = object == kAudioObjectSystemObject && count > 0;
+    bool process_list_only = device_list_only;
     for (UInt32 i = 0; i < count; ++i) {
         if (addresses[i].mSelector != kAudioHardwarePropertyDevices) device_list_only = false;
+        if (addresses[i].mSelector != kAudioHardwarePropertyProcessObjectList) process_list_only = false;
     }
     if (device_list_only) {
         atomic_fetch_add_explicit(&changes->device_list_sequence, 1, memory_order_release);
+    } else if (process_list_only) {
+        atomic_fetch_add_explicit(&changes->process_list_sequence, 1, memory_order_release);
     } else {
         atomic_fetch_add_explicit(&changes->sequence, 1, memory_order_release);
     }

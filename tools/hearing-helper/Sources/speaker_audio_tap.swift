@@ -2,8 +2,11 @@ import AVFoundation
 import Foundation
 
 final class SpeakerAudioTap: @unchecked Sendable {
-    private static let captureFailureExitCode: Int32 = 20
-    private static let loadFailureExitCode: Int32 = 21
+    private static let cleanupTimeoutExitCode: Int32 = 22
+    private static let cleanupFailureExitCode: Int32 = 23
+    private static let loadCleanupTimeoutExitCode: Int32 = 24
+    private static let loadCleanupFailureExitCode: Int32 = 25
+    private enum CleanupFailureKind { case timeout, release }
     private let worker = DispatchQueue(label: "dev.nrslib.coosenpai.hearing.speaker", qos: .userInitiated)
     private let drainQueue = DispatchQueue(label: "dev.nrslib.coosenpai.hearing.speaker.drain", qos: .userInitiated)
     private let cancellation = SpeakerAudioCancellation()
@@ -69,6 +72,13 @@ final class SpeakerAudioTap: @unchecked Sendable {
         }
     }
 
+    func updateExcludedProcessPIDs(_ pids: [pid_t]) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        worker.async { [self] in
+            device?.updateExcludedProcessPIDs(pids)
+        }
+    }
+
     func stop(forLoadFailure: Bool = false, _ completion: @escaping () -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         stopForLoadFailure = stopForLoadFailure || forLoadFailure
@@ -79,7 +89,7 @@ final class SpeakerAudioTap: @unchecked Sendable {
         startupDeadline?.cancel()
         let deadline = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.terminateForCleanupFailure("stop-timeout")
+            self.terminateForCleanupFailure("stop-timeout", kind: .timeout)
         }
         stopDeadline = deadline
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(2), execute: deadline)
@@ -95,7 +105,9 @@ final class SpeakerAudioTap: @unchecked Sendable {
                 device = nil
                 DispatchQueue.main.async { self.finishStop() }
             } catch {
-                DispatchQueue.main.async { self.terminateForCleanupFailure(error.localizedDescription) }
+                DispatchQueue.main.async {
+                    self.terminateForCleanupFailure(error.localizedDescription, kind: .release)
+                }
             }
         }
     }
@@ -226,10 +238,17 @@ final class SpeakerAudioTap: @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + startupTimeout, execute: deadline)
     }
 
-    private func terminateForCleanupFailure(_ reason: String) -> Never {
+    private func terminateForCleanupFailure(_ reason: String, kind: CleanupFailureKind) -> Never {
         // A blocked HAL call cannot be cancelled safely. Never announce release or reuse this process.
         diagnostic("audio-tap-cleanup operation=\(reason) action=terminate-process")
-        exit(stopForLoadFailure ? Self.loadFailureExitCode : Self.captureFailureExitCode)
+        let exitCode: Int32
+        switch (kind, stopForLoadFailure) {
+        case (.timeout, false): exitCode = Self.cleanupTimeoutExitCode
+        case (.release, false): exitCode = Self.cleanupFailureExitCode
+        case (.timeout, true): exitCode = Self.loadCleanupTimeoutExitCode
+        case (.release, true): exitCode = Self.loadCleanupFailureExitCode
+        }
+        exit(exitCode)
     }
 
     private func finishStop() {

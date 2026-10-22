@@ -32,6 +32,7 @@ pub(crate) enum AppInput {
     ToggleWatch,
     ToggleAudio,
     ResumeSpeaker,
+    DismissHearingWarning,
     TutorialNext,
     TutorialFinish,
     Recover,
@@ -92,6 +93,7 @@ pub(crate) enum AppOperation {
     SettingsAck,
     Reset,
     Recover(RecoveryAction),
+    DismissHearingWarning(u64),
 }
 #[derive(Debug)]
 pub(crate) enum AppTask {
@@ -610,6 +612,21 @@ impl AppPresenter {
                 vec![self.operation(AppOperation::SettingsAck, config_revision(snapshot))]
             }
             DismissBanner => self.status.dismiss_banner(),
+            DismissHearingWarning
+                if snapshot.is_some_and(|s| {
+                    s.audio
+                        .warning_kind
+                        .as_deref()
+                        .is_some_and(crate::hearing_presenter::is_stop_warning_kind)
+                }) =>
+            {
+                vec![self.operation(
+                    AppOperation::DismissHearingWarning(
+                        snapshot.expect("checked snapshot").audio.generation,
+                    ),
+                    config_revision(snapshot),
+                )]
+            }
             Recover => match self.status.recovery() {
                 Some(RecoveryAction::Settings) => vec![root(UiEvent::OpenSettings)],
                 Some(RecoveryAction::Relaunch) => vec![root(UiEvent::NativeShutdown(
@@ -928,6 +945,13 @@ async fn operation_result(
 ) -> Result<Arc<AppSnapshot>, String> {
     use crate::command_guard::CommandSource;
     match operation {
+        AppOperation::DismissHearingWarning(generation) => {
+            state
+                .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
+                    crate::hearing_presenter::HearingResult::StopWarningDismissed(generation),
+                ))
+                .await;
+        }
         AppOperation::Audio(enabled) => {
             let _ = state.logger.write("INFO", &format!("audio-toggle origin=ui-toggle desired-enabled={enabled} base-config-revision={config_revision}"));
             ipc_value(

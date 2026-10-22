@@ -1121,6 +1121,7 @@ export const ja = {
     hearing: {
       source: "音源",
       microphone: "マイクを聞く",
+      bluetoothCallMode: "Bluetooth ヘッドセットのマイクで出力が通話用モードになっています。別の入力デバイスを選んでください。",
       speaker: "スピーカーを聞く",
       outputDevices: "聞く出力デバイス",
       outputDevicesUnsupported: "出力デバイスの個別選択には macOS 14.2 以降が必要です。",

@@ -475,6 +475,9 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private let locale: Locale
     private let engine: SpeechEngine
     private let inputDevice: String
+    private let exclusionLock = NSLock()
+    private var excludedProcessPIDs: [pid_t]
+    private let parentPID: pid_t?
     private let sources: Set<AudioSource>
     private let debugInputWavPath: String?
     private let debugDumpAppendedPath: String?
@@ -536,6 +539,24 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private let speakerDevices: [String]
     private var speakerAudioTap: SpeakerAudioTap?
     private var speakerScreenCapture: SpeakerScreenCapture?
+
+    func updateExcludedProcessPIDs(_ pids: [pid_t]) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let parentPID, sources.contains(.speaker) else { return }
+        let candidates = Array(Set(pids)).sorted()
+        let verifiedCount = candidates.filter { isCurrentSiblingHelper($0, parentPID: parentPID) }.count
+        exclusionLock.lock()
+        excludedProcessPIDs = candidates
+        exclusionLock.unlock()
+        emitStderr("audio-tap-exclusion update received=\(pids.count) verified=\(verifiedCount)")
+        speakerAudioTap?.updateExcludedProcessPIDs(candidates)
+    }
+
+    private func currentExcludedProcessPIDs() -> [pid_t] {
+        exclusionLock.lock()
+        defer { exclusionLock.unlock() }
+        return excludedProcessPIDs
+    }
     private var microphoneStarted = false
     private var speakerStarted = false
     private var speakerInputGeneration: UInt64 = 1
@@ -569,6 +590,8 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         locale: Locale,
         engine: SpeechEngine,
         inputDevice: String,
+        excludedProcessPIDs: [pid_t] = [],
+        parentPID: pid_t? = nil,
         sources: Set<AudioSource>,
         debugInputWavPath: String?,
         debugDumpAppendedPath: String?,
@@ -590,6 +613,8 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.locale = locale
         self.engine = engine
         self.inputDevice = inputDevice
+        self.excludedProcessPIDs = excludedProcessPIDs
+        self.parentPID = parentPID
         self.sources = sources
         self.debugInputWavPath = debugInputWavPath
         self.debugDumpAppendedPath = debugDumpAppendedPath
@@ -948,18 +973,29 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         emitStartupStage(for: .microphone, stage: "input-device", phase: "begin")
         let token = beginMicrophoneInputGeneration()
-        let initialDefaultDevice = defaultInputDeviceID()
         var followsDefaultInput = inputDevice == "default"
         emitStartupStage(for: .microphone, stage: "engine-create", phase: "begin")
         let engine = AVAudioEngine()
         let input = engine.inputNode
         emitStartupStage(for: .microphone, stage: "engine-create", phase: "end")
-        if inputDevice != "default" {
+        let selectedInputDeviceID: AudioDeviceID
+        if followsDefaultInput {
             do {
-                try selectInputDevice(inputDevice, inputNode: input)
+                selectedInputDeviceID = try useDefaultInputDevice(inputNode: input)
+            } catch {
+                disableSource(
+                    .microphone,
+                    kind: "input-device",
+                    message: "システム既定のマイクを利用できません: \(errorDetails(error))"
+                )
+                return
+            }
+        } else {
+            do {
+                selectedInputDeviceID = try selectInputDevice(inputDevice, inputNode: input)
             } catch {
                 do {
-                    try useDefaultInputDevice(inputNode: input)
+                    selectedInputDeviceID = try useDefaultInputDevice(inputNode: input)
                     followsDefaultInput = true
                 } catch {
                     disableSource(
@@ -1035,10 +1071,15 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             emitStartupStage(for: .microphone, stage: "engine-start", phase: "begin")
             try engine.start()
             emitStartupStage(for: .microphone, stage: "engine-start", phase: "end")
+            let inputDiagnostic = microphoneDeviceDiagnostic(deviceID: selectedInputDeviceID)
+            emitStderr("microphone-input name=\(inputDiagnostic.name) bluetooth=\(inputDiagnostic.bluetooth.map(String.init) ?? "unknown")")
+            if let bluetooth = inputDiagnostic.bluetooth {
+                emit(["event": "microphone-device", "bluetooth": bluetooth])
+            }
             microphoneStarted = true
             observeMicrophoneInput(engine, generation: token,
                                    followsDefaultInput: followsDefaultInput,
-                                   initialDefaultDevice: initialDefaultDevice)
+                                   initialDefaultDevice: followsDefaultInput ? selectedInputDeviceID : nil)
             emitReadyIfPossible(microphone, recognition)
         } catch {
             disableSource(
@@ -1308,9 +1349,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         // Core Audio taps keep audio startup independent of that queue.
         let selectedUIDs = speakerDevices
         let capture = SpeakerAudioTap(diagnostic: emitStderr, makeDevice: { [weak self] in
-            if let factory = self?.speakerDeviceFactory { return try factory() }
-            return try CoreAudioSpeakerDevice(selectedUIDs: selectedUIDs, diagnostic: emitStderr, onStage: { stage, phase in
-                self?.emitStartupStage(for: .speaker, stage: stage, phase: phase)
+            guard let self else { throw SpeakerAudioTapError.allocation }
+            if let factory = self.speakerDeviceFactory { return try factory() }
+            return try CoreAudioSpeakerDevice(selectedUIDs: selectedUIDs, excludedProcessPIDs: self.currentExcludedProcessPIDs(), parentPID: self.parentPID, diagnostic: emitStderr, onStage: { stage, phase in
+                self.emitStartupStage(for: .speaker, stage: stage, phase: phase)
             })
         })
         speakerAudioTap = capture
@@ -1338,6 +1380,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                     "audio-format speaker capture=sampleRate=\(Int(format.sampleRate)) channels=\(format.channelCount) commonFormat=unknown-until-first-sample converted-append=mono-float32"
                 )
                 emitStderr("audio-tap format=\(audioFormatDescription(format))")
+                emit(["event": "speaker-format", "sampleRate": Int(format.sampleRate)])
                 self.speakerStarted = true
                 self.emitReadyIfPossible(microphone, recognition)
             },
@@ -3871,6 +3914,8 @@ struct Arguments {
     let locale: Locale
     let engine: SpeechEngine
     let inputDevice: String
+    let parentPID: pid_t?
+    let excludedProcessPIDs: [pid_t]
     let sources: Set<AudioSource>
     let debugInputWavPath: String?
     let debugDumpAppendedPath: String?
@@ -3900,12 +3945,30 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
     var speakerModelPath: String?
     var speakerLedgerPath: String?
     var speakerSessionID: String?
+    var parentPID: pid_t?
+    var excludedProcessPIDs: [pid_t] = []
     var backendSelection: String?
     var speakerDevices: [String] = []
     var engineSelection: String?
     var index = 6
     while index < arguments.count {
         switch arguments[index] {
+        case "--parent-pid":
+            guard parentPID == nil, index + 1 < arguments.count,
+                  let value = pid_t(arguments[index + 1]), value > 1 else {
+                emit(["event": "error", "kind": "arguments", "message": "--parent-pid は正の PID を一度だけ指定してください"])
+                exitAfterEmittedErrors()
+            }
+            parentPID = value
+            index += 2
+        case "--exclude-pid":
+            guard index + 1 < arguments.count,
+                  let value = pid_t(arguments[index + 1]), value > 1 else {
+                emit(["event": "error", "kind": "arguments", "message": "--exclude-pid には正の PID が必要です"])
+                exitAfterEmittedErrors()
+            }
+            if !excludedProcessPIDs.contains(value) { excludedProcessPIDs.append(value) }
+            index += 2
         case "--engine":
             guard engineSelection == nil, index + 1 < arguments.count else {
                 emit(["event": "error", "kind": "arguments", "message": "--engine は値を付けて一度だけ指定してください"])
@@ -4061,6 +4124,8 @@ func parseArguments(_ arguments: [String] = Array(CommandLine.arguments.dropFirs
         locale: locale,
         engine: engine,
         inputDevice: arguments[3],
+        parentPID: parentPID,
+        excludedProcessPIDs: excludedProcessPIDs,
         sources: sources,
         debugInputWavPath: debugInputWavPath,
         debugDumpAppendedPath: debugDumpAppendedPath,
@@ -4087,17 +4152,19 @@ private enum InputDeviceError: LocalizedError {
     }
 }
 
-private func selectInputDevice(_ uniqueID: String, inputNode: AVAudioInputNode) throws {
+private func selectInputDevice(_ uniqueID: String, inputNode: AVAudioInputNode) throws -> AudioDeviceID {
     guard AVCaptureDevice(uniqueID: uniqueID) != nil,
           let deviceID = coreAudioDeviceID(uniqueID: uniqueID) else {
         throw InputDeviceError.unavailable
     }
     try setInputDevice(deviceID, inputNode: inputNode)
+    return deviceID
 }
 
-private func useDefaultInputDevice(inputNode: AVAudioInputNode) throws {
+private func useDefaultInputDevice(inputNode: AVAudioInputNode) throws -> AudioDeviceID {
     guard let deviceID = defaultInputDeviceID() else { throw InputDeviceError.unavailable }
     try setInputDevice(deviceID, inputNode: inputNode)
+    return deviceID
 }
 
 private func setInputDevice(_ deviceID: AudioDeviceID, inputNode: AVAudioInputNode) throws {
@@ -4112,6 +4179,47 @@ private func setInputDevice(_ deviceID: AudioDeviceID, inputNode: AVAudioInputNo
         UInt32(MemoryLayout<AudioDeviceID>.size)
     )
     guard status == noErr else { throw InputDeviceError.audioUnit }
+}
+
+func microphoneDeviceDiagnostic(
+    deviceID: AudioDeviceID,
+    nameForDevice: (AudioDeviceID) -> String?,
+    transportForDevice: (AudioDeviceID) -> UInt32?
+) -> (name: String, bluetooth: Bool?) {
+    let transport = transportForDevice(deviceID)
+    let bluetooth = transport.map {
+        $0 == kAudioDeviceTransportTypeBluetooth || $0 == kAudioDeviceTransportTypeBluetoothLE
+    }
+    return (nameForDevice(deviceID) ?? "unavailable", bluetooth)
+}
+
+private func microphoneDeviceDiagnostic(deviceID: AudioDeviceID) -> (name: String, bluetooth: Bool?) {
+    microphoneDeviceDiagnostic(deviceID: deviceID, nameForDevice: microphoneDeviceName,
+                               transportForDevice: microphoneDeviceTransport)
+}
+
+private func microphoneDeviceName(_ deviceID: AudioDeviceID) -> String? {
+    var nameAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioObjectPropertyName,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var unmanagedName: Unmanaged<CFString>?
+    var nameSize = UInt32(MemoryLayout<CFString?>.size)
+    let nameStatus = AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &unmanagedName)
+    return nameStatus == noErr ? unmanagedName?.takeRetainedValue() as String? : nil
+}
+
+private func microphoneDeviceTransport(_ deviceID: AudioDeviceID) -> UInt32? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var transport: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &transport)
+    return status == noErr ? transport : nil
 }
 
 private func defaultInputDeviceAddress() -> AudioObjectPropertyAddress {

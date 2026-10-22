@@ -199,6 +199,8 @@ pub struct AudioView {
     pub microphone_permission: String,
     pub recognition_permission: String,
     pub screen_capture_permission: String,
+    #[serde(default)]
+    pub bluetooth_call_mode: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -697,6 +699,7 @@ impl AppSnapshot {
                         "not-required"
                     }
                     .to_owned(),
+                bluetooth_call_mode: false,
                 warning_kind: None,
                 message: None,
                 missing_speaker_device_count: None,

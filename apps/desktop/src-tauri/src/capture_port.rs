@@ -204,7 +204,15 @@ impl DesktopCapturePort {
             };
             let _ = state.logger.write("DEBUG", "範囲選択: 段階=prepare");
             let previous_error = super::current_shortcut_error_token(&state).await;
-            let mut events = port.session.open(generation, kind)?;
+            let mut events = if kind == CaptureKind::Text {
+                port.session.open_with_shortcut(
+                    generation,
+                    kind,
+                    state.runtime_config().keymap.send_text,
+                )?
+            } else {
+                port.session.open(generation, kind)?
+            };
             let selected = loop {
                 match events.next().await? {
                     crate::selection_session::SessionEvent::Opened => state.ui.input(

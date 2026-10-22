@@ -15,6 +15,7 @@ import { BooleanInput } from "./SettingsControls.js";
 interface Props extends SettingsCategoryProps {
   readonly onOpenSpeechSettings: (kind: "microphone" | "recognition") => void;
   readonly onResumeSpeaker: () => void;
+  readonly onDismissHearingWarning: () => void;
   readonly speaker?: SpeakerManagementView;
   readonly speakerConfirmation?: "speaker-delete" | "speaker-delete-all" | null;
   readonly onSpeakerAction?: (name: string, value?: unknown) => void;
@@ -134,7 +135,7 @@ function SpeakerManagementSection({ speaker, confirmation, onSpeakerAction }: {
   </fieldset>;
 }
 
-export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings, onResumeSpeaker, speaker, speakerConfirmation, onSpeakerAction }: Props): ReactElement {
+export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings, onResumeSpeaker, onDismissHearingWarning, speaker, speakerConfirmation, onSpeakerAction }: Props): ReactElement {
   const { locale, t } = useI18n();
   const { major, minor } = snapshot.osVersion;
   const supportsDeviceSelection = major > 14 || (major === 14 && minor >= 2);
@@ -142,6 +143,9 @@ export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings, 
   return <>
     <fieldset id="settings-audio"><legend>{t("settings.hearing.source")}</legend>
       <BooleanInput label={t("settings.hearing.microphone")} path="audio.mic" value={form.audioMic} update={(value) => update("audioMic", value)} />
+      <label><span>{t("settings.speechSettings.inputDevice")}</span><select id="setting-hearing-inputDevice" value={form.speechInputDevice} onChange={(event) => update("speechInputDevice", event.target.value)}><option value="default">{t("settings.speechSettings.systemDefault")}</option>{snapshot.speech.inputDevices.map((device) => <option key={device.id} value={device.id}>{device.name}</option>)}</select></label>
+      {snapshot.audio.bluetoothCallMode && <p className="field-help" role="alert">{t("settings.hearing.bluetoothCallMode")}</p>}
+      {(snapshot.audio.warningKind?.startsWith("helper-stop-") || snapshot.audio.warningKind?.startsWith("hearing-stop-")) && snapshot.audio.message && <p className="field-help" role="alert">{snapshot.audio.message} <button type="button" onClick={onDismissHearingWarning}>{t("common.close")}</button></p>}
       <BooleanInput label={t("settings.hearing.microphoneCommands")} path="audio.microphoneCommandsEnabled" value={form.audioMicrophoneCommandsEnabled} update={(value) => update("audioMicrophoneCommandsEnabled", value)} />
       <p className="field-help">{t("settings.hearing.microphoneCommandsHelp")}</p>
       <BooleanInput label={t("settings.hearing.speaker")} path="audio.speaker" value={form.audioSpeaker} update={(value) => update("audioSpeaker", value)} />

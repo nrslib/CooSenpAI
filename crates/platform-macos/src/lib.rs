@@ -25,6 +25,12 @@ mod speech;
 mod hearing;
 
 #[cfg(target_os = "macos")]
+mod hearing_command;
+
+#[cfg(target_os = "macos")]
+pub use hearing_command::{run_hearing_helper_command, HearingHelperCommandError};
+
+#[cfg(target_os = "macos")]
 mod speech_permissions;
 
 #[cfg(target_os = "macos")]

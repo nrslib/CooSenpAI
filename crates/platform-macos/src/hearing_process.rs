@@ -1,19 +1,138 @@
 use super::source_name;
 use coosenpai_core::interactive_process::{
-    InteractiveProcess, InteractiveProcessControl, InteractiveProcessEvent,
-    InteractiveProcessRequest, SHUTDOWN_GRACE,
+    InteractiveProcess, InteractiveProcessControl, InteractiveProcessError,
+    InteractiveProcessEvent, InteractiveProcessRequest, SHUTDOWN_GRACE,
 };
 use coosenpai_core::ports::{decode_hearing_event, HearingEvent, PortError, RuntimeLogger};
 use coosenpai_core::state::AudioObservationSource;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc as sync_mpsc, Arc};
+use std::sync::{mpsc as sync_mpsc, Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const MAX_RESTART_ATTEMPTS: u8 = 3;
 const DIAGNOSTIC_LOG_CAPACITY: usize = 128;
 const SPEAKER_LOAD_STOP_EXIT_CODE: i32 = 21;
+const SPEAKER_CLEANUP_TIMEOUT_EXIT_CODE: i32 = 22;
+const SPEAKER_CLEANUP_FAILURE_EXIT_CODE: i32 = 23;
+const SPEAKER_LOAD_CLEANUP_TIMEOUT_EXIT_CODE: i32 = 24;
+const SPEAKER_LOAD_CLEANUP_FAILURE_EXIT_CODE: i32 = 25;
+
+fn is_speaker_load_stop(status: Option<i32>) -> bool {
+    matches!(
+        status,
+        Some(SPEAKER_LOAD_STOP_EXIT_CODE)
+            | Some(SPEAKER_LOAD_CLEANUP_TIMEOUT_EXIT_CODE)
+            | Some(SPEAKER_LOAD_CLEANUP_FAILURE_EXIT_CODE)
+    )
+}
+
+fn stop_exit_error(status: Option<i32>, closed_seen: bool) -> Option<PortError> {
+    match status {
+        Some(SPEAKER_CLEANUP_TIMEOUT_EXIT_CODE | SPEAKER_LOAD_CLEANUP_TIMEOUT_EXIT_CODE) => {
+            Some(PortError::HearingStopTimeout)
+        }
+        Some(SPEAKER_CLEANUP_FAILURE_EXIT_CODE | SPEAKER_LOAD_CLEANUP_FAILURE_EXIT_CODE) => {
+            Some(PortError::HearingStopCleanupFailed)
+        }
+        _ if !closed_seen => Some(PortError::HearingStopUnconfirmed),
+        Some(0) => None,
+        _ => Some(PortError::HearingStopCleanupFailed),
+    }
+}
+
+pub(super) struct ActiveHelper {
+    source: AudioObservationSource,
+    control: InteractiveProcessControl,
+}
+
+#[derive(Default)]
+pub(super) struct ActiveHelperRegistry {
+    helpers: Mutex<HashMap<u32, Arc<ActiveHelper>>>,
+    update_gate: tokio::sync::Mutex<()>,
+}
+
+pub(super) type ActiveHelpers = Arc<ActiveHelperRegistry>;
+
+pub(super) async fn register_helper(
+    source: AudioObservationSource,
+    control: InteractiveProcessControl,
+    active: &ActiveHelpers,
+) {
+    let Some(pid) = control.pid() else { return };
+    let helper = Arc::new(ActiveHelper { source, control });
+    active
+        .helpers
+        .lock()
+        .expect("helper registry")
+        .insert(pid, helper.clone());
+    refresh_speaker_exclusions(active).await;
+    let active = active.clone();
+    tokio::spawn(async move {
+        helper.control.wait_for_completion().await;
+        {
+            let mut registry = active.helpers.lock().expect("helper registry");
+            if registry
+                .get(&pid)
+                .is_some_and(|current| Arc::ptr_eq(current, &helper))
+            {
+                registry.remove(&pid);
+            }
+        }
+        if source == AudioObservationSource::Microphone {
+            refresh_speaker_exclusions(&active).await;
+        }
+    });
+}
+
+async fn refresh_speaker_exclusions(active: &ActiveHelpers) {
+    let _update = active.update_gate.lock().await;
+    let (speaker, microphones) = {
+        let registry = active.helpers.lock().expect("helper registry");
+        let speaker = registry
+            .values()
+            .find(|helper| helper.source == AudioObservationSource::Speaker)
+            .map(|helper| helper.control.clone());
+        let microphones = registry
+            .values()
+            .filter(|helper| helper.source == AudioObservationSource::Microphone)
+            .filter_map(|helper| helper.control.pid())
+            .collect::<Vec<_>>();
+        (speaker, microphones)
+    };
+    if let Some(speaker) = speaker {
+        let command = serde_json::json!({"op": "update-exclude-pids", "pids": microphones});
+        let _ = speaker.write_line(command.to_string().into_bytes()).await;
+    }
+}
+
+pub(super) async fn wait_for_hearing_helpers(active: &ActiveHelpers) {
+    let controls = active
+        .helpers
+        .lock()
+        .expect("helper registry")
+        .values()
+        .map(|helper| helper.control.clone())
+        .collect::<Vec<_>>();
+    for control in controls {
+        control.wait_for_completion().await;
+    }
+}
+
+pub(super) async fn force_kill_hearing_helpers(active: &ActiveHelpers) {
+    let controls = active
+        .helpers
+        .lock()
+        .expect("helper registry")
+        .values()
+        .map(|helper| helper.control.clone())
+        .collect::<Vec<_>>();
+    for control in controls {
+        let _ = control.terminate(true).await;
+    }
+}
 
 struct BufferedDiagnosticLogger {
     sender: sync_mpsc::SyncSender<(String, String)>,
@@ -73,6 +192,7 @@ pub(crate) struct SourceProcessSpec {
     pub(crate) initial_error: Option<PortError>,
     pub(crate) parent_cancellation: CancellationToken,
     pub(crate) logger: Arc<dyn RuntimeLogger>,
+    pub(crate) active_helpers: ActiveHelpers,
 }
 
 pub(crate) struct SourceProcessEvent {
@@ -185,6 +305,10 @@ pub(crate) async fn run_source_process(
             return Ok(());
         }
         if !send_source_event(&events, spec.source, SourceProcessEventKind::Restarting).await {
+            if let Some(mut process) = initial_process.take() {
+                let control = process.control();
+                return cancel_and_reap(&mut process, &control, &diagnostic_logger).await;
+            }
             return Ok(());
         }
 
@@ -276,10 +400,11 @@ async fn spawn_process(spec: &SourceProcessSpec) -> Result<InteractiveProcess, P
             env: Vec::new(),
             cwd: None,
         },
-        spec.parent_cancellation.clone(),
+        CancellationToken::new(),
     )
     .await
     .map_err(process_error)?;
+    register_helper(spec.source, process.control(), &spec.active_helpers).await;
     Ok(process)
 }
 
@@ -428,6 +553,8 @@ async fn monitor_process(
     };
     let device_started = std::time::Instant::now();
     let mut stopping = false;
+    let mut closed_seen = false;
+    let mut stop_limit_exceeded = false;
     let force_shutdown = tokio::time::sleep(SHUTDOWN_GRACE);
     tokio::pin!(force_shutdown);
     let mut force_shutdown_armed = false;
@@ -450,7 +577,8 @@ async fn monitor_process(
         let event = tokio::select! {
             biased;
             _ = &mut force_shutdown, if force_shutdown_armed => {
-                let _ = control.terminate(true).await;
+                stop_limit_exceeded = true;
+                let _ = control.terminate(false).await;
                 force_shutdown_armed = false;
                 continue;
             }
@@ -461,6 +589,11 @@ async fn monitor_process(
         match event {
             Some(Ok(InteractiveProcessEvent::StdoutLine(line))) => {
                 if stopping {
+                    if decode_hearing_event(&line).ok().is_some_and(|decoded| {
+                        matches!(decoded.into_parts().0, HearingEvent::Closed)
+                    }) {
+                        closed_seen = true;
+                    }
                     continue;
                 }
                 match decode_hearing_event(&line) {
@@ -515,6 +648,7 @@ async fn monitor_process(
                                     &control,
                                     Some(error),
                                     valid_final_seen,
+                                    closed_seen,
                                     cancellation,
                                     parent_cancellation,
                                     logger,
@@ -540,11 +674,13 @@ async fn monitor_process(
                             }
                             HearingEvent::Error { ref kind, .. } if kind == "no-input-source" => {}
                             HearingEvent::Closed => {
+                                closed_seen = true;
                                 return terminate_before_restart(
                                     process,
                                     &control,
                                     None,
                                     valid_final_seen,
+                                    closed_seen,
                                     cancellation,
                                     parent_cancellation,
                                     logger,
@@ -605,6 +741,7 @@ async fn monitor_process(
                             &control,
                             Some(error),
                             valid_final_seen,
+                            closed_seen,
                             cancellation,
                             parent_cancellation,
                             logger,
@@ -617,12 +754,27 @@ async fn monitor_process(
                 log_helper_stderr(logger, &line);
             }
             Some(Ok(InteractiveProcessEvent::Exited { status, stderr })) => {
+                process.wait_for_completion().await;
                 if stopping || cancellation.is_cancelled() || parent_cancellation.is_cancelled() {
-                    return ProcessOutcome::Stopped(cancel_write_error.map_or(Ok(()), Err));
+                    if !closed_seen {
+                        let _ = logger
+                            .write("ERROR", "聴覚観察 helper は closed を送らずに終了しました");
+                    }
+                    if stop_limit_exceeded {
+                        return ProcessOutcome::Stopped(Err(PortError::HearingStopTimeout));
+                    }
+                    if let Some(error) = stop_exit_error(status, closed_seen) {
+                        return ProcessOutcome::Stopped(Err(error));
+                    }
+                    return ProcessOutcome::Stopped(if closed_seen {
+                        Ok(())
+                    } else {
+                        cancel_write_error.map_or(Ok(()), Err)
+                    });
                 }
                 if source == AudioObservationSource::Speaker {
-                    *load_stop_seen |= status == Some(SPEAKER_LOAD_STOP_EXIT_CODE);
-                    if status == Some(SPEAKER_LOAD_STOP_EXIT_CODE) {
+                    *load_stop_seen |= is_speaker_load_stop(status);
+                    if is_speaker_load_stop(status) {
                         *persistent_failure = None;
                     }
                     if !*load_stop_seen && persistent_failure.is_none() {
@@ -632,28 +784,35 @@ async fn monitor_process(
                         });
                     }
                 }
-                let error = if status == Some(SPEAKER_LOAD_STOP_EXIT_CODE)
-                    && source == AudioObservationSource::Speaker
-                {
-                    Some(PortError::SpeakerOverflow(
-                        "スピーカー音声の負荷による停止中に helper が終了しました".to_owned(),
-                    ))
-                } else if status != Some(0) {
-                    Some(helper_exit_error(&stderr))
-                } else {
-                    None
-                };
+                let error =
+                    if is_speaker_load_stop(status) && source == AudioObservationSource::Speaker {
+                        Some(PortError::SpeakerOverflow(
+                            "スピーカー音声の負荷による停止中に helper が終了しました".to_owned(),
+                        ))
+                    } else if status != Some(0) {
+                        Some(helper_exit_error(&stderr))
+                    } else {
+                        None
+                    };
                 return ProcessOutcome::Restart {
                     reset_restart_budget: valid_final_seen,
                     error,
                 };
             }
             Some(Err(error)) => {
+                if stop_limit_exceeded {
+                    process.wait_for_completion().await;
+                    return ProcessOutcome::Stopped(Err(PortError::HearingStopTimeout));
+                }
+                if stopping && closed_seen && matches!(error, InteractiveProcessError::Io(_)) {
+                    continue;
+                }
                 return terminate_before_restart(
                     process,
                     &control,
                     Some(process_error(error)),
                     valid_final_seen,
+                    closed_seen,
                     cancellation,
                     parent_cancellation,
                     logger,
@@ -661,6 +820,10 @@ async fn monitor_process(
                 .await;
             }
             None => {
+                if stop_limit_exceeded {
+                    process.wait_for_completion().await;
+                    return ProcessOutcome::Stopped(Err(PortError::HearingStopTimeout));
+                }
                 return terminate_before_restart(
                     process,
                     &control,
@@ -668,6 +831,7 @@ async fn monitor_process(
                         "聴覚観察 helper が停止しました".to_owned(),
                     )),
                     valid_final_seen,
+                    closed_seen,
                     cancellation,
                     parent_cancellation,
                     logger,
@@ -684,6 +848,7 @@ async fn terminate_before_restart(
     control: &InteractiveProcessControl,
     restart_error: Option<PortError>,
     valid_final_seen: bool,
+    mut closed_seen: bool,
     cancellation: &CancellationToken,
     parent_cancellation: &CancellationToken,
     logger: &dyn RuntimeLogger,
@@ -713,16 +878,25 @@ async fn terminate_before_restart(
             stopping = true;
         }
         match event {
-            Some(Ok(InteractiveProcessEvent::Exited { .. })) => {
+            Some(Ok(InteractiveProcessEvent::Exited { status, .. })) => {
+                process.wait_for_completion().await;
                 if stopping {
-                    return ProcessOutcome::Stopped(Ok(()));
+                    return ProcessOutcome::Stopped(
+                        stop_exit_error(status, closed_seen)
+                            .or(wait_error)
+                            .map_or(Ok(()), Err),
+                    );
                 }
                 return ProcessOutcome::Restart {
                     error: wait_error,
                     reset_restart_budget: valid_final_seen,
                 };
             }
-            Some(Ok(InteractiveProcessEvent::StdoutLine(_))) => {}
+            Some(Ok(InteractiveProcessEvent::StdoutLine(line))) => {
+                closed_seen |= decode_hearing_event(&line)
+                    .ok()
+                    .is_some_and(|decoded| matches!(decoded.into_parts().0, HearingEvent::Closed));
+            }
             Some(Ok(InteractiveProcessEvent::StderrLine(line))) => {
                 log_helper_stderr(logger, &line);
             }
@@ -771,25 +945,75 @@ async fn cancel_and_reap(
     control: &InteractiveProcessControl,
     logger: &dyn RuntimeLogger,
 ) -> Result<(), PortError> {
-    let _ = control.write_line(br#"{"op":"cancel"}"#.to_vec()).await;
-    let mut wait_error = control.terminate(false).await.err().map(process_error);
-    while let Some(event) = process.next_event().await {
+    let mut wait_error = control
+        .write_line(br#"{"op":"cancel"}"#.to_vec())
+        .await
+        .err()
+        .map(process_error);
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+    let mut stop_limit_exceeded = false;
+    let mut closed_seen = false;
+    loop {
+        let event = if stop_limit_exceeded {
+            process.next_event().await
+        } else {
+            match tokio::time::timeout_at(deadline, process.next_event()).await {
+                Ok(event) => event,
+                Err(_) => {
+                    stop_limit_exceeded = true;
+                    if let Err(error) = control.terminate(false).await {
+                        if wait_error.is_none() {
+                            wait_error = Some(process_error(error));
+                        }
+                    }
+                    continue;
+                }
+            }
+        };
         match event {
-            Ok(InteractiveProcessEvent::Exited { .. }) => {
+            Some(Ok(InteractiveProcessEvent::Exited { status, .. })) => {
+                process.wait_for_completion().await;
+                if !closed_seen {
+                    let _ =
+                        logger.write("ERROR", "聴覚観察 helper は closed を送らずに終了しました");
+                }
+                if stop_limit_exceeded {
+                    return Err(PortError::HearingStopTimeout);
+                }
+                if let Some(error) = stop_exit_error(status, closed_seen) {
+                    return Err(error);
+                }
                 return wait_error.map_or(Ok(()), Err);
             }
-            Ok(InteractiveProcessEvent::StdoutLine(_)) => {}
-            Ok(InteractiveProcessEvent::StderrLine(line)) => log_helper_stderr(logger, &line),
-            Err(error) => {
+            Some(Ok(InteractiveProcessEvent::StdoutLine(line))) => {
+                if decode_hearing_event(&line)
+                    .ok()
+                    .is_some_and(|decoded| matches!(decoded.into_parts().0, HearingEvent::Closed))
+                {
+                    closed_seen = true;
+                }
+            }
+            Some(Ok(InteractiveProcessEvent::StderrLine(line))) => {
+                log_helper_stderr(logger, &line);
+            }
+            Some(Err(error)) => {
                 if wait_error.is_none() {
                     wait_error = Some(process_error(error));
                 }
             }
+            None => {
+                if stop_limit_exceeded {
+                    process.wait_for_completion().await;
+                    return Err(PortError::HearingStopTimeout);
+                }
+                return Err(wait_error.unwrap_or_else(|| {
+                    PortError::Unavailable(
+                        "聴覚観察 helper の終了を確認できませんでした".to_owned(),
+                    )
+                }));
+            }
         }
     }
-    Err(wait_error.unwrap_or_else(|| {
-        PortError::Unavailable("聴覚観察 helper の終了を確認できませんでした".to_owned())
-    }))
 }
 
 fn restart_delay(attempt: u8) -> std::time::Duration {

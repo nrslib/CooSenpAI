@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-core"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-desktop"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-judge-fixed-plugin"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-judge-fixed-plugin-notify"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "coosenpai-platform-macos"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -702,6 +702,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "uuid",
