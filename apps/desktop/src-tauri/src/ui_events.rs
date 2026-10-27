@@ -133,6 +133,36 @@ pub(crate) enum BubbleQuery {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct WakeIdentity {
+    pub(crate) session_id: String,
+    pub(crate) source: coosenpai_core::state::AudioObservationSource,
+    pub(crate) recognition_generation: u64,
+    pub(crate) sequence: u64,
+}
+
+impl WakeIdentity {
+    pub(crate) fn same_segment(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.source == other.source
+            && self.recognition_generation == other.recognition_generation
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct WakeIdleIdentity {
+    pub(crate) session_id: String,
+    pub(crate) source: coosenpai_core::state::AudioObservationSource,
+    pub(crate) recognition_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WakeFinalDisposition {
+    Rejected,
+    Accepted,
+    WakeOnly,
+}
+
 #[derive(Debug)]
 pub(crate) enum UiEvent {
     SettingsPreview {
@@ -211,7 +241,15 @@ pub(crate) enum UiEvent {
         target: crate::state::NotificationTarget,
         context: Box<crate::bubbles::presenter::NotificationContext>,
         reply: tokio::sync::oneshot::Sender<bool>,
+        external_input_ids: Vec<String>,
     },
+    ExternalInputAccepted {
+        id: String,
+        kind: CaptureKind,
+        tutorial_run_id: Option<String>,
+    },
+    ExternalInputSubmitFailed(String),
+    ExternalInputDelivered(Vec<String>),
     BubbleRequested {
         record: Box<crate::bubbles::BubbleRecord>,
         duration_ms: u64,
@@ -264,6 +302,26 @@ pub(crate) enum UiEvent {
     ApplicationDeactivated,
     OtherApplicationActivated,
     Voice(VoiceAction),
+    WakeRecognizing {
+        identity: WakeIdentity,
+        display_name: String,
+        text: String,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    WakeStart {
+        identity: WakeIdentity,
+        accepted: bool,
+    },
+    WakeFinal {
+        identity: WakeIdentity,
+        display_name: String,
+        text: String,
+        locale: String,
+        end_reason: Option<coosenpai_core::ports::HearingSegmentEndReason>,
+        reply: tokio::sync::oneshot::Sender<WakeFinalDisposition>,
+    },
+    WakeIdle(WakeIdleIdentity),
+    WakeIdleFailed(WakeIdleIdentity),
     PopupProtection {
         generation: u64,
         active: bool,
@@ -363,6 +421,8 @@ pub(crate) enum UiEvent {
     MotionSettings(crate::motion_settings_presenter::MotionEvent),
     StatusDeadline(crate::status_presenter::StatusDeadline),
     WorkApproval(crate::work_approval_presenter::WorkApprovalEvent),
+    WorkOffer(crate::work_offer_presenter::WorkOfferEvent),
+    WorkOfferProjection(crate::work_offer_presenter::WorkOfferProjection),
     Conversation(crate::conversation_presenter::ConversationEvent),
     ChatLoaded(std::sync::Arc<crate::snapshot::AppSnapshot>),
 }
@@ -432,6 +492,7 @@ pub(crate) enum UiEffect {
     RejectInput,
     Log(String),
     WorkApprovalRender(Box<crate::work_approval_presenter::WorkApprovalView>),
+    WorkOfferRender(Box<crate::work_offer_presenter::WorkOfferProjection>),
     AppRender(Box<crate::app_presenter::AppFrame>),
     StatusRender(Box<crate::status_presenter::StatusView>),
     ThoughtRender(Box<crate::status_presenter::ThoughtWindowView>),
@@ -493,6 +554,7 @@ pub(crate) enum UiTask {
     CompleteNotification {
         presentation: crate::bubbles::BubblePresentation,
         reply: tokio::sync::oneshot::Sender<bool>,
+        external_input_ids: Vec<String>,
     },
     PrepareOsNotification {
         record: coosenpai_core::notification::NotificationRecord,
@@ -532,6 +594,7 @@ pub(crate) enum UiTask {
     Voice(VoiceAction),
     SubmitChat(String),
     SubmitInput(ChatInput),
+    ReplayNotifications(Vec<UiEvent>),
     AnnounceSetup,
     MainOpened,
     InterruptCapture(bool),
@@ -543,6 +606,7 @@ pub(crate) enum UiTask {
     MotionSettings(crate::motion_settings_presenter::MotionTask),
     StatusDelay(crate::status_presenter::StatusDeadline),
     WorkApproval(crate::work_approval_presenter::WorkApprovalTask),
+    WorkOffer(crate::work_offer_presenter::WorkOfferTask),
     BubbleView {
         id: String,
         token: u64,
@@ -593,6 +657,8 @@ impl UiEvent {
             Self::App(_) => "App".into(),
             Self::StatusDeadline(_) => "StatusDeadline".into(),
             Self::WorkApproval(_) => "WorkApproval".into(),
+            Self::WorkOffer(_) => "WorkOffer".into(),
+            Self::WorkOfferProjection(_) => "WorkOfferProjection".into(),
             Self::Composer(_) => "Composer".into(),
             Self::Conversation(_) => "Conversation".into(),
             Self::ChatLoaded(_) => "ChatLoaded".into(),
@@ -607,6 +673,9 @@ impl UiEvent {
             Self::OsNotificationPrepared { .. } => "OsNotificationPrepared".into(),
             Self::NotificationFinished(_) => "NotificationFinished".into(),
             Self::NotificationRequested { .. } => "NotificationRequested".into(),
+            Self::ExternalInputAccepted { .. } => "ExternalInputAccepted".into(),
+            Self::ExternalInputSubmitFailed(_) => "ExternalInputSubmitFailed".into(),
+            Self::ExternalInputDelivered(_) => "ExternalInputDelivered".into(),
             Self::ThoughtRequested { .. } => "ThoughtRequested".into(),
             Self::BubbleRequested { .. } => "BubbleRequested".into(),
             Self::ResetPromptRequested => "ResetPromptRequested".into(),
@@ -628,6 +697,25 @@ impl UiEvent {
             Self::ApplicationDeactivated => "ApplicationDeactivated".into(),
             Self::OtherApplicationActivated => "OtherApplicationActivated".into(),
             Self::Voice(action) => format!("Voice({action:?})"),
+            Self::WakeRecognizing { identity, .. } => format!(
+                "WakeRecognizing(generation={},sequence={})",
+                identity.recognition_generation, identity.sequence
+            ),
+            Self::WakeStart { identity, .. } => format!(
+                "WakeStart(generation={},sequence={})",
+                identity.recognition_generation, identity.sequence
+            ),
+            Self::WakeFinal { identity, .. } => format!(
+                "WakeFinal(generation={},sequence={})",
+                identity.recognition_generation, identity.sequence
+            ),
+            Self::WakeIdle(identity) => {
+                format!("WakeIdle(generation={})", identity.recognition_generation)
+            }
+            Self::WakeIdleFailed(identity) => format!(
+                "WakeIdleFailed(generation={})",
+                identity.recognition_generation
+            ),
             Self::PopupProtection { generation, active } => {
                 format!("PopupProtection({generation},{active})")
             }
@@ -753,7 +841,7 @@ impl UiEvent {
 
 pub(crate) enum Handling {
     Handled(Vec<UiEffect>),
-    Bubble(UiEvent),
+    Bubble(Box<UiEvent>),
 }
 
 #[derive(Debug)]

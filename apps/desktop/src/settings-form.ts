@@ -15,6 +15,7 @@ export interface SettingsAppearancePreview {
 export interface FormState {
   workApprovalMode: "manual" | "auto";
   workAllowedRoots: readonly WorkAllowedRoot[];
+  workProactiveOffersEnabled: boolean;
   emotionsEnabled: boolean;
   displayName: string;
   avatarColor: string;
@@ -36,6 +37,7 @@ export interface FormState {
   audioEnabled: boolean;
   audioMic: boolean;
   audioMicrophoneCommandsEnabled: boolean;
+  audioWakeEnabled: boolean;
   audioSpeaker: boolean;
   audioSpeakerDevices: readonly string[];
   audioSpeakerIdentificationEnabled: boolean;
@@ -119,7 +121,7 @@ export interface FormState {
   bubbleKeepLatest: boolean;
   bubbleEdgeRecall: boolean;
   bubblePosition: "bottom-right" | "top-right" | "bottom-left" | "top-left";
-  bubbleDisplay: "main" | "cursor" | "front";
+  bubbleDisplay: CooSenpaiConfig["bubble"]["display"];
   uiTheme: "system" | "light" | "dark";
   uiFont: string;
   language: "ja" | "en";
@@ -146,14 +148,14 @@ export type SettingsErrorFor = (path: string) => string | undefined;
 export type ConfigFormKey = keyof Omit<FormState, "avatarImage" | "avatarFileName" | "avatarImageLoadFailed">;
 
 const pageFields: Readonly<Record<SettingsCategory, readonly ConfigFormKey[]>> = {
-  work: ["workApprovalMode", "workAllowedRoots"],
+  work: ["workApprovalMode", "workAllowedRoots", "workProactiveOffersEnabled"],
   general: [
     "displayName", "avatarColor", "avatarPath", "persona", "assertiveness", "emotionsEnabled", "uiTheme", "uiFont", "language",
     "memoryEnabled", "memoryProviderConsent", "checkForUpdates", "launchAtLogin", "reviewTime", "reminders", "whileThinking",
     "memoryDailyRetentionDays", "memoryWeeklyRetentionWeeks", "factPromptDailyLimit", "observationDays", "conversationDays",
   ],
   vision: ["watchFullscreen", "watchApps", "watchFocusElement", "captureAllowlistEnabled", "captureAllowlistApps"],
-  hearing: ["audioMicrophoneCommandsEnabled", "audioMic", "audioSpeaker", "audioSpeakerDevices", "audioSpeakerIdentificationEnabled"],
+  hearing: ["audioMicrophoneCommandsEnabled", "audioWakeEnabled", "audioMic", "audioSpeaker", "audioSpeakerDevices", "audioSpeakerIdentificationEnabled"],
   speech: ["speechLocale", "speechInputDevice", "speechMode", "speechConfirmBeforeSend", "voiceOutputEnabled", "voiceOutputProvider", "voiceOutputRate", "voicevoxStyleId"],
   notifications: ["notificationMode", "bubblePosition", "bubbleDisplay", "bubbleEdgeRecall", "thoughtBubble", "bubbleKeepLatest", "textQuickActions", "imageQuickActions", "minPriority", "bubbleDurationMs"],
   providers: [
@@ -194,6 +196,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
   return {
     workApprovalMode: config.work.approvalMode,
     workAllowedRoots: config.work.allowedRoots.map((root) => ({ ...root })),
+    workProactiveOffersEnabled: config.work.proactiveOffersEnabled,
     displayName: config.companion.displayName,
     emotionsEnabled: config.companion.emotionsEnabled,
     avatarColor: config.ui.avatarColor ?? DEFAULT_AVATAR_COLOR,
@@ -213,6 +216,7 @@ export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean):
     audioEnabled: config.audio.enabled,
     audioMic: config.audio.mic,
     audioMicrophoneCommandsEnabled: config.audio.microphoneCommandsEnabled,
+    audioWakeEnabled: config.audio.wakeEnabled,
     audioSpeaker: config.audio.speaker,
     audioSpeakerDevices: config.audio.speakerDevices,
     audioSpeakerIdentificationEnabled: config.audio.speakerIdentification.enabled,
@@ -338,12 +342,13 @@ export function toPatch(form: FormState): ConfigPatch {
   const base = toBasePatch(form);
   return {
     ...base,
-    work: { approvalMode: form.workApprovalMode, allowedRoots: form.workAllowedRoots },
+    work: { approvalMode: form.workApprovalMode, allowedRoots: form.workAllowedRoots, proactiveOffersEnabled: form.workProactiveOffersEnabled },
     voiceOutput: { enabled: form.voiceOutputEnabled, provider: form.voiceOutputProvider, rate: Number(form.voiceOutputRate), voicevoxStyleId: form.voicevoxStyleId },
     audio: {
       enabled: form.audioEnabled,
       mic: form.audioMic,
       microphoneCommandsEnabled: form.audioMicrophoneCommandsEnabled,
+      wakeEnabled: form.audioWakeEnabled,
       speaker: form.audioSpeaker,
       speakerDevices: [...new Set(form.audioSpeakerDevices)],
       speakerIdentification: { enabled: form.audioSpeakerIdentificationEnabled },

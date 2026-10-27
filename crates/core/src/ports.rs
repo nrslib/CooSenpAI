@@ -190,10 +190,20 @@ pub struct ScreenPoint {
     pub y: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct BubbleDisplay {
+    pub uuid: String,
+    pub name: String,
+    pub is_main: bool,
+    pub bounds: WindowBounds,
+}
+
 pub trait BubbleDisplayPort: Send + Sync {
     fn cursor_point(&self) -> Result<ScreenPoint, PortError>;
 
     fn frontmost_window_point(&self) -> Result<Option<ScreenPoint>, PortError>;
+
+    fn displays(&self) -> Result<Vec<BubbleDisplay>, PortError>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -469,6 +479,14 @@ pub enum HearingEvent {
         generation: u64,
         sequence: u64,
     },
+    Idle {
+        source: AudioObservationSource,
+        generation: u64,
+    },
+    WakeIdleRevoked {
+        source: AudioObservationSource,
+        generation: u64,
+    },
     Final {
         source: AudioObservationSource,
         generation: u64,
@@ -476,6 +494,13 @@ pub enum HearingEvent {
         #[serde(rename = "inputGeneration")]
         input_generation: u64,
         text: String,
+        #[serde(
+            rename = "endReason",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_hearing_segment_end_reason"
+        )]
+        end_reason: Option<HearingSegmentEndReason>,
         #[serde(flatten)]
         speaker: Option<Box<HearingSpeakerMetadata>>,
     },
@@ -488,6 +513,24 @@ pub enum HearingEvent {
         message: String,
     },
     Closed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HearingSegmentEndReason {
+    Silence,
+    Maximum,
+    Stop,
+    RecognizerFinal,
+}
+
+fn deserialize_hearing_segment_end_reason<'de, D>(
+    deserializer: D,
+) -> Result<Option<HearingSegmentEndReason>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    HearingSegmentEndReason::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -570,6 +613,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
         sequence,
         input_generation,
         text,
+        end_reason,
         speaker: _,
     } = required_event
     else {
@@ -584,6 +628,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
                 sequence,
                 input_generation,
                 text,
+                end_reason,
                 speaker: None,
             },
             speaker_metadata_reason: None,
@@ -598,6 +643,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
                 sequence,
                 input_generation,
                 text,
+                end_reason,
                 speaker: Some(Box::new(metadata)),
             },
             speaker_metadata_reason: None,
@@ -610,6 +656,7 @@ pub fn decode_hearing_event(bytes: &[u8]) -> Result<DecodedHearingEvent, Hearing
                 sequence,
                 input_generation,
                 text,
+                end_reason,
                 speaker: None,
             },
             speaker_metadata_reason: Some("metadata.decode"),
@@ -922,6 +969,18 @@ impl HearingEvent {
                 .as_ref()
                 .is_none_or(|metadata| metadata.validation_reason().is_none()),
             HearingEvent::SpeakerIdentification { .. } => true,
+            HearingEvent::Idle {
+                source: event_source,
+                generation,
+            }
+            | HearingEvent::WakeIdleRevoked {
+                source: event_source,
+                generation,
+            } => {
+                source == AudioObservationSource::Microphone
+                    && event_source == &source
+                    && *generation > 0
+            }
             HearingEvent::MicrophoneDevice { .. } => source == AudioObservationSource::Microphone,
             HearingEvent::SpeakerFormat { sample_rate } => {
                 source == AudioObservationSource::Speaker && *sample_rate > 0
@@ -943,6 +1002,7 @@ impl HearingEvent {
             sequence,
             input_generation,
             text,
+            end_reason,
             speaker: Some(metadata),
         } = self
         else {
@@ -956,6 +1016,7 @@ impl HearingEvent {
                 sequence,
                 input_generation,
                 text,
+                end_reason,
                 speaker: None,
             },
             reason,
@@ -965,6 +1026,10 @@ impl HearingEvent {
 
 pub enum HearingCommand {
     Cancel {
+        completed: oneshot::Sender<Result<(), PortError>>,
+    },
+    ArmWakeIdle {
+        generation: u64,
         completed: oneshot::Sender<Result<(), PortError>>,
     },
 }
@@ -1113,6 +1178,20 @@ impl HearingSessionControl {
     }
     pub fn force_cancel(&self) {
         self.force_requested.cancel();
+    }
+
+    pub async fn arm_wake_idle(&self, generation: u64) -> Result<(), PortError> {
+        let (completed, result) = oneshot::channel();
+        self.commands
+            .send(HearingCommand::ArmWakeIdle {
+                generation,
+                completed,
+            })
+            .await
+            .map_err(|_| PortError::Unavailable("聴覚観察は停止しています".to_owned()))?;
+        result.await.map_err(|_| {
+            PortError::Unavailable("無言待機の開始を確認できませんでした".to_owned())
+        })?
     }
 
     pub async fn cancel(&self) -> Result<(), PortError> {

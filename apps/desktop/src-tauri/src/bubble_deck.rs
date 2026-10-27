@@ -182,6 +182,32 @@ impl BubbleState {
         finished || moved
     }
 
+    pub(crate) fn complete_tutorial_guide(&mut self, id: &str, now: Instant) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.record.id == id
+                && entry.record.message_kind == "tutorial"
+                && entry
+                    .record
+                    .interaction
+                    .as_ref()
+                    .is_some_and(|interaction| {
+                        interaction
+                            .actions
+                            .iter()
+                            .any(|action| action.id == crate::tutorial::TUTORIAL_SKIP_ACTION)
+                    })
+        }) else {
+            return false;
+        };
+        entry.record.interaction = None;
+        let changed = self.retire_cards(&[id.to_owned()], now);
+        if changed {
+            self.reconcile_deck(now);
+            self.mark_changed();
+        }
+        changed
+    }
+
     fn return_to_latest_from_history(&mut self, now: Instant) -> bool {
         let Some(active_id) = self.active_id.clone() else {
             return false;

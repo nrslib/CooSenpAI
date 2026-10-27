@@ -1,14 +1,46 @@
 import type { ReactElement } from "react";
 
-import { useI18n } from "../i18n/index.js";
+import { t, useI18n, type Locale } from "../i18n/index.js";
 import type { FormState } from "../settings-form.js";
+import type { AppSnapshot, BubbleDisplaySelection } from "../types.js";
 import { SettingsSearchItem } from "../settings-search.js";
 import type { SettingsCategoryProps } from "./SettingsCategoryProps.js";
 import { QuickActionsEditor } from "./QuickActionsEditor.js";
 import { BooleanInput, NumberInput, SelectInput } from "./SettingsControls.js";
 
+interface BubbleDisplayOption {
+  readonly value: BubbleDisplaySelection;
+  readonly label: string;
+}
+
+export function bubbleDisplayOptions(snapshot: AppSnapshot, selected: BubbleDisplaySelection, locale: Locale): readonly BubbleDisplayOption[] {
+  const options: BubbleDisplayOption[] = [
+    { value: "main", label: t(locale, "settings.notifications.mainScreen") },
+    { value: "cursor", label: t(locale, "settings.notifications.cursorScreen") },
+    { value: "front", label: t(locale, "settings.notifications.frontScreen") },
+  ];
+  const nameCounts = new Map<string, number>();
+  for (const display of snapshot.displays.items) {
+    if (display.name !== "") nameCounts.set(display.name, (nameCounts.get(display.name) ?? 0) + 1);
+  }
+  const selectedUuid = selected.startsWith("display:") ? selected.slice("display:".length) : null;
+  for (const display of snapshot.displays.items) {
+    const id = display.uuid.slice(0, 8);
+    const name = display.name === "" ? t(locale, "settings.notifications.unnamedDisplay", { id }) : display.name;
+    const label = (nameCounts.get(display.name) ?? 0) > 1 ? `${name}（${id}）` : name;
+    const value: BubbleDisplaySelection = selectedUuid?.toLowerCase() === display.uuid.toLowerCase() ? selected : `display:${display.uuid}`;
+    options.push({ value, label });
+  }
+  if (selectedUuid !== null && !snapshot.displays.items.some((display) => display.uuid.toLowerCase() === selectedUuid.toLowerCase())) {
+    const key = snapshot.displays.loadFailed ? "settings.notifications.unknownDisplay" : "settings.notifications.disconnectedDisplay";
+    options.push({ value: selected, label: t(locale, key, { id: selectedUuid.slice(0, 8) }) });
+  }
+  return options;
+}
+
 export function NotificationSettings({ form, snapshot, update, errorFor }: SettingsCategoryProps): ReactElement {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const displayOptions = bubbleDisplayOptions(snapshot, form.bubbleDisplay, locale);
   return <>
     <fieldset id="settings-notification"><legend>{t("settings.notifications.heading")}</legend>
       <SelectInput label={t("settings.notifications.mode")} path="notification.mode" value={form.notificationMode} options={snapshot.signedBuild ? ["bubble", "os", "both"] : ["bubble"]} update={(value) => update("notificationMode", value as FormState["notificationMode"])} />
@@ -16,7 +48,8 @@ export function NotificationSettings({ form, snapshot, update, errorFor }: Setti
         <label><span>{t("settings.notifications.position")}</span><select id="setting-bubble-position" value={form.bubblePosition} onChange={(event) => update("bubblePosition", event.target.value as FormState["bubblePosition"])}><option value="bottom-right">{t("settings.notifications.bottomRight")}</option><option value="top-right">{t("settings.notifications.topRight")}</option><option value="bottom-left">{t("settings.notifications.bottomLeft")}</option><option value="top-left">{t("settings.notifications.topLeft")}</option></select></label>
       </SettingsSearchItem>
       <SettingsSearchItem label={t("settings.notifications.display")} path="bubble.display">
-        <label><span>{t("settings.notifications.display")}</span><select id="setting-bubble-display" value={form.bubbleDisplay} onChange={(event) => update("bubbleDisplay", event.target.value as FormState["bubbleDisplay"])}><option value="main">{t("settings.notifications.mainScreen")}</option><option value="cursor">{t("settings.notifications.cursorScreen")}</option><option value="front">{t("settings.notifications.frontScreen")}</option></select></label>
+        <label><span>{t("settings.notifications.display")}</span><select id="setting-bubble-display" value={form.bubbleDisplay} onChange={(event) => update("bubbleDisplay", event.target.value as FormState["bubbleDisplay"])}>{displayOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        {snapshot.displays.loadFailed ? <p className="field-help" role="alert">{t("settings.notifications.displayLoadFailed")}</p> : null}
       </SettingsSearchItem>
       <SettingsSearchItem label={t("settings.notifications.edgeRecall")} path="bubble.edgeRecall" description={t("settings.notifications.edgeRecallDescription")}>
         <label className="boolean-field"><span>{t("settings.notifications.edgeRecall")}</span><input id="setting-bubble-edgeRecall" type="checkbox" checked={form.bubbleEdgeRecall} onChange={(event) => update("bubbleEdgeRecall", event.target.checked)} /></label>

@@ -218,6 +218,78 @@ impl RuntimeHandle {
         result.await.map_err(|_| RuntimeError::ResponseDropped)?
     }
 
+    pub async fn accept_work_offer(
+        &self,
+        offer_id: String,
+        conversation_generation: u64,
+    ) -> Result<String, RuntimeError> {
+        self.ensure_open()?;
+        if !self.config().work.proactive_offers_enabled {
+            return Err(RuntimeError::Factory("作業の申し出が無効です".to_owned()));
+        }
+        let preparer = self
+            .user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .clone()
+            .ok_or(RuntimeError::CompanionUnavailable)?;
+        let input = {
+            let _turn_commit_guard = self
+                .turn_commit_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            preparer
+                .accept_work_offer(&offer_id, conversation_generation)
+                .map_err(RuntimeError::from)?
+        };
+        let id = input.id.clone();
+        if self
+            .user_tx
+            .send(UserCommand::Enqueue(Box::new(UserQueueCommand {
+                input_id: input.id,
+                response: None,
+            })))
+            .await
+            .is_err()
+            && input.user_seq == 0
+        {
+            return Err(RuntimeError::Closed);
+        }
+        Ok(id)
+    }
+
+    pub async fn decline_work_offer(
+        &self,
+        offer_id: String,
+        conversation_generation: u64,
+    ) -> Result<(), RuntimeError> {
+        self.ensure_open()?;
+        if !self.config().work.proactive_offers_enabled {
+            return Err(RuntimeError::Factory("作業の申し出が無効です".to_owned()));
+        }
+        let preparer = self
+            .user_preparer
+            .read()
+            .map_err(|_| RuntimeError::CompanionUnavailable)?
+            .clone()
+            .ok_or(RuntimeError::CompanionUnavailable)?;
+        {
+            let _turn_commit_guard = self
+                .turn_commit_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            preparer
+                .decline_work_offer(&offer_id, conversation_generation)
+                .map_err(RuntimeError::from)?;
+        }
+        let (response, result) = oneshot::channel();
+        self.user_tx
+            .send(UserCommand::WorkOfferDeclined { response })
+            .await
+            .map_err(|_| RuntimeError::Closed)?;
+        result.await.map_err(|_| RuntimeError::ResponseDropped)?
+    }
+
     pub async fn enqueue_user_message(
         &self,
         message: String,

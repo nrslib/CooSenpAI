@@ -109,6 +109,14 @@ pub struct BubbleSnapshot {
     pub avatar_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_image_png: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offer: Option<coosenpai_core::work::WorkOffer>,
+    #[serde(default)]
+    pub work_offer_operation_generation: u64,
+    #[serde(default)]
+    pub work_offer_busy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offer_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -704,6 +712,10 @@ impl BubbleState {
             position: "bottom-right".to_owned(),
             avatar_color: None,
             avatar_image_png: None,
+            work_offer: None,
+            work_offer_operation_generation: 0,
+            work_offer_busy: false,
+            work_offer_error: None,
         }
     }
 
@@ -833,6 +845,10 @@ pub(crate) enum BubbleMutation {
     Navigate(BubbleDeckDirection),
     Dismiss(String),
     CompleteAction(String),
+    CompleteTutorialGuide {
+        kind: crate::capture::CaptureKind,
+        tutorial_run_id: String,
+    },
     ClearTutorialProgress,
     ClearThoughtBubbles,
     SetMaxStack(usize),

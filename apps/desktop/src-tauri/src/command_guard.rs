@@ -357,6 +357,9 @@ impl CommandFirewall {
                 fences.insert(self.generations.stamp(GenerationResource::Conversation));
                 fences.insert(self.generations.stamp(GenerationResource::Bubble));
             }
+            DesktopCommand::WorkOfferAccept | DesktopCommand::WorkOfferDecline => {
+                fences.insert(self.generations.stamp(GenerationResource::Conversation));
+            }
             DesktopCommand::WorkApprove
             | DesktopCommand::ChatSend
             | DesktopCommand::ChatCancel

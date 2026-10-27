@@ -21,6 +21,10 @@ pub(crate) enum ProgressEvent {
         reply: Reply,
     },
     Guide(TutorialStep),
+    ExternalInputAccepted {
+        kind: crate::capture::CaptureKind,
+        tutorial_run_id: Option<String>,
+    },
     Completed {
         id: u64,
         result: ProgressResult,
@@ -45,6 +49,7 @@ pub(crate) enum ProgressResult {
     Step(Result<Option<TutorialStep>, RuntimeError>),
     Response(Option<TutorialStep>),
     Guide(Result<(String, String), String>),
+    ExternalInputGuide(Result<(), RuntimeError>),
     Cleared {
         cleared: bool,
         cancellation: CancellationToken,
@@ -80,6 +85,10 @@ pub(crate) enum ProgressAction {
         message: String,
     },
     GuideDetails(&'static str),
+    CompleteExternalInputGuide {
+        kind: crate::capture::CaptureKind,
+        tutorial_run_id: Option<String>,
+    },
     Clear,
     Read {
         notice_id: String,

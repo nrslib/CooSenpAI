@@ -1224,6 +1224,7 @@ impl CompanionStorage {
                 target_ids: target_ids.to_vec(),
                 dispatch_seq: None,
                 expected_user_epoch: Some(expected_user_epoch),
+                work_offer: None,
             });
             Ok(true)
         })
@@ -1232,6 +1233,7 @@ impl CompanionStorage {
     pub(crate) fn mark_turn_commit_persisting(
         &self,
         turn_id: &str,
+        work_offer: Option<crate::work::WorkProposal>,
     ) -> Result<(), PersistenceError> {
         self.update_cursor(|cursor| {
             let Some(commit) = cursor.active_turn_commit.as_mut() else {
@@ -1245,6 +1247,7 @@ impl CompanionStorage {
                 ));
             }
             commit.phase = TurnCommitPhase::Persisting;
+            commit.work_offer = work_offer;
             Ok(())
         })
     }
@@ -1430,6 +1433,7 @@ impl CompanionStorage {
                 target_ids: input_ids.to_vec(),
                 dispatch_seq: Some(dispatch_seq),
                 expected_user_epoch: None,
+                work_offer: None,
             });
             Ok(true)
         })
@@ -2485,7 +2489,8 @@ fn validate_active_turn_commit_shape(commit: &ActiveTurnCommit) -> Result<(), Pe
             .any(|id| id.is_empty() || !target_ids.insert(id.as_str()))
         || matches!(commit.kind, TurnCommitKind::User)
             && (commit.dispatch_seq.is_none_or(|seq| seq == 0)
-                || commit.expected_user_epoch.is_some())
+                || commit.expected_user_epoch.is_some()
+                || commit.work_offer.is_some())
         || matches!(commit.kind, TurnCommitKind::Proactive)
             && (commit.expected_user_epoch.is_none() || commit.dispatch_seq.is_some())
     {

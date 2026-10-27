@@ -2,6 +2,7 @@ mod approval;
 mod chat;
 mod execution;
 mod harness;
+mod offer;
 mod roots;
 
 pub use approval::{
@@ -10,6 +11,8 @@ pub use approval::{
 pub use chat::{ChatWorkError, ChatWorkExecutor, WorkBrief, WorkProposal, WorkRequest, WorkResult};
 pub use execution::{execute, WorkExecution, WORK_TIME_LIMIT};
 pub use harness::{build_prompt, harness_arguments, harness_environment, Harness, HarnessLaunch};
+pub(crate) use offer::{accepted_input_id, accepted_message};
+pub use offer::{WorkOffer, WorkOfferStatus, WorkOfferStore};
 pub use roots::{AllowedRoot, RootPolicy, RootStatus, WorkKind};
 
 use serde::{Deserialize, Serialize};
@@ -21,4 +24,6 @@ pub struct WorkConfig {
     pub approval_mode: ApprovalMode,
     #[serde(default)]
     pub allowed_roots: Vec<AllowedRoot>,
+    #[serde(default)]
+    pub proactive_offers_enabled: bool,
 }

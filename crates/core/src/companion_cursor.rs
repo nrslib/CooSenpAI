@@ -96,6 +96,8 @@ pub struct ActiveTurnCommit {
     pub dispatch_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_user_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offer: Option<crate::work::WorkProposal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +217,8 @@ pub struct PendingUserMessage {
     pub response_failure: Option<crate::provider::ProviderFailureSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tutorial_response_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offer_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,6 +378,41 @@ impl PendingUserMessage {
             response_terminal: false,
             response_failure: None,
             tutorial_response_key: entry.tutorial_response_key.clone(),
+            work_offer_id: None,
+        }
+    }
+
+    pub(crate) fn for_work_offer_acceptance(
+        offer: &crate::work::WorkOffer,
+        created_at: String,
+    ) -> Self {
+        Self {
+            id: offer
+                .accepted_input_id
+                .clone()
+                .unwrap_or_else(|| crate::work::accepted_input_id(&offer.id)),
+            conversation_generation: offer.conversation_generation,
+            user_seq: 0,
+            interrupted_input_ids: Vec::new(),
+            created_at,
+            message: crate::work::accepted_message(&offer.proposal),
+            attachment_path: None,
+            attachment_text: None,
+            observations: Vec::new(),
+            judge_feedback_targets: Vec::new(),
+            pending_frames: Vec::new(),
+            hearing_context: Vec::new(),
+            pending_audio: Vec::new(),
+            pending_audio_ids: Vec::new(),
+            observation_in_progress: false,
+            prepared_response: None,
+            response_commit_started: false,
+            attachment_failure: None,
+            response_attempts: 0,
+            response_terminal: false,
+            response_failure: None,
+            tutorial_response_key: None,
+            work_offer_id: Some(offer.id.clone()),
         }
     }
 

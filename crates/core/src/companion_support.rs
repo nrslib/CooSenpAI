@@ -158,6 +158,8 @@ pub(super) fn session_mode(session: &SessionRequest) -> &'static str {
 struct CompanionProviderFields {
     #[serde(default)]
     work_request: Option<crate::work::WorkProposal>,
+    #[serde(default)]
+    work_offer: Option<crate::work::WorkProposal>,
     #[serde(default, deserialize_with = "crate::emotion::optional_delta")]
     emotion_delta: Option<crate::emotion::EmotionDelta>,
     emit: bool,
@@ -191,6 +193,7 @@ impl CompanionProviderFields {
     fn into_response(self, thought: Option<String>) -> CompanionResponse {
         CompanionResponse {
             work_request: self.work_request,
+            work_offer: self.work_offer,
             emotion_delta: self.emotion_delta,
             emit: self.emit,
             message: self.message,
@@ -241,6 +244,18 @@ pub(super) fn parse_response(
     {
         return Err(CompanionError::Output);
     }
+    if response.work_offer.as_ref().is_some_and(|offer| {
+        user_response
+            || !response.emit
+            || response
+                .message
+                .as_deref()
+                .is_none_or(|message| message.trim().is_empty())
+            || offer.cwd.trim().is_empty()
+            || offer.summary.trim().is_empty()
+    }) {
+        return Err(CompanionError::Output);
+    }
     Ok(response)
 }
 
@@ -261,6 +276,7 @@ pub(super) fn require_user_message(response: &CompanionResponse) -> Result<Strin
 pub(crate) fn silent_response() -> CompanionResponse {
     CompanionResponse {
         work_request: None,
+        work_offer: None,
         emotion_delta: None,
         emit: false,
         message: None,

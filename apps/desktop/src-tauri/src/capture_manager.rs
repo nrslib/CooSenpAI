@@ -9,6 +9,9 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
+#[path = "capture_wake.rs"]
+mod wake;
+
 pub(crate) type CaptureFuture<T> =
     Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'static>>;
 
@@ -462,6 +465,13 @@ pub(crate) struct CapturePresenter {
     voice_focus: bool,
     voice_draft_generation: Option<u64>,
     voice_interrupts: Vec<oneshot::Sender<Result<(), String>>>,
+    pending_voice_start: Option<(
+        crate::speech::SpeechSource,
+        oneshot::Sender<Result<u64, String>>,
+    )>,
+    pending_wake: Option<wake::WakeSession>,
+    wake: Option<wake::WakeSession>,
+    wake_consumed: std::collections::VecDeque<crate::ui_events::WakeIdentity>,
     closing: bool,
     view: Option<watch::Sender<CaptureView>>,
 }
@@ -494,6 +504,35 @@ pub(crate) fn channel(ui: crate::ui_root::UiHandle) -> (CaptureHandle, CapturePr
 }
 
 impl CapturePresenter {
+    fn begin_voice(&mut self, action: crate::ui_events::VoiceAction, reply: VoiceControlReply) {
+        let crate::ui_events::VoiceAction::Start(source) = action else {
+            unreachable!()
+        };
+        self.generation += 1;
+        self.draft.clear();
+        self.send_error = None;
+        self.voice_draft_generation = None;
+        self.edit_revision = 0;
+        self.voice_focus = false;
+        if matches!(
+            source,
+            crate::speech::SpeechSource::Shortcut | crate::speech::SpeechSource::Wake
+        ) {
+            self.present(UiView::SpeechPopup, PresentationEvent::Open(()));
+        }
+        if source == crate::speech::SpeechSource::Shortcut {
+            self.effects.push(UiEffect::Activation(
+                crate::activation_policy::ActivationInput::SpeechStarted(self.generation),
+            ));
+        }
+        self.set_state(CaptureState::Voice {
+            generation: self.generation,
+            speech_generation: None,
+            phase: CapturePhase::Selecting,
+        });
+        self.start_voice_control(action, reply);
+    }
+
     fn start_voice_control(
         &mut self,
         action: crate::ui_events::VoiceAction,
@@ -518,6 +557,23 @@ impl CapturePresenter {
         });
     }
 
+    fn end_voice_session(&mut self) {
+        self.wake = None;
+        self.voice_snapshot = None;
+        self.pending_transcript = None;
+        self.pending_voice_finish = None;
+        self.draft.clear();
+        self.send_error = None;
+        self.present(UiView::SpeechPopup, PresentationEvent::Hide);
+        self.effects.push(UiEffect::Activation(
+            crate::activation_policy::ActivationInput::SpeechClosed {
+                generation: self.generation,
+                restore: self.voice_focus,
+            },
+        ));
+        self.set_state(CaptureState::Idle);
+    }
+
     fn finish_voice_control(&mut self, result: Result<CaptureResult, String>) {
         use crate::ui_events::VoiceAction;
         if self.voice_send.is_some()
@@ -530,6 +586,14 @@ impl CapturePresenter {
             return;
         }
         let control = self.voice_control.take().expect("voice control completion");
+        let finish_observed_idle = control.action == VoiceAction::Finish
+            && matches!(
+                self.state,
+                CaptureState::Voice {
+                    phase: CapturePhase::Idle,
+                    ..
+                }
+            );
         if matches!(control.action, VoiceAction::Start(_)) {
             if let Err(error) = result {
                 if let VoiceControlReply::User(reply) = control.reply {
@@ -563,19 +627,27 @@ impl CapturePresenter {
             }
             Ok(CaptureResult::Done) => {
                 if control.action == VoiceAction::Cancel {
-                    self.voice_snapshot = None;
-                    self.pending_transcript = None;
-                    self.pending_voice_finish = None;
-                    self.draft.clear();
-                    self.send_error = None;
-                    self.set_state(CaptureState::Idle);
+                    self.end_voice_session();
                 }
                 Ok(self.generation)
             }
             Ok(_) => Err("音声操作の応答形式が一致しません".to_owned()),
             Err(error) => Err(error),
         };
-        if !self.voice_interrupts.is_empty() || self.closing {
+        if finish_observed_idle {
+            self.end_voice_session();
+        }
+        if let Some((source, reply)) = self.pending_voice_start.take() {
+            if matches!(self.state, CaptureState::Idle) {
+                self.begin_voice(
+                    crate::ui_events::VoiceAction::Start(source),
+                    VoiceControlReply::User(reply),
+                );
+            } else {
+                self.pending_voice_start = Some((source, reply));
+                self.start_voice_control(VoiceAction::Cancel, VoiceControlReply::Internal);
+            }
+        } else if !self.voice_interrupts.is_empty() || self.closing {
             if matches!(self.state, CaptureState::Idle) || control.action == VoiceAction::Cancel {
                 for reply in self.voice_interrupts.drain(..) {
                     let _ = reply.send(result.clone().map(|_| ()));
@@ -948,8 +1020,8 @@ impl CapturePresenter {
                     speech_generation: Some(current),
                     ..
                 } if current == generation => {
-                    return crate::ui_events::Handling::Bubble(crate::ui_events::UiEvent::Voice(
-                        crate::ui_events::VoiceAction::Finish,
+                    return crate::ui_events::Handling::Bubble(Box::new(
+                        crate::ui_events::UiEvent::Voice(crate::ui_events::VoiceAction::Finish),
                     ))
                 }
                 CaptureState::Voice {
@@ -961,8 +1033,8 @@ impl CapturePresenter {
             CaptureEvent::VoiceCancel { generation } => {
                 if matches!(self.state, CaptureState::Voice { speech_generation: Some(current), .. } if current == generation)
                 {
-                    return crate::ui_events::Handling::Bubble(crate::ui_events::UiEvent::Voice(
-                        crate::ui_events::VoiceAction::Cancel,
+                    return crate::ui_events::Handling::Bubble(Box::new(
+                        crate::ui_events::UiEvent::Voice(crate::ui_events::VoiceAction::Cancel),
                     ));
                 }
             }
@@ -987,9 +1059,9 @@ impl CapturePresenter {
                     && input.key_code != 229
                 {
                     if input.key == "Escape" {
-                        return crate::ui_events::Handling::Bubble(
+                        return crate::ui_events::Handling::Bubble(Box::new(
                             crate::ui_events::UiEvent::Voice(crate::ui_events::VoiceAction::Cancel),
-                        );
+                        ));
                     }
                     if input.key == "Enter" && !input.shift_key {
                         let (reply, _) = oneshot::channel();
@@ -1034,11 +1106,6 @@ impl CapturePresenter {
                     }
                     if !cancelled {
                         self.present_voice();
-                    }
-                    if !cancelled {
-                        return crate::ui_events::Handling::Bubble(
-                            crate::ui_events::UiEvent::OpenMain,
-                        );
                     }
                 }
             }
@@ -1112,9 +1179,9 @@ impl CapturePresenter {
                         speech_generation: Some(current),
                         ..
                     } if current == generation => {
-                        return crate::ui_events::Handling::Bubble(
+                        return crate::ui_events::Handling::Bubble(Box::new(
                             crate::ui_events::UiEvent::SpeechTranscript { generation, text },
-                        )
+                        ))
                     }
                     CaptureState::Voice {
                         speech_generation: None,
@@ -1123,10 +1190,46 @@ impl CapturePresenter {
                     _ => self.log("capture: event=SpeechTranscript ignored=true reason=stale"),
                 }
             }
+            CaptureEvent::Ui(crate::ui_events::UiEvent::WakeRecognizing {
+                identity,
+                display_name,
+                text,
+                reply,
+            }) => {
+                self.wake_recognizing(identity, display_name, text, reply);
+            }
+            CaptureEvent::Ui(crate::ui_events::UiEvent::WakeStart { identity, accepted }) => {
+                if self.wake_start(identity, accepted) {
+                    return crate::ui_events::Handling::Bubble(Box::new(UiEvent::Voice(
+                        crate::ui_events::VoiceAction::Start(crate::speech::SpeechSource::Wake),
+                    )));
+                }
+            }
+            CaptureEvent::Ui(crate::ui_events::UiEvent::WakeFinal {
+                identity,
+                display_name,
+                text,
+                locale,
+                end_reason,
+                reply,
+            }) => self.wake_final(identity, display_name, text, locale, end_reason, reply),
+            CaptureEvent::Ui(crate::ui_events::UiEvent::WakeIdle(identity))
+            | CaptureEvent::Ui(crate::ui_events::UiEvent::WakeIdleFailed(identity)) => {
+                self.wake_idle(identity)
+            }
             CaptureEvent::Ui(crate::ui_events::UiEvent::CaptureCancel { generation, source }) => {
                 self.transition(CaptureEvent::PopupCancel { generation, source });
             }
             CaptureEvent::Ui(crate::ui_events::UiEvent::SnapshotUpdated(snapshot)) => {
+                if self.wake_display_name().is_some_and(|display_name| {
+                    !snapshot.config.audio.enabled
+                        || !snapshot.config.audio.mic
+                        || !snapshot.config.audio.wake_enabled
+                        || display_name != snapshot.companion_display_name
+                        || matches!(snapshot.audio.phase.as_str(), "off" | "stopping" | "error")
+                }) {
+                    self.cancel_wake();
+                }
                 if let Some(current) = &self.popup_snapshot {
                     let mut popup = (**current).clone();
                     popup.revision = snapshot.revision;
@@ -1167,7 +1270,9 @@ impl CapturePresenter {
                 self.voice_ready = true;
                 self.present_voice();
             }
-            CaptureEvent::Ui(event) => return crate::ui_events::Handling::Bubble(event),
+            CaptureEvent::Ui(event) => {
+                return crate::ui_events::Handling::Bubble(Box::new(event));
+            }
             event => self.transition(event),
         }
         crate::ui_events::Handling::Handled(Vec::new())
@@ -1198,6 +1303,10 @@ impl CapturePresenter {
             voice_focus: false,
             voice_draft_generation: None,
             voice_interrupts: Vec::new(),
+            pending_voice_start: None,
+            pending_wake: None,
+            wake: None,
+            wake_consumed: std::collections::VecDeque::new(),
             closing: false,
             view: Some(view),
         }
@@ -1330,7 +1439,6 @@ impl CapturePresenter {
                 content,
                 sent,
                 reply,
-                open_main: sent && !self.closing,
             },
         });
     }
@@ -1378,7 +1486,6 @@ impl CapturePresenter {
                 content,
                 sent,
                 reply,
-                open_main,
             } => {
                 if generation != self.generation {
                     return;
@@ -1413,9 +1520,6 @@ impl CapturePresenter {
                                 kind,
                                 generation: self.generation,
                             });
-                        }
-                        if open_main {
-                            self.bubble(UiEvent::OpenMain);
                         }
                     }
                     Err(error) => {
@@ -1468,7 +1572,7 @@ impl CapturePresenter {
             Handling::Handled(_) => Handling::Handled(std::mem::take(&mut self.effects)),
             Handling::Bubble(event) if self.effects.is_empty() => Handling::Bubble(event),
             Handling::Bubble(event) => {
-                self.bubble(event);
+                self.bubble(*event);
                 Handling::Handled(std::mem::take(&mut self.effects))
             }
         }
@@ -1488,6 +1592,18 @@ impl CapturePresenter {
         let from = self.state.view().phase;
         let previous = self.state.view();
         let label = event.label();
+        if matches!(
+            &event,
+            CaptureEvent::Voice {
+                action: crate::ui_events::VoiceAction::Cancel,
+                ..
+            } | CaptureEvent::Interrupt {
+                selection_only: false,
+                ..
+            } | CaptureEvent::Shutdown
+        ) {
+            self.invalidate_wake();
+        }
         let current = std::mem::replace(&mut self.state, CaptureState::Idle);
         let mut ignored = false;
         match (current, event) {
@@ -1531,8 +1647,7 @@ impl CapturePresenter {
                 }
                 self.voice_snapshot = Some(snapshot);
                 if phase == CapturePhase::Idle && self.voice_control.is_none() {
-                    self.present(UiView::SpeechPopup, PresentationEvent::Hide);
-                    self.set_state(CaptureState::Idle);
+                    self.end_voice_session();
                 } else {
                     self.set_state(CaptureState::Voice {
                         generation,
@@ -1540,6 +1655,7 @@ impl CapturePresenter {
                         phase,
                     });
                     self.present_voice();
+                    self.flush_wake_input();
                 }
             }
             (
@@ -1555,6 +1671,71 @@ impl CapturePresenter {
                 self.edit_revision = edit_revision;
                 self.send_error = None;
                 self.render_input();
+            }
+            (
+                current @ CaptureState::Voice { .. },
+                CaptureEvent::Voice {
+                    action: crate::ui_events::VoiceAction::Start(crate::speech::SpeechSource::Wake),
+                    reply,
+                },
+            ) => {
+                self.set_state(current);
+                ignored = true;
+                let _ = reply.send(Err(
+                    "別の音声入力を終了してから呼びかけを開始してください".to_owned()
+                ));
+            }
+            (
+                current @ CaptureState::Voice { generation, .. },
+                CaptureEvent::Voice {
+                    action: crate::ui_events::VoiceAction::Finish,
+                    reply,
+                },
+            ) if self.wake.is_some() => {
+                self.set_state(current);
+                ignored = true;
+                let _ = reply.send(Ok(generation));
+            }
+            (
+                current @ CaptureState::Voice { .. },
+                CaptureEvent::Voice {
+                    action: crate::ui_events::VoiceAction::Start(source),
+                    reply,
+                },
+            ) if self.wake.is_some() => {
+                if self
+                    .voice_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.speech.phase == "sending")
+                {
+                    self.set_state(current);
+                    let _ = reply.send(Err("音声入力の送信完了後に開始してください".into()));
+                } else {
+                    self.set_state(current);
+                    self.invalidate_wake();
+                    self.pending_voice_start = Some((source, reply));
+                    if let Some(control) = &self.voice_control {
+                        if control.action != crate::ui_events::VoiceAction::Cancel {
+                            control.cancellation.cancel();
+                        }
+                    } else {
+                        self.start_voice_control(
+                            crate::ui_events::VoiceAction::Cancel,
+                            VoiceControlReply::Internal,
+                        );
+                    }
+                }
+            }
+            (
+                current @ CaptureState::Voice { .. },
+                CaptureEvent::Voice {
+                    action: crate::ui_events::VoiceAction::Start(_),
+                    reply,
+                },
+            ) if self.pending_voice_start.is_some() => {
+                self.set_state(current);
+                ignored = true;
+                let _ = reply.send(Err("音声入力の切替完了後に開始してください".into()));
             }
             (
                 current @ CaptureState::Voice { generation, .. },
@@ -1573,25 +1754,22 @@ impl CapturePresenter {
             (
                 CaptureState::Idle,
                 CaptureEvent::Voice {
-                    action: action @ crate::ui_events::VoiceAction::Start(source),
+                    action: crate::ui_events::VoiceAction::Start(crate::speech::SpeechSource::Wake),
+                    reply,
+                },
+            ) if self.wake.as_ref().is_some_and(|wake| wake.cancelled) => {
+                self.wake = None;
+                ignored = true;
+                let _ = reply.send(Err("呼びかけは開始前に取り消されました".to_owned()));
+            }
+            (
+                CaptureState::Idle,
+                CaptureEvent::Voice {
+                    action: action @ crate::ui_events::VoiceAction::Start(_),
                     reply,
                 },
             ) => {
-                self.generation += 1;
-                self.draft.clear();
-                self.send_error = None;
-                self.voice_draft_generation = None;
-                self.edit_revision = 0;
-                self.voice_focus = false;
-                if source == crate::speech::SpeechSource::Shortcut {
-                    self.present(UiView::SpeechPopup, PresentationEvent::Open(()));
-                }
-                self.set_state(CaptureState::Voice {
-                    generation: self.generation,
-                    speech_generation: None,
-                    phase: CapturePhase::Selecting,
-                });
-                self.start_voice_control(action, VoiceControlReply::User(reply));
+                self.begin_voice(action, VoiceControlReply::User(reply));
             }
             (current @ CaptureState::Voice { .. }, CaptureEvent::Voice { action, reply })
                 if self.voice_control.is_none() =>
@@ -1854,7 +2032,6 @@ impl CapturePresenter {
                     });
                     self.render_input();
                     let _ = operation.reply.send(result);
-                    self.bubble(UiEvent::OpenMain);
                 }
             }
             (current @ CaptureState::Selecting { .. }, CaptureEvent::Interrupt { reply, .. }) => {

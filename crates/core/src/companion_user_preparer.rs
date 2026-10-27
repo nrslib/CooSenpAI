@@ -10,6 +10,52 @@ use crate::provider::ProviderMidTurnInput;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+pub(crate) fn persist_accepted_work_offer_input(
+    storage: &CompanionStorage,
+    store: &crate::work::WorkOfferStore,
+    offer: &crate::work::WorkOffer,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<PendingUserMessage, CompanionError> {
+    let input_id = offer
+        .accepted_input_id
+        .clone()
+        .unwrap_or_else(|| crate::work::accepted_input_id(&offer.id));
+    let existing = storage
+        .load_all_conversation()?
+        .into_iter()
+        .find(|entry| entry.id == input_id);
+    let created_at = existing.as_ref().map_or_else(
+        || now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        |entry| entry.created_at.clone(),
+    );
+    let input = PendingUserMessage::for_work_offer_acceptance(offer, created_at);
+    let expected_entry = input.conversation_entry();
+    if existing.is_some_and(|entry| entry != expected_entry) {
+        return Err(PersistenceError::Invalid(
+            "受諾ユーザー入力の ID が別の内容に使われています".into(),
+        )
+        .into());
+    }
+    if storage.append_conversation_once_at(&expected_entry, now)? {
+        storage.record_stagnation_reaction_at(now);
+    }
+    let enqueued = storage.enqueue_user_input(input)?;
+    if enqueued.message != expected_entry.message
+        || enqueued.work_offer_id.as_deref() != Some(offer.id.as_str())
+        || enqueued.conversation_generation != offer.conversation_generation
+    {
+        return Err(
+            PersistenceError::Invalid("受諾ユーザー入力の永続内容が一致しません".into()).into(),
+        );
+    }
+    store.reconcile_user_epoch(
+        offer.conversation_generation,
+        storage.load_cursor()?.user_epoch,
+    )?;
+    store.complete_acceptance_enqueue(&offer.id, &enqueued.id)?;
+    Ok(enqueued)
+}
+
 impl UserMessagePreparer {
     pub(crate) fn cancelled_message_status(
         &self,
@@ -37,6 +83,59 @@ impl UserMessagePreparer {
 
     pub(crate) fn owns_user_queue(&self) -> bool {
         self.delivery_ownership == DeliveryOwnership::Owner
+    }
+
+    fn work_offer_action_parts(
+        &self,
+    ) -> Result<(&CompanionStorage, &crate::work::WorkOfferStore), CompanionError> {
+        if !self.work_offers_eligible || !self.uses_persistent_queue() {
+            return Err(PersistenceError::Invalid(
+                "現在の設定では作業の申し出へ応答できません".into(),
+            )
+            .into());
+        }
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            PersistenceError::Invalid("作業の申し出の storage がありません".into())
+        })?;
+        let store = self
+            .work_offer_store
+            .as_ref()
+            .ok_or_else(|| PersistenceError::Invalid("作業の申し出の store がありません".into()))?;
+        let onboarding =
+            crate::onboarding::OnboardingStore::new(storage.config_paths()?.onboarding)
+                .load()
+                .map_err(|error| PersistenceError::Invalid(error.to_string()))?;
+        if onboarding.tutorial_active() {
+            return Err(PersistenceError::Invalid(
+                "チュートリアル中は作業の申し出へ応答できません".into(),
+            )
+            .into());
+        }
+        Ok((storage, store))
+    }
+
+    pub(crate) fn accept_work_offer(
+        &self,
+        offer_id: &str,
+        conversation_generation: u64,
+    ) -> Result<PendingUserMessage, CompanionError> {
+        let (storage, store) = self.work_offer_action_parts()?;
+        let _generation_guard =
+            crate::conversation_archive::acquire_conversation_reset_lock(&storage.config_paths()?)?;
+        let offer = store.accept(offer_id, conversation_generation)?;
+        persist_accepted_work_offer_input(storage, store, &offer, self.clock.now())
+    }
+
+    pub(crate) fn decline_work_offer(
+        &self,
+        offer_id: &str,
+        conversation_generation: u64,
+    ) -> Result<(), CompanionError> {
+        let (storage, store) = self.work_offer_action_parts()?;
+        let _generation_guard =
+            crate::conversation_archive::acquire_conversation_reset_lock(&storage.config_paths()?)?;
+        store.decline(offer_id, conversation_generation)?;
+        Ok(())
     }
 
     fn enqueue_runtime_input(&self, input: PendingUserMessage) {
@@ -272,6 +371,7 @@ impl UserMessagePreparer {
             response_terminal: false,
             response_failure: None,
             tutorial_response_key,
+            work_offer_id: None,
         };
         if let Some(storage) = &self.storage {
             let appended = storage.append_conversation_once_at(&input.conversation_entry(), now)?;
@@ -280,6 +380,19 @@ impl UserMessagePreparer {
             }
             if self.delivery_ownership == DeliveryOwnership::Owner {
                 input = storage.enqueue_user_input(input.clone())?;
+            }
+            if let Some(store) = &self.work_offer_store {
+                if input.tutorial_response_key.is_some() {
+                    store.invalidate_current(input.conversation_generation)?;
+                }
+                if self.delivery_ownership == DeliveryOwnership::Owner {
+                    store.reconcile_user_epoch(
+                        input.conversation_generation,
+                        storage.load_cursor()?.user_epoch,
+                    )?;
+                } else {
+                    store.note_user_input(input.conversation_generation)?;
+                }
             }
         } else if persist_runtime_queue {
             self.enqueue_runtime_input(input.clone());

@@ -91,6 +91,9 @@ export const ja = {
     "manual": "通常：必要な許可を自分で確認する",
     "auto": "Auto mode：AIに承認の審査を任せる",
     "help": "Auto modeでも調査（読むだけ）と作業（編集・実行あり）を別々に審査します。許可ルートの外や判断できない場合はCooが確認します。承認依頼からも切り替えられます。AI審査には依頼内容、作業ディレクトリ、直近のユーザー発言（最大4件）をClaudeに送信します。",
+    "proactiveOffers": "Cooからの作業提案を有効にする",
+    "proactiveOffersSearch": "自発 提案 作業 proactiveOffersEnabled",
+    "proactiveOffersHelp": "会話や画面の内容から、次にできる作業をCooが提案します。提案を選ぶまでは操作を実行しません。",
     "scope": "作業は会話用のprovider（Claude CodeまたはCodex）が作業ディレクトリの中で実行します。対象はCooが会話から決め、実行前に承認カードで確認します。~/.ssh、~/.aws、~/.gnupg、~/Library/Keychains、~/.config/gh は常に対象外です。",
     "roots": "許可ルート",
     "rootsSearch": "許可 ディレクトリ 読み取り 書き込み allowedRoots",
@@ -118,7 +121,15 @@ export const ja = {
     "deny": "拒否",
     "switchAuto": "Auto modeに切り替えてAIに審査を任せる",
     "switchManual": "通常モードに戻す",
-    "saved": "モードの変更は設定画面にも保存され、以後の作業に適用されます。"
+    "saved": "モードの変更は設定画面にも保存され、以後の作業に適用されます。",
+    "offer": {
+      "label": "Cooからの申し出",
+      "cwd": "作業フォルダ",
+      "summary": "何をするか",
+      "explanation": "Yesは申し出の受諾です。実行前に別の承認確認があります。",
+      "yes": "Yes",
+      "no": "No"
+    }
 },
   motions: {
     "slots": {
@@ -238,6 +249,7 @@ export const ja = {
     title: "{name} に話しかける",
     transcriptLabel: "文字起こしを確認",
     listening: "聞いています…",
+    wakeListening: "Hey {name} で聞き取り中",
   },
   composer: {
     stopSpeech: "音声入力を停止",
@@ -1132,6 +1144,8 @@ export const ja = {
       unknownOutput: "接続状態が不明（{id}）",
       microphoneCommands: "マイクからCooへの指示を受け付ける",
       microphoneCommandsHelp: "Hearingが拾ったCooへの明確な依頼をチャットに追加します。入力欄の音声入力とは別の設定です。操作の承認は通常のチャットと同じです。初期値はOFFです。",
+      wake: "Hey {name} で音声入力を開始",
+      wakeHelp: "Hearing とマイクの両方がオンのときだけ動きます。「Hey {name}」と呼びかけると聞き取りを始め、話し終えると確認せずに送信します。名前だけでは開始しません。ショートカットや入力欄のマイクで使う送信前の確認設定は変わりません。初期値はOFFです。",
       speakerIdentification: "話者を識別する",
       help: "Hearing AI が ON の間だけ取得します（切り替えはメイン画面の Hearing ボタン）。確定した文字を Hearing AI がまとめて観察し、結果を Coo へ渡します。生音声は保存しません。",
       speakerIdentificationHelp: "話者側の音声を端末内のモデルで照合し、登録時にランダム生成して保存した UUID を付けます。既定はオンです。音声と埋め込みは外部へ送信せず、モデルが見つからない場合は理由をログに記録して機能を無効にします。",
@@ -1191,6 +1205,10 @@ export const ja = {
       mainScreen: "メイン画面",
       cursorScreen: "マウスカーソルのある画面",
       frontScreen: "前面ウィンドウのある画面",
+      unnamedDisplay: "ディスプレイ（{id}）",
+      disconnectedDisplay: "未接続のディスプレイ（{id}）",
+      unknownDisplay: "接続状態が不明（{id}）",
+      displayLoadFailed: "ディスプレイ一覧を取得できませんでした。接続状態は不明です。",
       edgeRecall: "画面端で吹き出しを再表示する",
       edgeRecallDescription: "吹き出しが消えた後、表示位置の画面端にマウスを0.5秒以上置くと最新のCooの発言を再表示します。",
       thoughtBubble: "思考フキダシを表示する",

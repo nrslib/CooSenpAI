@@ -3,13 +3,14 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from "rea
 import { ConversationFeedback } from "./ConversationFeedback.js";
 import { ConversationProgress } from "./ConversationProgress.js";
 import { WorkApproval } from "./WorkApproval.js";
+import { pendingWorkOfferForEntry, WorkOffer } from "./WorkOffer.js";
 import { Composer } from "./Composer.js";
 import { renderUiText } from "../app-view.js";
 import { desktopApi } from "../ipc.js";
 import { AttachmentImage } from "./AttachmentImage.js";
 import { DebugDrawer } from "./DebugDrawer.js";
 import type { ComposerView, ConversationView, ConversationAction } from "../composer-view.js";
-import type { AppSnapshot, DebugDetail } from "../types.js";
+import type { AppSnapshot, DebugDetail, WorkOfferProjection } from "../types.js";
 import { attachmentFailureState, attachmentTextView, conversationDate, findDebugDetail, formatTime, unreadBoundaryIndex } from "../view-model.js";
 import { t, useI18n } from "../i18n/index.js";
 
@@ -23,12 +24,15 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
   const { locale, t } = useI18n();
   const [composer, setComposer] = useState<ComposerView>();
   const [view, setView] = useState<ConversationView>();
+  const [workOfferView, setWorkOfferView] = useState<WorkOfferProjection>({ revision: snapshot.revision, offer: snapshot.workOffer, operationGeneration: 0, busy: false });
   const [detail, setDetail] = useState<DebugDetail>();
   const listRef = useRef<HTMLDivElement>(null);
   const programmaticScroll = useRef(false);
   const previousScrollTop = useRef(0);
   const entryElements = useRef(new Map<string, HTMLDivElement>());
   const selectedId = view?.selectedId;
+  const currentWorkOffer = workOfferView.revision >= snapshot.revision ? workOfferView.offer : snapshot.workOffer;
+  const workOffer = currentWorkOffer?.conversationGeneration === snapshot.selectedConversationGeneration ? currentWorkOffer : undefined;
   const visibleConversation = snapshot.conversation.filter((entry) => !isResponseFailureHistoryEntry(entry));
   const newestEntryId = visibleConversation.at(-1)?.id;
   const unreadIndex = unreadBoundaryIndex(visibleConversation, snapshot.unreadCount);
@@ -42,7 +46,8 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
   useEffect(() => {
     const composer = desktopApi.subscribeComposerView(setComposer);
     const conversation = desktopApi.subscribeConversationView(setView);
-    void Promise.all([composer.ready, conversation.ready]).then(() => desktopApi.conversationInput({ type: "mounted" }));
+    const workOffer = desktopApi.subscribeWorkOfferView((next) => setWorkOfferView((current) => next.revision >= current.revision ? next : current));
+    void Promise.all([composer.ready, conversation.ready, workOffer.ready]).then(() => desktopApi.conversationInput({ type: "mounted" }));
     const opened = () => { void desktopApi.conversationInput({ type: "opened" }); };
     const escape = (event: KeyboardEvent) => {
       if (event.key === "Escape") void desktopApi.conversationInput({ type: "escape", composing: event.isComposing, keyCode: event.keyCode });
@@ -50,7 +55,7 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
     window.addEventListener("focus", opened);
     document.addEventListener("visibilitychange", opened);
     window.addEventListener("keydown", escape);
-    return () => { composer.dispose(); conversation.dispose(); window.removeEventListener("focus", opened); document.removeEventListener("visibilitychange", opened); window.removeEventListener("keydown", escape); };
+    return () => { composer.dispose(); conversation.dispose(); workOffer.dispose(); window.removeEventListener("focus", opened); document.removeEventListener("visibilitychange", opened); window.removeEventListener("keydown", escape); };
   }, []);
   useEffect(() => {
     if (view === undefined) return;
@@ -69,7 +74,7 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
   }, [view?.scrollRequest]);
   useEffect(() => {
     void desktopApi.conversationInput({ type: "layout" });
-  }, [newestEntryId]);
+  }, [newestEntryId, workOffer?.id]);
 
   return <><section className="conversation" aria-label={t("conversation.label")}>
     <div
@@ -86,6 +91,7 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
       {visibleConversation.length === 0 ? <div className="conversation-empty"><p>{t("conversation.empty")}</p><span>{t("conversation.emptyPrompt", { name: snapshot.companionDisplayName })}</span></div> : null}
       {visibleConversation.map((entry, index) => {
         const feedback = view?.feedback[entry.id];
+        const entryWorkOffer = pendingWorkOfferForEntry(workOffer, entry.id);
         const responseFailure = view?.actions[entry.id]?.failure;
         const previous = visibleConversation[index - 1];
         const showDate = previous === undefined || conversationDate(previous.createdAt, locale) !== conversationDate(entry.createdAt, locale);
@@ -128,6 +134,7 @@ export function Conversation({ snapshot, onInputActive, onRead }: Props): ReactE
                 ? <button className="detail-link" type="button" onClick={() => setDetail(entryDetail)}>{t("conversation.details")}</button>
                 : null}
             </div>
+            {entryWorkOffer === undefined ? null : <WorkOffer offer={entryWorkOffer} operationGeneration={workOfferView.operationGeneration} busy={workOfferView.busy} error={workOfferView.error} />}
             {responseFailure !== undefined
               ? <div className="message-state" role="alert">{renderUiText(responseFailure, t)}<button type="button" disabled={!view?.actions[entry.id]?.cancel} onClick={() => action(entry.id, "cancel")}>{t("conversation.cancel")}</button><button type="button" disabled={!view?.actions[entry.id]?.retry} onClick={() => action(entry.id, "retry")}>{t("common.retry")}</button></div>
               : entry.role === "user" && attachmentState !== undefined

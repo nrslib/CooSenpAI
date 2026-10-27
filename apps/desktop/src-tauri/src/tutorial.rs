@@ -100,6 +100,28 @@ pub(crate) fn tutorial_step_for_guide_key(key: &str) -> Option<TutorialStep> {
     }
 }
 
+pub(crate) fn current_external_input_guide_id(
+    state: &OnboardingState,
+    kind: crate::capture::CaptureKind,
+    accepted_run_id: &str,
+) -> Option<String> {
+    let (step, key) = match kind {
+        crate::capture::CaptureKind::Text => (TutorialStep::Text, "text-intro"),
+        crate::capture::CaptureKind::Image => (TutorialStep::Image, "image-intro"),
+        crate::capture::CaptureKind::Voice => (TutorialStep::Voice, "voice-intro"),
+    };
+    if state.current_step() != Some(step)
+        || state.tutorial.run_id.as_deref() != Some(accepted_run_id)
+    {
+        return None;
+    }
+    Some(
+        state
+            .tutorial_notice_id(key)
+            .expect("a current tutorial run has an ID"),
+    )
+}
+
 pub struct TutorialController {
     store: OnboardingStore,
     state: OnboardingState,

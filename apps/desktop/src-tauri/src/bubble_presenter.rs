@@ -28,6 +28,7 @@ pub(crate) struct BubblePresenter {
     delivery_log: notification::BubbleDeliveryLogState,
     presentation: crate::presentation::Presentation,
     snapshot: Option<std::sync::Arc<crate::bubbles::BubbleSnapshot>>,
+    work_offer: crate::work_offer_presenter::WorkOfferProjection,
     display: String,
     typing_epoch: u64,
     typing: Option<(String, usize, usize)>,
@@ -59,6 +60,13 @@ impl BubblePresenter {
             config,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn initialize_work_offer(
+        &mut self,
+        projection: crate::work_offer_presenter::WorkOfferProjection,
+    ) {
+        self.work_offer = projection;
     }
 
     pub(crate) fn initialize(&mut self, snapshot: &crate::snapshot::AppSnapshot) {
@@ -372,6 +380,23 @@ impl BubblePresenter {
                 let appearance = matches!(mutation, BubbleMutation::Preview(_));
                 let conversation_generation_mutation =
                     matches!(mutation, BubbleMutation::ConversationGeneration(_));
+                let tutorial_guide_id = match &mutation {
+                    BubbleMutation::CompleteTutorialGuide {
+                        kind,
+                        tutorial_run_id,
+                    } => {
+                        let mut id = None;
+                        if let Some(tutorial) = &self.tutorial {
+                            id = crate::tutorial::current_external_input_guide_id(
+                                tutorial.lock().await.state(),
+                                *kind,
+                                tutorial_run_id,
+                            );
+                        }
+                        id
+                    }
+                    _ => None,
+                };
                 let (changed, conversation_generation) = {
                     let mut model = self.model.lock().await;
                     let changed = match mutation {
@@ -390,6 +415,9 @@ impl BubblePresenter {
                         }
                         BubbleMutation::Dismiss(id) => model.dismiss(&id),
                         BubbleMutation::CompleteAction(id) => model.complete_action(&id),
+                        BubbleMutation::CompleteTutorialGuide { .. } => tutorial_guide_id
+                            .as_ref()
+                            .is_some_and(|id| model.complete_tutorial_guide(id, Instant::now())),
                         BubbleMutation::ClearTutorialProgress => model.clear_tutorial_progress(),
                         BubbleMutation::ClearThoughtBubbles => model.clear_thought_bubbles(),
                         BubbleMutation::SetMaxStack(max_stack) => model.set_max_stack(max_stack),
@@ -427,9 +455,17 @@ impl BubblePresenter {
                 target,
                 context,
                 reply,
+                external_input_ids,
             } => {
                 let (plan, mut effects) = self
-                    .notification(record, target, *context, main_focused, main_visible)
+                    .notification(
+                        record,
+                        target,
+                        *context,
+                        main_focused,
+                        main_visible,
+                        external_input_ids,
+                    )
                     .await;
                 match plan {
                     NotificationPlan::Complete(accepted) => {
@@ -441,10 +477,11 @@ impl BubblePresenter {
                             crate::snapshot_presenter::SnapshotEvent::UnreadAdded(reply),
                         )),
                     }),
-                    NotificationPlan::Bubble(presentation) => {
+                    NotificationPlan::Bubble(presentation, external_input_ids) => {
                         effects.push(UiEffect::Run(UiTask::CompleteNotification {
                             presentation,
                             reply,
+                            external_input_ids,
                         }))
                     }
                     NotificationPlan::Os(record) => {
@@ -648,6 +685,14 @@ impl BubblePresenter {
                 Handling::Handled(effects)
             }
             UiEvent::BubbleRefresh | UiEvent::Mounted(_) => self.refresh().await,
+            UiEvent::WorkOfferProjection(projection) => {
+                if projection.revision >= self.work_offer.revision {
+                    self.work_offer = projection;
+                    self.refresh_appearance().await
+                } else {
+                    Handling::Handled(Vec::new())
+                }
+            }
             UiEvent::SnapshotUpdated(snapshot) => {
                 self.initialize(&snapshot);
                 self.sync_latest_coo_speech(&snapshot).await;
@@ -881,6 +926,10 @@ impl BubblePresenter {
         );
         snapshot.language = config.ui.language.clone();
         snapshot.avatar_image_png = self.avatar_image_png.clone();
+        snapshot.work_offer = self.work_offer.offer.clone();
+        snapshot.work_offer_operation_generation = self.work_offer.operation_generation;
+        snapshot.work_offer_busy = self.work_offer.busy;
+        snapshot.work_offer_error = self.work_offer.error.clone();
         let display = preview.map_or_else(|| config.bubble.display.clone(), |value| value.display);
         (Arc::new(snapshot), display)
     }

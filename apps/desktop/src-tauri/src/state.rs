@@ -513,6 +513,28 @@ impl DesktopState {
         self.runtime_active.load(Ordering::Acquire)
     }
 
+    fn snapshot_input(
+        &self,
+        event: crate::snapshot_presenter::SnapshotEvent,
+    ) -> crate::snapshot_presenter::SnapshotInput {
+        crate::snapshot_presenter::SnapshotInput {
+            event,
+            config_revision: self.config_update.current_revision(),
+            work: coosenpai_core::work::WorkConfig {
+                approval_mode: self.work.approvals.mode(),
+                allowed_roots: self.work.roots(),
+                proactive_offers_enabled: self.runtime_config().work.proactive_offers_enabled,
+            },
+        }
+    }
+
+    pub(crate) fn enqueue_snapshot_event(&self, event: crate::snapshot_presenter::SnapshotEvent) {
+        self.ui.input(
+            crate::ui_events::UiView::Application,
+            crate::ui_events::UiEvent::SnapshotResult(Box::new(self.snapshot_input(event))),
+        );
+    }
+
     pub(crate) async fn publish_event(
         &self,
         event: crate::snapshot_presenter::SnapshotEvent,
@@ -525,14 +547,7 @@ impl DesktopState {
             }
             _ => None,
         };
-        let input = crate::snapshot_presenter::SnapshotInput {
-            event,
-            config_revision: self.config_update.current_revision(),
-            work: coosenpai_core::work::WorkConfig {
-                approval_mode: self.work.approvals.mode(),
-                allowed_roots: self.work.roots(),
-            },
-        };
+        let input = self.snapshot_input(event);
         if let Err(error) = self
             .ui
             .request(
@@ -564,6 +579,7 @@ impl DesktopState {
                 work: coosenpai_core::work::WorkConfig {
                     approval_mode: self.work.approvals.mode(),
                     allowed_roots: self.work.roots(),
+                    proactive_offers_enabled: self.runtime_config().work.proactive_offers_enabled,
                 },
             };
             if let Err(error) = self
@@ -593,6 +609,10 @@ impl DesktopState {
                     work: coosenpai_core::work::WorkConfig {
                         approval_mode: self.work.approvals.mode(),
                         allowed_roots: self.work.roots(),
+                        proactive_offers_enabled: self
+                            .runtime_config()
+                            .work
+                            .proactive_offers_enabled,
                     },
                 },
             )),

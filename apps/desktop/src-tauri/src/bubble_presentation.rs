@@ -63,7 +63,7 @@ impl BubblePresenter {
                 view: PresenterId::Bubble,
                 command,
             }]),
-            event => Handling::Bubble(event),
+            event => Handling::Bubble(Box::new(event)),
         }
     }
 }

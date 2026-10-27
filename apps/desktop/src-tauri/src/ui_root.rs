@@ -105,6 +105,9 @@ pub(crate) struct UiModel {
     shutdown_signals: u32,
     protected_popup: Option<u64>,
     snapshot_revision: u64,
+    external_input_ids: std::collections::HashSet<String>,
+    external_submissions_pending: usize,
+    pending_notifications: std::collections::VecDeque<UiEvent>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,6 +125,7 @@ pub(crate) struct UiRoot<P: UiPort> {
     tray: crate::tray_presenter::TrayPresenter,
     snapshot: Option<crate::snapshot_presenter::SnapshotPresenter>,
     chat: ChatPresenter,
+    work_offer: crate::work_offer_presenter::WorkOfferPresenter,
     tutorial: crate::ui_commands::TutorialPresenter,
     capture: crate::capture::CapturePresenter,
     avatar: crate::avatar_presenter::AvatarPresenter,
@@ -180,6 +184,8 @@ pub(crate) fn channel(
             root.bubble = BubblePresenter::new(config, initial.selected_conversation_generation);
             root.bubble.tutorial = Some(state.tutorial.clone());
             root.bubble.initialize(&initial);
+            root.bubble
+                .initialize_work_offer(root.work_offer.observe(&initial));
             root.avatar = crate::avatar_presenter::AvatarPresenter::new(avatar);
             tauri::async_runtime::spawn(async move {
                 root.bubble.sync_latest_coo_speech(&initial).await;
@@ -215,6 +221,7 @@ impl<P: UiPort> UiRoot<P> {
             tray: Default::default(),
             snapshot: None,
             chat: ChatPresenter::default(),
+            work_offer: Default::default(),
             tutorial: crate::ui_commands::TutorialPresenter::default(),
             capture: crate::capture::CapturePresenter::default(),
             avatar: crate::avatar_presenter::AvatarPresenter::default(),
@@ -637,7 +644,7 @@ impl<P: UiPort> UiRoot<P> {
                             break Vec::new();
                         };
                         presenter = parent;
-                        event = next;
+                        event = *next;
                     }
                 }
             };
@@ -784,6 +791,23 @@ impl<P: UiPort> UiRoot<P> {
         effects
     }
 
+    fn finish_external_submission(&mut self) -> Vec<UiEffect> {
+        self.model.external_submissions_pending = self
+            .model
+            .external_submissions_pending
+            .checked_sub(1)
+            .expect("external submission completion without a pending submission");
+        if self.model.external_submissions_pending > 0 {
+            return Vec::new();
+        }
+        let notifications: Vec<_> = self.model.pending_notifications.drain(..).collect();
+        if notifications.is_empty() {
+            Vec::new()
+        } else {
+            vec![UiEffect::Spawn(UiTask::ReplayNotifications(notifications))]
+        }
+    }
+
     fn handle(&mut self, source: PresenterId, event: UiEvent) -> Handling {
         if matches!(
             event,
@@ -865,6 +889,7 @@ impl<P: UiPort> UiRoot<P> {
                 child: owner,
                 event: UiEvent::CommandFinished { owner, completion },
             }],
+            UiEvent::WorkOffer(event) => self.work_offer.handle(event),
             event @ UiEvent::ModelSaved { .. } => vec![UiEffect::Deliver {
                 child: PresenterId::ModelPicker,
                 event,
@@ -888,7 +913,13 @@ impl<P: UiPort> UiRoot<P> {
                 child: PresenterId::Chat,
                 event,
             }],
-            event @ (UiEvent::CaptureCompleted(_) | UiEvent::PopupWindow { .. }) => {
+            event @ (UiEvent::CaptureCompleted(_)
+            | UiEvent::WakeRecognizing { .. }
+            | UiEvent::WakeStart { .. }
+            | UiEvent::WakeFinal { .. }
+            | UiEvent::WakeIdle(_)
+            | UiEvent::WakeIdleFailed(_)
+            | UiEvent::PopupWindow { .. }) => {
                 let mut effects = Vec::new();
                 if let UiEvent::CaptureCompleted(completed) = &event {
                     if let crate::capture::CaptureEvent::Applied(applied) = completed.as_ref() {
@@ -1110,10 +1141,40 @@ impl<P: UiPort> UiRoot<P> {
                 child: PresenterId::Chat,
                 event: UiEvent::SpeechTranscript { generation, text },
             }],
-            UiEvent::SubmitInput(input) => vec![UiEffect::Deliver {
-                child: PresenterId::Chat,
-                event: UiEvent::SubmitInput(input),
-            }],
+            UiEvent::SubmitInput(input) => {
+                self.model.external_submissions_pending += 1;
+                vec![UiEffect::Deliver {
+                    child: PresenterId::Chat,
+                    event: UiEvent::SubmitInput(input),
+                }]
+            }
+            UiEvent::ExternalInputAccepted {
+                id,
+                kind,
+                tutorial_run_id,
+            } => {
+                self.model.external_input_ids.insert(id);
+                let mut effects = vec![UiEffect::Deliver {
+                    child: PresenterId::Tutorial,
+                    event: crate::tutorial_progress_presenter::event(
+                        crate::tutorial_progress_presenter::ProgressEvent::ExternalInputAccepted {
+                            kind,
+                            tutorial_run_id,
+                        },
+                    ),
+                }];
+                effects.extend(self.finish_external_submission());
+                effects
+            }
+            UiEvent::ExternalInputSubmitFailed(error) => {
+                let mut effects = self.finish_external_submission();
+                effects.push(UiEffect::Fail(error));
+                effects
+            }
+            UiEvent::ExternalInputDelivered(ids) => {
+                self.model.external_input_ids.retain(|id| !ids.contains(id));
+                Vec::new()
+            }
             UiEvent::BubbleTypingTick(epoch) => vec![UiEffect::Deliver {
                 child: PresenterId::Bubble,
                 event: UiEvent::BubbleTypingTick(epoch),
@@ -1165,6 +1226,57 @@ impl<P: UiPort> UiRoot<P> {
                 duration: std::time::Duration::from_millis(300),
                 event: UiEvent::RestorePointer,
             })],
+            UiEvent::NotificationRequested {
+                record,
+                target,
+                context,
+                reply,
+                ..
+            } => {
+                let external_input_ids: Vec<String> = record
+                    .caused_by_ids
+                    .iter()
+                    .filter(|id| self.model.external_input_ids.contains(*id))
+                    .cloned()
+                    .collect();
+                let latest_is_external = record
+                    .caused_by
+                    .as_ref()
+                    .is_some_and(|id| external_input_ids.contains(id));
+                if !latest_is_external {
+                    self.model
+                        .external_input_ids
+                        .retain(|id| !record.caused_by_ids.contains(id));
+                }
+                let external_input_ids = if latest_is_external {
+                    external_input_ids
+                } else {
+                    Vec::new()
+                };
+                if external_input_ids.is_empty() && self.model.external_submissions_pending > 0 {
+                    self.model
+                        .pending_notifications
+                        .push_back(UiEvent::NotificationRequested {
+                            record,
+                            target,
+                            context,
+                            reply,
+                            external_input_ids,
+                        });
+                    Vec::new()
+                } else {
+                    vec![UiEffect::Deliver {
+                        child: PresenterId::Bubble,
+                        event: UiEvent::NotificationRequested {
+                            record,
+                            target,
+                            context,
+                            reply,
+                            external_input_ids,
+                        },
+                    }]
+                }
+            }
             event @ (UiEvent::OsNotificationPrepared { .. }
             | UiEvent::BubbleClickPrepared { .. }
             | UiEvent::BubbleClickCompleted(_)
@@ -1172,7 +1284,6 @@ impl<P: UiPort> UiRoot<P> {
             | UiEvent::BubbleWindow(_)
             | UiEvent::NotificationFinished(_)
             | UiEvent::ThoughtRequested { .. }
-            | UiEvent::NotificationRequested { .. }
             | UiEvent::BubbleRequested { .. }
             | UiEvent::ResetPromptRequested
             | UiEvent::BubbleRendererReady { .. }
@@ -1280,21 +1391,24 @@ impl<P: UiPort> UiRoot<P> {
                     ))]);
                 }
                 self.model.snapshot_revision = snapshot.revision;
-                let mut effects: Vec<_> = [
-                    PresenterId::Chat,
-                    PresenterId::Capture,
-                    PresenterId::Details,
-                    PresenterId::BrainActivity,
-                    PresenterId::ModelPicker,
-                    PresenterId::Avatar,
-                    PresenterId::Bubble,
-                ]
-                .into_iter()
-                .map(|child| UiEffect::Deliver {
-                    child,
-                    event: UiEvent::SnapshotUpdated(snapshot.clone()),
-                })
-                .collect();
+                self.work_offer.observe(&snapshot);
+                let mut effects: Vec<_> = self.work_offer.deliver();
+                effects.extend(
+                    [
+                        PresenterId::Chat,
+                        PresenterId::Capture,
+                        PresenterId::Details,
+                        PresenterId::BrainActivity,
+                        PresenterId::ModelPicker,
+                        PresenterId::Avatar,
+                        PresenterId::Bubble,
+                    ]
+                    .into_iter()
+                    .map(|child| UiEffect::Deliver {
+                        child,
+                        event: UiEvent::SnapshotUpdated(snapshot.clone()),
+                    }),
+                );
                 effects.insert(
                     0,
                     UiEffect::Deliver {
@@ -1373,9 +1487,18 @@ impl<P: UiPort> UiRoot<P> {
                 child: PresenterId::Settings,
                 event,
             }],
+            UiEvent::ChatLoaded(snapshot) => {
+                self.work_offer.observe(&snapshot);
+                vec![
+                    UiEffect::Deliver {
+                        child: PresenterId::Chat,
+                        event: UiEvent::ChatLoaded(snapshot),
+                    },
+                    self.work_offer.deliver_to(PresenterId::Chat),
+                ]
+            }
             event @ (UiEvent::Composer(_)
             | UiEvent::Conversation(_)
-            | UiEvent::ChatLoaded(_)
             | UiEvent::WorkApproval(_)
             | UiEvent::App(_)
             | UiEvent::StatusDeadline(_)) => vec![UiEffect::Deliver {
@@ -1390,7 +1513,7 @@ impl<P: UiPort> UiRoot<P> {
                 child: PresenterId::ModelPicker,
                 event,
             }],
-            event => return Handling::Bubble(event),
+            event => return Handling::Bubble(Box::new(event)),
         };
         Handling::Handled(effects)
     }
@@ -1512,6 +1635,17 @@ impl Pipeline {
 async fn run_task(port: &impl UiPort, task: UiTask) -> Result<EffectResult, String> {
     match task {
         UiTask::Activation(task) => task.run().await,
+        UiTask::SubmitInput(input) => match port.run(UiTask::SubmitInput(input)).await {
+            Ok(result) => Ok(result),
+            Err(error) => Ok(EffectResult {
+                events: vec![UiEvent::ExternalInputSubmitFailed(error)],
+                value: None,
+            }),
+        },
+        UiTask::ReplayNotifications(events) => Ok(EffectResult {
+            events,
+            value: None,
+        }),
         task => port.run(task).await,
     }
 }

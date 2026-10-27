@@ -55,6 +55,34 @@ enum RecognitionSegmentCloseReason: String {
     case error
 }
 
+enum HearingSegmentEndReason: String {
+    case silence
+    case maximum
+    case stop
+    case recognizerFinal = "recognizer-final"
+}
+
+func recognitionFinalEndReason(
+    closeReason: RecognitionSegmentCloseReason?,
+    recognizerInitiated: Bool,
+    musicGateSuppressed: Bool
+) -> HearingSegmentEndReason {
+    if musicGateSuppressed { return .stop }
+    if recognizerInitiated { return .recognizerFinal }
+    switch closeReason {
+    case .trailing, .steadyNoise:
+        return .silence
+    case .max:
+        return .maximum
+    case .forced, .music, .noSpeech, .error:
+        return .stop
+    case .recognizerFinal:
+        return .recognizerFinal
+    case nil:
+        preconditionFailure("recognition final is missing its segment close reason")
+    }
+}
+
 enum RecognitionSessionCancelReason: String {
     case finalTimeout = "final-timeout"
     case sourceDisabled = "source-disabled"

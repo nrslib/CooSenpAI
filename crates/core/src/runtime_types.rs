@@ -32,6 +32,8 @@ pub struct RuntimeSnapshot {
     pub proactive_limit_reached: bool,
     pub active_user_message_id: Option<String>,
     pub user_work_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offer: Option<crate::work::WorkOffer>,
     pub cancelled_user_message_ids: Vec<String>,
     pub carried_cancelled_user_message_ids: Vec<String>,
     pub companion_draft: Option<String>,

@@ -23,6 +23,12 @@ export function WorkSettings({ form, update, saving, errorFor }: SettingsCategor
       <p className="field-help">{t("work.help")}</p>
       {errorFor("work.approvalMode") ? <p role="alert">{errorFor("work.approvalMode")}</p> : null}
     </SettingsSearchItem>
+    <SettingsSearchItem label={t("work.proactiveOffers")} path="work.proactiveOffersEnabled" description={t("work.proactiveOffersSearch")}>
+      <label className="boolean-field"><span>{t("work.proactiveOffers")}</span><input id="setting-work-proactiveOffersEnabled" type="checkbox" checked={form.workProactiveOffersEnabled} disabled={saving}
+        onChange={(event) => update("workProactiveOffersEnabled", event.target.checked)} /></label>
+      <p className="field-help">{t("work.proactiveOffersHelp")}</p>
+      {errorFor("work.proactiveOffersEnabled") ? <p role="alert">{errorFor("work.proactiveOffersEnabled")}</p> : null}
+    </SettingsSearchItem>
     <SettingsSearchItem label={t("work.roots")} path="work.allowedRoots" description={t("work.rootsSearch")}>
       <p className="field-help">{t("work.rootsHelp")}</p>
       <div className="work-root-list">

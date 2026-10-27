@@ -70,6 +70,9 @@ pub(super) struct UserQueueCommand {
 
 pub(super) enum UserCommand {
     Enqueue(Box<UserQueueCommand>),
+    WorkOfferDeclined {
+        response: oneshot::Sender<Result<(), RuntimeError>>,
+    },
 }
 
 pub(super) enum PriorityCommand {

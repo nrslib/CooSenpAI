@@ -236,3 +236,190 @@ fn replace_shortcuts(
         accepted: true,
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WakeMatch {
+    pub(crate) text: String,
+    pub(crate) has_body: bool,
+    pub(crate) has_delimiter: bool,
+}
+
+impl WakeMatch {
+    pub(crate) fn can_start(&self) -> bool {
+        self.has_body || self.has_delimiter
+    }
+}
+
+struct WakeChar {
+    value: char,
+    original_end: usize,
+}
+
+fn normalize_wake(value: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    value.nfkc().flat_map(char::to_lowercase).collect()
+}
+
+fn wake_chars(value: &str) -> Vec<WakeChar> {
+    use unicode_normalization::UnicodeNormalization;
+    let mut normalized = Vec::new();
+    for (offset, original) in value.char_indices() {
+        let original_end = offset + original.len_utf8();
+        for value in original.to_string().nfkc().flat_map(char::to_lowercase) {
+            normalized.push(WakeChar {
+                value,
+                original_end,
+            });
+        }
+    }
+    normalized
+}
+
+fn wake_delimiter(value: char) -> bool {
+    value.is_whitespace()
+        || value.is_ascii_punctuation()
+        || matches!(
+            value,
+            '\u{00a1}'..='\u{00bf}'
+                | '\u{2000}'..='\u{206f}'
+                | '\u{2e00}'..='\u{2e7f}'
+                | '\u{3001}'..='\u{303f}'
+                | '\u{fe10}'..='\u{fe1f}'
+                | '\u{fe30}'..='\u{fe4f}'
+                | '\u{ff01}'..='\u{ff0f}'
+                | '\u{ff1a}'..='\u{ff20}'
+                | '\u{ff3b}'..='\u{ff40}'
+                | '\u{ff5b}'..='\u{ff65}'
+        )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WakeScript {
+    AsciiLetter,
+    Hiragana,
+    Katakana,
+    Han,
+    ProlongedSound,
+    OtherAlphabetic,
+    Other,
+}
+
+fn wake_script(value: char) -> WakeScript {
+    match value {
+        value if value.is_ascii_alphabetic() => WakeScript::AsciiLetter,
+        'ー' => WakeScript::ProlongedSound,
+        '\u{3040}'..='\u{309f}' => WakeScript::Hiragana,
+        '\u{30a0}'..='\u{30ff}' => WakeScript::Katakana,
+        '\u{3400}'..='\u{4dbf}'
+        | '\u{4e00}'..='\u{9fff}'
+        | '\u{f900}'..='\u{faff}'
+        | '\u{20000}'..='\u{2fa1f}' => WakeScript::Han,
+        value if value.is_alphabetic() => WakeScript::OtherAlphabetic,
+        _ => WakeScript::Other,
+    }
+}
+
+fn same_wake_script(name: &str, next: char) -> bool {
+    let Some(script) = name
+        .chars()
+        .rev()
+        .find(|value| *value != 'ー')
+        .map(wake_script)
+    else {
+        return next == 'ー';
+    };
+    let next = wake_script(next);
+    script == next
+        || (matches!(script, WakeScript::Hiragana | WakeScript::Katakana)
+            && next == WakeScript::ProlongedSound)
+}
+
+fn matches_wake_at(chars: &[WakeChar], start: usize, name: &str) -> Option<usize> {
+    let mut end = start;
+    for expected in name.chars() {
+        if chars
+            .get(end)
+            .is_some_and(|actual| actual.value == expected)
+        {
+            end += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(end)
+}
+
+pub(crate) fn match_wake(text: &str, display_name: &str) -> Option<WakeMatch> {
+    let display_name = normalize_wake(display_name);
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return None;
+    }
+    let chars = wake_chars(text);
+    let mut start = 0;
+    while chars.get(start).is_some_and(|ch| ch.value.is_whitespace()) {
+        start += 1;
+    }
+    let mut prefix_end = ["hey", "ヘイ", "へい"]
+        .into_iter()
+        .find_map(|vocative| matches_wake_at(&chars, start, vocative))?;
+    while chars
+        .get(prefix_end)
+        .is_some_and(|ch| ch.value.is_whitespace())
+    {
+        prefix_end += 1;
+    }
+    if chars
+        .get(prefix_end)
+        .is_some_and(|ch| matches!(ch.value, ',' | '、'))
+    {
+        prefix_end += 1;
+    }
+    while chars
+        .get(prefix_end)
+        .is_some_and(|ch| ch.value.is_whitespace())
+    {
+        prefix_end += 1;
+    }
+    let coo = display_name == "coo";
+    let mut names = vec![display_name];
+    if coo {
+        names.extend(["クー", "くー", "グー", "ぐー", "goo", "君", "空", "食う"]);
+    }
+    let (name, name_end) = names.into_iter().find_map(|name| {
+        let normalized = normalize_wake(name);
+        matches_wake_at(&chars, prefix_end, &normalized).map(|end| (normalized, end))
+    })?;
+    let mut end = name_end;
+    let has_delimiter = chars.get(end).is_some_and(|ch| wake_delimiter(ch.value));
+    if end < chars.len() && !has_delimiter {
+        let strict_name = matches!(name.as_str(), "空" | "食う");
+        let continues_name = chars
+            .get(end)
+            .is_some_and(|next| same_wake_script(&name, next.value));
+        if name != "君" && (strict_name || continues_name) {
+            return None;
+        }
+    }
+    while chars.get(end).is_some_and(|ch| ch.value.is_whitespace()) {
+        end += 1;
+    }
+    if chars.get(end).is_some_and(|ch| wake_delimiter(ch.value)) {
+        end += 1;
+    }
+    while chars.get(end).is_some_and(|ch| ch.value.is_whitespace()) {
+        end += 1;
+    }
+    let original_end = if end == chars.len() {
+        text.len()
+    } else {
+        chars[end - 1].original_end
+    };
+    let text = text[original_end..].to_owned();
+    let has_body = !text.is_empty();
+    Some(WakeMatch {
+        text,
+        has_body,
+        has_delimiter,
+    })
+}

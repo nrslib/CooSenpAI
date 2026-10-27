@@ -215,6 +215,8 @@ pub(crate) struct PreparedMidTurnInput {
 pub(crate) struct UserMessagePreparer {
     pub(super) emotions: super::emotions::CompanionEmotions,
     pub(super) storage: Option<CompanionStorage>,
+    pub(super) work_offer_store: Option<crate::work::WorkOfferStore>,
+    pub(super) work_offers_eligible: bool,
     pub(super) clock: Arc<dyn Clock>,
     pub(super) delivery_ownership: DeliveryOwnership,
     pub(super) runtime_queue: Arc<std::sync::Mutex<VecDeque<PendingUserMessage>>>,
@@ -290,6 +292,8 @@ impl CompanionAgent {
         UserMessagePreparer {
             emotions: self.emotions.clone(),
             storage: self.storage.clone(),
+            work_offer_store: self.work_offer_store.clone(),
+            work_offers_eligible: self.work_offers_eligible(),
             clock: self.clock.clone(),
             delivery_ownership: self.delivery_ownership,
             runtime_queue,
@@ -981,7 +985,7 @@ impl CompanionAgent {
         }
         if reservation == Some(true) {
             let storage = self.storage.as_ref().expect("reserved user commit storage");
-            if let Err(error) = storage.mark_turn_commit_persisting(&turn_id) {
+            if let Err(error) = storage.mark_turn_commit_persisting(&turn_id, None) {
                 storage.prepare_turn_commit_recovery()?;
                 return Err(error.into());
             }
@@ -1347,6 +1351,7 @@ pub(super) fn common_prepared_response(
 fn prepared_response(response: &PreparedUserResponse) -> CompanionResponse {
     CompanionResponse {
         work_request: None,
+        work_offer: None,
         emotion_delta: response.emotion_delta,
         emit: true,
         message: Some(response.message.clone()),

@@ -236,6 +236,7 @@ struct HearingAggregation {
     microphone_bluetooth: Option<bool>,
     speaker_low_rate: Option<bool>,
     bluetooth_warning_active: bool,
+    wake_idle_generation: Option<u64>,
 }
 
 impl HearingAggregation {
@@ -261,6 +262,7 @@ impl HearingAggregation {
             microphone_bluetooth: None,
             speaker_low_rate: None,
             bluetooth_warning_active: false,
+            wake_idle_generation: None,
         }
     }
 
@@ -349,10 +351,15 @@ impl HearingAggregation {
                 source,
                 generation,
                 sequence,
-            } => (source, generation, sequence),
+            } => (source, generation, Some(sequence)),
+            HearingEvent::Idle { source, generation }
+            | HearingEvent::WakeIdleRevoked { source, generation } => (source, generation, None),
             _ => return Ok(()),
         };
-        if *event_source != source || *generation == 0 || *sequence == 0 {
+        if *event_source != source
+            || *generation == 0
+            || sequence.is_some_and(|sequence| *sequence == 0)
+        {
             return Err(invalid_event_protocol_error(source));
         }
         let status = self.status_mut(source).ok_or_else(|| {
@@ -366,6 +373,26 @@ impl HearingAggregation {
         status.latest_generation = status.latest_generation.max(mapped);
         *generation = mapped;
         Ok(())
+    }
+
+    fn helper_generation(
+        &self,
+        source: AudioObservationSource,
+        generation: u64,
+    ) -> Result<u64, PortError> {
+        let status = self
+            .sources
+            .iter()
+            .find(|status| status.source == source)
+            .ok_or_else(|| {
+                PortError::Unavailable("聴覚イベントの音源が登録されていません".to_owned())
+            })?;
+        generation
+            .checked_sub(status.generation_offset)
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| {
+                PortError::Unavailable("無言待機の世代は現在の helper にありません".to_owned())
+            })
     }
 
     fn mark_ready(&mut self, source: AudioObservationSource, event: HearingEvent) {
@@ -492,6 +519,24 @@ impl HearingAggregation {
             .any(|status| status.source == source && status.ready.is_some())
     }
 
+    fn arm_wake_idle(&mut self, generation: u64) {
+        self.wake_idle_generation = Some(generation);
+    }
+
+    fn complete_wake_idle(&mut self, generation: u64) {
+        if self.wake_idle_generation == Some(generation) {
+            self.wake_idle_generation = None;
+        }
+    }
+
+    fn revoke_wake_idle(&mut self, source: AudioObservationSource) -> Option<u64> {
+        if source == AudioObservationSource::Microphone {
+            self.wake_idle_generation.take()
+        } else {
+            None
+        }
+    }
+
     fn status_mut(&mut self, source: AudioObservationSource) -> Option<&mut SourceStatus> {
         self.sources
             .iter_mut()
@@ -574,6 +619,11 @@ async fn run_session(
         }
     };
     let source_list = specs.iter().map(|spec| spec.source).collect::<Vec<_>>();
+    let active_helpers = specs
+        .first()
+        .expect("hearing session requires a source")
+        .active_helpers
+        .clone();
     let (source_events_tx, mut source_events_rx) = mpsc::channel(64);
     let worker_cancellation = CancellationToken::new();
     let mut workers = JoinSet::new();
@@ -596,6 +646,16 @@ async fn run_session(
                     let _ = completed.send(result);
                     return;
                 }
+                Some(HearingCommand::ArmWakeIdle { generation, completed }) => {
+                    let result = match aggregation.helper_generation(AudioObservationSource::Microphone, generation) {
+                        Ok(generation) => hearing_process::arm_wake_idle(&active_helpers, generation).await,
+                        Err(error) => Err(error),
+                    };
+                    if result.is_ok() {
+                        aggregation.arm_wake_idle(generation);
+                    }
+                    let _ = completed.send(result);
+                }
                 None => {
                     let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                     return;
@@ -604,16 +664,26 @@ async fn run_session(
             _ = cancel_requested.cancelled() => {
                 let result = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                 send_terminal_event(&mut terminal_event, Ok(HearingEvent::Closed));
-                if let Some(HearingCommand::Cancel { completed }) = commands.recv().await {
-                    let _ = completed.send(result);
+                if let Some(command) = commands.recv().await {
+                    match command {
+                        HearingCommand::Cancel { completed } => { let _ = completed.send(result); }
+                        HearingCommand::ArmWakeIdle { completed, .. } => {
+                            let _ = completed.send(Err(PortError::Unavailable("聴覚観察は停止しています".to_owned())));
+                        }
+                    }
                 }
                 return;
             }
             _ = parent_cancellation.cancelled() => {
                 let result = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                 send_terminal_event(&mut terminal_event, Ok(HearingEvent::Closed));
-                if let Ok(HearingCommand::Cancel { completed }) = commands.try_recv() {
-                    let _ = completed.send(result);
+                if let Ok(command) = commands.try_recv() {
+                    match command {
+                        HearingCommand::Cancel { completed } => { let _ = completed.send(result); }
+                        HearingCommand::ArmWakeIdle { completed, .. } => {
+                            let _ = completed.send(Err(PortError::Unavailable("聴覚観察は停止しています".to_owned())));
+                        }
+                    }
                 }
                 return;
             }
@@ -628,6 +698,20 @@ async fn run_session(
                 match source_event.kind {
                     SourceProcessEventKind::Restarting => {
                         aggregation.mark_restarting(source_event.source);
+                        if let Some(generation) = aggregation.revoke_wake_idle(source_event.source) {
+                            if !send_hearing_event(
+                                &events,
+                                Ok(HearingEvent::WakeIdleRevoked {
+                                    source: source_event.source,
+                                    generation,
+                                }),
+                                &cancel_requested,
+                                &parent_cancellation,
+                            ).await {
+                                let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
+                                return;
+                            }
+                        }
                         if let Some(warning) = aggregation.bluetooth_warning() {
                             if !send_hearing_event(&events, Ok(warning), &cancel_requested, &parent_cancellation).await {
                                 let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
@@ -640,6 +724,9 @@ async fn run_session(
                             let _ = stop_workers(&worker_cancellation, workers, &mut source_events_rx, &stop_status).await;
                             send_terminal_event(&mut terminal_event, Err(error));
                             return;
+                        }
+                        if let HearingEvent::Idle { generation, .. } = &event {
+                            aggregation.complete_wake_idle(*generation);
                         }
                         aggregation.mark_recovered(source_event.source, &event);
                         match event {
@@ -748,6 +835,8 @@ async fn run_session(
                         }
                         event @ HearingEvent::Recognizing { .. }
                         | event @ HearingEvent::NoSpeech { .. }
+                        | event @ HearingEvent::Idle { .. }
+                        | event @ HearingEvent::WakeIdleRevoked { .. }
                         | event @ HearingEvent::Final { .. } => {
                             if !aggregation.source_is_ready(source_event.source) {
                                 continue;

@@ -75,6 +75,8 @@ pub(crate) fn permit_class(command: DesktopCommand) -> PermitClass {
         | DesktopCommand::TutorialAdvance => PermitClass::Exclusive,
         DesktopCommand::WorkApprove
         | DesktopCommand::WorkConfigure
+        | DesktopCommand::WorkOfferAccept
+        | DesktopCommand::WorkOfferDecline
         | DesktopCommand::ChatSend
         | DesktopCommand::ChatCancel
         | DesktopCommand::ChatRetry
@@ -406,7 +408,10 @@ fn normal_decision(class: CommandClass) -> Admission {
 
 fn command_class(command: DesktopCommand) -> CommandClass {
     match command {
-        DesktopCommand::WorkApprove | DesktopCommand::WorkConfigure => CommandClass::Work,
+        DesktopCommand::WorkApprove
+        | DesktopCommand::WorkConfigure
+        | DesktopCommand::WorkOfferAccept
+        | DesktopCommand::WorkOfferDecline => CommandClass::Work,
         DesktopCommand::ChatSend | DesktopCommand::ChatRetry => CommandClass::Chat,
         DesktopCommand::CaptureStartText | DesktopCommand::CaptureSendText => {
             CommandClass::TextAttachment
@@ -481,6 +486,8 @@ fn requires_runtime(command: DesktopCommand) -> bool {
     match command {
         DesktopCommand::ChatSend
         | DesktopCommand::ChatRetry
+        | DesktopCommand::WorkOfferAccept
+        | DesktopCommand::WorkOfferDecline
         | DesktopCommand::CaptureSendImage
         | DesktopCommand::CaptureSendText
         | DesktopCommand::SpeechConfirm

@@ -189,6 +189,18 @@ pub(super) fn main_or_details_source(window: &WebviewWindow) -> Result<CommandSo
     }
 }
 
+pub(super) fn main_or_bubble_source(window: &WebviewWindow) -> Result<CommandSource, String> {
+    main_or_bubble_source_for_label(window.label())
+}
+
+pub(super) fn main_or_bubble_source_for_label(label: &str) -> Result<CommandSource, String> {
+    match label {
+        "main" => Ok(CommandSource::IpcMain),
+        "bubble" => Ok(CommandSource::IpcBubble),
+        _ => Err(text(TextKey::CommandWindowNotAllowed, Locale::Ja).to_owned()),
+    }
+}
+
 /// dispatcher を通らない command の送信元を main / details に限定する。
 pub(super) fn authorize_main_or_details<R: tauri::Runtime>(
     window: &WebviewWindow<R>,
@@ -224,9 +236,6 @@ where
         Err(error) => IpcResult::failure(error.format_for_locale(locale)),
     }
 }
-
-/// ポップアップ送信の逐次: dispatch が受理・失敗・拒否のどれで終わっても、
-/// 結果を呼び出し元へ返す前にメイン画面を前面に出す。
 
 fn run_detached<T, Fut>(future: Fut) -> impl std::future::Future<Output = Result<T, DispatchError>>
 where

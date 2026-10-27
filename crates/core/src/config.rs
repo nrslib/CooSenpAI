@@ -444,6 +444,8 @@ pub struct AudioConfig {
     pub mic: bool,
     #[serde(default)]
     pub microphone_commands_enabled: bool,
+    #[serde(default)]
+    pub wake_enabled: bool,
     #[serde(default = "default_true")]
     pub speaker: bool,
     #[serde(default)]
@@ -478,6 +480,7 @@ impl Default for AudioConfig {
             enabled: false,
             mic: true,
             microphone_commands_enabled: false,
+            wake_enabled: false,
             speaker: true,
             speaker_devices: Vec::new(),
             speaker_identification: SpeakerIdentificationConfig::default(),
@@ -1205,6 +1208,23 @@ pub(super) fn is_valid_persona_name(value: &str) -> bool {
                 byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
             }
         })
+}
+
+pub fn bubble_display_uuid(value: &str) -> Option<&str> {
+    let uuid = value.strip_prefix("display:")?;
+    let hyphenated = uuid.len() == 36
+        && uuid.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    (hyphenated && uuid::Uuid::parse_str(uuid).is_ok()).then_some(uuid)
+}
+
+pub fn is_valid_bubble_display(value: &str) -> bool {
+    matches!(value, "main" | "cursor" | "front") || bubble_display_uuid(value).is_some()
 }
 
 pub fn is_valid_avatar_path(value: &str) -> bool {

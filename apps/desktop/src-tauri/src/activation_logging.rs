@@ -23,6 +23,13 @@ pub(super) fn input_label(input: &ActivationInput) -> String {
             format!("PopupShown({generation},ok={})", result.is_ok())
         }
         I::HidePopup => "HidePopup".into(),
+        I::SpeechStarted(generation) => format!("SpeechStarted({generation})"),
+        I::SpeechClosed {
+            generation,
+            restore,
+        } => {
+            format!("SpeechClosed({generation},restore={restore})")
+        }
         I::PopupClosed {
             generation,
             sent,

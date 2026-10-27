@@ -8,7 +8,7 @@ import type { WorkSnapshot } from "./work.js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { AppSnapshot, BubbleSnapshot, CapturePopupSnapshot, CompanionModelCatalog, ConfigPatch, ConversationLogPage, CooSenpaiConfig, DataFlowLog, DebugWakeResult, IpcResult, LicenseDocument, MemoryCatalog, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, RunningApplication, SettingsAppearancePreviewPayload, SpeakerDirectory, SpeakerManagementPayload, SpeakerRenamePayload, SpeechPopupSnapshot } from "./types.js";
+import type { AppSnapshot, BubbleSnapshot, CapturePopupSnapshot, CompanionModelCatalog, ConfigPatch, ConversationLogPage, CooSenpaiConfig, DataFlowLog, DebugWakeResult, IpcResult, LicenseDocument, MemoryCatalog, PersonaDocument, PersonaOption, ProviderApiKeyStatus, ProviderModelOptions, ProviderName, RunningApplication, SettingsAppearancePreviewPayload, SpeakerDirectory, SpeakerManagementPayload, SpeakerRenamePayload, SpeechPopupSnapshot, WorkOfferProjection } from "./types.js";
 
 // 各 WebView は独立した JS コンテキストなので、最後に受け取った snapshot の言語を
 // IPC の transport 例外にも使う。最初の snapshot 前は config の既定値 ja とする。
@@ -82,6 +82,8 @@ export const desktopApi = {
   thoughtRendered: (generation: number): Promise<IpcResult<null>> => call("thought_rendered", { generation }),
   workApprovalInput: (payload: import("./work-approval-view.js").WorkApprovalInput): Promise<IpcResult<null>> => call("work_approval_input", { payload }),
   subscribeWorkApprovalView: (listener: (view: import("./work-approval-view.js").WorkApprovalView) => void) => subscribeLocal("coosenpai:work-approval:view", listener),
+  workOfferInput: (payload: import("./types.js").WorkOfferInput): Promise<IpcResult<null>> => call("work_offer_input", { payload }),
+  subscribeWorkOfferView: (listener: (view: WorkOfferProjection) => void) => subscribeLocal("coosenpai:work-offer:view", listener),
   composerInput: (payload: import("./composer-view.js").ComposerInput): Promise<IpcResult<null>> => call("composer_input", { payload }),
   exportUtteranceFeedback: (): Promise<IpcResult<string>> => call("export_utterance_feedback"),
   debugWake: (image: readonly number[], context: string): Promise<IpcResult<DebugWakeResult>> => call("debug_wake", { payload: { image, context } }),

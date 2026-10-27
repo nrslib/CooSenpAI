@@ -76,6 +76,18 @@ impl CapturePort for DesktopCapturePort {
                         .await
                         .map(CaptureResult::Sent)
                 }
+                CaptureEffect::WakePartial { generation, text } => {
+                    port.state
+                        .speech
+                        .accept_wake_partial(&port.state, generation, text)
+                        .await;
+                }
+                CaptureEffect::WakeFinal { generation, text } => {
+                    port.state
+                        .speech
+                        .accept_wake_final(&port.state, generation, text)
+                        .await;
+                }
                 CaptureEffect::SpeechView(command) => port.speech_view.apply(command)?,
                 CaptureEffect::LoadPopup {
                     generation,
@@ -354,6 +366,7 @@ pub(super) fn voice_command(
             match source {
                 crate::speech::SpeechSource::Composer => CommandSource::IpcMain,
                 crate::speech::SpeechSource::Shortcut => CommandSource::GlobalShortcut,
+                crate::speech::SpeechSource::Wake => CommandSource::RuntimeMonitor,
             },
             DesktopCommand::SpeechStart,
         )),

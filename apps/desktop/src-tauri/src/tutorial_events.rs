@@ -124,6 +124,9 @@ impl TutorialEvent {
                 ProgressEvent::Finish { .. } => "Tutorial(Progress.Finish)".into(),
                 ProgressEvent::Response { .. } => "Tutorial(Progress.Response)".into(),
                 ProgressEvent::Guide(..) => "Tutorial(Progress.Guide)".into(),
+                ProgressEvent::ExternalInputAccepted { .. } => {
+                    "Tutorial(Progress.ExternalInputAccepted)".into()
+                }
                 ProgressEvent::Completed { .. } => "Tutorial(Progress.Completed)".into(),
                 ProgressEvent::TransitionExpired { .. } => {
                     "Tutorial(Progress.TransitionExpired)".into()

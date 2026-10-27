@@ -57,7 +57,7 @@ pub async fn settings_appearance_preview(
                     payload.bubble_position.as_str(),
                     "bottom-right" | "top-right" | "bottom-left" | "top-left"
                 )
-                || !matches!(payload.bubble_display.as_str(), "main" | "cursor" | "front")
+                || !coosenpai_core::config::is_valid_bubble_display(&payload.bubble_display)
                 || payload.font.trim().is_empty()
                 || payload.avatar_color.trim().is_empty()
             {

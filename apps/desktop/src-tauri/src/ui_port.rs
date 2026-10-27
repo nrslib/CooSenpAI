@@ -279,6 +279,13 @@ impl UiPort for NativeUiPort {
                 &view,
             )
             .map_err(|e| e.to_string())?,
+            UiEffect::WorkOfferRender(view) => crate::webview_event::emit_to(
+                &state.app,
+                "main",
+                "coosenpai:work-offer:view",
+                &view,
+            )
+            .map_err(|e| e.to_string())?,
             UiEffect::ComposerRender(view) => {
                 crate::webview_event::emit_to(&state.app, "main", "coosenpai:composer:view", &view)
                     .map_err(|e| e.to_string())?
@@ -511,6 +518,9 @@ impl UiPort for NativeUiPort {
             UiTask::WorkApproval(task) => result
                 .events
                 .push(crate::work_approval_presenter::run(state.clone(), task).await),
+            UiTask::WorkOffer(task) => result
+                .events
+                .push(crate::work_offer_presenter::run(state.clone(), task).await),
             UiTask::Composer(task) => result
                 .events
                 .push(crate::composer_presenter::run(state.clone(), task).await),
@@ -645,13 +655,23 @@ impl UiPort for NativeUiPort {
             UiTask::CompleteNotification {
                 presentation,
                 reply,
+                external_input_ids,
             } => {
                 let accepted = crate::bubbles::complete_presentation(state.clone(), presentation)
                     .await
                     .is_ok_and(|outcome| {
                         outcome == crate::bubbles::BubblePresentationOutcome::Acknowledged
                     });
-                let _ = reply.send(accepted);
+                if accepted && !external_input_ids.is_empty() {
+                    result
+                        .events
+                        .push(UiEvent::ExternalInputDelivered(external_input_ids));
+                    result.events.push(UiEvent::SnapshotCompleted(Box::new(
+                        crate::snapshot_presenter::SnapshotEvent::UnreadAdded(reply),
+                    )));
+                } else {
+                    let _ = reply.send(accepted);
+                }
             }
             UiTask::PrepareOsNotification { record, reply } => {
                 let guard = state
@@ -803,14 +823,16 @@ impl UiPort for NativeUiPort {
             UiTask::SubmitInput(input) => {
                 use crate::state::user_input::UserMessageAttachment;
                 use crate::ui_events::ChatInput;
-                let (source, command, fence, message, attachment) = match input {
+                let (kind, source, command, fence, message, attachment) = match input {
                     ChatInput::Capture { content, message } => {
-                        let (command, attachment) = match &content.attachment {
+                        let (kind, command, attachment) = match &content.attachment {
                             crate::capture::ReadyAttachment::Image { path, .. } => (
+                                CaptureKind::Image,
                                 DesktopCommand::CaptureSendImage,
                                 UserMessageAttachment::Image(path.clone()),
                             ),
                             crate::capture::ReadyAttachment::Text(Some(text)) => (
+                                CaptureKind::Text,
                                 DesktopCommand::CaptureSendText,
                                 UserMessageAttachment::Text(text.text.clone()),
                             ),
@@ -819,6 +841,7 @@ impl UiPort for NativeUiPort {
                             }
                         };
                         (
+                            kind,
                             CommandSource::IpcCapturePopup,
                             command,
                             content.conversation,
@@ -827,6 +850,7 @@ impl UiPort for NativeUiPort {
                         )
                     }
                     ChatInput::Voice { generation, text } => (
+                        CaptureKind::Voice,
                         CommandSource::SpeechCallback,
                         DesktopCommand::SpeechConfirm,
                         crate::command_guard::GenerationStamp {
@@ -838,26 +862,34 @@ impl UiPort for NativeUiPort {
                     ),
                 };
                 let handler_state = state.clone();
-                result.value = Some(
-                    state
-                        .dispatch_with_fence(source, command, fence, move |context| async move {
-                            handler_state
-                                .command_enqueue_user_message(
-                                    &context,
-                                    message,
-                                    Vec::new(),
-                                    attachment,
-                                )
-                                .await
-                                .map_err(crate::command_guard::DispatchError::handler)
-                        })
-                        .await
-                        .map_err(|error| {
-                            error.format_for_locale(Locale::from_config(
-                                &state.runtime_config().ui.language,
-                            ))
-                        })?,
-                );
+                let (accepted, tutorial_run_id) = state
+                    .dispatch_with_fence(source, command, fence, move |context| async move {
+                        let accepted = handler_state
+                            .command_enqueue_user_message(&context, message, Vec::new(), attachment)
+                            .await
+                            .map_err(crate::command_guard::DispatchError::handler)?;
+                        let tutorial_run_id = handler_state
+                            .tutorial
+                            .lock()
+                            .await
+                            .state()
+                            .tutorial
+                            .run_id
+                            .clone();
+                        Ok((accepted, tutorial_run_id))
+                    })
+                    .await
+                    .map_err(|error| {
+                        error.format_for_locale(Locale::from_config(
+                            &state.runtime_config().ui.language,
+                        ))
+                    })?;
+                result.events.push(UiEvent::ExternalInputAccepted {
+                    id: accepted.clone(),
+                    kind,
+                    tutorial_run_id,
+                });
+                result.value = Some(accepted);
             }
             UiTask::SubmitChat(message) => {
                 let handler_state = state.clone();
@@ -937,6 +969,7 @@ impl UiPort for NativeUiPort {
                     result: loaded,
                 });
             }
+            UiTask::ReplayNotifications(_) => unreachable!("Root replays notifications"),
         }
         Ok(result)
     }

@@ -1,0 +1,10 @@
+.work-offer-card { margin: 10px 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; }
+.work-offer-card dl { margin: 8px 0; }
+.work-offer-card dl > div { margin: 6px 0; }
+.work-offer-card dt { font-weight: 600; }
+.work-offer-card dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.work-offer-card code { overflow-wrap: anywhere; }
+.work-offer-card .work-offer-explanation { overflow-wrap: anywhere; }
+.work-offer-card .button-row { display: flex; gap: 8px; }
+.work-offer-card button { padding: 7px 10px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-control); }
+.work-offer-card button:disabled { opacity: .5; }

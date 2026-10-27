@@ -247,9 +247,15 @@ pub(super) fn drain_closed_commands(
         }
     }
     while let Ok(command) = user_rx.try_recv() {
-        let UserCommand::Enqueue(command) = command;
-        if let Some(response) = command.response {
-            let _ = response.send(Err(RuntimeError::Closed));
+        match command {
+            UserCommand::Enqueue(command) => {
+                if let Some(response) = command.response {
+                    let _ = response.send(Err(RuntimeError::Closed));
+                }
+            }
+            UserCommand::WorkOfferDeclined { response } => {
+                let _ = response.send(Err(RuntimeError::Closed));
+            }
         }
     }
 }
@@ -265,7 +271,20 @@ impl RuntimeActor {
         running_observer: &mut Option<RunningOperation>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
     ) {
-        let UserCommand::Enqueue(command) = command;
+        let command = match command {
+            UserCommand::Enqueue(command) => command,
+            UserCommand::WorkOfferDeclined { response } => {
+                let result = if self.user_commands_blocked {
+                    Err(RuntimeError::Closed)
+                } else {
+                    self.revision = self.revision.saturating_add(1);
+                    self.publish(snapshot_tx);
+                    Ok(())
+                };
+                let _ = response.send(result);
+                return;
+            }
+        };
         let UserQueueCommand { input_id, response } = *command;
         if self.user_commands_blocked {
             if let Some(response) = response {
@@ -490,15 +509,19 @@ impl RuntimeActor {
         config_revision: Option<u64>,
         snapshot_tx: &watch::Sender<RuntimeSnapshot>,
         config_tx: &watch::Sender<Config>,
-    ) -> u64 {
+    ) -> Result<u64, RuntimeError> {
+        if let Some(companion) = self.companion.as_mut() {
+            companion.set_proactive_work_offers_enabled(work.proactive_offers_enabled)?;
+        }
         self.config.work = work;
+        self.refresh_user_preparer();
         if let Some(config_revision) = config_revision {
             self.config.revision = config_revision;
         }
         self.revision = self.revision.saturating_add(1);
         self.publish_config(config_tx);
         self.publish(snapshot_tx);
-        self.revision
+        Ok(self.revision)
     }
 
     pub(super) fn update_watch_enabled(
@@ -848,6 +871,25 @@ impl RuntimeActor {
             });
         }
     }
+    fn reconcile_work_offer_replacement(
+        &self,
+        config: &Config,
+        next_companion: Option<&CompanionAgent>,
+    ) -> Result<(), RuntimeError> {
+        let provider_changed = self.config.companion.provider != config.companion.provider;
+        let owner = next_companion.or(self.companion.as_ref());
+        if provider_changed {
+            if let Some(owner) = owner {
+                owner.invalidate_work_offers(true)?;
+            }
+        } else if !next_companion.is_some_and(CompanionAgent::work_offers_eligible) {
+            if let Some(owner) = owner {
+                owner.invalidate_work_offers(false)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn replace_companion_config(
         &mut self,
         companion: CompanionAgent,
@@ -857,6 +899,10 @@ impl RuntimeActor {
         let config = config
             .map(|config| self.merge_config_update(config))
             .transpose()?;
+        let next_config = config.as_ref().unwrap_or(&self.config);
+        let companion =
+            companion.with_proactive_work_offers_enabled(next_config.work.proactive_offers_enabled);
+        self.reconcile_work_offer_replacement(next_config, Some(&companion))?;
         companion.synchronize_emotions()?;
         self.companion = Some(companion);
         if let Some(config) = config {
@@ -889,15 +935,17 @@ impl RuntimeActor {
                 .build(&config)
                 .await
                 .map_err(RuntimeError::Factory)?;
-            if let Some(companion) = &agents.companion {
+            let next_companion = agents.companion.take().map(|companion| {
+                companion.with_proactive_work_offers_enabled(config.work.proactive_offers_enabled)
+            });
+            self.reconcile_work_offer_replacement(&config, next_companion.as_ref())?;
+            if let Some(companion) = &next_companion {
                 companion.synchronize_emotions()?;
+                self.companion_display_name = companion.display_name().to_owned();
             }
             self.observer = agents.observer.take();
             self.observation_delivery = agents.observation_delivery;
-            if let Some(companion) = agents.companion.as_ref() {
-                self.companion_display_name = companion.display_name().to_owned();
-            }
-            self.companion = agents.companion.take();
+            self.companion = next_companion;
             self.refresh_user_preparer();
             self.memory = agents.memory.take();
             self.memory_run_at = self.memory.as_ref().map(|_| Instant::now());
@@ -907,6 +955,8 @@ impl RuntimeActor {
         } else {
             self.validate_reused_providers(&config)?;
             if let Some(companion) = self.companion.as_mut() {
+                companion
+                    .set_proactive_work_offers_enabled(config.work.proactive_offers_enabled)?;
                 companion.update_config(config.companion.clone())?;
             }
             if let Some(observer) = self.observer.as_mut() {
@@ -951,6 +1001,9 @@ impl RuntimeActor {
         let config_revision = config.revision;
         let config = self.merge_config_update(config)?;
         self.validate_reused_providers(&config)?;
+        if let Some(companion) = self.companion.as_mut() {
+            companion.set_proactive_work_offers_enabled(config.work.proactive_offers_enabled)?;
+        }
         if config.companion != self.config.companion {
             if let Some(companion) = self.companion.as_mut() {
                 companion.update_config(config.companion.clone())?;
@@ -1023,15 +1076,17 @@ impl RuntimeActor {
     ) -> Result<u64, RuntimeError> {
         let config_revision = config.revision;
         let config = self.merge_config_update(config)?;
-        if let Some(companion) = &agents.companion {
+        let next_companion = agents.companion.take().map(|companion| {
+            companion.with_proactive_work_offers_enabled(config.work.proactive_offers_enabled)
+        });
+        self.reconcile_work_offer_replacement(&config, next_companion.as_ref())?;
+        if let Some(companion) = &next_companion {
             companion.synchronize_emotions()?;
+            self.companion_display_name = companion.display_name().to_owned();
         }
         self.observer = agents.observer.take();
         self.observation_delivery = agents.observation_delivery;
-        if let Some(companion) = agents.companion.as_ref() {
-            self.companion_display_name = companion.display_name().to_owned();
-        }
-        self.companion = agents.companion.take();
+        self.companion = next_companion;
         self.refresh_user_preparer();
         self.memory = agents.memory.take();
         self.memory_run_at = self.memory.as_ref().map(|_| Instant::now());
@@ -1156,6 +1211,7 @@ pub(super) fn initialization_error_kind(error: &CompanionError) -> RuntimeErrorK
         | CompanionError::DispatchSuperseded
         | CompanionError::Provider(_)
         | CompanionError::Output
+        | CompanionError::OutputMessage(_)
         | CompanionError::ObservationPrompt
         | CompanionError::LimitReached
         | CompanionError::AttachmentOcr(_) => RuntimeErrorKind::Provider,

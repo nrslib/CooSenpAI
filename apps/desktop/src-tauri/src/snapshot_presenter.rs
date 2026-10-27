@@ -165,6 +165,7 @@ pub(crate) enum SnapshotEvent {
         result: Result<Vec<coosenpai_core::ports::AudioOutputDevice>, String>,
         monitor_failed: bool,
     },
+    DisplaysLoaded(Result<Vec<coosenpai_core::ports::BubbleDisplay>, String>),
     DebugLoaded(coosenpai_core::debug::DebugCatalog),
     SpeechPermissionsLoaded(SpeechPermissions),
     ScreenPermissionLoaded(ScreenCapturePermission),
@@ -674,6 +675,7 @@ impl SnapshotPresenter {
                     }
                 }
             }
+            SnapshotEvent::DisplaysLoaded(result) => snapshot.displays.apply(result),
             SnapshotEvent::DebugLoaded(catalog) => snapshot.debug_catalog = catalog,
             SnapshotEvent::SpeechPermissionsLoaded(permissions) => {
                 snapshot.speech.microphone_permission =
@@ -715,8 +717,6 @@ impl SnapshotPresenter {
             return effects;
         }
         count.published += 1;
-        let focus_after_speech =
-            previous_speech.speech.phase == "sending" && snapshot.speech.phase == "idle";
         let voice_changed = (previous_speech.speech.phase != "idle"
             || snapshot.speech.phase != "idle")
             && previous_speech != crate::speech::SpeechPopupSnapshot::from_app(&snapshot);
@@ -728,12 +728,6 @@ impl SnapshotPresenter {
             });
         } else {
             effects.extend(snapshot_effects(&snapshot, voice_changed));
-        }
-        if focus_after_speech {
-            effects.push(UiEffect::Deliver {
-                child: PresenterId::Root,
-                event: UiEvent::FocusComposer,
-            });
         }
         effects
     }
@@ -803,6 +797,7 @@ impl SnapshotEvent {
             Self::AvatarRefresh | Self::AvatarLoaded { .. } => "Avatar",
             Self::SpeechDevicesLoaded(_) => "SpeechDevices",
             Self::OutputDevicesLoaded { .. } => "OutputDevices",
+            Self::DisplaysLoaded(_) => "Displays",
             Self::SpeechPermissionsLoaded(_) => "SpeechPermissions",
             Self::ScreenPermissionLoaded(_) => "ScreenPermission",
         }

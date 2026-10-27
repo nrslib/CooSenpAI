@@ -35,7 +35,7 @@ impl TrayPresenter {
                 snapshot
             }
             UiEvent::SnapshotUpdated(snapshot) => snapshot,
-            event => return Handling::Bubble(event),
+            event => return Handling::Bubble(Box::new(event)),
         };
         if !self.mounted {
             return Handling::Handled(Vec::new());

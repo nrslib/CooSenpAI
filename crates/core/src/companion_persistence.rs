@@ -152,7 +152,7 @@ impl CompanionAgent {
                 storage.clear_transient_observation_markers()?;
             }
         }
-        self.initialize_storage_with_pruning(false)?;
+        self.initialize_storage_with_pruning_and_reset_lock(false, true)?;
         if self.delivery_ownership == DeliveryOwnership::Owner {
             self.deliver_outbox()?;
             self.retry_pending_remarks()?;
@@ -164,6 +164,14 @@ impl CompanionAgent {
         &mut self,
         prune_conversation: bool,
     ) -> Result<(), CompanionError> {
+        self.initialize_storage_with_pruning_and_reset_lock(prune_conversation, false)
+    }
+
+    fn initialize_storage_with_pruning_and_reset_lock(
+        &mut self,
+        prune_conversation: bool,
+        conversation_reset_locked: bool,
+    ) -> Result<(), CompanionError> {
         if self.storage_loaded {
             return Ok(());
         }
@@ -174,6 +182,9 @@ impl CompanionAgent {
             return Ok(());
         };
         storage.pin_conversation_generation()?;
+        if !self.proactive_work_offers_enabled {
+            self.invalidate_work_offers(false)?;
+        }
         self.emotions
             .configure(Some(&storage), self.config.emotions_enabled)?;
         self.storage = Some(storage.clone());
@@ -181,6 +192,11 @@ impl CompanionAgent {
             storage.prune_attachments()?;
         }
         self.conversation = storage.load_conversation()?;
+        if conversation_reset_locked {
+            self.recover_accepted_work_offers_fenced()?;
+        } else {
+            self.recover_accepted_work_offers()?;
+        }
         self.latest_user_activity_at = self.latest_normal_user_conversation_at();
         if let Some(summary) = storage.load_summary()? {
             self.previous_summary = Some(summary);
@@ -199,6 +215,9 @@ impl CompanionAgent {
         } else {
             storage.reconcile_pending_user_inputs_without_pruning()?
         };
+        if let Some(store) = &self.work_offer_store {
+            store.reconcile_user_epoch(storage.conversation_generation()?, cursor.user_epoch)?;
+        }
         self.completed_observation_ids = cursor.ids.iter().cloned().collect();
         self.failed_observation_ids = cursor.failed.iter().cloned().collect();
         self.observation_attempts = cursor
@@ -230,6 +249,13 @@ impl CompanionAgent {
         let Some(storage) = self.storage.clone() else {
             return Ok(());
         };
+        let cursor = storage.load_cursor()?;
+        if cursor.active_turn_commit.is_none() {
+            return Ok(());
+        }
+        if let Some(store) = &self.work_offer_store {
+            store.reconcile_user_epoch(storage.conversation_generation()?, cursor.user_epoch)?;
+        }
         let Some(commit) = storage.prepare_turn_commit_recovery()? else {
             return Ok(());
         };
@@ -332,21 +358,51 @@ impl CompanionAgent {
             return Ok(());
         };
         let cursor = storage.load_cursor()?;
+        let pending_delivery = cursor
+            .pending_deliveries
+            .iter()
+            .find(|delivery| {
+                delivery
+                    .observation_ids
+                    .iter()
+                    .any(|id| commit.target_ids.iter().any(|target| target == id))
+            })
+            .cloned();
+        let stale = commit.expected_user_epoch != Some(cursor.user_epoch);
         let completed = commit
             .target_ids
             .iter()
             .all(|id| cursor.ids.iter().any(|completed| completed == id));
-        let has_pending_delivery = cursor.pending_deliveries.iter().any(|delivery| {
-            delivery
-                .observation_ids
-                .iter()
-                .any(|id| commit.target_ids.iter().any(|target| target == id))
-        });
         if completed {
             storage.clear_active_turn_commit(&commit.turn_id)?;
             return Ok(());
         }
-        if has_pending_delivery {
+        if stale {
+            if let Some(delivery) = pending_delivery {
+                self.complete_pending_remark(&delivery)?;
+            }
+            storage.clear_active_turn_commit(&commit.turn_id)?;
+            return Ok(());
+        }
+        if let Some(delivery) = pending_delivery {
+            if let Some(proposal) = &commit.work_offer {
+                if self
+                    .commit_work_offer(
+                        commit
+                            .expected_user_epoch
+                            .expect("proactive commit has user epoch"),
+                        &commit.turn_id,
+                        &delivery.remark_id,
+                        &delivery.observation_ids,
+                        proposal,
+                    )?
+                    .is_none()
+                {
+                    self.complete_pending_remark(&delivery)?;
+                    storage.clear_active_turn_commit(&commit.turn_id)?;
+                    return Ok(());
+                }
+            }
             if let Err(error) = self.retry_pending_remarks() {
                 if let Some(logger) = &self.logger {
                     let _ = logger.write(
@@ -504,6 +560,8 @@ impl CompanionAgent {
         &mut self,
         response: &mut CompanionResponse,
         observations: &[ObservationRecord],
+        turn_id: &str,
+        expected_user_epoch: u64,
     ) -> Result<(bool, bool), CompanionError> {
         if !response.emit {
             return Ok((false, false));
@@ -526,9 +584,40 @@ impl CompanionAgent {
                 .collect(),
         );
         let Some(delivery) = self.prepare_pending_remark(&entry)? else {
+            if response.work_offer.is_some() {
+                let existing = match &self.work_offer_store {
+                    Some(store) => store.get(&format!("work-offer-{turn_id}"))?,
+                    None => None,
+                };
+                response.work_offer = existing
+                    .filter(|offer| offer.status == crate::work::WorkOfferStatus::Proposed)
+                    .map(|offer| offer.proposal);
+                if response.work_offer.is_none() {
+                    *response = silent_response();
+                    return Ok((false, false));
+                }
+            }
             return Ok((true, false));
         };
+        if let Some(proposal) = response.work_offer.clone() {
+            let Some(offer) = self.commit_work_offer(
+                expected_user_epoch,
+                turn_id,
+                &delivery.remark_id,
+                &delivery.observation_ids,
+                &proposal,
+            )?
+            else {
+                self.complete_pending_remark(&delivery)?;
+                *response = silent_response();
+                return Ok((false, false));
+            };
+            response.work_offer = Some(offer.proposal);
+        }
         if !self.ensure_pending_remark_counted(&delivery)? {
+            if response.work_offer.is_some() {
+                self.invalidate_work_offers(false)?;
+            }
             self.complete_pending_remark(&delivery)?;
             *response = silent_response();
             return Ok((false, false));

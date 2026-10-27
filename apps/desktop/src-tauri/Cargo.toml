@@ -51,6 +51,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+unicode-normalization.workspace = true
 base64 = "0.22"
 minisign-verify = "0.2.5"
 flate2 = "1"

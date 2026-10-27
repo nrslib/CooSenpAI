@@ -95,6 +95,7 @@ mod window_thought;
 mod windows;
 mod work;
 mod work_approval_presenter;
+mod work_offer_presenter;
 
 use crate::command_guard::{CommandSource, DesktopCommand, DispatchError};
 use crate::shutdown::ShutdownCoordinator;
@@ -222,6 +223,7 @@ async fn restore_watch_on_startup(state: Arc<DesktopState>) {
 }
 
 mod desktop_startup;
+mod display_monitor;
 
 fn setup_desktop(app: &mut tauri::App) -> anyhow::Result<()> {
     let state = tauri::async_runtime::block_on(DesktopState::initialize(app.handle().clone()))?;
@@ -233,6 +235,7 @@ fn setup_desktop(app: &mut tauri::App) -> anyhow::Result<()> {
         if let Err(status) = output_device_monitor::start(state.clone()) {
             eprintln!("Core Audio device-list listener failed: status={status}");
         }
+        display_monitor::start(state.clone());
         update_check::start(state.clone());
         model_catalog::start(state.clone());
         tauri::async_runtime::spawn(async move {
@@ -294,6 +297,7 @@ pub fn run() -> anyhow::Result<()> {
             commands_work::work_status,
             commands_work::work_stop,
             commands_work::work_approve,
+            commands_work::work_offer_input,
             app_update::app_update_status,
             app_update::app_update_check,
             app_update::app_update_install,

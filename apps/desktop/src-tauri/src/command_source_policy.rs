@@ -6,6 +6,8 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
         CommandSource::IpcBubble => matches!(
             command,
             DesktopCommand::TutorialInteract
+                | DesktopCommand::WorkOfferAccept
+                | DesktopCommand::WorkOfferDecline
                 | DesktopCommand::SpeakerNameProposal
                 | DesktopCommand::TutorialAdvance
                 | DesktopCommand::BubbleFastForward
@@ -66,7 +68,9 @@ pub(crate) fn source_allows(source: CommandSource, command: DesktopCommand) -> b
         ),
         CommandSource::RuntimeMonitor => matches!(
             command,
-            DesktopCommand::PresentTutorialResponse | DesktopCommand::CompanionPresence
+            DesktopCommand::PresentTutorialResponse
+                | DesktopCommand::CompanionPresence
+                | DesktopCommand::SpeechStart
         ),
         CommandSource::Startup => command == DesktopCommand::WatchStart,
     }
@@ -77,6 +81,8 @@ fn main_allows(command: DesktopCommand) -> bool {
         DesktopCommand::UtteranceFeedback
         | DesktopCommand::WorkApprove
         | DesktopCommand::WorkConfigure
+        | DesktopCommand::WorkOfferAccept
+        | DesktopCommand::WorkOfferDecline
         | DesktopCommand::ChatSend
         | DesktopCommand::ChatCancel
         | DesktopCommand::ChatRetry

@@ -8,7 +8,7 @@ use std::time::Duration;
 pub(super) enum NotificationPlan {
     Complete(bool),
     Unread,
-    Bubble(BubblePresentation),
+    Bubble(BubblePresentation, Vec<String>),
     Os(coosenpai_core::notification::NotificationRecord),
 }
 
@@ -31,6 +31,7 @@ impl BubblePresenter {
         context: NotificationContext,
         main_focused: bool,
         main_visible: bool,
+        external_input_ids: Vec<String>,
     ) -> (NotificationPlan, Vec<UiEffect>) {
         use crate::state::{signed_build, NotificationTarget};
         if record.conversation_generation != self.model.lock().await.conversation_generation() {
@@ -76,6 +77,16 @@ impl BubblePresenter {
                             &record.message_kind,
                             context.utterance_feedback.get(&record.id),
                         );
+                        let unread = if coosenpai_core::state::ConversationMessageKind::from_wire(
+                            &record.message_kind,
+                        )
+                        .is_some_and(
+                            coosenpai_core::state::ConversationMessageKind::is_normal_speech,
+                        ) {
+                            external_input_ids
+                        } else {
+                            Vec::new()
+                        };
                         let bubble = BubbleRecord {
                             id: record.id,
                             created_at: record.created_at,
@@ -104,7 +115,7 @@ impl BubblePresenter {
                         )
                         .await
                         {
-                            Ok(presentation) => NotificationPlan::Bubble(presentation),
+                            Ok(presentation) => NotificationPlan::Bubble(presentation, unread),
                             Err(_) => NotificationPlan::Complete(false),
                         }
                     }

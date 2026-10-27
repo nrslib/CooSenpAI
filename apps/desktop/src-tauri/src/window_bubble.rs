@@ -1,5 +1,5 @@
 use coosenpai_core::ports::ScreenPoint;
-use tauri::{LogicalPosition, LogicalSize};
+use tauri::{LogicalPosition, LogicalSize, Manager};
 
 pub(crate) fn position(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     update_layout(window, "bottom-right", "main")
@@ -19,7 +19,52 @@ pub(crate) fn resize(
     position: &str,
     display: &str,
 ) -> tauri::Result<()> {
-    let Some(area) = resolve_display_area(window, display, None)? else {
+    resize_with_port(
+        window,
+        height,
+        position,
+        display,
+        crate::platform::bubble_display(),
+    )
+}
+
+fn resize_with_port<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    height: u32,
+    position: &str,
+    display: &str,
+    display_port: std::sync::Arc<dyn coosenpai_core::ports::BubbleDisplayPort>,
+) -> tauri::Result<()> {
+    let window = window.clone();
+    let dispatcher = window.app_handle().clone();
+    let position = position.to_owned();
+    let display = display.to_owned();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let task = move || {
+        let result = resize_on_main(&window, height, &position, &display, display_port);
+        let _ = sender.send(result);
+    };
+    if objc2::MainThreadMarker::new().is_some() {
+        task();
+    } else {
+        dispatcher.run_on_main_thread(task)?;
+    }
+    receiver.recv().map_err(|error| {
+        tauri::Error::Anyhow(anyhow::anyhow!(
+            "吹き出しの配置結果を受け取れませんでした: {error}"
+        ))
+    })?
+}
+
+fn resize_on_main<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    height: u32,
+    position: &str,
+    display: &str,
+    display_port: std::sync::Arc<dyn coosenpai_core::ports::BubbleDisplayPort>,
+) -> tauri::Result<()> {
+    let target = resolve_display_target(display, None, display_port.as_ref());
+    let Some(area) = resolve_display_area(&target, display_port.as_ref())? else {
         return Ok(());
     };
     let width = bubble_width(area.width, position);
@@ -39,15 +84,26 @@ pub(crate) fn resize(
     Ok(())
 }
 
-pub(crate) fn cursor_at_bubble_edge(
-    window: &tauri::WebviewWindow,
-    position: &str,
-    display: &str,
+pub(crate) async fn cursor_at_bubble_edge(
+    app: tauri::AppHandle,
+    position: String,
+    display: String,
 ) -> anyhow::Result<BubbleEdgeCheck> {
-    let cursor = crate::platform::bubble_display()
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(cursor_at_bubble_edge_on_main(&position, &display));
+    })?;
+    receiver
+        .await
+        .map_err(|_| anyhow::anyhow!("画面端再表示の画面解決に失敗しました"))?
+}
+
+fn cursor_at_bubble_edge_on_main(position: &str, display: &str) -> anyhow::Result<BubbleEdgeCheck> {
+    let display_port = crate::platform::bubble_display();
+    let cursor = display_port
         .cursor_point()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let resolved = resolve_edge_display_area(window, display, cursor)?;
+    let resolved = resolve_edge_display_area(display, cursor, display_port.as_ref())?;
     Ok(BubbleEdgeCheck {
         at_edge: crate::bubble_edge_recall::is_at_bubble_edge(
             cursor,
@@ -70,26 +126,27 @@ pub(crate) struct BubbleEdgeCheck {
 
 struct DisplayTarget {
     point: Option<ScreenPoint>,
+    uuid: Option<String>,
     warning: Option<anyhow::Error>,
 }
 
 fn resolve_display_area(
-    window: &tauri::WebviewWindow,
-    display: &str,
-    cursor: Option<ScreenPoint>,
-) -> tauri::Result<Option<MonitorArea>> {
-    let target = resolve_display_target(display, cursor);
-    resolve_monitor_area_for_window(window, target.point)
+    target: &DisplayTarget,
+    display_port: &dyn coosenpai_core::ports::BubbleDisplayPort,
+) -> anyhow::Result<Option<MonitorArea>> {
+    let displays = display_port
+        .displays()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(resolve_monitor_area(&displays, target))
 }
 
 fn resolve_edge_display_area(
-    window: &tauri::WebviewWindow,
     display: &str,
     cursor: ScreenPoint,
+    display_port: &dyn coosenpai_core::ports::BubbleDisplayPort,
 ) -> anyhow::Result<ResolvedEdgeDisplay> {
-    let target = resolve_display_target(display, Some(cursor));
-    let area = resolve_monitor_area_for_window(window, target.point)
-        .map_err(anyhow::Error::from)?
+    let target = resolve_display_target(display, Some(cursor), display_port);
+    let area = resolve_display_area(&target, display_port)?
         .ok_or_else(|| anyhow::anyhow!("吹き出しの表示画面を解決できません"))?;
     Ok(ResolvedEdgeDisplay {
         area,
@@ -102,42 +159,35 @@ struct ResolvedEdgeDisplay {
     warning: Option<anyhow::Error>,
 }
 
-fn resolve_display_target(display: &str, cursor: Option<ScreenPoint>) -> DisplayTarget {
-    let display_port = crate::platform::bubble_display();
+fn resolve_display_target(
+    display: &str,
+    cursor: Option<ScreenPoint>,
+    display_port: &dyn coosenpai_core::ports::BubbleDisplayPort,
+) -> DisplayTarget {
     match display {
         "cursor" => DisplayTarget {
             point: cursor.or_else(|| display_port.cursor_point().ok()),
+            uuid: None,
             warning: None,
         },
         "front" => match display_port.frontmost_window_point() {
             Ok(point) => DisplayTarget {
                 point,
+                uuid: None,
                 warning: None,
             },
             Err(error) => DisplayTarget {
                 point: None,
+                uuid: None,
                 warning: Some(anyhow::anyhow!(error.to_string())),
             },
         },
         _ => DisplayTarget {
             point: None,
+            uuid: coosenpai_core::config::bubble_display_uuid(display).map(str::to_owned),
             warning: None,
         },
     }
-}
-
-fn resolve_monitor_area_for_window(
-    window: &tauri::WebviewWindow,
-    target: Option<ScreenPoint>,
-) -> tauri::Result<Option<MonitorArea>> {
-    let primary = window.primary_monitor()?;
-    let monitors = window.available_monitors()?;
-    let areas = monitors.iter().map(monitor_area).collect::<Vec<_>>();
-    Ok(resolve_monitor_area(
-        primary.as_ref().map(monitor_area),
-        &areas,
-        target,
-    ))
 }
 
 fn geometry_differs(current: f64, target: f64) -> bool {
@@ -145,13 +195,26 @@ fn geometry_differs(current: f64, target: f64) -> bool {
 }
 
 fn resolve_monitor_area(
-    primary: Option<MonitorArea>,
-    monitors: &[MonitorArea],
-    target: Option<ScreenPoint>,
+    displays: &[coosenpai_core::ports::BubbleDisplay],
+    target: &DisplayTarget,
 ) -> Option<MonitorArea> {
     target
-        .and_then(|point| monitors.iter().copied().find(|area| area.contains(point)))
-        .or(primary)
+        .uuid
+        .as_ref()
+        .and_then(|uuid| {
+            displays
+                .iter()
+                .find(|display| display.uuid.eq_ignore_ascii_case(uuid))
+        })
+        .or_else(|| {
+            target.point.and_then(|point| {
+                displays
+                    .iter()
+                    .find(|display| MonitorArea::from(display.bounds).contains(point))
+            })
+        })
+        .or_else(|| displays.iter().find(|display| display.is_main))
+        .map(|display| MonitorArea::from(display.bounds))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,15 +234,14 @@ impl MonitorArea {
     }
 }
 
-fn monitor_area(monitor: &tauri::Monitor) -> MonitorArea {
-    let scale = monitor.scale_factor();
-    let size = monitor.size().to_logical::<f64>(scale);
-    let position = monitor.position().to_logical::<f64>(scale);
-    MonitorArea {
-        x: position.x,
-        y: position.y,
-        width: size.width,
-        height: size.height,
+impl From<coosenpai_core::ports::WindowBounds> for MonitorArea {
+    fn from(bounds: coosenpai_core::ports::WindowBounds) -> Self {
+        Self {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        }
     }
 }
 

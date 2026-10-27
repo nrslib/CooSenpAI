@@ -138,6 +138,9 @@ impl ChatPresenter {
                 Handling::Handled(self.route_loaded_snapshot(effects))
             }
             UiEvent::ChatLoaded(snapshot) => Handling::Handled(self.observe(snapshot.clone())),
+            UiEvent::WorkOfferProjection(projection) => {
+                Handling::Handled(vec![UiEffect::WorkOfferRender(Box::new(projection))])
+            }
             UiEvent::SnapshotUpdated(snapshot) => {
                 if self
                     .snapshot
@@ -503,7 +506,7 @@ impl WindowPresenter {
             UiEvent::Present(command) if command == ViewCommand::FocusInput => {
                 vec![self.command(command)]
             }
-            event => return Handling::Bubble(event),
+            event => return Handling::Bubble(Box::new(event)),
         };
         Handling::Handled(effects)
     }

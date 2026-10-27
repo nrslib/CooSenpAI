@@ -17,7 +17,7 @@ pub(crate) enum SpeechResult {
         confirm_before_send: bool,
         reply: tokio::sync::oneshot::Sender<Option<crate::speech_lifecycle::FinalOutcome>>,
     },
-    CallbackSent(Result<String, String>),
+    CallbackSent,
     Started(SpeechSource),
     Permissions(SpeechPermissions),
     DeviceFallback(String),
@@ -87,17 +87,8 @@ impl SpeechPresenter {
                 let _ = reply.send(plan);
                 return Some(Vec::new());
             }
-            SpeechResult::CallbackSent(result)
-                if lifecycle.accept_callback_completion(generation) =>
-            {
-                let label = if result.is_ok() { "受理" } else { "失敗" };
-                return Some(vec![
-                    UiEffect::Log(format!("送信の{label}にあわせてメイン画面を前面に出します")),
-                    UiEffect::Deliver {
-                        child: crate::ui_events::PresenterId::Root,
-                        event: UiEvent::OpenMain,
-                    },
-                ]);
+            SpeechResult::CallbackSent if lifecycle.accept_callback_completion(generation) => {
+                return Some(Vec::new());
             }
 
             SpeechResult::Started(source) if lifecycle.is_current(generation) => {
@@ -231,6 +222,6 @@ pub(crate) fn final_outcome(
     match source {
         SpeechSource::Composer => FinalOutcome::Composer,
         SpeechSource::Shortcut if confirm_before_send => FinalOutcome::Confirm,
-        SpeechSource::Shortcut => FinalOutcome::Send,
+        SpeechSource::Shortcut | SpeechSource::Wake => FinalOutcome::Send,
     }
 }

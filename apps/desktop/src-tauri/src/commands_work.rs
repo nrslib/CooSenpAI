@@ -1,6 +1,7 @@
 use crate::command_guard::{CommandSource, DesktopCommand};
 use crate::commands::{
-    authorize_window, dispatch_result, CommandOrigin, IpcResult, TauriIpcResult,
+    authorize_window, dispatch_result, main_or_bubble_source, CommandOrigin, IpcResult,
+    TauriIpcResult,
 };
 use crate::state::DesktopState;
 use crate::work::WorkSnapshot;
@@ -65,4 +66,24 @@ pub(crate) async fn work_approve(
         },
     )
     .await)
+}
+
+#[tauri::command]
+pub(crate) async fn work_offer_input(
+    window: WebviewWindow,
+    state: State<'_, Arc<DesktopState>>,
+    payload: crate::work_offer_presenter::WorkOfferInput,
+) -> TauriIpcResult<()> {
+    let source = main_or_bubble_source(&window)?;
+    if payload.offer_id.is_empty() || payload.offer_id.len() > 128 {
+        return Err("申し出IDが不正です".into());
+    }
+    state.ui.input(
+        crate::ui_events::UiView::Application,
+        crate::ui_events::UiEvent::WorkOffer(crate::work_offer_presenter::WorkOfferEvent::Input {
+            source,
+            input: payload,
+        }),
+    );
+    Ok(IpcResult::success(()))
 }

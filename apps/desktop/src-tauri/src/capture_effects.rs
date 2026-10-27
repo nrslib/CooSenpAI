@@ -37,6 +37,14 @@ pub(crate) enum CaptureEffect {
         generation: u64,
         text: String,
     },
+    WakePartial {
+        generation: u64,
+        text: String,
+    },
+    WakeFinal {
+        generation: u64,
+        text: String,
+    },
     SpeechView(crate::speech_view::SpeechViewCommand),
     Input {
         generation: u64,
@@ -86,6 +94,7 @@ pub(crate) enum CaptureTask {
     Popup(u64),
     Voice(u64),
     VoiceSend(u64),
+    WakeFinal,
     Send(u64),
 }
 impl CaptureTask {
@@ -107,6 +116,10 @@ impl CaptureTask {
                 generation,
                 result: sent(result),
             },
+            Self::WakeFinal => CaptureEvent::Applied(CaptureApplied {
+                completion: CaptureOutput::Reported,
+                result: result.map(|_| ()),
+            }),
             Self::Send(generation) => CaptureEvent::SendFinished {
                 generation,
                 result: sent(result),
@@ -143,7 +156,6 @@ pub(crate) enum CaptureOutput {
         content: Arc<ReadyCapture>,
         sent: bool,
         reply: Option<CloseReply>,
-        open_main: bool,
     },
 }
 #[derive(Debug)]

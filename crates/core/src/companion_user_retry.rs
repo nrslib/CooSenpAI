@@ -61,6 +61,13 @@ fn fresh_input_from_history(
     storage: &crate::companion_storage::CompanionStorage,
     entry: ConversationEntry,
 ) -> Result<PendingUserMessage, CompanionError> {
+    let work_offer_id = preparer
+        .work_offer_store
+        .as_ref()
+        .map(|store| store.accepted_for_input(&entry.id))
+        .transpose()?
+        .flatten()
+        .map(|offer| offer.id);
     let context = entry.screen_context.unwrap_or_default();
     let id = if preparer.delivery_ownership == DeliveryOwnership::Owner {
         format!(
@@ -95,6 +102,7 @@ fn fresh_input_from_history(
         response_terminal: false,
         response_failure: None,
         tutorial_response_key: entry.tutorial_response_key,
+        work_offer_id,
     };
     if storage.append_conversation_once_at(&input.conversation_entry(), now)? {
         storage.record_stagnation_reaction_at(now);
@@ -246,7 +254,9 @@ impl CompanionAgent {
     ) -> Result<(), CompanionError> {
         let kind = match error {
             CompanionError::Provider(error) => error.kind,
-            CompanionError::Output => ProviderErrorKind::InvalidOutput,
+            CompanionError::Output | CompanionError::OutputMessage(_) => {
+                ProviderErrorKind::InvalidOutput
+            }
             _ => return Ok(()),
         };
         let Some(storage) = &self.storage else {

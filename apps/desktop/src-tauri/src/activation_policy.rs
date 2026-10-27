@@ -69,6 +69,11 @@ pub(crate) enum ActivationInput {
         result: Result<(), String>,
     },
     HidePopup,
+    SpeechStarted(u64),
+    SpeechClosed {
+        generation: u64,
+        restore: bool,
+    },
     PopupClosed {
         generation: u64,
         origin: crate::capture::CaptureOrigin,
@@ -113,6 +118,8 @@ pub(crate) struct ActivationPolicy {
     key_recovery: Option<KeyRecovery>,
     main_origin: Option<ForegroundApplication>,
     origin: crate::capture::CaptureOrigin,
+    speech_close_pending: bool,
+    main_shown_during_speech: bool,
     port: Arc<dyn ActivationPort>,
     lease: ActivationLease,
     timeouts_enabled: bool,
@@ -153,6 +160,8 @@ impl ActivationPolicy {
             key_recovery: None,
             main_origin: None,
             origin: Default::default(),
+            speech_close_pending: false,
+            main_shown_during_speech: false,
             port: Arc::new(port),
             lease: ActivationLease::new(),
             timeouts_enabled: true,
@@ -161,6 +170,7 @@ impl ActivationPolicy {
 
     fn supersede(&mut self, generation: u64) {
         self.generation = generation;
+        self.speech_close_pending = false;
         self.lease = self.lease.supersede(generation);
         if let Some(recovery) = &mut self.key_recovery {
             recovery.in_flight = None;
@@ -210,7 +220,9 @@ impl ActivationPolicy {
         use ActivationInput as I;
         match input {
             I::MainWindow(command)
-                if self.popup.is_none() && matches!(self.handoff, Handoff::Ready) =>
+                if self.popup.is_none()
+                    && (matches!(self.handoff, Handoff::Ready)
+                        || matches!(self.handoff, Handoff::Preparing(open) if open.kind == CaptureKind::Voice)) =>
             {
                 vec![self.view(ActivationEffect::MainWindow {
                     command,
@@ -219,6 +231,8 @@ impl ActivationPolicy {
             }
             I::MainShown(origin) => {
                 self.main_origin = origin;
+                self.main_shown_during_speech = true;
+                self.speech_close_pending = false;
                 Vec::new()
             }
             // 表示を開始した popup の key 所有は、Hide の成功通知まで維持する。
@@ -235,6 +249,19 @@ impl ActivationPolicy {
                 self.popup = None;
                 vec![self.task(HandoffEffect::PrepareOrigin(self.main_origin.clone()))]
             }
+            I::SpeechStarted(generation) if generation >= self.generation => {
+                self.supersede(generation);
+                self.main_shown_during_speech = false;
+                let open = SelectionOpen {
+                    generation,
+                    kind: CaptureKind::Voice,
+                    source: CommandSource::GlobalShortcut,
+                };
+                self.handoff = Handoff::Preparing(open);
+                self.popup = None;
+                self.origin = Default::default();
+                vec![self.task(HandoffEffect::PrepareOrigin(self.main_origin.clone()))]
+            }
             I::Supersede(generation) if generation >= self.generation => {
                 self.supersede(generation);
                 self.handoff = Handoff::Ready;
@@ -248,6 +275,20 @@ impl ActivationPolicy {
                 };
                 match result {
                     Err(error) => self.failed(open, error),
+                    Ok(origin) if open.kind == CaptureKind::Voice => {
+                        self.origin = origin.capture_origin;
+                        self.handoff = Handoff::Ready;
+                        if self.speech_close_pending && !self.main_shown_during_speech {
+                            self.speech_close_pending = false;
+                            if self.origin.frontmost_application.is_some() {
+                                vec![self.view(ActivationEffect::RestoreOrigin(self.origin.clone()))]
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        }
+                    }
                     Ok(origin) => {
                         self.origin = origin.capture_origin;
                         self.handoff = Handoff::Returning(open);
@@ -364,14 +405,37 @@ impl ActivationPolicy {
                 self.popup = Some(PopupState::Shown(generation));
                 Vec::new()
             }
+            I::SpeechClosed {
+                generation,
+                restore,
+            } if generation == self.generation => {
+                if !restore {
+                    self.speech_close_pending = false;
+                    Vec::new()
+                } else if self.main_shown_during_speech {
+                    self.speech_close_pending = false;
+                    self.main_shown_during_speech = false;
+                    Vec::new()
+                } else if matches!(self.handoff, Handoff::Preparing(open) if open.kind == CaptureKind::Voice)
+                {
+                    self.speech_close_pending = true;
+                    Vec::new()
+                } else if self.origin.frontmost_application.is_some() {
+                    self.speech_close_pending = false;
+                    vec![self.view(ActivationEffect::RestoreOrigin(self.origin.clone()))]
+                } else {
+                    self.speech_close_pending = false;
+                    Vec::new()
+                }
+            }
             I::PopupClosed {
                 generation,
                 origin,
-                sent,
+                sent: _,
                 restarting,
             } if self.popup == Some(PopupState::Closing(generation)) => {
                 self.popup = None;
-                if sent || restarting || origin.frontmost_application.is_none() {
+                if restarting || origin.frontmost_application.is_none() {
                     Vec::new()
                 } else {
                     vec![self.view(ActivationEffect::RestoreOrigin(origin))]

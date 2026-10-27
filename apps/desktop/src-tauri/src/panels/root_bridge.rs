@@ -31,6 +31,7 @@ impl UiPort for Port {
             | UiEffect::ComposerRender(_)
             | UiEffect::ConversationRender(_)
             | UiEffect::WorkApprovalRender(_)
+            | UiEffect::WorkOfferRender(_)
             | UiEffect::AvatarRender(_)
             | UiEffect::BubbleRender { .. }
             | UiEffect::BubbleControls(_)

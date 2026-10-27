@@ -9,13 +9,14 @@ export type SettingsResetFields = Partial<FormFields>;
 // フォーム項目を追加したら、保存先の対応がなければ型チェックを失敗させる。
 const paths = {
   workApprovalMode: "work.approvalMode", workAllowedRoots: "work.allowedRoots",
+  workProactiveOffersEnabled: "work.proactiveOffersEnabled",
   emotionsEnabled: "companion.emotionsEnabled", displayName: "companion.displayName",
   avatarColor: "ui.avatarColor", avatarPath: "ui.avatarPath", persona: "companion.persona",
   watchEnabled: "watch.enabled", watchFullscreen: "watch.fullscreen", watchFocusElement: "watch.focusElement", watchApps: "watch.apps",
   captureAllowlistEnabled: "capture.allowlist.enabled", captureAllowlistApps: "capture.allowlist.apps",
   voiceOutputEnabled: "voiceOutput.enabled", voiceOutputProvider: "voiceOutput.provider",
   voiceOutputRate: "voiceOutput.rate", voicevoxStyleId: "voiceOutput.voicevoxStyleId",
-  audioMicrophoneCommandsEnabled: "audio.microphoneCommandsEnabled",
+  audioMicrophoneCommandsEnabled: "audio.microphoneCommandsEnabled", audioWakeEnabled: "audio.wakeEnabled",
   audioEnabled: "audio.enabled", audioMic: "audio.mic", audioSpeaker: "audio.speaker", audioSpeakerDevices: "audio.speakerDevices",
   audioSpeakerIdentificationEnabled: "audio.speakerIdentification.enabled", audioDebugDumpDir: "audio.debugDumpDir",
   providerObserver: "observer.vision.provider", providerCompanion: "companion.provider",

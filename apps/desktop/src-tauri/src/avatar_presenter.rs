@@ -191,7 +191,7 @@ impl AvatarPresenter {
                     }
                 }
             }
-            event => return Handling::Bubble(event),
+            event => return Handling::Bubble(Box::new(event)),
         };
         effects.extend(self.scene.observe(&self.state));
         Handling::Handled(effects)

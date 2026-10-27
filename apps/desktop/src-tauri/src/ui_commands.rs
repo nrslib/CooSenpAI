@@ -198,7 +198,7 @@ impl TutorialPresenter {
                 completion.reply();
                 Handling::Handled(Vec::new())
             }
-            event => Handling::Bubble(event),
+            event => Handling::Bubble(Box::new(event)),
         }
     }
 }

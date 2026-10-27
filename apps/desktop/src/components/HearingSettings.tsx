@@ -148,6 +148,8 @@ export function HearingSettings({ form, snapshot, update, onOpenSpeechSettings, 
       {(snapshot.audio.warningKind?.startsWith("helper-stop-") || snapshot.audio.warningKind?.startsWith("hearing-stop-")) && snapshot.audio.message && <p className="field-help" role="alert">{snapshot.audio.message} <button type="button" onClick={onDismissHearingWarning}>{t("common.close")}</button></p>}
       <BooleanInput label={t("settings.hearing.microphoneCommands")} path="audio.microphoneCommandsEnabled" value={form.audioMicrophoneCommandsEnabled} update={(value) => update("audioMicrophoneCommandsEnabled", value)} />
       <p className="field-help">{t("settings.hearing.microphoneCommandsHelp")}</p>
+      <BooleanInput label={t("settings.hearing.wake", { name: form.displayName })} path="audio.wakeEnabled" value={form.audioWakeEnabled} update={(value) => update("audioWakeEnabled", value)} />
+      <p className="field-help">{t("settings.hearing.wakeHelp", { name: form.displayName })}</p>
       <BooleanInput label={t("settings.hearing.speaker")} path="audio.speaker" value={form.audioSpeaker} update={(value) => update("audioSpeaker", value)} />
       <SettingsSearchItem label={t("settings.hearing.outputDevices")} path="audio.speakerDevices">
         <fieldset id="setting-audio-speakerDevices" disabled={!form.audioSpeaker}>

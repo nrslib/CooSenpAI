@@ -29,6 +29,109 @@ impl CompanionAgent {
         self
     }
 
+    pub(crate) fn with_proactive_work_offers_enabled(mut self, enabled: bool) -> Self {
+        self.proactive_work_offers_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn set_proactive_work_offers_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), CompanionError> {
+        self.proactive_work_offers_enabled = enabled;
+        if !enabled {
+            self.invalidate_work_offers(false)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn work_offers_eligible(&self) -> bool {
+        self.proactive_work_offers_enabled && self.work_executor.is_some()
+    }
+
+    pub(crate) fn pending_work_offer(
+        &self,
+    ) -> Result<Option<crate::work::WorkOffer>, CompanionError> {
+        let Some(store) = &self.work_offer_store else {
+            return Ok(None);
+        };
+        Ok(store.pending(self.conversation_generation()?)?)
+    }
+
+    pub(crate) fn invalidate_work_offers(&self, all: bool) -> Result<(), CompanionError> {
+        let Some(store) = &self.work_offer_store else {
+            return Ok(());
+        };
+        if all {
+            store.invalidate_all()?;
+        } else {
+            store.invalidate_current(self.conversation_generation()?)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn recover_accepted_work_offers(&mut self) -> Result<(), CompanionError> {
+        let Some(storage) = self.storage.clone() else {
+            return Ok(());
+        };
+        let _generation_guard =
+            crate::conversation_archive::acquire_conversation_reset_lock(&storage.config_paths()?)?;
+        self.recover_accepted_work_offers_fenced()
+    }
+
+    pub(crate) fn recover_accepted_work_offers_fenced(&mut self) -> Result<(), CompanionError> {
+        let (Some(storage), Some(store)) = (self.storage.clone(), self.work_offer_store.clone())
+        else {
+            return Ok(());
+        };
+        for offer in store.accepted_pending_enqueue(storage.conversation_generation()?)? {
+            let input_id = offer
+                .accepted_input_id
+                .clone()
+                .unwrap_or_else(|| crate::work::accepted_input_id(&offer.id));
+            if storage.completed_user_response(&input_id)?.is_some() {
+                store.complete_acceptance_enqueue(&offer.id, &input_id)?;
+                continue;
+            }
+            let input = super::user_preparer::persist_accepted_work_offer_input(
+                &storage,
+                &store,
+                &offer,
+                self.clock.now(),
+            )?;
+            if !self.conversation.iter().any(|entry| entry.id == input.id) {
+                self.remember_conversation_entry(input.conversation_entry());
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn commit_work_offer(
+        &self,
+        expected_user_epoch: u64,
+        turn_id: &str,
+        entry_id: &str,
+        observation_ids: &[String],
+        proposal: &WorkProposal,
+    ) -> Result<Option<crate::work::WorkOffer>, CompanionError> {
+        if !self.work_offers_eligible() {
+            return Ok(None);
+        }
+        let store = self.work_offer_store.as_ref().ok_or_else(|| {
+            PersistenceError::Invalid("work offer の storage がありません".to_owned())
+        })?;
+        Ok(store
+            .propose(
+                self.conversation_generation()?,
+                expected_user_epoch,
+                turn_id,
+                entry_id,
+                observation_ids.to_vec(),
+                proposal.clone(),
+            )?
+            .filter(|offer| offer.status == crate::work::WorkOfferStatus::Proposed))
+    }
+
     pub(super) async fn complete_chat_work(
         &mut self,
         outcome: &mut CompanionCallOutcome,
@@ -38,12 +141,42 @@ impl CompanionAgent {
         cancellation: CancellationToken,
     ) -> Result<(), CompanionError> {
         let input_id = input_ids.first().ok_or(CompanionError::Output)?;
+        let accepted_offer = inputs
+            .iter()
+            .find_map(|input| input.work_offer_id.as_deref());
+        let accepted_proposal = match accepted_offer {
+            Some(offer_id) => {
+                let offer = self
+                    .work_offer_store
+                    .as_ref()
+                    .ok_or(CompanionError::Output)?
+                    .get(offer_id)?
+                    .filter(|offer| offer.status == crate::work::WorkOfferStatus::Accepted)
+                    .ok_or_else(|| {
+                        CompanionError::OutputMessage(
+                            "受諾した作業の申し出を確認できないため、実行しませんでした。".into(),
+                        )
+                    })?;
+                Some(offer.proposal)
+            }
+            None => None,
+        };
         let deadline = tokio::time::Instant::now() + crate::work::WORK_TIME_LIMIT;
         let mut failed = Vec::<(WorkProposal, String)>::new();
         let mut step = 0_u64;
         while let Some(proposal) = outcome.response.work_request.take() {
             if cancellation.is_cancelled() {
                 return Err(CompanionError::Cancelled);
+            }
+            if step == 0
+                && accepted_proposal
+                    .as_ref()
+                    .is_some_and(|accepted| accepted != &proposal)
+            {
+                return Err(CompanionError::OutputMessage(
+                    "受諾した申し出と最初の workRequest が一致しないため、作業を実行しませんでした。申し出の内容を確認して、もう一度依頼してください。"
+                        .into(),
+                ));
             }
             let operation_id = format!("{input_id}-work-{step}");
             step = step.checked_add(1).ok_or(CompanionError::Output)?;

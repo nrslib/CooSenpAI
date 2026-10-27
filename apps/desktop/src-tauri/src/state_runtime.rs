@@ -109,16 +109,18 @@ impl DesktopState {
             self.reset_bubble_edge_observation();
             return;
         }
-        let Some(window) = self.app.get_webview_window("bubble") else {
+        let Some(_window) = self.app.get_webview_window("bubble") else {
             self.bubble_edge_poll_failed.store(false, Ordering::Release);
             self.reset_bubble_edge_observation();
             return;
         };
         let observation = match crate::window_bubble::cursor_at_bubble_edge(
-            &window,
-            &config.bubble.position,
-            &config.bubble.display,
-        ) {
+            self.app.clone(),
+            config.bubble.position.clone(),
+            config.bubble.display.clone(),
+        )
+        .await
+        {
             Ok(observation) => {
                 if let Some(error) = observation.warning.as_ref() {
                     self.record_bubble_edge_error(|| {
@@ -272,6 +274,7 @@ impl DesktopState {
                 target,
                 context: Box::new(self.notification_context().await),
                 reply,
+                external_input_ids: Vec::new(),
             },
         );
         let accepted = response.await.unwrap_or(false);

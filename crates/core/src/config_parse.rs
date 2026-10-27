@@ -199,19 +199,13 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         ],
         "config",
     );
-    let work = match object.get("work") {
-        None => crate::work::WorkConfig::default(),
-        Some(value) => match serde_json::from_value::<crate::work::WorkConfig>(value.clone()) {
-            Ok(work) => work,
-            Err(_) => {
-                issues.push(issue(
-                    "work",
-                    "approvalMode は manual または auto、allowedRoots は {path, read, write} の配列で指定してください。",
-                ));
-                crate::work::WorkConfig::default()
-            }
-        },
-    };
+    let work = parse_section(
+        object.get("work"),
+        crate::work::WorkConfig::default(),
+        "work",
+        &mut issues,
+        parse_work,
+    );
     let watch = parse_section(
         object.get("watch"),
         WatchConfig::default(),
@@ -359,6 +353,54 @@ pub(super) fn parse_v3_with_issues(value: Value) -> (Config, Vec<ConfigValidatio
         },
         issues,
     )
+}
+
+fn parse_work(
+    object: &Map<String, Value>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> crate::work::WorkConfig {
+    issues.extend(unknown_keys(
+        object,
+        &["approvalMode", "allowedRoots", "proactiveOffersEnabled"],
+        "work",
+    ));
+    let approval_mode = match enum_string(
+        object,
+        "approvalMode",
+        "manual",
+        &["manual", "auto"],
+        "work.approvalMode",
+        issues,
+    )
+    .as_str()
+    {
+        "auto" => crate::work::ApprovalMode::Auto,
+        _ => crate::work::ApprovalMode::Manual,
+    };
+    let allowed_roots = match object.get("allowedRoots") {
+        None => Vec::new(),
+        Some(value) => match serde_json::from_value(value.clone()) {
+            Ok(roots) => roots,
+            Err(_) => {
+                issues.push(issue(
+                    "work.allowedRoots",
+                    "{path, read, write} の配列で指定してください。",
+                ));
+                Vec::new()
+            }
+        },
+    };
+    crate::work::WorkConfig {
+        approval_mode,
+        allowed_roots,
+        proactive_offers_enabled: boolean(
+            object,
+            "proactiveOffersEnabled",
+            false,
+            "work.proactiveOffersEnabled",
+            issues,
+        ),
+    }
 }
 
 fn parse_judge(
@@ -549,14 +591,20 @@ fn parse_bubble(
             "bubble.position",
             issues,
         ),
-        display: enum_string(
-            object,
-            "display",
-            "main",
-            &["main", "cursor", "front"],
+        display: bubble_display(object, issues),
+    }
+}
+
+fn bubble_display(object: &Map<String, Value>, issues: &mut Vec<ConfigValidationIssue>) -> String {
+    let value = string(object, "display", "main", "bubble.display", issues);
+    if !super::is_valid_bubble_display(&value) {
+        issues.push(issue(
             "bubble.display",
-            issues,
-        ),
+            "main / cursor / front / display:<UUID> のいずれかで指定してください。",
+        ));
+        "main".to_owned()
+    } else {
+        value
     }
 }
 

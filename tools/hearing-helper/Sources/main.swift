@@ -517,6 +517,8 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         .microphone: VoiceActivityDetector(configuration: .standard),
         .speaker: VoiceActivityDetector(configuration: .standard),
     ]
+    private var wakeIdleMonitor = WakeIdleMonitor(configuration: .standard)
+    private let wakeIdleRevokedOutput: ([String: Any]) -> Void
     private var speakerMusicGate: SpeakerMusicGateSegment?
     private var speakerMusicGatePreRollCount = 0
     private(set) var speakerMusicGateToken = 0
@@ -557,6 +559,15 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         defer { exclusionLock.unlock() }
         return excludedProcessPIDs
     }
+
+    func armWakeIdle(generation: Int) {
+        audioProcessingQueue.async { [weak self] in
+            guard let self, !self.isTerminal(), self.isSourceActive(.microphone),
+                  self.recognitionStates.currentGeneration(for: .microphone) == nil else { return }
+            _ = self.wakeIdleMonitor.arm(generation: generation)
+        }
+    }
+
     private var microphoneStarted = false
     private var speakerStarted = false
     private var speakerInputGeneration: UInt64 = 1
@@ -605,8 +616,10 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         speakerDeviceFactory: (() throws -> SpeakerAudioCapture)? = nil,
         debugRequestScreenCaptureAuth: Bool = false,
         speechAnalysisFactory: ((AVAudioFormat) -> SpeechAnalysis)? = nil,
-        speakerMusicGateForTesting: Bool = false
+        speakerMusicGateForTesting: Bool = false,
+        wakeIdleRevokedOutput: @escaping ([String: Any]) -> Void = { value in _ = emit(value) }
     ) {
+        self.wakeIdleRevokedOutput = wakeIdleRevokedOutput
         self.speakerDeviceFactory = speakerDeviceFactory
         self.speakerBackend = speakerBackend
         self.speakerDevices = speakerDevices
@@ -1168,7 +1181,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         startMicrophone(microphoneAuthorization, recognitionAuthorization)
     }
 
-    private func resetRecognitionInput(
+    func resetRecognitionInput(
         for source: AudioSource,
         advanceSpeakerInputGeneration: Bool = false
     ) {
@@ -1191,6 +1204,13 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 }
             }
             pendingDrainWorkItems.removeValue(forKey: source)?.cancel()
+            if source == .microphone, let generation = wakeIdleMonitor.revoke() {
+                wakeIdleRevokedOutput([
+                    "event": "wake-idle-revoked",
+                    "source": source.rawValue,
+                    "generation": generation,
+                ])
+            }
             voiceActivity[source]?.resetToWaiting()
             if source == .speaker {
                 speakerMusicGate = nil
@@ -1703,6 +1723,11 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let needsSegmentClose = lifecycle == .accepting || lifecycle == .terminal
         switch terminalOutcome {
         case let .success(text, words):
+            let endReason = recognitionFinalEndReason(
+                closeReason: segmentCloseReason,
+                recognizerInitiated: needsSegmentClose,
+                musicGateSuppressed: musicGateSuppressed
+            )
             let ordinal = reserveTranscriptPublication(for: source)
             func emitSuccess(_ speakerIdentificationResult: SpeakerIdentificationResult?) {
                 publishTranscriptInOrder(source: source, ordinal: ordinal) { [self] in
@@ -1736,7 +1761,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                         var event: [String: Any] = [
                             "event": "final", "source": source.rawValue, "text": boundedText,
                             "generation": generation, "sequence": transcriptSequence,
-                            "inputGeneration": inputGeneration
+                            "inputGeneration": inputGeneration, "endReason": endReason.rawValue,
                         ]
                         if let speakerIdentificationResult {
                             var fields = speakerEventFields(speakerIdentificationResult)
@@ -2240,6 +2265,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             }
             pendingDrainWorkItems[source]?.cancel()
             pendingDrainWorkItems.removeValue(forKey: source)
+            if source == .microphone { wakeIdleMonitor.cancel() }
             voiceActivity[source]?.resetToWaiting()
             if source == .speaker {
                 speakerMusicGate = nil
@@ -2334,6 +2360,7 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 pendingDrainWorkItems[source]?.cancel()
                 pendingDrainWorkItems.removeValue(forKey: source)
                 recognitionStates.clearPendingAndPreRoll(for: source)
+                if source == .microphone { wakeIdleMonitor.cancel() }
                 voiceActivity[source]?.resetToWaiting()
             }
             speakerMusicGate = nil
@@ -3361,6 +3388,14 @@ final class HearingSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             durationNanoseconds: durationNanoseconds,
             for: source
         )
+        if source == .microphone,
+           let generation = wakeIdleMonitor.observe(
+               isSustainedSpeech: voiceActivity[source]?.isSustainedSpeech == true,
+               durationNanoseconds: durationNanoseconds,
+               action: action
+           ) {
+            emit(["event": "idle", "source": source.rawValue, "generation": generation])
+        }
         switch action {
         case .wait:
             recordPreRollAudio(buffer, for: source, rms: rms, at: timestamp)

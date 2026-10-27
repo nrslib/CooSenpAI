@@ -630,6 +630,11 @@ impl RuntimeActor {
             || config.companion.display_name.clone(),
             |agent| agent.display_name().to_owned(),
         );
+        if let Some(agent) = companion.take() {
+            companion = Some(
+                agent.with_proactive_work_offers_enabled(config.work.proactive_offers_enabled),
+            );
+        }
         let runtime_user_queue = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let mut hearing_buffer = crate::hearing_context::HearingContextBuffer::default();
         hearing_buffer.set_persistent(observation_delivery == ObservationDelivery::Companion);
@@ -682,6 +687,7 @@ impl RuntimeActor {
                 .is_some_and(CompanionAgent::proactive_limit_reached),
             active_user_message_id: None,
             user_work_pending: false,
+            work_offer: None,
             cancelled_user_message_ids: Vec::new(),
             carried_cancelled_user_message_ids: Vec::new(),
             companion_draft: None,
@@ -1118,13 +1124,13 @@ impl RuntimeActor {
                                 config_revision,
                                 response,
                             } => {
-                                let revision = actor.update_work_config(
+                                let result = actor.update_work_config(
                                     work,
                                     config_revision,
                                     &snapshot_tx,
                                     &config_tx,
                                 );
-                                let _ = response.send(Ok(revision));
+                                let _ = response.send(result);
                             }
                             PriorityCommand::UpdateWatchEnabled {
                                 enabled,
@@ -1390,9 +1396,8 @@ impl RuntimeActor {
                 config_revision,
                 response,
             } => {
-                let revision =
-                    self.update_work_config(work, config_revision, snapshot_tx, config_tx);
-                let _ = response.send(Ok(revision));
+                let result = self.update_work_config(work, config_revision, snapshot_tx, config_tx);
+                let _ = response.send(result);
             }
             PriorityCommand::UpdateWatchEnabled {
                 enabled,

@@ -94,6 +94,9 @@ export const en = {
     "manual": "Manual: review permissions yourself",
     "auto": "Auto mode: let AI review permissions",
     "help": "Auto mode reviews investigation (read only) and work (edits and commands) as separate stages, and asks you when the directory is outside the allowed roots or the decision is unclear. You can also switch modes from an approval request. AI review sends the request, working directory, and up to four recent user messages to Claude.",
+    "proactiveOffers": "Enable proactive work suggestions",
+    "proactiveOffersSearch": "proactive work suggestions proactiveOffersEnabled",
+    "proactiveOffersHelp": "Coo suggests useful next work from your conversation and screen. No action runs until you choose a suggestion.",
     "scope": "Work runs through the chat provider (Claude Code or Codex) inside the working directory. Coo chooses the directory from the conversation and you confirm it in the approval card. ~/.ssh, ~/.aws, ~/.gnupg, ~/Library/Keychains, and ~/.config/gh are always excluded.",
     "roots": "Allowed roots",
     "rootsSearch": "allowed directory read write allowedRoots",
@@ -121,7 +124,15 @@ export const en = {
     "deny": "Deny",
     "switchAuto": "Switch to Auto mode for AI review",
     "switchManual": "Switch to manual mode",
-    "saved": "Mode changes are saved in Settings and apply to future work."
+    "saved": "Mode changes are saved in Settings and apply to future work.",
+    "offer": {
+      "label": "Offer from Coo",
+      "cwd": "Working directory",
+      "summary": "What to do",
+      "explanation": "Yes accepts this offer. A separate approval is required before execution.",
+      "yes": "Yes",
+      "no": "No"
+    }
 },
   motions: {
     "slots": {
@@ -241,6 +252,7 @@ export const en = {
     title: "Talk to {name}",
     transcriptLabel: "Review transcription",
     listening: "Listening…",
+    wakeListening: "Listening after “Hey {name}”",
   },
   composer: {
     stopSpeech: "Stop voice input",
@@ -1135,6 +1147,8 @@ export const en = {
       unknownOutput: "Connection status unknown ({id})",
       microphoneCommands: "Accept instructions to Coo from the microphone",
       microphoneCommandsHelp: "Add clear requests to Coo detected by Hearing to the chat. This is separate from voice input in the message field. Operations use the same approval process as chat. Off by default.",
+      wake: "Start voice input with “Hey {name}”",
+      wakeHelp: "Works only while both Hearing and the microphone are on. Say “Hey {name}” to start listening; the name alone does not start it. When you finish speaking, your words are sent without confirmation. The confirmation settings for the shortcut and the microphone in the message field are unchanged. Off by default.",
       speakerIdentification: "Identify speakers",
       help: "Audio is collected only while Hearing AI is on (toggle it with the Hearing button on the main screen). Hearing AI observes finalized transcripts in batches and passes its observations to Coo. Raw audio is not saved.",
       speakerIdentificationHelp: "Match speaker audio on this device and attach UUIDs generated randomly at registration and persisted in the ledger. It is on by default. Audio and embeddings are not sent outside the device; if the model is missing, the helper logs the reason and disables this feature.",
@@ -1194,6 +1208,10 @@ export const en = {
       mainScreen: "Main screen",
       cursorScreen: "Screen with the mouse cursor",
       frontScreen: "Screen with the foreground window",
+      unnamedDisplay: "Display ({id})",
+      disconnectedDisplay: "Disconnected display ({id})",
+      unknownDisplay: "Connection status unknown ({id})",
+      displayLoadFailed: "The display list could not be loaded. Connection status is unknown.",
       edgeRecall: "Recall a bubble at the screen edge",
       edgeRecallDescription: "After a bubble disappears, hold the mouse at the screen edge where it appears for 0.5 seconds to recall Coo's latest message.",
       thoughtBubble: "Show thought bubbles",

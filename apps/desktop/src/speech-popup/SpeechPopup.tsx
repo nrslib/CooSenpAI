@@ -68,7 +68,7 @@ export function SpeechPopupView(): ReactElement {
         const editRevision = edit(snapshot.speech.generation, text);
         if (editRevision !== undefined) void speechPopupApi.edit(snapshot.speech.generation, editRevision, text);
       }} aria-label={t(locale, "speechPopup.transcriptLabel")} />
-      : <p className={speech?.partial ? "transcript" : "listening"}>{speech?.partial || t(locale, "speechPopup.listening")}</p>}
+      : <p className={speech?.partial ? "transcript" : "listening"}>{speech?.partial || t(locale, speech?.source === "wake" ? "speechPopup.wakeListening" : "speechPopup.listening", { name: snapshot?.companionDisplayName ?? t(locale, "modelPopup.companionDefault") })}</p>}
     {errorMessage === undefined ? null : <p className="error">{errorMessage}</p>}
     <footer>
       <button type="button" disabled={sending || speech?.phase === "sending"} onClick={cancel}>{t(locale, "common.cancel")}</button>

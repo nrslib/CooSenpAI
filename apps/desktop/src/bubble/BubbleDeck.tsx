@@ -4,6 +4,7 @@ import type { BubbleSnapshot } from "../types.js";
 import { useI18n } from "../i18n/index.js";
 import type { BubbleControlsView, BubbleViewInput } from "./view.js";
 import { Bubble } from "./Bubble.js";
+import { pendingWorkOfferForEntry } from "../components/WorkOffer.js";
 
 interface Props {
   readonly snapshot: BubbleSnapshot;
@@ -27,6 +28,8 @@ export function BubbleDeck({ snapshot, controls, typing, hoveredId, onEvent }: P
     {controls.olderEdge ? <button className={`deck-edge${controls.secondEdge ? " has-second-edge" : ""}`} type="button" aria-label={t("bubble.previousCard")} disabled={controls.navigationDisabled} onClick={() => onEvent({ type: "navigate", direction: "older" })} /> : null}
     <div className="deck-face" ref={faceRef}>
       {record === null ? null : <Bubble key={record.id} record={record} controls={controls}
+        offer={pendingWorkOfferForEntry(snapshot.workOffer, record.id)}
+        workOfferOperationGeneration={snapshot.workOfferOperationGeneration} workOfferBusy={snapshot.workOfferBusy} workOfferError={snapshot.workOfferError}
         revealed={typing?.id === record.id ? typing.revealed : null} avatarColor={snapshot.avatarColor} avatarImage={snapshot.avatarImagePng}
         exiting={controls.exiting} reading={controls.reading} hovered={hoveredId === record.id} onEvent={onEvent} />}
     </div>

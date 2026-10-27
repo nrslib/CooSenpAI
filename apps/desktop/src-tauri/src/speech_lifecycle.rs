@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) enum SpeechSource {
     Shortcut,
     Composer,
+    Wake,
 }
 
 impl SpeechSource {
@@ -13,6 +14,7 @@ impl SpeechSource {
         match self {
             Self::Shortcut => "shortcut",
             Self::Composer => "composer",
+            Self::Wake => "wake",
         }
     }
 }

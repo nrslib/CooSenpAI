@@ -25,10 +25,10 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             "bottom-right / top-right / bottom-left / top-left のいずれかで指定してください。",
         ));
     }
-    if !matches!(config.bubble.display.as_str(), "main" | "cursor" | "front") {
+    if !super::is_valid_bubble_display(&config.bubble.display) {
         issues.push(issue(
             "bubble.display",
-            "main / cursor / front のいずれかで指定してください。",
+            "main / cursor / front / display:<UUID> のいずれかで指定してください。",
         ));
     }
     validate_providers(config, &mut issues);

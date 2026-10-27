@@ -35,6 +35,7 @@ enum Flow {
         step: TutorialStep,
         notice_id: String,
     },
+    ExternalInputGuide,
 }
 #[derive(Default)]
 pub(crate) struct TutorialProgressPresenter {
@@ -107,6 +108,19 @@ impl TutorialProgressPresenter {
                     notice_id: String::new(),
                 });
                 vec![task(id, ProgressAction::GuideDetails(key))]
+            }
+            ProgressEvent::ExternalInputAccepted {
+                kind,
+                tutorial_run_id,
+            } => {
+                let id = self.insert(Flow::ExternalInputGuide);
+                vec![task(
+                    id,
+                    ProgressAction::CompleteExternalInputGuide {
+                        kind,
+                        tutorial_run_id,
+                    },
+                )]
             }
             ProgressEvent::AdvanceChecked {
                 step,
@@ -199,6 +213,7 @@ impl TutorialProgressPresenter {
             }
             ProgressResult::Step(Err(error))
             | ProgressResult::Advanced(Err(error))
+            | ProgressResult::ExternalInputGuide(Err(error))
             | ProgressResult::Done(Err(error))
             | ProgressResult::Presented(Err(error)) => self.finish(id, Err(error)),
             ProgressResult::Response(accepted) => {
@@ -298,7 +313,9 @@ impl TutorialProgressPresenter {
                 effects.extend(log);
                 effects
             }
-            ProgressResult::Read(false) | ProgressResult::Done(Ok(())) => self.finish(id, Ok(())),
+            ProgressResult::Read(false)
+            | ProgressResult::ExternalInputGuide(Ok(()))
+            | ProgressResult::Done(Ok(())) => self.finish(id, Ok(())),
             ProgressResult::Cleared {
                 cleared,
                 cancellation,

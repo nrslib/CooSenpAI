@@ -1,6 +1,7 @@
 use super::*;
 use crate::mailbox::{ClaimedEnvelope, MailboxDisposition};
 use crate::state::{parse_observation, DEFAULT_OBSERVATION_LIMITS};
+use std::sync::Mutex;
 
 pub(super) struct PendingMailboxAck {
     mailbox: Mailbox,
@@ -15,7 +16,7 @@ pub(super) enum PendingMailboxAckPlan {
 }
 
 enum MailboxOutcome {
-    Complete(Option<CompanionResponse>),
+    Complete(Option<Box<CompanionResponse>>),
     Retry(CompanionError),
     InvalidObservation,
 }
@@ -62,7 +63,7 @@ impl CompanionAgent {
         &mut self,
         cancellation: CancellationToken,
     ) -> Result<CompanionResponse, CompanionError> {
-        self.process_incoming_mailbox_decision(cancellation)
+        self.process_incoming_mailbox_decision(cancellation, None)
             .await
             .map(|decision| decision.unwrap_or_else(silent_response))
     }
@@ -70,6 +71,7 @@ impl CompanionAgent {
     pub(crate) async fn process_incoming_mailbox_decision(
         &mut self,
         cancellation: CancellationToken,
+        turn_commit_lock: Option<Arc<Mutex<()>>>,
     ) -> Result<Option<CompanionResponse>, CompanionError> {
         if self.delivery_ownership == DeliveryOwnership::None {
             self.initialize_storage()?;
@@ -80,6 +82,7 @@ impl CompanionAgent {
             return self.retry_mailbox_ack();
         }
         self.initialize_storage()?;
+        self.recover_active_turn_commit()?;
         let delivery_was_blocked = self.delivery_backpressure_active();
         self.deliver_outbox()?;
         self.retry_pending_remarks()?;
@@ -88,7 +91,7 @@ impl CompanionAgent {
         }
         let Some(mailbox) = self.incoming_mailbox.clone() else {
             return self
-                .process_mailbox_observations(Vec::new(), cancellation)
+                .process_mailbox_observations(Vec::new(), cancellation, turn_commit_lock)
                 .await;
         };
         let mut response = None;
@@ -103,10 +106,14 @@ impl CompanionAgent {
                 }
                 Ok(observation) => {
                     match self
-                        .process_mailbox_observations(vec![observation], cancellation.clone())
+                        .process_mailbox_observations(
+                            vec![observation],
+                            cancellation.clone(),
+                            turn_commit_lock.clone(),
+                        )
                         .await
                     {
-                        Ok(next) => MailboxOutcome::Complete(next),
+                        Ok(next) => MailboxOutcome::Complete(next.map(Box::new)),
                         Err(error) => MailboxOutcome::Retry(error),
                     }
                 }
@@ -142,7 +149,7 @@ impl CompanionAgent {
             .expect("acknowledged claim")
             .outcome
         {
-            MailboxOutcome::Complete(response) => Ok(response),
+            MailboxOutcome::Complete(response) => Ok(response.map(|response| *response)),
             MailboxOutcome::Retry(error) => Err(error),
             MailboxOutcome::InvalidObservation => Err(MailboxError::InvalidEnvelope.into()),
         }
@@ -152,12 +159,20 @@ impl CompanionAgent {
         &mut self,
         observations: Vec<ObservationRecord>,
         cancellation: CancellationToken,
+        turn_commit_lock: Option<Arc<Mutex<()>>>,
     ) -> Result<Option<CompanionResponse>, CompanionError> {
+        let user_epoch = self.user_epoch()?;
         let candidate = self
             .process_observations_candidate(observations, None, cancellation)
             .await?;
         let decision_produced = candidate.decision_produced;
-        let response = self.commit_proactive_candidate(candidate)?;
-        Ok(decision_produced.then_some(response))
+        let _turn_commit_guard = turn_commit_lock
+            .as_ref()
+            .map(|lock| lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        let Some(outcome) = self.commit_proactive_candidate_if_current(candidate, user_epoch)?
+        else {
+            return Ok(None);
+        };
+        Ok(decision_produced.then_some(outcome.response))
     }
 }

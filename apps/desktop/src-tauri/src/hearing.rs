@@ -938,6 +938,7 @@ impl HearingController {
         let mut terminal_failure: Option<(String, String)> = None;
         let mut cancel_task = None;
         let mut source_errors = SourceErrorTracker::new(active_session.sources.clone());
+        let mut recognition_locale = settings.locale.clone();
         let accept_controller = self.as_ref();
         let capture_state = state.as_ref();
         self.publish_active_result(&state, generation, HearingResult::Restarted(generation))
@@ -970,11 +971,13 @@ impl HearingController {
             );
             match event {
                 Ok(HearingEvent::Ready {
+                    locale,
                     microphone,
                     recognition,
                     ready_sources,
                     ..
                 }) => {
+                    recognition_locale = locale;
                     self.publish_active_result(
                         &state,
                         generation,
@@ -1018,8 +1021,40 @@ impl HearingController {
                     }
                 }
                 Ok(HearingEvent::Recognizing {
-                    source, sequence, ..
+                    source,
+                    generation: recognition_generation,
+                    sequence,
+                    text,
                 }) => {
+                    let wake_identity = crate::ui_events::WakeIdentity {
+                        session_id: context_session.clone(),
+                        source,
+                        recognition_generation,
+                        sequence,
+                    };
+                    if self
+                        .forward_wake_recognizing(&state, wake_identity.clone(), text)
+                        .await
+                    {
+                        let accepted = match ingestion_scope.invalidate_microphone_command_results()
+                        {
+                            Ok(()) => true,
+                            Err(error) => {
+                                let _ = state.logger.write(
+                                    "WARN",
+                                    &format!("マイク指示の分類世代を更新できません: {error}"),
+                                );
+                                false
+                            }
+                        };
+                        state.ui.input(
+                            crate::ui_events::UiView::Application,
+                            crate::ui_events::UiEvent::WakeStart {
+                                identity: wake_identity,
+                                accepted,
+                            },
+                        );
+                    }
                     if self.accepts_events(generation).await {
                         state
                             .publish_event(crate::snapshot_presenter::SnapshotEvent::Hearing(
@@ -1061,14 +1096,80 @@ impl HearingController {
                     )
                     .await;
                 }
+                Ok(HearingEvent::Idle {
+                    source,
+                    generation: recognition_generation,
+                }) => {
+                    state.ui.input(
+                        crate::ui_events::UiView::Application,
+                        crate::ui_events::UiEvent::WakeIdle(crate::ui_events::WakeIdleIdentity {
+                            session_id: context_session.clone(),
+                            source,
+                            recognition_generation,
+                        }),
+                    );
+                }
+                Ok(HearingEvent::WakeIdleRevoked {
+                    source,
+                    generation: recognition_generation,
+                }) => {
+                    state.ui.input(
+                        crate::ui_events::UiView::Application,
+                        crate::ui_events::UiEvent::WakeIdleFailed(
+                            crate::ui_events::WakeIdleIdentity {
+                                session_id: context_session.clone(),
+                                source,
+                                recognition_generation,
+                            },
+                        ),
+                    );
+                }
                 Ok(HearingEvent::Final {
                     source,
                     text,
                     generation: recognition_generation,
                     sequence,
                     input_generation: _,
+                    end_reason,
                     speaker,
                 }) => {
+                    let wake_identity = crate::ui_events::WakeIdentity {
+                        session_id: context_session.clone(),
+                        source,
+                        recognition_generation,
+                        sequence,
+                    };
+                    let wake_disposition = self
+                        .forward_wake_final(
+                            &state,
+                            wake_identity,
+                            text.clone(),
+                            recognition_locale.clone(),
+                            end_reason,
+                        )
+                        .await;
+                    if wake_disposition == crate::ui_events::WakeFinalDisposition::WakeOnly {
+                        let idle_identity = crate::ui_events::WakeIdleIdentity {
+                            session_id: context_session.clone(),
+                            source,
+                            recognition_generation,
+                        };
+                        if let Err(error) = active_session
+                            .session
+                            .control()
+                            .arm_wake_idle(recognition_generation)
+                            .await
+                        {
+                            let _ = state.logger.write(
+                                "WARN",
+                                &format!("呼びかけ後の無言待機を開始できません: {error}"),
+                            );
+                            state.ui.input(
+                                crate::ui_events::UiView::Application,
+                                crate::ui_events::UiEvent::WakeIdleFailed(idle_identity),
+                            );
+                        }
+                    }
                     // 文脈への登録前に取り込み状態と helper 世代を検証済み。
                     let Some(ingestion_sender) = ingestion_tx.as_ref() else {
                         return;
@@ -1083,7 +1184,13 @@ impl HearingController {
                         speaker: speaker.map(|metadata| *metadata),
                     };
                     let corrections = final_corrections(&context);
-                    if let Err(error) = ingestion_scope.register_microphone_final(&context) {
+                    let classification =
+                        if wake_disposition == crate::ui_events::WakeFinalDisposition::Rejected {
+                            ingestion_scope.register_microphone_final(&context)
+                        } else {
+                            ingestion_scope.exclude_wake_final(&context)
+                        };
+                    if let Err(error) = classification {
                         let _ = state
                             .logger
                             .write("WARN", &format!("マイク指示の受付に失敗しました: {error}"));
@@ -1181,6 +1288,84 @@ impl HearingController {
             self.handle_session_failure(&state, generation, kind, message, settings)
                 .await;
         }
+    }
+
+    async fn wake_display_name(
+        &self,
+        state: &DesktopState,
+        identity: &crate::ui_events::WakeIdentity,
+    ) -> Option<String> {
+        if identity.source != AudioObservationSource::Microphone {
+            return None;
+        }
+        let snapshot = state.snapshot().await;
+        (snapshot.config.audio.enabled
+            && snapshot.config.audio.mic
+            && snapshot.config.audio.wake_enabled)
+            .then_some(snapshot.companion_display_name)
+    }
+
+    async fn forward_wake_recognizing(
+        &self,
+        state: &DesktopState,
+        identity: crate::ui_events::WakeIdentity,
+        text: String,
+    ) -> bool {
+        let Some(display_name) = self.wake_display_name(state, &identity).await else {
+            return false;
+        };
+        let (reply, accepted) = oneshot::channel();
+        if state
+            .ui
+            .request(
+                crate::ui_events::UiView::Application,
+                crate::ui_events::UiEvent::WakeRecognizing {
+                    identity,
+                    display_name,
+                    text,
+                    reply,
+                },
+            )
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        accepted.await.unwrap_or(false)
+    }
+
+    async fn forward_wake_final(
+        &self,
+        state: &DesktopState,
+        identity: crate::ui_events::WakeIdentity,
+        text: String,
+        locale: String,
+        end_reason: Option<coosenpai_core::ports::HearingSegmentEndReason>,
+    ) -> crate::ui_events::WakeFinalDisposition {
+        use crate::ui_events::WakeFinalDisposition;
+        let Some(display_name) = self.wake_display_name(state, &identity).await else {
+            return WakeFinalDisposition::Rejected;
+        };
+        let (reply, accepted) = oneshot::channel();
+        if state
+            .ui
+            .request(
+                crate::ui_events::UiView::Application,
+                crate::ui_events::UiEvent::WakeFinal {
+                    identity,
+                    display_name,
+                    text,
+                    locale,
+                    end_reason,
+                    reply,
+                },
+            )
+            .await
+            .is_err()
+        {
+            return WakeFinalDisposition::Rejected;
+        }
+        accepted.await.unwrap_or(WakeFinalDisposition::Rejected)
     }
 
     async fn publish_recognition_event(

@@ -8,6 +8,8 @@ use uuid::Uuid;
 pub(crate) enum DesktopCommand {
     WorkApprove,
     WorkConfigure,
+    WorkOfferAccept,
+    WorkOfferDecline,
     ChatSend,
     ChatCancel,
     ChatRetry,

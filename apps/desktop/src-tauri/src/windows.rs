@@ -420,9 +420,6 @@ pub(crate) fn create_details_window(app: &App) -> tauri::Result<tauri::WebviewWi
         .build()
 }
 
-/// ポップアップからの送信が受理・失敗・拒否のどれで終わっても、
-/// 結果と理由を読めるようメイン画面を表示して前面に出す。
-
 pub(crate) fn apply_main_hide<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let window = app
         .get_webview_window("main")

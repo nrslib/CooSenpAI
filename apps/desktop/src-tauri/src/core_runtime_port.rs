@@ -150,6 +150,16 @@ pub(crate) trait CoreRuntimePort: Send + Sync {
     async fn cancel_user_message_for(&self, input_id: String) -> Result<String, RuntimeError>;
     async fn retry_user_message_for(&self, input_id: String) -> Result<String, RuntimeError>;
     async fn reset_companion_emotions(&self) -> Result<(), RuntimeError>;
+    async fn accept_work_offer(
+        &self,
+        offer_id: &str,
+        conversation_generation: u64,
+    ) -> Result<String, RuntimeError>;
+    async fn decline_work_offer(
+        &self,
+        offer_id: &str,
+        conversation_generation: u64,
+    ) -> Result<(), RuntimeError>;
     async fn consolidate_memory(&self, period: String) -> Result<u64, RuntimeError>;
 }
 
@@ -417,5 +427,21 @@ impl CoreRuntimePort for RuntimeHandle {
 
     async fn reset_companion_emotions(&self) -> Result<(), RuntimeError> {
         RuntimeHandle::reset_companion_emotions(self).await
+    }
+
+    async fn accept_work_offer(
+        &self,
+        offer_id: &str,
+        conversation_generation: u64,
+    ) -> Result<String, RuntimeError> {
+        RuntimeHandle::accept_work_offer(self, offer_id.to_owned(), conversation_generation).await
+    }
+
+    async fn decline_work_offer(
+        &self,
+        offer_id: &str,
+        conversation_generation: u64,
+    ) -> Result<(), RuntimeError> {
+        RuntimeHandle::decline_work_offer(self, offer_id.to_owned(), conversation_generation).await
     }
 }

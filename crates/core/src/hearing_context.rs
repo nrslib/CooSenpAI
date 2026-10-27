@@ -247,6 +247,22 @@ impl HearingContextBuffer {
         Ok(())
     }
 
+    pub(crate) fn exclude_wake_final(
+        &mut self,
+        context: &HearingContext,
+    ) -> Result<(), crate::state::ObservationError> {
+        if self.accepts_session(&context.session_id) {
+            self.microphone_commands.exclude_wake_final(context)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn invalidate_microphone_command_results(&mut self, session_id: &str) {
+        if self.accepts_session(session_id) {
+            self.microphone_commands.invalidate_results();
+        }
+    }
+
     pub(crate) fn microphone_command_candidates(
         &mut self,
         audio: &[crate::state::AudioObservation],

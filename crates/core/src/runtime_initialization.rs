@@ -321,6 +321,30 @@ impl RuntimeActor {
             .companion
             .as_ref()
             .map_or((0, false), CompanionAgent::pending_delivery_status);
+        let work_offer = match self
+            .companion
+            .as_ref()
+            .map(CompanionAgent::pending_work_offer)
+            .transpose()
+        {
+            Ok(offer) => offer.flatten(),
+            Err(error) => {
+                if let Some(logger) = &self.logger {
+                    let _ = logger.write(
+                        "WARN",
+                        &format!("pending work offer を読み込めませんでした: {error}"),
+                    );
+                }
+                None
+            }
+        };
+        let work_offer = work_offer.filter(|_| {
+            self.config.work.proactive_offers_enabled
+                && self
+                    .companion
+                    .as_ref()
+                    .is_some_and(CompanionAgent::work_offers_eligible)
+        });
         RuntimeSnapshot {
             companion_emotions: self
                 .user_preparer
@@ -357,6 +381,7 @@ impl RuntimeActor {
                 .is_some_and(CompanionAgent::proactive_limit_reached),
             active_user_message_id: self.active_user_message_id.clone(),
             user_work_pending: self.user_work_pending,
+            work_offer,
             cancelled_user_message_ids: self.cancelled_user_message_ids.clone(),
             carried_cancelled_user_message_ids: self.carried_cancelled_user_message_ids.clone(),
             companion_draft: self.companion_draft.clone(),

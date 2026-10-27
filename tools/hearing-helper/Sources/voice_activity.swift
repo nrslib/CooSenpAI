@@ -251,6 +251,10 @@ struct VoiceActivityDetector {
         )
     }
 
+    var isSustainedSpeech: Bool {
+        movingRmsWindow.rms >= sustainRmsThreshold
+    }
+
     var levels: VoiceActivityLevels {
         VoiceActivityLevels(
             noiseFloorRms: noiseFloorRms,
@@ -547,5 +551,55 @@ struct VoiceActivityDetector {
             * configuration.maximumNoiseFloorRiseFractionPerSecond
             * durationSeconds
         noiseFloorRms += min(target - noiseFloorRms, maximumIncrease)
+    }
+}
+
+struct WakeIdleMonitor {
+    private let trailingNanoseconds: UInt64
+    private var latestGeneration = 0
+    private var activeGeneration: Int?
+    private var silenceNanoseconds: UInt64 = 0
+
+    init(configuration: VoiceActivityConfiguration) {
+        trailingNanoseconds = configuration.trailingNanoseconds
+    }
+
+    mutating func arm(generation: Int) -> Bool {
+        guard generation > 0, generation >= latestGeneration else { return false }
+        if activeGeneration == generation { return true }
+        guard generation > latestGeneration || latestGeneration == 0 else { return false }
+        latestGeneration = generation
+        activeGeneration = generation
+        silenceNanoseconds = 0
+        return true
+    }
+
+    mutating func cancel() {
+        activeGeneration = nil
+        silenceNanoseconds = 0
+    }
+
+    mutating func revoke() -> Int? {
+        let generation = activeGeneration
+        cancel()
+        return generation
+    }
+
+    mutating func observe(
+        isSustainedSpeech: Bool,
+        durationNanoseconds: UInt64,
+        action: VoiceActivityAction
+    ) -> Int? {
+        if action == .start { cancel() }
+        guard let generation = activeGeneration else { return nil }
+        if isSustainedSpeech {
+            silenceNanoseconds = 0
+        } else {
+            let (total, overflow) = silenceNanoseconds.addingReportingOverflow(durationNanoseconds)
+            silenceNanoseconds = overflow ? UInt64.max : total
+        }
+        guard silenceNanoseconds >= trailingNanoseconds else { return nil }
+        cancel()
+        return generation
     }
 }

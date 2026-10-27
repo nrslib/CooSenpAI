@@ -981,8 +981,10 @@ impl RuntimeActor {
         );
         let provider_cancellation = cancellation.clone();
         let catch_panic_to_keep_agent = self.factory.is_none();
+        let turn_commit_lock = self.turn_commit_lock.clone();
         let task = tokio::spawn(async move {
-            let process = companion.process_incoming_mailbox_decision(provider_cancellation);
+            let process = companion
+                .process_incoming_mailbox_decision(provider_cancellation, Some(turn_commit_lock));
             let result = if catch_panic_to_keep_agent {
                 std::panic::AssertUnwindSafe(process)
                     .catch_unwind()
@@ -1512,6 +1514,13 @@ impl RuntimeActor {
                                 snapshot_tx,
                             );
                             committed_result = Err(RuntimeError::Companion(error));
+                        }
+                    }
+                    if let Err(RuntimeError::Companion(CompanionError::OutputMessage(message))) =
+                        &committed_result
+                    {
+                        if let Some(error) = self.last_error.as_mut() {
+                            error.message = Some(message.clone());
                         }
                     }
                     response_result = committed_result;

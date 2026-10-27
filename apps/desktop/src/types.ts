@@ -1,8 +1,27 @@
 export type ProviderName = "codex" | "claude" | "opencode";
 export interface WorkAllowedRoot { readonly path: string; readonly read: boolean; readonly write: boolean }
-export interface WorkConfigPatch { readonly approvalMode?: "manual" | "auto"; readonly allowedRoots?: readonly WorkAllowedRoot[] }
+export interface WorkConfig { readonly approvalMode: "manual" | "auto"; readonly allowedRoots: readonly WorkAllowedRoot[]; readonly proactiveOffersEnabled: boolean }
+export interface WorkConfigPatch { readonly approvalMode?: "manual" | "auto"; readonly allowedRoots?: readonly WorkAllowedRoot[]; readonly proactiveOffersEnabled?: boolean }
+export interface WorkProposal { readonly kind: "investigate" | "work"; readonly cwd: string; readonly summary: string }
+export interface WorkOffer {
+  readonly id: string;
+  readonly conversationGeneration: number;
+  readonly userEpoch: number;
+  readonly observationIds: readonly string[];
+  readonly turnId: string;
+  readonly entryId: string;
+  readonly proposal: WorkProposal;
+  readonly fingerprint: string;
+  readonly status: "proposed" | "accepted" | "declined" | "ignored" | "invalidated";
+  readonly acceptedInputId?: string | null;
+  readonly acceptanceEnqueuePending: boolean;
+}
+export type WorkOfferAction = "accept" | "decline";
+export interface WorkOfferInput { readonly offerId: string; readonly operationGeneration: number; readonly action: WorkOfferAction }
+export interface WorkOfferProjection { readonly revision: number; readonly offer?: WorkOffer | null; readonly operationGeneration: number; readonly busy: boolean; readonly error?: string | null }
 export type LicenseDocument = "license" | "eula" | "eula-en" | "third-party-notices" | "cc-by-4.0" | "wespeaker-apache-2.0";
 export type NotificationPriority = "none" | "info" | "warning" | "critical";
+export type BubbleDisplaySelection = "main" | "cursor" | "front" | `display:${string}`;
 export interface PersonaOption { readonly id: string; readonly displayName: string; readonly builtin: boolean }
 export interface ProviderModelOptions { readonly provider: ProviderName; readonly defaultModel: string; readonly candidates: readonly string[]; readonly efforts: readonly string[]; readonly modelEfforts: Readonly<Record<string, readonly string[]>> }
 export interface ModelCatalogProvider {
@@ -33,7 +52,7 @@ export interface JudgeDecision {
 }
 
 export interface CooSenpaiConfig {
-  readonly work: { readonly approvalMode: "manual" | "auto"; readonly allowedRoots: readonly WorkAllowedRoot[] };
+  readonly work: WorkConfig;
   readonly configVersion: number;
   readonly revision: number;
   readonly app: { readonly launchAtLogin: boolean; readonly checkForUpdates: boolean };
@@ -63,6 +82,7 @@ export interface CooSenpaiConfig {
     readonly enabled: boolean;
     readonly mic: boolean;
     readonly microphoneCommandsEnabled: boolean;
+    readonly wakeEnabled: boolean;
     readonly speaker: boolean;
     readonly speakerDevices: readonly string[];
     readonly speakerIdentification: { readonly enabled: boolean; readonly modelPath: string | null };
@@ -104,7 +124,7 @@ export interface CooSenpaiConfig {
     readonly edgeRecall: boolean;
     readonly maxStack: number;
     readonly position: "bottom-right" | "top-right" | "bottom-left" | "top-left";
-    readonly display: "main" | "cursor" | "front";
+    readonly display: BubbleDisplaySelection;
   };
   readonly observer: ObserverConfig;
   readonly companion: CompanionConfig;
@@ -560,6 +580,7 @@ export interface AppSnapshot {
   };
   readonly companion: { readonly phase: "idle" | "thinking" | "error"; readonly ready: boolean; readonly totalCallsToday: number; readonly proactiveLimitReached: boolean };
   readonly notify: { readonly mode: string; readonly minimumPriority: string };
+  readonly displays: { readonly items: readonly { readonly uuid: string; readonly name: string }[]; readonly loadFailed: boolean };
   readonly observerProviderLabel: string;
   readonly companionProviderLabel: string;
   readonly companionDisplayName: string;
@@ -584,6 +605,7 @@ export interface AppSnapshot {
   readonly debugCatalog: DebugCatalog;
   readonly captureShortcutError?: string;
   readonly activeUserMessageId?: string;
+  readonly workOffer?: WorkOffer | null;
   readonly userWorkPending: boolean;
   readonly cancelledUserMessageIds: readonly string[];
   readonly carriedCancelledUserMessageIds: readonly string[];
@@ -634,7 +656,7 @@ export interface SpeechView {
   readonly inputDevices: readonly { readonly id: string; readonly name: string }[];
   readonly warningKind?: string;
   readonly message?: string;
-  readonly source?: "shortcut" | "composer";
+  readonly source?: "shortcut" | "composer" | "wake";
 }
 
 export type AudioLogEvent = {
@@ -854,6 +876,10 @@ export interface BubbleSnapshot {
   readonly position: "bottom-right" | "top-right" | "bottom-left" | "top-left";
   readonly avatarColor?: string;
   readonly avatarImagePng?: readonly number[];
+  readonly workOffer?: WorkOffer | null;
+  readonly workOfferOperationGeneration: number;
+  readonly workOfferBusy: boolean;
+  readonly workOfferError?: string | null;
 }
 
 export interface SettingsAppearancePreviewPayload {
@@ -861,7 +887,7 @@ export interface SettingsAppearancePreviewPayload {
   readonly font: string;
   readonly avatarColor: string;
   readonly bubblePosition: "bottom-right" | "top-right" | "bottom-left" | "top-left";
-  readonly bubbleDisplay: "main" | "cursor" | "front";
+  readonly bubbleDisplay: BubbleDisplaySelection;
 }
 
 export interface ConfigIssue { readonly path: string; readonly message: string }

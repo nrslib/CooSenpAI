@@ -37,6 +37,7 @@ pub struct AppSnapshot {
     pub observer: ObserverView,
     pub companion: CompanionView,
     pub notify: NotificationView,
+    pub displays: DisplayCatalogView,
     pub observer_provider_label: String,
     pub companion_provider_label: String,
     pub companion_display_name: String,
@@ -73,6 +74,8 @@ pub struct AppSnapshot {
     pub(crate) capture_shortcut_error_speech_generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_user_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offer: Option<coosenpai_core::work::WorkOffer>,
     pub user_work_pending: bool,
     pub cancelled_user_message_ids: Vec<String>,
     pub carried_cancelled_user_message_ids: Vec<String>,
@@ -556,6 +559,41 @@ pub struct NotificationView {
     pub minimum_priority: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayCatalogView {
+    pub items: Vec<DisplayOptionView>,
+    pub load_failed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayOptionView {
+    pub uuid: String,
+    pub name: String,
+}
+
+impl DisplayCatalogView {
+    pub(crate) fn apply(
+        &mut self,
+        result: Result<Vec<coosenpai_core::ports::BubbleDisplay>, String>,
+    ) {
+        match result {
+            Ok(displays) => {
+                self.items = displays
+                    .into_iter()
+                    .map(|display| DisplayOptionView {
+                        uuid: display.uuid,
+                        name: display.name,
+                    })
+                    .collect();
+                self.load_failed = false;
+            }
+            Err(_) => self.load_failed = true,
+        }
+    }
+}
+
 impl AppSnapshot {
     pub(crate) fn finish_watch(&mut self, failed: bool) {
         self.observer_running = false;
@@ -630,6 +668,7 @@ impl AppSnapshot {
                 mode: config.notification.mode.clone(),
                 minimum_priority: config.notification.min_priority.clone(),
             },
+            displays: DisplayCatalogView::default(),
             observer_provider_label: provider_label(&config.observer.vision.provider),
             companion_provider_label: provider_label(&config.companion.provider),
             companion_display_name: config.companion.display_name.clone(),
@@ -653,6 +692,7 @@ impl AppSnapshot {
             capture_shortcut_error_id: 0,
             capture_shortcut_error_speech_generation: None,
             active_user_message_id: None,
+            work_offer: None,
             user_work_pending: false,
             cancelled_user_message_ids: Vec::new(),
             carried_cancelled_user_message_ids: Vec::new(),
@@ -727,6 +767,7 @@ impl AppSnapshot {
         self.companion_display_name = runtime.companion_display_name.clone();
         self.companion.proactive_limit_reached = runtime.proactive_limit_reached;
         self.active_user_message_id = runtime.active_user_message_id.clone();
+        self.work_offer = runtime.work_offer.clone();
         self.user_work_pending = runtime.user_work_pending;
         self.cancelled_user_message_ids = runtime.cancelled_user_message_ids.clone();
         self.carried_cancelled_user_message_ids =

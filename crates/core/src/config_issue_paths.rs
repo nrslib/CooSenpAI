@@ -15,6 +15,7 @@ const FIXED_ISSUE_PATH_PATTERNS: &[&str] = &[
     "work.allowedRoots[n].read",
     "work.allowedRoots[n].write",
     "work.approvalMode",
+    "work.proactiveOffersEnabled",
     "app",
     "app.checkForUpdates",
     "app.launchAtLogin",
@@ -28,6 +29,7 @@ const FIXED_ISSUE_PATH_PATTERNS: &[&str] = &[
     "audio.speakerIdentification",
     "audio.speakerIdentification.enabled",
     "audio.speakerIdentification.modelPath",
+    "audio.wakeEnabled",
     "bubble",
     "bubble.display",
     "bubble.edgeRecall",
@@ -245,6 +247,7 @@ const UNKNOWN_KEY_SCOPES: &[&str] = &[
     "watch.battery",
     "watch.ocrGate",
     "watch.triggers",
+    "work",
 ];
 
 /// 設定 parser / validator が返し得る path の有限な契約。

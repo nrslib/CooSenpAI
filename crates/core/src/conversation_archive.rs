@@ -136,6 +136,7 @@ pub fn select_conversation_generation(
     paths: &ConfigPaths,
     generation: u64,
 ) -> Result<(), PersistenceError> {
+    let _reset_guard = acquire_conversation_reset_lock(paths)?;
     fs::create_dir_all(&paths.state)?;
     let _lock = SiblingLock::acquire(&generation_lock_path(paths))?;
     let mut state = read_generation_state(paths)?;
@@ -155,6 +156,9 @@ pub fn select_conversation_generation(
         return Err(PersistenceError::Invalid(format!(
             "選択する会話世代が存在しません: {generation}"
         )));
+    }
+    if state.selected_generation.unwrap_or(state.generation) != generation {
+        crate::work::WorkOfferStore::new(paths).invalidate_all()?;
     }
     state.selected_generation = Some(generation);
     write_generation_state(paths, &state)
@@ -232,6 +236,13 @@ fn generation_lock_path(paths: &ConfigPaths) -> PathBuf {
 
 pub fn conversation_generation_lock_path(state_directory: &Path) -> PathBuf {
     state_directory.join(".conversation-generation.lock")
+}
+
+pub(crate) fn acquire_conversation_reset_lock(
+    paths: &ConfigPaths,
+) -> Result<SiblingLock, PersistenceError> {
+    fs::create_dir_all(&paths.state)?;
+    SiblingLock::acquire(&paths.state.join(".conversation-reset.lock"))
 }
 
 fn read_generation_state(paths: &ConfigPaths) -> Result<ConversationGeneration, PersistenceError> {
@@ -343,8 +354,7 @@ fn run_reset_operation_with_recovery<F>(
 where
     F: FnOnce() -> Result<(), PersistenceError>,
 {
-    fs::create_dir_all(&paths.state)?;
-    let _guard = SiblingLock::acquire(&paths.state.join(".conversation-reset.lock"))?;
+    let _guard = acquire_conversation_reset_lock(paths)?;
     recovery()?;
     reconcile_locked(paths)?;
     let storage = CompanionStorage::from_paths(paths, retention_days);
@@ -369,8 +379,7 @@ where
 }
 
 pub fn reconcile_conversation_reset(paths: &ConfigPaths) -> Result<(), PersistenceError> {
-    fs::create_dir_all(&paths.state)?;
-    let _guard = SiblingLock::acquire(&paths.state.join(".conversation-reset.lock"))?;
+    let _guard = acquire_conversation_reset_lock(paths)?;
     reconcile_locked(paths).map(|_| ())
 }
 
@@ -456,6 +465,7 @@ fn execute_intent(paths: &ConfigPaths, intent: &ResetIntent) -> Result<(), Persi
         .started_at
         .clone()
         .unwrap_or_else(|| Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    crate::work::WorkOfferStore::new(paths).invalidate_all()?;
     with_generation_state(paths, |state| {
         state.generation = state.generation.max(intent.target_generation);
         state.selected_generation = Some(intent.target_generation);

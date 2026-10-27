@@ -9,12 +9,32 @@ pub(crate) struct MicrophoneCommandBatch {
     pub(crate) selected_ids: Vec<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct MicrophoneFinalIdentity {
+    session_id: String,
+    source: AudioObservationSource,
+    generation: u64,
+    sequence: u64,
+}
+
+impl MicrophoneFinalIdentity {
+    fn new(context: &HearingContext) -> Self {
+        Self {
+            session_id: context.session_id.clone(),
+            source: context.source,
+            generation: context.generation,
+            sequence: context.sequence,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct MicrophoneCommands {
     enabled: bool,
     epoch: u64,
     last_generation: u64,
     pending: VecDeque<AudioObservation>,
+    wake_excluded: VecDeque<MicrophoneFinalIdentity>,
 }
 
 impl MicrophoneCommands {
@@ -30,12 +50,40 @@ impl MicrophoneCommands {
         self.epoch = self.epoch.saturating_add(1);
         self.last_generation = 0;
         self.pending.clear();
+        self.wake_excluded.clear();
+    }
+
+    pub(crate) fn invalidate_results(&mut self) {
+        self.epoch = self.epoch.saturating_add(1);
+    }
+
+    pub(crate) fn exclude_wake_final(
+        &mut self,
+        context: &HearingContext,
+    ) -> Result<(), ObservationError> {
+        if context.source != AudioObservationSource::Microphone || !context.confirmed {
+            return Ok(());
+        }
+        self.last_generation = self.last_generation.max(context.generation);
+        let identity = MicrophoneFinalIdentity::new(context);
+        if !self.wake_excluded.contains(&identity) {
+            if self.wake_excluded.len() == crate::hearing_context::MAX_PENDING_AUDIO_COUNT {
+                self.wake_excluded.pop_front();
+            }
+            self.wake_excluded.push_back(identity);
+        }
+        let id = context.confirmed_audio(chrono::Utc::now())?.id;
+        self.pending.retain(|pending| pending.id != id);
+        Ok(())
     }
 
     pub(crate) fn record(&mut self, context: &HearingContext) -> Result<(), ObservationError> {
         if context.source != AudioObservationSource::Microphone
             || !context.confirmed
             || context.generation <= self.last_generation
+            || self
+                .wake_excluded
+                .contains(&MicrophoneFinalIdentity::new(context))
         {
             return Ok(());
         }

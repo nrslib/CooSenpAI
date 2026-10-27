@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
 
-import type { BubbleRecord } from "../types.js";
+import type { BubbleRecord, WorkOffer as WorkOfferValue } from "../types.js";
 import type { BubbleControlsView, BubbleViewInput } from "./view.js";
 import { AvatarBlob } from "../components/AvatarBlob.js";
+import { WorkOffer } from "../components/WorkOffer.js";
 import { CloseIcon } from "../components/LineIcons.js";
 import { useI18n } from "../i18n/index.js";
 
@@ -11,6 +12,10 @@ interface Props {
   readonly revealed?: number | null;
   readonly avatarColor?: string;
   readonly avatarImage?: readonly number[];
+  readonly offer?: WorkOfferValue;
+  readonly workOfferOperationGeneration?: number;
+  readonly workOfferBusy?: boolean;
+  readonly workOfferError?: string | null;
   readonly exiting: boolean;
   readonly reading: boolean;
   readonly hovered: boolean;
@@ -18,7 +23,7 @@ interface Props {
   readonly onEvent: (event: BubbleViewInput) => void;
 }
 
-export function Bubble({ record, revealed, avatarColor, avatarImage, exiting, reading, hovered, controls, onEvent }: Props): ReactElement {
+export function Bubble({ record, revealed, avatarColor, avatarImage, offer, workOfferOperationGeneration = 0, workOfferBusy = false, workOfferError, exiting, reading, hovered, controls, onEvent }: Props): ReactElement {
   const [selected, setSelected] = useState(record.interaction?.select?.selected ?? "");
   const [secretDraft, setSecretDraft] = useState(record.interaction?.secretInput?.value ?? "");
   const article = useRef<HTMLElement>(null);
@@ -70,6 +75,7 @@ export function Bubble({ record, revealed, avatarColor, avatarImage, exiting, re
       {dismissible ? <button className="bubble-close" type="button" aria-label={t("common.close")} onClick={() => onEvent({ type: "dismiss", id: record.id })}><CloseIcon /></button> : null}
       {dismissible ? <div className="bubble-close-lane" aria-hidden="true" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} /> : null}
     </div>
+    {offer === undefined ? null : <WorkOffer offer={offer} operationGeneration={workOfferOperationGeneration} busy={workOfferBusy} error={workOfferError} />}
   </article>;
 }
 

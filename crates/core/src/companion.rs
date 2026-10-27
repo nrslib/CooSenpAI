@@ -81,6 +81,8 @@ const MAX_OBSERVATION_ATTEMPTS: u8 = 3;
 pub struct CompanionResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_request: Option<crate::work::WorkProposal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_offer: Option<crate::work::WorkProposal>,
     #[serde(
         default,
         deserialize_with = "crate::emotion::optional_delta",
@@ -111,6 +113,8 @@ pub enum CompanionError {
     Provider(#[from] ProviderError),
     #[error("companion の構造化出力が不正です")]
     Output,
+    #[error("{0}")]
+    OutputMessage(String),
     #[error("companion prompt 用の観察が不正です")]
     ObservationPrompt,
     #[error("companion の自発呼び出し上限に達しました")]
@@ -162,6 +166,7 @@ impl CompanionError {
             Self::ObservationPrompt => ObservationFailureKind::DeterministicObservation,
             Self::Provider(_)
             | Self::Output
+            | Self::OutputMessage(_)
             | Self::LimitReached
             | Self::Usage(_)
             | Self::Persistence(_)
@@ -222,6 +227,8 @@ pub struct CompanionAgent {
     debug_store: Option<DebugStore>,
     attachment_ocr: Option<Arc<dyn OcrPort>>,
     work_executor: Option<Arc<dyn crate::work::ChatWorkExecutor>>,
+    work_offer_store: Option<crate::work::WorkOfferStore>,
+    proactive_work_offers_enabled: bool,
     conversation_pruning_enabled: bool,
     temporary_assertiveness: TemporaryAssertiveness,
     proactive_not_before: Option<chrono::DateTime<chrono::Utc>>,
@@ -298,6 +305,8 @@ impl CompanionAgent {
             debug_store: None,
             attachment_ocr: None,
             work_executor: None,
+            work_offer_store: None,
+            proactive_work_offers_enabled: false,
             conversation_pruning_enabled: true,
             temporary_assertiveness: TemporaryAssertiveness::default(),
             proactive_not_before: None,
@@ -438,6 +447,7 @@ impl CompanionAgent {
             .completed_user_response(input_id)?
             .map(|entry| CompanionResponse {
                 work_request: None,
+                work_offer: None,
                 emotion_delta: None,
                 emit: true,
                 message: Some(entry.message),
@@ -529,6 +539,7 @@ impl CompanionAgent {
 
     pub fn with_storage(mut self, paths: &ConfigPaths, retention_days: u64) -> Self {
         self.storage = Some(CompanionStorage::from_paths(paths, retention_days));
+        self.work_offer_store = Some(crate::work::WorkOfferStore::new(paths));
         self.storage_loaded = false;
         self
     }
@@ -843,17 +854,27 @@ impl CompanionAgent {
         &mut self,
         candidate: CompanionCallOutcome,
     ) -> Result<CompanionResponse, CompanionError> {
-        self.commit_proactive_candidate_with_turn_id(candidate, &Uuid::new_v4().to_string())
-            .map(|outcome| outcome.response)
+        let expected_user_epoch = self.user_epoch()?;
+        self.commit_proactive_candidate_with_turn_id(
+            candidate,
+            &Uuid::new_v4().to_string(),
+            expected_user_epoch,
+        )
+        .map(|outcome| outcome.response)
     }
 
     fn commit_proactive_candidate_with_turn_id(
         &mut self,
         mut candidate: CompanionCallOutcome,
         turn_id: &str,
+        expected_user_epoch: u64,
     ) -> Result<ProactiveCommitOutcome, CompanionError> {
-        let (remark_created, counted_emit) =
-            self.persist_proactive_response(&mut candidate.response, &candidate.observations)?;
+        let (remark_created, counted_emit) = self.persist_proactive_response(
+            &mut candidate.response,
+            &candidate.observations,
+            turn_id,
+            expected_user_epoch,
+        )?;
         self.commit_session_summary(self.pending_session_summary.clone())?;
         self.commit_call_side_effects(
             &candidate.response,
@@ -942,14 +963,21 @@ impl CompanionAgent {
         }
         let Some(storage) = self.storage.clone() else {
             return self
-                .commit_proactive_candidate_with_turn_id(candidate, &Uuid::new_v4().to_string())
+                .commit_proactive_candidate_with_turn_id(
+                    candidate,
+                    &Uuid::new_v4().to_string(),
+                    expected_user_epoch,
+                )
                 .map(Some);
         };
-        if let Err(error) = storage.mark_turn_commit_persisting(&turn_id) {
+        if let Err(error) =
+            storage.mark_turn_commit_persisting(&turn_id, candidate.response.work_offer.clone())
+        {
             storage.prepare_turn_commit_recovery()?;
             return Err(error.into());
         }
-        let result = self.commit_proactive_candidate_with_turn_id(candidate, &turn_id);
+        let result =
+            self.commit_proactive_candidate_with_turn_id(candidate, &turn_id, expected_user_epoch);
         if result.is_ok() && !storage.finalize_proactive_commit(expected_user_epoch, &turn_id)? {
             return Ok(None);
         }

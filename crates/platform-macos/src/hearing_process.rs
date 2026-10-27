@@ -134,6 +134,25 @@ pub(super) async fn force_kill_hearing_helpers(active: &ActiveHelpers) {
     }
 }
 
+pub(super) async fn arm_wake_idle(
+    active: &ActiveHelpers,
+    generation: u64,
+) -> Result<(), PortError> {
+    let control = active
+        .helpers
+        .lock()
+        .expect("helper registry")
+        .values()
+        .find(|helper| helper.source == AudioObservationSource::Microphone)
+        .map(|helper| helper.control.clone())
+        .ok_or_else(|| PortError::Unavailable("マイク helper は停止しています".to_owned()))?;
+    let command = serde_json::json!({"op": "wake-idle", "generation": generation});
+    control
+        .write_line(command.to_string().into_bytes())
+        .await
+        .map_err(|error| PortError::Unavailable(format!("無言待機を開始できません: {error}")))
+}
+
 struct BufferedDiagnosticLogger {
     sender: sync_mpsc::SyncSender<(String, String)>,
     dropped: Arc<AtomicU64>,

@@ -178,6 +178,35 @@ impl SpeechController {
         if !self.continue_start(&state, generation).await {
             return;
         }
+        if source == SpeechSource::Wake {
+            let (commands, _) = tokio::sync::mpsc::channel(1);
+            let (_, events) = tokio::sync::mpsc::channel(1);
+            let session = coosenpai_core::ports::SpeechSession::from_channels(commands, events);
+            let outcome =
+                self.lifecycle()
+                    .attach_session(generation, cancellation, session.control());
+            match outcome {
+                SessionOutcome::Active => {
+                    state
+                        .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                            generation,
+                            event: SpeechResult::SessionStarted {
+                                microphone: coosenpai_core::ports::SpeechPermissionKind::Granted,
+                                recognition: coosenpai_core::ports::SpeechPermissionKind::Granted,
+                            },
+                        })
+                        .await;
+                }
+                SessionOutcome::Finish(control) => {
+                    let _ = control.finish().await;
+                }
+                SessionOutcome::Cancel(control) => {
+                    let _ = control.cancel().await;
+                    self.complete_cancel_owner(&state, generation).await;
+                }
+            }
+            return;
+        }
         let permission_port = self
             .permission_port
             .lock()
@@ -442,6 +471,30 @@ impl SpeechController {
         SpeechPopupSnapshot::from_app(&snapshot)
     }
 
+    pub(crate) async fn accept_wake_partial(
+        &self,
+        state: &Arc<DesktopState>,
+        generation: u64,
+        text: String,
+    ) {
+        if self.lifecycle().accepts_session_events(generation) {
+            state.enqueue_snapshot_event(crate::snapshot_presenter::SnapshotEvent::Speech {
+                generation,
+                event: SpeechResult::Partial(text),
+            });
+        }
+    }
+
+    pub(crate) async fn accept_wake_final(
+        &self,
+        state: &Arc<DesktopState>,
+        generation: u64,
+        text: String,
+    ) {
+        self.accept_final(state, generation, SpeechSource::Wake, text)
+            .await;
+    }
+
     async fn continue_start(&self, state: &DesktopState, generation: u64) -> bool {
         let outcome = { self.lifecycle().continue_start(generation) };
         match outcome {
@@ -637,7 +690,7 @@ impl SpeechController {
                     })
                     .await;
                 self.refresh_cancel_shortcut(state).await;
-                let result = complete_callback_send(
+                let _ = complete_callback_send(
                     move || send_chat_from_callback(self, state, generation, text),
                     |result| async move {
                         match result {
@@ -657,7 +710,7 @@ impl SpeechController {
                 state
                     .publish_event(crate::snapshot_presenter::SnapshotEvent::Speech {
                         generation,
-                        event: SpeechResult::CallbackSent(result),
+                        event: SpeechResult::CallbackSent,
                     })
                     .await;
             }

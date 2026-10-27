@@ -89,6 +89,7 @@ pub(crate) async fn load(
         WindowRequest::PreparedMain(content) => WindowContent::Main(content),
         WindowRequest::Settings { section } => {
             prepare_settings(state).await?;
+            crate::display_monitor::refresh(state).await;
             state.refresh_speech_input_devices().await;
             state.refresh_output_devices().await;
             let models =

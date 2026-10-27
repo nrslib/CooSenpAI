@@ -139,6 +139,10 @@ struct HearingHelperApp {
                     continue
                 }
                 if operation == "cancel" { session.cancel() }
+                if operation == "wake-idle", arguments.sources.contains(.microphone),
+                   let generation = value["generation"] as? Int, generation > 0 {
+                    session.armWakeIdle(generation: generation)
+                }
                 if operation == "update-exclude-pids", let values = value["pids"] as? [Int],
                    values.allSatisfy({ $0 > 1 && $0 <= Int32.max }) {
                     let pids = values.map(pid_t.init)

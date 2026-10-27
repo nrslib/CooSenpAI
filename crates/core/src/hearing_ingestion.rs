@@ -31,6 +31,24 @@ impl HearingAudioIngestion {
             .map_err(|error| PersistenceError::Invalid(error.to_string()))
     }
 
+    pub fn exclude_wake_final(
+        &self,
+        context: &crate::hearing_context::HearingContext,
+    ) -> Result<(), PersistenceError> {
+        if context.session_id != self.session_id {
+            return Ok(());
+        }
+        self.lock()?
+            .exclude_wake_final(context)
+            .map_err(|error| PersistenceError::Invalid(error.to_string()))
+    }
+
+    pub fn invalidate_microphone_command_results(&self) -> Result<(), PersistenceError> {
+        self.lock()?
+            .invalidate_microphone_command_results(&self.session_id);
+        Ok(())
+    }
+
     pub(crate) fn new(session_id: String, buffer: Arc<Mutex<HearingContextBuffer>>) -> Self {
         Self { session_id, buffer }
     }

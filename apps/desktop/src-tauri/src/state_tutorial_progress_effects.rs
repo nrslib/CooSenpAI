@@ -101,6 +101,25 @@ impl DesktopState {
                     });
                 ProgressResult::Guide(details)
             }
+            ProgressAction::CompleteExternalInputGuide {
+                kind,
+                tutorial_run_id,
+            } => {
+                let result = match tutorial_run_id {
+                    Some(tutorial_run_id) => crate::bubbles::mutate_checked(
+                        &self.ui,
+                        crate::bubbles::BubbleMutation::CompleteTutorialGuide {
+                            kind,
+                            tutorial_run_id,
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(RuntimeError::Factory),
+                    None => Ok(()),
+                };
+                ProgressResult::ExternalInputGuide(result)
+            }
             ProgressAction::Clear => ProgressResult::Cleared {
                 cleared: crate::bubbles::clear_tutorial_progress(self).await,
                 cancellation: self.cancellation.clone(),
