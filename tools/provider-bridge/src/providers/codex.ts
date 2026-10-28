@@ -127,6 +127,7 @@ export class CodexAgent implements ProviderAgent {
         mcp_servers: {},
         web_search: options.webSearchEnabled === true ? "live" : "disabled",
         model_reasoning_summary: "auto",
+        ...(options.fastMode ? { service_tier: "fast" } : {}),
       } as CodexOptions["config"];
       const client = this.createClient({
         env: sdkEnvironment,

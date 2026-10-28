@@ -49,6 +49,9 @@ mod clipboard;
 mod focus_element;
 
 #[cfg(target_os = "macos")]
+mod selected_text_bounds;
+
+#[cfg(target_os = "macos")]
 mod keychain;
 
 #[cfg(target_os = "macos")]

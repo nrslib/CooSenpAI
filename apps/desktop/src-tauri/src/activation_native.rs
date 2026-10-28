@@ -175,7 +175,9 @@ impl ActivationPort for NativeActivationPort {
         generation: u64,
         content: Arc<ReadyCapture>,
     ) -> Result<(), String> {
-        self.popup.prepare_show(generation).await?;
+        self.popup
+            .prepare_show(generation, content.selection_bounds)
+            .await?;
         self.make_popup_key(lease, generation).await?;
         crate::capture::window::emit_capture_popup_ready(&self.state.app, generation, &content.id)
             .map_err(|error| error.to_string())?;

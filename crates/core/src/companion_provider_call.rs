@@ -333,7 +333,7 @@ impl CompanionAgent {
         session: SessionRequest,
         tutorial_response_key: Option<&str>,
     ) -> ProviderCall {
-        let (model, effort) = self.resolved_model_and_effort(!user);
+        let (model, effort, fast_mode) = self.resolved_provider_settings(!user);
         ProviderCall {
             system_prompt: self.system_prompt(),
             prompt: prompt.to_owned(),
@@ -348,6 +348,7 @@ impl CompanionAgent {
             session,
             model: Some(model.to_owned()),
             effort: Some(effort.to_owned()),
+            fast_mode: tutorial_response_key.is_none() && fast_mode,
             stall_timeout: Duration::from_millis(self.config.stall_timeout_ms),
             timeout: Duration::from_millis(self.config.timeout_ms),
             tutorial_response_key: tutorial_response_key.map(str::to_owned),
@@ -356,7 +357,7 @@ impl CompanionAgent {
         }
     }
 
-    pub(super) fn resolved_model_and_effort(&self, proactive: bool) -> (&str, &str) {
+    pub(super) fn resolved_provider_settings(&self, proactive: bool) -> (&str, &str, bool) {
         let use_proactive = proactive && !self.proactive_conversation_is_active();
         let model = if use_proactive && !self.config.proactive_model.is_empty() {
             &self.config.proactive_model
@@ -368,6 +369,18 @@ impl CompanionAgent {
         } else {
             &self.config.effort
         };
+        let fast_mode = if use_proactive {
+            self.config
+                .proactive_fast_mode
+                .unwrap_or(self.config.fast_mode)
+        } else {
+            self.config.fast_mode
+        };
+        (model, effort, fast_mode)
+    }
+
+    pub(super) fn resolved_model_and_effort(&self, proactive: bool) -> (&str, &str) {
+        let (model, effort, _) = self.resolved_provider_settings(proactive);
         (model, effort)
     }
 

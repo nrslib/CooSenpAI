@@ -12,6 +12,7 @@ export const PROVIDER_CAPABILITIES: Readonly<Record<Provider, ProviderCapabiliti
     sessionResume: true,
     sessionCompact: false,
     effort: true,
+    fastMode: true,
     midTurnInput: false,
   },
   claude: {
@@ -25,6 +26,7 @@ export const PROVIDER_CAPABILITIES: Readonly<Record<Provider, ProviderCapabiliti
     sessionResume: true,
     sessionCompact: false,
     effort: true,
+    fastMode: true,
     midTurnInput: true,
   },
   opencode: {
@@ -38,6 +40,7 @@ export const PROVIDER_CAPABILITIES: Readonly<Record<Provider, ProviderCapabiliti
     sessionResume: true,
     sessionCompact: false,
     effort: true,
+    fastMode: false,
     midTurnInput: false,
   },
 };

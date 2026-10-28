@@ -71,24 +71,45 @@ pub(super) fn deep_merge(target: &mut Value, patch: Value) {
     }
 }
 
+fn provider_changed(patch: &Value, path: &[&str], previous: &str) -> bool {
+    path.iter()
+        .try_fold(patch, |value, segment| value.get(*segment))
+        .and_then(|section| section.get("provider"))
+        .and_then(Value::as_str)
+        .is_some_and(|provider| provider != previous)
+}
+
 pub(super) fn apply_config_patch(
     current: Config,
     patch: Value,
     signed_build: bool,
 ) -> Result<Config, ConfigError> {
     validate_config_patch(&patch)?;
-    let previous_companion_provider = current.companion.provider.clone();
-    let companion_provider_changed = patch
-        .get("companion")
-        .and_then(Value::as_object)
-        .and_then(|companion| companion.get("provider"))
-        .and_then(Value::as_str)
-        .is_some_and(|provider| provider != previous_companion_provider);
+    let vision_provider_changed = provider_changed(
+        &patch,
+        &["observer", "vision"],
+        &current.observer.vision.provider,
+    );
+    let hearing_provider_changed = provider_changed(
+        &patch,
+        &["observer", "hearing"],
+        &current.observer.hearing.provider,
+    );
+    let companion_provider_changed =
+        provider_changed(&patch, &["companion"], &current.companion.provider);
     let audio_was_enabled = current.audio.enabled;
     let mut merged = serde_json::to_value(current)?;
     deep_merge(&mut merged, patch);
+    if vision_provider_changed {
+        merged["observer"]["vision"]["fastMode"] = Value::Bool(false);
+    }
+    if hearing_provider_changed {
+        merged["observer"]["hearing"]["fastMode"] = Value::Bool(false);
+    }
     if companion_provider_changed {
         merged["companion"]["proactiveModel"] = Value::String(String::new());
+        merged["companion"]["fastMode"] = Value::Bool(false);
+        merged["companion"]["proactiveFastMode"] = Value::Null;
     }
     let mut config = parse_config(merged)?;
     coosenpai_core::config::normalize_audio_sources_on_enable(audio_was_enabled, &mut config);
@@ -162,6 +183,7 @@ pub(crate) fn invalidates_running_operations(current: &Config, next: &Config) ->
         || current.companion.provider != next.companion.provider
         || current.companion.model != next.companion.model
         || current.companion.effort != next.companion.effort
+        || current.companion.fast_mode != next.companion.fast_mode
         || current.companion.executable != next.companion.executable
         || current.memory.enabled != next.memory.enabled
         || current.memory.provider_consent != next.memory.provider_consent

@@ -38,6 +38,7 @@ pub struct ProviderModelOptions {
     pub candidates: Vec<String>,
     pub efforts: Vec<String>,
     pub model_efforts: BTreeMap<String, Vec<String>>,
+    pub fast_mode: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -864,6 +865,7 @@ impl DesktopRuntimeFactory {
                 candidates: capabilities.model_candidates,
                 efforts: crate::model_catalog::builtin_efforts(),
                 model_efforts: crate::model_catalog::builtin_model_efforts(provider.as_str()),
+                fast_mode: capabilities.fast_mode,
             });
         }
         Ok(values)
@@ -990,6 +992,7 @@ fn tutorial_provider_model_options(config: &Config) -> Vec<ProviderModelOptions>
             candidates,
             efforts: crate::model_catalog::builtin_efforts(),
             model_efforts: crate::model_catalog::builtin_model_efforts(provider.as_str()),
+            fast_mode: false,
         }
     })
     .collect()
@@ -1014,6 +1017,7 @@ async fn run_connection_check(
                 session: SessionRequest::Ephemeral,
                 model: Some(model.to_owned()),
                 effort: None,
+                fast_mode: false,
                 allow_session_model_change: false,
                 stall_timeout: Duration::from_secs(30),
                 timeout: Duration::from_secs(30),

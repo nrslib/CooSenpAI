@@ -50,6 +50,7 @@ pub(crate) struct ReadyCapture {
     pub(crate) attachment: ReadyAttachment,
     origin: CaptureOrigin,
     accessibility_permission_required: bool,
+    pub(crate) selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
 }
 
 #[derive(Debug)]

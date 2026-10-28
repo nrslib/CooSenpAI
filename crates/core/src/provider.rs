@@ -102,6 +102,7 @@ pub struct ProviderCall {
     pub session: SessionRequest,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub fast_mode: bool,
     /// companion だけが、同じ session を別 model で継続できる。
     pub allow_session_model_change: bool,
     /// bridge からのイベントが途切れたときに切るまでの時間。
@@ -142,6 +143,8 @@ pub struct ProviderCapabilities {
     pub session_resume: bool,
     pub session_compact: bool,
     pub effort: bool,
+    #[serde(default)]
+    pub fast_mode: bool,
     pub mid_turn_input: bool,
 }
 
@@ -362,13 +365,20 @@ pub async fn validate_node_version(
         return Err(node_version_error());
     }
     let version = std::str::from_utf8(&output.stdout).map_err(|_| node_version_error())?;
-    let major = version
+    let mut segments = version
         .trim()
         .strip_prefix('v')
-        .and_then(|value| value.split('.').next())
+        .ok_or_else(node_version_error)?
+        .split('.');
+    let major = segments
+        .next()
         .and_then(|value| value.parse::<u64>().ok())
         .ok_or_else(node_version_error)?;
-    if major < 18 {
+    let minor = segments
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(node_version_error)?;
+    if major < 18 || (major == 18 && minor < 14) {
         return Err(node_version_error());
     }
     Ok(())
@@ -377,7 +387,7 @@ pub async fn validate_node_version(
 fn node_version_error() -> ProviderError {
     ProviderError {
         kind: ProviderErrorKind::Unsupported,
-        message: "Node.js 18 以上が必要です。".to_owned(),
+        message: "Node.js 18.14.0 以上が必要です。".to_owned(),
     }
 }
 

@@ -174,6 +174,10 @@ export class ClaudeAgent implements ProviderAgent {
       mcpServers: {},
       strictMcpConfig: true,
       settingSources: [],
+      settings: {
+        fastMode: options.fastMode,
+        fastModePerSessionOptIn: true,
+      },
       permissionMode: "dontAsk",
       ...(options.isolateTools === true ? {
         canUseTool: async () => ({ behavior: "deny" as const, message: "作業plannerはtoolを実行できません" }),

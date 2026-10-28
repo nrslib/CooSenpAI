@@ -347,12 +347,14 @@ pub(super) async fn prepare_selected_capture(
         SelectionData::Text {
             attachment,
             permission_required,
+            selection_bounds,
         } => Ok(ReadyCapture {
             conversation,
             id: uuid::Uuid::new_v4().to_string(),
             attachment: ReadyAttachment::Text(attachment),
             origin,
             accessibility_permission_required: permission_required,
+            selection_bounds,
         }),
     }
 }

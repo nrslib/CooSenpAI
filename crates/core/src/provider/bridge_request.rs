@@ -22,6 +22,7 @@ pub(super) fn send_request_value(
         "session": {"mode": session_mode, "id": session_id},
         "model": input.model,
         "effort": input.effort,
+        "fastMode": input.fast_mode,
         "systemPrompt": input.system_prompt,
         "message": input.prompt,
         "allowedTranscriptPaths": input.allowed_transcript_paths,

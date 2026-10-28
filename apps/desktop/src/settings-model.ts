@@ -24,8 +24,8 @@ export function effortCandidatesForModel(options: ProviderModelOptions, model: s
   return [...new Set([...(modelEfforts ?? []), ...options.efforts])];
 }
 
-export function companionProviderChange(provider: ProviderName, model: string): Pick<FormState, "providerCompanion" | "companionModel" | "proactiveModel"> {
-  return { providerCompanion: provider, companionModel: model, proactiveModel: "" };
+export function companionProviderChange(provider: ProviderName, model: string): Pick<FormState, "providerCompanion" | "companionModel" | "companionFastMode" | "proactiveModel" | "proactiveFastMode"> {
+  return { providerCompanion: provider, companionModel: model, companionFastMode: false, proactiveModel: "", proactiveFastMode: null };
 }
 
 export function unavailableProviderMessage(detail?: string, locale: Locale = "ja"): string {
@@ -39,13 +39,13 @@ export interface SettingsIssueTarget {
 const CONTROL_PATHS = new Set<string>([
   "companion.displayName", "companion.persona", "companion.assertiveness", "companion.emotionsEnabled",
   "companion.reviewTime", "chat.whileThinking",
-  "observer.vision.provider", "observer.vision.model",
+  "observer.vision.provider", "observer.vision.model", "observer.vision.fastMode",
   "observer.vision.dailyCallLimit",
-  "observer.hearing.provider", "observer.hearing.model", "observer.hearing.dailyCallLimit",
+  "observer.hearing.provider", "observer.hearing.model", "observer.hearing.fastMode", "observer.hearing.dailyCallLimit",
   "judge.follow",
   // Keep resolving issue paths emitted by legacy flat configuration files.
   "observer.provider", "observer.model", "observer.dailyCallLimit",
-  "companion.provider", "companion.model", "companion.proactiveModel", "companion.dailyProactiveLimit",
+  "companion.provider", "companion.model", "companion.fastMode", "companion.proactiveModel", "companion.proactiveFastMode", "companion.dailyProactiveLimit",
   "memory.dailyRetentionDays",
   "memory.weeklyRetentionWeeks", "memory.factPromptDailyLimit",
   "memory.enabled", "memory.providerConsent", "watch.fullscreen", "watch.focusElement", "watch.ocrGate.executable",

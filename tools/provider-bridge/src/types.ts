@@ -56,6 +56,7 @@ export interface ProviderCapabilities {
   readonly sessionResume: boolean;
   readonly sessionCompact: boolean;
   readonly effort: boolean;
+  readonly fastMode: boolean;
   readonly midTurnInput: boolean;
 }
 
@@ -77,6 +78,7 @@ export interface ProviderCallOptions {
   readonly session: ProviderSession;
   readonly model?: string;
   readonly effort?: EffortSelection;
+  readonly fastMode: boolean;
   readonly systemPrompt: string;
   readonly message: string;
   /** Undefined preserves normal observation access; [] denies every transcript. */

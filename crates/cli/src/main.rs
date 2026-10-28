@@ -588,6 +588,7 @@ async fn run_eval_case(
                         session: SessionRequest::Ephemeral,
                         model: Some(case.model.to_owned()),
                         effort: Some(case.effort.to_owned()),
+                        fast_mode: case.config.observer.fast_mode,
                         allow_session_model_change: false,
                         stall_timeout: Duration::from_millis(case.config.observer.stall_timeout_ms),
                         timeout: Duration::from_millis(case.config.observer.timeout_ms),
@@ -674,6 +675,7 @@ async fn run_eval_case(
                         session: SessionRequest::New,
                         model: Some(case.model.to_owned()),
                         effort: Some(case.effort.to_owned()),
+                        fast_mode: case.config.companion.fast_mode,
                         allow_session_model_change: false,
                         stall_timeout: Duration::from_millis(
                             case.config.companion.stall_timeout_ms,
@@ -716,6 +718,7 @@ async fn run_eval_case(
                             session: SessionRequest::Ephemeral,
                             model: Some(case.model.to_owned()),
                             effort: Some(case.effort.to_owned()),
+                            fast_mode: false,
                             allow_session_model_change: false,
                             stall_timeout: Duration::from_millis(case.config.companion.stall_timeout_ms),
                             timeout: Duration::from_millis(case.config.companion.timeout_ms),

@@ -1345,7 +1345,7 @@ impl CompanionAgent {
             .map_or(SessionRequest::New, SessionRequest::Resume);
         let mode = session_mode(&session);
         let started = Instant::now();
-        let (model, effort) = self.resolved_model_and_effort(false);
+        let (model, effort, fast_mode) = self.resolved_provider_settings(false);
         let model = model.to_owned();
         let effort = effort.to_owned();
         let selected_model = model.clone();
@@ -1380,6 +1380,7 @@ impl CompanionAgent {
                 session: provider_session,
                 model: Some(model),
                 effort: Some(effort),
+                fast_mode,
                 stall_timeout: Duration::from_millis(self.config.stall_timeout_ms),
                 timeout,
                 tutorial_response_key: None,

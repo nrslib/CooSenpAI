@@ -20,8 +20,8 @@ mod presence;
 mod watch_apps;
 use self::helpers::{
     app_window_limit, boolean, effort, effort_or_empty, enum_string, executable, frames_per_send,
-    nonnegative_u32, nonnegative_u64, optional_nonnegative_u32, parse_audio, parse_chat,
-    parse_debug, parse_speech, parse_ui, parse_voice_output, persona, positive_number,
+    nonnegative_u32, nonnegative_u64, optional_boolean, optional_nonnegative_u32, parse_audio,
+    parse_chat, parse_debug, parse_speech, parse_ui, parse_voice_output, persona, positive_number,
     positive_u32, positive_u64, positive_usize, provider, string, string_or_empty, unknown_keys,
 };
 use keymap::parse_keymap;
@@ -949,6 +949,7 @@ fn parse_observer_profile(
             "provider",
             "model",
             "effort",
+            "fastMode",
             "stallTimeoutMs",
             "timeoutMs",
             "dailyCallLimit",
@@ -965,6 +966,7 @@ fn parse_observer_profile(
             provider: provider(object, "provider", "codex", &path_value("provider"), issues),
             model: string(object, "model", "default", &path_value("model"), issues),
             effort: effort(object, "effort", "default", &path_value("effort"), issues),
+            fast_mode: boolean(object, "fastMode", false, &path_value("fastMode"), issues),
             executable: executable(object, "executable", &path_value("executable"), issues),
             stall_timeout_ms: positive_u64(
                 object,
@@ -1023,8 +1025,10 @@ fn parse_companion(
             "provider",
             "model",
             "effort",
+            "fastMode",
             "proactiveModel",
             "proactiveEffort",
+            "proactiveFastMode",
             "persona",
             "displayName",
             "assertiveness",
@@ -1061,11 +1065,18 @@ fn parse_companion(
         provider,
         model,
         effort: effort(object, "effort", "default", "companion.effort", issues),
+        fast_mode: boolean(object, "fastMode", false, "companion.fastMode", issues),
         proactive_model,
         proactive_effort: effort_or_empty(
             object,
             "proactiveEffort",
             "companion.proactiveEffort",
+            issues,
+        ),
+        proactive_fast_mode: optional_boolean(
+            object,
+            "proactiveFastMode",
+            "companion.proactiveFastMode",
             issues,
         ),
         executable: executable(object, "executable", "companion.executable", issues),

@@ -94,10 +94,11 @@ export function EffortInput({ path, value, options, label: customLabel, descript
   </SettingsSearchItem>;
 }
 
-export function BooleanInput({ label, path, value, update }: {
+export function BooleanInput({ label, path, value, disabled, update }: {
   readonly label: string;
   readonly path?: string;
   readonly value: boolean;
+  readonly disabled?: boolean;
   readonly update: (value: boolean) => void;
 }): ReactElement | null {
   const { locale, t } = useI18n();
@@ -109,7 +110,28 @@ export function BooleanInput({ label, path, value, update }: {
     <label className="boolean-field">
       <span>{label}{defaultValue === undefined ? "" : t("settings.controls.defaultValue", { value: defaultValue })}</span>
       {helpDescription === undefined ? null : <small>{helpDescription}</small>}
-      <input id={path === undefined ? undefined : inputId(path)} type="checkbox" checked={value} onChange={(event) => update(event.target.checked)} />
+      <input id={path === undefined ? undefined : inputId(path)} type="checkbox" checked={value} disabled={disabled === true} onChange={(event) => update(event.target.checked)} />
+    </label>
+  </SettingsSearchItem>;
+}
+
+export function ProactiveFastModeInput({ value, disabled, update }: {
+  readonly value: boolean | null;
+  readonly disabled: boolean;
+  readonly update: (value: boolean | null) => void;
+}): ReactElement | null {
+  const { t } = useI18n();
+  const path = "companion.proactiveFastMode";
+  const description = t("settings.tuning.fastMode");
+  return <SettingsSearchItem label={t("settings.providers.proactiveFastMode")} path={path} description={description}>
+    <label>
+      <span>{t("settings.providers.proactiveFastMode")}</span>
+      <select id={inputId(path)} value={value === null ? "same" : value ? "on" : "off"} disabled={disabled} onChange={(event) => update(event.target.value === "same" ? null : event.target.value === "on")}>
+        <option value="same">{t("settings.providers.sameAsReply")}</option>
+        <option value="on">ON</option>
+        <option value="off">OFF</option>
+      </select>
+      <small>{description}</small>
     </label>
   </SettingsSearchItem>;
 }

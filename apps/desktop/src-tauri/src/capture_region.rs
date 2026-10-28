@@ -25,5 +25,6 @@ pub(super) async fn prepare_image(
         },
         origin,
         accessibility_permission_required: false,
+        selection_bounds: None,
     })
 }

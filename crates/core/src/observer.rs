@@ -1171,6 +1171,7 @@ impl ObserverAgent {
                     session: session.clone(),
                     model: Some(self.config.model.clone()),
                     effort: Some(self.config.effort.clone()),
+                    fast_mode: self.config.fast_mode,
                     allow_session_model_change: false,
                     stall_timeout,
                     timeout: remaining,

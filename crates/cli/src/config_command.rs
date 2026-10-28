@@ -56,10 +56,19 @@ fn parse_config_value(key: &str, raw: &str) -> Result<Value> {
     }
     if matches!(
         key,
-        "companion.dailyProactiveLimit" | "voiceOutput.voicevoxStyleId"
+        "companion.dailyProactiveLimit"
+            | "companion.proactiveFastMode"
+            | "voiceOutput.voicevoxStyleId"
     ) && raw == "null"
     {
         return Ok(Value::Null);
+    }
+    if key == "companion.proactiveFastMode" {
+        return match raw {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => anyhow::bail!("{key} は null、true または false で指定してください。"),
+        };
     }
     if matches!(
         field,
@@ -75,6 +84,7 @@ fn parse_config_value(key: &str, raw: &str) -> Result<Value> {
             | "edgeRecall"
             | "launchAtLogin"
             | "checkForUpdates"
+            | "fastMode"
     ) {
         return match raw {
             "true" => Ok(Value::Bool(true)),

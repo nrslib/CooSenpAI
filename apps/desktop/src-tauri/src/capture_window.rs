@@ -8,7 +8,10 @@ pub(super) type MouseCallback = Arc<dyn Fn(crate::platform::MouseClick) + Send +
 #[async_trait::async_trait]
 pub(super) trait PopupBoundary: Clone + Send + Sync + 'static {
     type Monitor: Clone + Send + Sync;
-    async fn prepare(&self) -> Result<(), String>;
+    async fn prepare(
+        &self,
+        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
+    ) -> Result<(), String>;
     async fn install_mouse(&self, callback: MouseCallback) -> Result<Self::Monitor, String>;
     async fn remove_mouse(&self, monitor: Self::Monitor) -> Result<(), String>;
     async fn install_escape(&self, generation: u64) -> Result<(), String>;
@@ -40,8 +43,12 @@ impl CapturePopupView {
         }
     }
 
-    pub(crate) async fn prepare_show(&self, generation: u64) -> Result<(), String> {
-        self.inner.prepare_show(generation).await
+    pub(crate) async fn prepare_show(
+        &self,
+        generation: u64,
+        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
+    ) -> Result<(), String> {
+        self.inner.prepare_show(generation, selection_bounds).await
     }
 
     pub(super) async fn arm(&self, generation: u64) -> Result<(), String> {
@@ -65,8 +72,12 @@ impl<B: PopupBoundary> PopupView<B> {
         }
     }
 
-    pub(crate) async fn prepare_show(&self, generation: u64) -> Result<(), String> {
-        self.boundary.prepare().await?;
+    pub(crate) async fn prepare_show(
+        &self,
+        generation: u64,
+        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
+    ) -> Result<(), String> {
+        self.boundary.prepare(selection_bounds).await?;
         self.arm(generation).await
     }
 
@@ -134,12 +145,20 @@ impl DesktopPopupBoundary {
 #[async_trait::async_trait]
 impl PopupBoundary for DesktopPopupBoundary {
     type Monitor = Arc<Mutex<Option<crate::platform::MouseDownMonitor>>>;
-    async fn prepare(&self) -> Result<(), String> {
+    async fn prepare(
+        &self,
+        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
+    ) -> Result<(), String> {
         let window = self.window()?;
         window
             .set_focusable(true)
             .map_err(|error| error.to_string())?;
-        crate::windows::position_capture_popup(&window).map_err(|error| error.to_string())?;
+        let positioning_window = window.clone();
+        on_main_thread(&self.state.app, move || {
+            crate::windows::position_capture_popup(&positioning_window, selection_bounds)
+                .map_err(|error| error.to_string())
+        })
+        .await?;
         native_action(&window, |native| {
             crate::platform::convert_to_nonactivating_panel(native)
                 .map_err(|error| error.to_string())

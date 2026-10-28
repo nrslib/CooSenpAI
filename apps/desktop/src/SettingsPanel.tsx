@@ -253,8 +253,8 @@ export function SettingsPanel({ snapshot, personas, providerModels, providerMode
       return;
     }
     const current = formSync.form;
-    if (target === "vision") edit({ ...current, providerObserver: provider, observerModel: model });
-    else if (target === "hearing") edit({ ...current, providerHearing: provider, hearingModel: model });
+    if (target === "vision") edit({ ...current, providerObserver: provider, observerModel: model, observerFastMode: false });
+    else if (target === "hearing") edit({ ...current, providerHearing: provider, hearingModel: model, hearingFastMode: false });
     else edit({ ...current, ...companionProviderChange(provider, model) });
   };
   const requestClose = (): void => action("close");

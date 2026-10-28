@@ -110,6 +110,7 @@ impl ProviderClient for MockProvider {
             session_resume: true,
             session_compact: false,
             effort: true,
+            fast_mode: false,
             mid_turn_input: false,
         })
     }

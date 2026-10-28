@@ -23,7 +23,7 @@ export type LicenseDocument = "license" | "eula" | "eula-en" | "third-party-noti
 export type NotificationPriority = "none" | "info" | "warning" | "critical";
 export type BubbleDisplaySelection = "main" | "cursor" | "front" | `display:${string}`;
 export interface PersonaOption { readonly id: string; readonly displayName: string; readonly builtin: boolean }
-export interface ProviderModelOptions { readonly provider: ProviderName; readonly defaultModel: string; readonly candidates: readonly string[]; readonly efforts: readonly string[]; readonly modelEfforts: Readonly<Record<string, readonly string[]>> }
+export interface ProviderModelOptions { readonly provider: ProviderName; readonly defaultModel: string; readonly candidates: readonly string[]; readonly efforts: readonly string[]; readonly modelEfforts: Readonly<Record<string, readonly string[]>>; readonly fastMode: boolean }
 export interface ModelCatalogProvider {
   readonly provider: ProviderName;
   readonly defaultModel: string;
@@ -168,6 +168,7 @@ export interface AgentConfig {
   readonly provider: ProviderName;
   readonly model: string;
   readonly effort: string;
+  readonly fastMode: boolean;
   readonly executable?: string | null;
   readonly stallTimeoutMs: number;
   readonly timeoutMs: number;
@@ -190,8 +191,10 @@ export interface CompanionConfig {
   readonly provider: ProviderName;
   readonly model: string;
   readonly effort: string;
+  readonly fastMode: boolean;
   readonly proactiveModel: string;
   readonly proactiveEffort: string;
+  readonly proactiveFastMode: boolean | null;
   readonly proactiveIdleMs: number;
   readonly executable?: string | null;
   readonly persona: string;

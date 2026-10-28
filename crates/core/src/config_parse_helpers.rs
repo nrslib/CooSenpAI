@@ -212,6 +212,22 @@ pub(super) fn boolean(
     }
 }
 
+pub(super) fn optional_boolean(
+    object: &Map<String, Value>,
+    key: &str,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> Option<bool> {
+    match object.get(key) {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => {
+            issues.push(issue(path, "null、true または false で指定してください。"));
+            None
+        }
+    }
+}
+
 pub(super) fn string(
     object: &Map<String, Value>,
     key: &str,

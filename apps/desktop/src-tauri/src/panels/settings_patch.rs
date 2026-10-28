@@ -98,7 +98,7 @@ pub(super) fn category_for_issue(path: &str) -> &'static str {
     } else if belongs("observer.hearing") {
         "providers"
     } else if belongs("observer") {
-        let provider_fields = ["provider", "model", "dailyCallLimit"];
+        let provider_fields = ["provider", "model", "fastMode", "dailyCallLimit"];
         if path == "observer"
             || provider_fields
                 .iter()
@@ -118,9 +118,11 @@ pub(super) fn category_for_issue(path: &str) -> &'static str {
             "provider",
             "model",
             "effort",
+            "fastMode",
             "dailyProactiveLimit",
             "proactiveModel",
             "proactiveEffort",
+            "proactiveFastMode",
             "proactiveIdleMs",
             "stallTimeoutMs",
             "timeoutMs",

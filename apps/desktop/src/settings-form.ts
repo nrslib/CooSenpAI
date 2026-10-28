@@ -47,9 +47,13 @@ export interface FormState {
   observerModel: string;
   companionModel: string;
   observerEffort: string;
+  hearingFastMode: boolean;
+  observerFastMode: boolean;
   companionEffort: string;
+  companionFastMode: boolean;
   proactiveModel: string;
   proactiveEffort: string;
+  proactiveFastMode: boolean | null;
   proactiveIdleMs: string;
   observerExecutable: string;
   observerIntervalMs: string;
@@ -159,8 +163,8 @@ const pageFields: Readonly<Record<SettingsCategory, readonly ConfigFormKey[]>> =
   speech: ["speechLocale", "speechInputDevice", "speechMode", "speechConfirmBeforeSend", "voiceOutputEnabled", "voiceOutputProvider", "voiceOutputRate", "voicevoxStyleId"],
   notifications: ["notificationMode", "bubblePosition", "bubbleDisplay", "bubbleEdgeRecall", "thoughtBubble", "bubbleKeepLatest", "textQuickActions", "imageQuickActions", "minPriority", "bubbleDurationMs"],
   providers: [
-    "providerObserver", "observerModel", "observerEffort", "observerLimit", "providerHearing", "hearingModel", "hearingEffort", "hearingLimit", "providerCompanion", "companionModel",
-    "companionEffort", "proactiveModel", "proactiveEffort", "companionLimit",
+    "providerObserver", "observerModel", "observerEffort", "observerFastMode", "observerLimit", "providerHearing", "hearingModel", "hearingEffort", "hearingFastMode", "hearingLimit", "providerCompanion", "companionModel",
+    "companionEffort", "companionFastMode", "proactiveModel", "proactiveEffort", "proactiveFastMode", "companionLimit",
   ],
   shortcuts: ["captureShortcut", "microphoneShortcut", "togglePanelShortcut", "toggleAvatarShortcut", "toggleWatchShortcut", "sendTextShortcut", "copyLastReplyShortcut", "sendKey"],
   setup: [],
@@ -190,6 +194,9 @@ export const tuningHelp: Readonly<Record<string, { readonly defaultValue: string
   "watch.focusElement": { defaultValue: "enabled", defaultValueKey: "common.enabled", descriptionKey: "settings.tuning.focusElement" },
   "companion.dailyProactiveLimit": { defaultValue: "unlimited", defaultValueKey: "settings.tuning.unlimited", descriptionKey: "settings.tuning.dailyProactiveLimit" },
   "companion.assertiveness": { defaultValue: "normal", descriptionKey: "settings.tuning.assertiveness" },
+  "observer.vision.fastMode": { defaultValue: "disabled", descriptionKey: "settings.tuning.fastMode" },
+  "observer.hearing.fastMode": { defaultValue: "disabled", descriptionKey: "settings.tuning.fastMode" },
+  "companion.fastMode": { defaultValue: "disabled", descriptionKey: "settings.tuning.fastMode" },
 };
 
 export function toForm(config: CooSenpaiConfig, avatarImageLoadFailed: boolean): FormState {
@@ -273,9 +280,13 @@ function toBaseForm(source: CooSenpaiConfig) {
     observerModel: vision.model,
     companionModel: source.companion.model,
     observerEffort: vision.effort,
+    observerFastMode: vision.fastMode,
+    hearingFastMode: hearing.fastMode,
     companionEffort: source.companion.effort,
+    companionFastMode: source.companion.fastMode,
     proactiveModel: source.companion.proactiveModel,
     proactiveEffort: source.companion.proactiveEffort,
+    proactiveFastMode: source.companion.proactiveFastMode,
     proactiveIdleMs: String(source.companion.proactiveIdleMs),
     observerExecutable: vision.executable ?? "",
     observerIntervalMs: String(vision.intervalMs),
@@ -417,6 +428,7 @@ function toBasePatch(form: FormState): ConfigPatch {
         provider: form.providerObserver,
         model: form.observerModel,
         effort: form.observerEffort,
+        fastMode: form.observerFastMode,
         executable: form.observerExecutable === "" ? null : form.observerExecutable,
         intervalMs: Number(form.observerIntervalMs),
         stallTimeoutMs: Number(form.observerStallTimeoutMs),
@@ -429,6 +441,7 @@ function toBasePatch(form: FormState): ConfigPatch {
         provider: form.providerHearing,
         model: form.hearingModel,
         effort: form.hearingEffort,
+        fastMode: form.hearingFastMode,
         executable: form.hearingExecutable === "" ? null : form.hearingExecutable,
         intervalMs: Number(form.hearingIntervalMs),
         stallTimeoutMs: Number(form.hearingStallTimeoutMs),
@@ -442,8 +455,10 @@ function toBasePatch(form: FormState): ConfigPatch {
       provider: form.providerCompanion,
       model: form.companionModel,
       effort: form.companionEffort,
+      fastMode: form.companionFastMode,
       proactiveModel: form.proactiveModel,
       proactiveEffort: form.proactiveEffort,
+      proactiveFastMode: form.proactiveFastMode,
       proactiveIdleMs: Number(form.proactiveIdleMs),
       executable: form.companionExecutable === "" ? null : form.companionExecutable,
       assertiveness: form.assertiveness,

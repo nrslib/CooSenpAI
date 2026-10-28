@@ -172,6 +172,7 @@ export class BridgeHost {
         session: request.session,
         ...(request.model === undefined ? {} : { model: request.model }),
         ...(request.effort === undefined ? {} : { effort: classifyEffort(request.effort) }),
+        fastMode: request.fastMode,
         systemPrompt: request.systemPrompt,
         message: request.message,
         ...(request.allowedTranscriptPaths === undefined ? {} : { allowedTranscriptPaths: request.allowedTranscriptPaths }),

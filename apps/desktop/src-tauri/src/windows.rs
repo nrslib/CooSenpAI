@@ -17,6 +17,9 @@ mod brain_activity;
 #[cfg(target_os = "macos")]
 #[path = "windows_bubble_tracking.rs"]
 mod bubble_tracking;
+#[cfg(target_os = "macos")]
+#[path = "windows_capture_popup.rs"]
+mod capture_popup;
 #[path = "windows_tray.rs"]
 mod tray;
 pub(crate) use brain_activity::{ensure_brain_activity_window, show_brain_activity};
@@ -131,7 +134,7 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
         .get_webview_window("capture-popup")
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
     configure_full_screen_space_behavior(&capture)?;
-    position_capture_popup(&capture)?;
+    position_capture_popup(&capture, None)?;
     capture.on_window_event({
         let state = app
             .try_state::<Arc<DesktopState>>()
@@ -610,7 +613,18 @@ fn create_tray(app: &App) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn position_capture_popup(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+pub fn position_capture_popup(
+    window: &tauri::WebviewWindow,
+    selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
+) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    if let Some(selection_bounds) = selection_bounds {
+        if let Some(position) = capture_popup::position_near_selection(window, selection_bounds)? {
+            return window.set_position(position);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = selection_bounds;
     let Some(monitor) = window.primary_monitor()? else {
         return Ok(());
     };

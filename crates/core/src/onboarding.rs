@@ -493,6 +493,7 @@ impl ProviderClient for TutorialProvider {
             session_resume: true,
             session_compact: false,
             effort: false,
+            fast_mode: false,
             mid_turn_input: false,
         })
     }

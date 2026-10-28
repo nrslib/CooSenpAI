@@ -118,7 +118,7 @@ impl RuntimeFactory for WatchRuntimeFactory {
             coosenpai_core::provider::resolve_login_shell_path(self.cancellation.clone()).await;
         let node = crate::platform::MacHelperResolver
             .resolve_node(&path_value)
-            .ok_or_else(|| "Node.js 18 以上が見つかりません".to_owned())?;
+            .ok_or_else(|| "Node.js 18.14.0 以上が見つかりません".to_owned())?;
         coosenpai_core::provider::validate_node_version(
             &node,
             &path_value,

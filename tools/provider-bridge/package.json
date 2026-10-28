@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.14.0"
   },
   "scripts": {
     "build": "esbuild src/bridge.ts --bundle --platform=node --format=esm --target=node18 --outfile=dist/bridge.js --banner:js=\"import { createRequire as __coosenpaiCreateRequire } from 'node:module'; const require = __coosenpaiCreateRequire(import.meta.url);\"",
@@ -12,8 +12,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.206",
-    "@openai/codex-sdk": "0.154.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.312",
+    "@openai/codex-sdk": "0.165.0",
     "@opencode-ai/sdk": "1.18.2"
   },
   "devDependencies": {

@@ -696,6 +696,8 @@ pub struct AgentConfig {
     #[serde(default = "default_effort")]
     pub effort: String,
     #[serde(default)]
+    pub fast_mode: bool,
+    #[serde(default)]
     pub executable: Option<String>,
     #[serde(default = "default_stall_timeout")]
     pub stall_timeout_ms: u64,
@@ -715,6 +717,7 @@ impl AgentConfig {
             provider: default_codex(),
             model: default_model(),
             effort: default_effort(),
+            fast_mode: false,
             executable: None,
             stall_timeout_ms: default_stall_timeout(),
             timeout_ms: default_observer_timeout(),
@@ -821,9 +824,13 @@ pub struct CompanionConfig {
     #[serde(default = "default_effort")]
     pub effort: String,
     #[serde(default)]
+    pub fast_mode: bool,
+    #[serde(default)]
     pub proactive_model: String,
     #[serde(default)]
     pub proactive_effort: String,
+    #[serde(default)]
+    pub proactive_fast_mode: Option<bool>,
     #[serde(default)]
     pub executable: Option<String>,
     #[serde(default = "default_persona")]
@@ -869,8 +876,10 @@ impl Default for CompanionConfig {
             provider: default_codex(),
             model: default_model(),
             effort: default_effort(),
+            fast_mode: false,
             proactive_model: String::new(),
             proactive_effort: String::new(),
+            proactive_fast_mode: None,
             executable: None,
             persona: default_persona(),
             display_name: default_display_name(),

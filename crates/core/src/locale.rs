@@ -911,8 +911,8 @@ pub fn text(key: TextKey, locale: Locale) -> &'static str {
         }
         (TextKey::FactoryBridgeMissing, Locale::Ja) => "provider bridge が見つかりません",
         (TextKey::FactoryBridgeMissing, Locale::En) => "The provider bridge was not found.",
-        (TextKey::FactoryNodeMissing, Locale::Ja) => "Node.js 18 以上が見つかりません",
-        (TextKey::FactoryNodeMissing, Locale::En) => "Node.js 18 or later was not found.",
+        (TextKey::FactoryNodeMissing, Locale::Ja) => "Node.js 18.14.0 以上が見つかりません",
+        (TextKey::FactoryNodeMissing, Locale::En) => "Node.js 18.14.0 or later was not found.",
         (TextKey::FactoryBridgeInitFailed, Locale::Ja) => "provider bridge を初期化できません",
         (TextKey::FactoryBridgeInitFailed, Locale::En) => "Could not initialize the provider bridge.",
         (TextKey::FactoryTutorialMissing, Locale::Ja) => "チュートリアル台本が見つかりません",
@@ -2302,7 +2302,7 @@ pub fn localize_factory_message(message: &str, locale: Locale) -> String {
             Some(TextKey::FactoryAuthRestoreFailed)
         }
         "provider bridge が見つかりません" => Some(TextKey::FactoryBridgeMissing),
-        "Node.js 18 以上が見つかりません" => Some(TextKey::FactoryNodeMissing),
+        "Node.js 18.14.0 以上が見つかりません" => Some(TextKey::FactoryNodeMissing),
         "provider bridge を初期化できません" => Some(TextKey::FactoryBridgeInitFailed),
         "チュートリアル台本が見つかりません" => {
             Some(TextKey::FactoryTutorialMissing)

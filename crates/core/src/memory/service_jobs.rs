@@ -140,6 +140,7 @@ impl MemoryService {
                 session: SessionRequest::Ephemeral,
                 model,
                 effort,
+                fast_mode: false,
                 allow_session_model_change: false,
                 stall_timeout,
                 timeout,

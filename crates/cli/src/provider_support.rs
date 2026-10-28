@@ -43,7 +43,7 @@ pub(super) fn make_provider(
                 .context("provider bridge が見つかりません。tools/provider-bridge/build.sh を実行してください")?;
             let node = resolver
                 .resolve_node(path_value)
-                .context("Node.js 18 以上が見つかりません")?;
+                .context("Node.js 18.14.0 以上が見つかりません")?;
             let keychain = crate::platform::provider_api_key_store();
             let env = bridge_environment(
                 std::env::vars(),

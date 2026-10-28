@@ -176,9 +176,12 @@ pub trait SelectedTextCopyPort: Send + Sync {
     ) -> Result<SelectedTextCopyOutcome, PortError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SelectedTextCopyOutcome {
-    Sent { change_count_before_post: i64 },
+    Sent {
+        change_count_before_post: i64,
+        selection_bounds: Option<WindowBounds>,
+    },
     PermissionDenied,
     Cancelled,
     ReleaseTimeout,

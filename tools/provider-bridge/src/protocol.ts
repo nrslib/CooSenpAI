@@ -26,6 +26,7 @@ export interface SendRequest extends RequestBase {
   readonly session: ProviderSession;
   readonly model?: string;
   readonly effort?: string;
+  readonly fastMode: boolean;
   readonly systemPrompt: string;
   readonly message: string;
   readonly allowedTranscriptPaths?: readonly string[];
@@ -75,6 +76,7 @@ const SEND_KEYS = [
   "session",
   "model",
   "effort",
+  "fastMode",
   "systemPrompt",
   "message",
   "allowedTranscriptPaths",
@@ -158,6 +160,7 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
     throw new BridgeError("protocol", "schema exceeds the byte limit");
   }
   if (record.toolsDisabled !== true) throw new BridgeError("protocol", "toolsDisabled must be true");
+  if (typeof record.fastMode !== "boolean") throw new BridgeError("protocol", "fastMode must be a boolean");
   if (record.webSearchEnabled !== undefined && typeof record.webSearchEnabled !== "boolean") {
     throw new BridgeError("protocol", "webSearchEnabled must be a boolean");
   }
@@ -198,6 +201,7 @@ function parseSend(record: Record<string, unknown>, id: string): SendRequest {
     session: session(record),
     ...(model === undefined ? {} : { model }),
     ...(effort === undefined ? {} : { effort }),
+    fastMode: record.fastMode,
     systemPrompt: string(record, "systemPrompt"),
     message: string(record, "message"),
     ...(allowedTranscriptPaths === undefined ? {} : { allowedTranscriptPaths: allowedTranscriptPaths as string[] }),
