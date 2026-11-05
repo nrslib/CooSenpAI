@@ -9,6 +9,7 @@ use objc2_core_foundation::{CFRetained, CFUUID};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGError, CGGetActiveDisplayList, CGMainDisplayID,
 };
+use objc2_foundation::{NSNumber, NSString};
 use std::collections::{HashMap, HashSet};
 use std::ptr::NonNull;
 
@@ -65,13 +66,17 @@ fn bubble_displays() -> Result<Vec<BubbleDisplay>, PortError> {
         PortError::Unavailable("ディスプレイ一覧の取得にはメインスレッドが必要です".to_owned())
     })?;
     let ids = active_display_ids()?;
+    let screen_number_key = NSString::from_str("NSScreenNumber");
     let names = NSScreen::screens(main_thread)
         .iter()
-        .map(|screen| {
-            (
-                screen.CGDirectDisplayID(),
-                screen.localizedName().to_string(),
-            )
+        .filter_map(|screen| {
+            let id = screen
+                .deviceDescription()
+                .objectForKey(&screen_number_key)?
+                .downcast::<NSNumber>()
+                .ok()?
+                .unsignedIntValue();
+            Some((id, screen.localizedName().to_string()))
         })
         .collect::<HashMap<_, _>>();
     let main_id = CGMainDisplayID();
