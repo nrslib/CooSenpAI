@@ -66,7 +66,7 @@ pub(crate) enum ActivationInput {
     },
     PopupShown {
         generation: u64,
-        result: Result<(), String>,
+        result: Result<coosenpai_core::ports::ScreenPoint, String>,
     },
     HidePopup,
     SpeechStarted(u64),
@@ -199,6 +199,10 @@ impl ActivationPolicy {
             effect,
             self.timeouts_enabled,
         ))
+    }
+
+    pub(crate) fn is_preparing_popup(&self, generation: u64) -> bool {
+        self.popup == Some(PopupState::Preparing(generation))
     }
 
     pub(crate) fn transition(&mut self, input: ActivationInput) -> Vec<UiEffect> {
@@ -385,7 +389,7 @@ impl ActivationPolicy {
                                 view: UiView::CapturePopup,
                                 generation,
                             },
-                            result,
+                            result: result.map(|_| ()),
                         },
                     ))),
                 }];

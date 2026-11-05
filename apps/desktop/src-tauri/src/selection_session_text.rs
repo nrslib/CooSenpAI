@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 struct PreparedSelectedTextAttachment {
     pub attachment: Option<BoundedTextAttachment>,
     pub accessibility_permission_required: bool,
-    pub selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
 }
 
 #[derive(Debug)]
@@ -45,7 +44,7 @@ async fn prepare_selected_text_attachment(
         .synthesize_copy(shortcut, cancellation)
         .await
         .map_err(|_| SelectedTextAttachmentError::CopyEvent)?;
-    let (change_count_before_post, selection_bounds) = match copy_outcome {
+    let change_count_before_post = match copy_outcome {
         SelectedTextCopyOutcome::Cancelled => return Ok(None),
         SelectedTextCopyOutcome::ReleaseTimeout => {
             return Err(SelectedTextAttachmentError::ReleaseTimeout)
@@ -55,16 +54,11 @@ async fn prepare_selected_text_attachment(
                 "INFO",
                 "アクセシビリティ未許可のため既存クリップボードを使用しました",
             );
-            return Ok(Some(prepared_text_attachment(
-                previous.as_deref(),
-                true,
-                None,
-            )));
+            return Ok(Some(prepared_text_attachment(previous.as_deref(), true)));
         }
         SelectedTextCopyOutcome::Sent {
             change_count_before_post,
-            selection_bounds,
-        } => (change_count_before_post, selection_bounds),
+        } => change_count_before_post,
     };
     if cancellation.is_cancelled() {
         let _ = wait_for_clipboard_change(reader, change_count_before_post, cancellation).await?;
@@ -83,11 +77,7 @@ async fn prepare_selected_text_attachment(
                 return Ok(None);
             }
             let _ = logger.write("INFO", "合成コピーで選択中の文章を取得しました");
-            Ok(Some(prepared_text_attachment(
-                text.as_deref(),
-                false,
-                selection_bounds,
-            )))
+            Ok(Some(prepared_text_attachment(text.as_deref(), false)))
         }
         ClipboardPollResult::Unchanged => {
             if cancellation.is_cancelled() {
@@ -146,12 +136,10 @@ async fn wait_for_clipboard_change(
 fn prepared_text_attachment(
     text: Option<&str>,
     accessibility_permission_required: bool,
-    selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
 ) -> PreparedSelectedTextAttachment {
     PreparedSelectedTextAttachment {
         attachment: prepare_text_attachment(text),
         accessibility_permission_required,
-        selection_bounds,
     }
 }
 
@@ -172,7 +160,6 @@ pub(super) async fn select(
             value.map(|value| super::SelectionData::Text {
                 attachment: value.attachment,
                 permission_required: value.accessibility_permission_required,
-                selection_bounds: value.selection_bounds,
             })
         })
         .map_err(|error| match error {

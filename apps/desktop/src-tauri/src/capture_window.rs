@@ -8,10 +8,7 @@ pub(super) type MouseCallback = Arc<dyn Fn(crate::platform::MouseClick) + Send +
 #[async_trait::async_trait]
 pub(super) trait PopupBoundary: Clone + Send + Sync + 'static {
     type Monitor: Clone + Send + Sync;
-    async fn prepare(
-        &self,
-        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
-    ) -> Result<(), String>;
+    async fn prepare(&self) -> Result<coosenpai_core::ports::ScreenPoint, String>;
     async fn install_mouse(&self, callback: MouseCallback) -> Result<Self::Monitor, String>;
     async fn remove_mouse(&self, monitor: Self::Monitor) -> Result<(), String>;
     async fn install_escape(&self, generation: u64) -> Result<(), String>;
@@ -46,9 +43,8 @@ impl CapturePopupView {
     pub(crate) async fn prepare_show(
         &self,
         generation: u64,
-        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
-    ) -> Result<(), String> {
-        self.inner.prepare_show(generation, selection_bounds).await
+    ) -> Result<coosenpai_core::ports::ScreenPoint, String> {
+        self.inner.prepare_show(generation).await
     }
 
     pub(super) async fn arm(&self, generation: u64) -> Result<(), String> {
@@ -75,10 +71,10 @@ impl<B: PopupBoundary> PopupView<B> {
     pub(crate) async fn prepare_show(
         &self,
         generation: u64,
-        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
-    ) -> Result<(), String> {
-        self.boundary.prepare(selection_bounds).await?;
-        self.arm(generation).await
+    ) -> Result<coosenpai_core::ports::ScreenPoint, String> {
+        let position = self.boundary.prepare().await?;
+        self.arm(generation).await?;
+        Ok(position)
     }
 
     // 非表示失敗後も同じ表示世代の明示取消を受け取れるよう、解除済みの入口だけを戻す。
@@ -145,17 +141,14 @@ impl DesktopPopupBoundary {
 #[async_trait::async_trait]
 impl PopupBoundary for DesktopPopupBoundary {
     type Monitor = Arc<Mutex<Option<crate::platform::MouseDownMonitor>>>;
-    async fn prepare(
-        &self,
-        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
-    ) -> Result<(), String> {
+    async fn prepare(&self) -> Result<coosenpai_core::ports::ScreenPoint, String> {
         let window = self.window()?;
         window
             .set_focusable(true)
             .map_err(|error| error.to_string())?;
         let positioning_window = window.clone();
-        on_main_thread(&self.state.app, move || {
-            crate::windows::position_capture_popup(&positioning_window, selection_bounds)
+        let position = on_main_thread(&self.state.app, move || {
+            crate::windows::position_capture_popup(&positioning_window)
                 .map_err(|error| error.to_string())
         })
         .await?;
@@ -163,7 +156,8 @@ impl PopupBoundary for DesktopPopupBoundary {
             crate::platform::convert_to_nonactivating_panel(native)
                 .map_err(|error| error.to_string())
         })
-        .await
+        .await?;
+        Ok(position)
     }
     async fn install_mouse(&self, callback: MouseCallback) -> Result<Self::Monitor, String> {
         native_action(&self.window()?, move |native| {

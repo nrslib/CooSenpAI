@@ -109,7 +109,6 @@ trait SelectedTextCopySystem: Send + Sync {
     fn event_access_allowed(&self) -> bool;
     fn key_pressed(&self, key_code: u16) -> bool;
     fn modifier_flags(&self) -> u64;
-    fn selected_text_bounds(&self) -> Option<coosenpai_core::ports::WindowBounds>;
     fn prepare_copy(&self) -> Result<Self::PreparedCopy, PortError>;
     fn clipboard_change_count(&self) -> i64;
     fn post_copy(&self, prepared: Self::PreparedCopy);
@@ -141,10 +140,6 @@ impl SelectedTextCopySystem for MacSelectedTextCopySystem {
 
     fn modifier_flags(&self) -> u64 {
         ObjcCGEventSource::flags_state(ObjcCGEventSourceStateID::CombinedSessionState).0
-    }
-
-    fn selected_text_bounds(&self) -> Option<coosenpai_core::ports::WindowBounds> {
-        crate::selected_text_bounds::read_selected_text_bounds()
     }
 
     fn prepare_copy(&self) -> Result<Self::PreparedCopy, PortError> {
@@ -219,7 +214,6 @@ async fn synthesize_copy_with<S: SelectedTextCopySystem>(
     if clock.now() >= deadline {
         return Ok(SelectedTextCopyOutcome::ReleaseTimeout);
     }
-    let selection_bounds = system.selected_text_bounds();
     let prepared = system.prepare_copy()?;
     let change_count_before_post = system.clipboard_change_count();
     if cancellation.is_cancelled() {
@@ -231,7 +225,6 @@ async fn synthesize_copy_with<S: SelectedTextCopySystem>(
     system.post_copy(prepared);
     Ok(SelectedTextCopyOutcome::Sent {
         change_count_before_post,
-        selection_bounds,
     })
 }
 

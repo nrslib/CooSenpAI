@@ -124,7 +124,7 @@ pub(super) trait ActivationPort: Send + Sync + 'static {
         lease: ActivationLease,
         generation: u64,
         content: Arc<ReadyCapture>,
-    ) -> Result<(), String>;
+    ) -> Result<coosenpai_core::ports::ScreenPoint, String>;
     async fn reacquire_popup_key(
         &self,
         lease: ActivationLease,

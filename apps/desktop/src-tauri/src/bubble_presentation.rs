@@ -54,6 +54,7 @@ impl BubblePresenter {
                         height,
                         position: snapshot.position.clone(),
                         display: self.display.clone(),
+                        reply_anchor: None,
                     })
                     .into_iter()
                     .collect(),
@@ -140,6 +141,7 @@ impl BubblePresenter {
                 snapshot: snapshot.clone(),
                 display,
                 layout,
+                reply_anchor: None,
             },
         ];
         if has_content != had_content {

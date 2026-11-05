@@ -55,8 +55,15 @@ impl CapturePort for DesktopCapturePort {
                     }
                     return Ok(CaptureResult::Selected(None));
                 }
-                CaptureEffect::Send { content, message } => {
-                    return port.send(content, message).await.map(CaptureResult::Sent)
+                CaptureEffect::Send {
+                    generation,
+                    content,
+                    message,
+                } => {
+                    return port
+                        .send(generation, content, message)
+                        .await
+                        .map(CaptureResult::Sent)
                 }
                 CaptureEffect::Voice {
                     action,
@@ -257,7 +264,12 @@ impl DesktopCapturePort {
         Ok(())
     }
 
-    fn send(&self, content: Arc<ReadyCapture>, message: String) -> CaptureFuture<String> {
+    fn send(
+        &self,
+        generation: u64,
+        content: Arc<ReadyCapture>,
+        message: String,
+    ) -> CaptureFuture<String> {
         let state = self.state.clone();
         Box::pin(async move {
             state
@@ -265,6 +277,7 @@ impl DesktopCapturePort {
                 .request(
                     crate::ui_events::UiView::CapturePopup,
                     crate::ui_events::UiEvent::SubmitInput(crate::ui_events::ChatInput::Capture {
+                        generation,
                         content,
                         message,
                     }),
@@ -347,14 +360,12 @@ pub(super) async fn prepare_selected_capture(
         SelectionData::Text {
             attachment,
             permission_required,
-            selection_bounds,
         } => Ok(ReadyCapture {
             conversation,
             id: uuid::Uuid::new_v4().to_string(),
             attachment: ReadyAttachment::Text(attachment),
             origin,
             accessibility_permission_required: permission_required,
-            selection_bounds,
         }),
     }
 }

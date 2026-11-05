@@ -1987,6 +1987,7 @@ impl CapturePresenter {
                 self.send_error = None;
                 self.run(
                     CaptureEffect::Send {
+                        generation,
                         content: content.clone(),
                         message,
                     },

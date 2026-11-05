@@ -91,6 +91,7 @@ pub(crate) enum VoiceAction {
 #[derive(Debug)]
 pub(crate) enum ChatInput {
     Capture {
+        generation: u64,
         content: std::sync::Arc<crate::capture::ReadyCapture>,
         message: String,
     },
@@ -246,6 +247,7 @@ pub(crate) enum UiEvent {
     ExternalInputAccepted {
         id: String,
         kind: CaptureKind,
+        capture_generation: Option<u64>,
         tutorial_run_id: Option<String>,
     },
     ExternalInputSubmitFailed(String),
@@ -469,11 +471,13 @@ pub(crate) enum UiEffect {
         snapshot: std::sync::Arc<crate::bubbles::BubbleSnapshot>,
         display: String,
         layout: bool,
+        reply_anchor: Option<coosenpai_core::ports::ScreenPoint>,
     },
     BubbleResize {
         height: u32,
         position: String,
         display: String,
+        reply_anchor: Option<coosenpai_core::ports::ScreenPoint>,
     },
     BubbleFocused(bool),
     Pointer(bool),

@@ -395,14 +395,20 @@ impl UiPort for NativeUiPort {
                 snapshot,
                 display,
                 layout,
+                reply_anchor,
             } => {
                 let window = state
                     .app
                     .get_webview_window("bubble")
                     .ok_or("吹き出しがありません")?;
                 if layout {
-                    crate::window_bubble::update_layout(&window, &snapshot.position, &display)
-                        .map_err(|error| error.to_string())?;
+                    crate::window_bubble::update_layout(
+                        &window,
+                        &snapshot.position,
+                        &display,
+                        reply_anchor,
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
                 crate::webview_event::emit_to(
                     &state.app,
@@ -416,12 +422,13 @@ impl UiPort for NativeUiPort {
                 height,
                 position,
                 display,
+                reply_anchor,
             } => {
                 let window = state
                     .app
                     .get_webview_window("bubble")
                     .ok_or("吹き出しがありません")?;
-                crate::window_bubble::resize(&window, height, &position, &display)
+                crate::window_bubble::resize(&window, height, &position, &display, reply_anchor)
                     .map_err(|error| error.to_string())?;
             }
             UiEffect::View { view, command } => {
@@ -823,44 +830,51 @@ impl UiPort for NativeUiPort {
             UiTask::SubmitInput(input) => {
                 use crate::state::user_input::UserMessageAttachment;
                 use crate::ui_events::ChatInput;
-                let (kind, source, command, fence, message, attachment) = match input {
-                    ChatInput::Capture { content, message } => {
-                        let (kind, command, attachment) = match &content.attachment {
-                            crate::capture::ReadyAttachment::Image { path, .. } => (
-                                CaptureKind::Image,
-                                DesktopCommand::CaptureSendImage,
-                                UserMessageAttachment::Image(path.clone()),
-                            ),
-                            crate::capture::ReadyAttachment::Text(Some(text)) => (
-                                CaptureKind::Text,
-                                DesktopCommand::CaptureSendText,
-                                UserMessageAttachment::Text(text.text.clone()),
-                            ),
-                            crate::capture::ReadyAttachment::Text(None) => {
-                                return Err("送信できる文章がありません".into())
-                            }
-                        };
-                        (
-                            kind,
-                            CommandSource::IpcCapturePopup,
-                            command,
-                            content.conversation,
-                            message.trim().to_owned(),
-                            attachment,
-                        )
-                    }
-                    ChatInput::Voice { generation, text } => (
-                        CaptureKind::Voice,
-                        CommandSource::SpeechCallback,
-                        DesktopCommand::SpeechConfirm,
-                        crate::command_guard::GenerationStamp {
-                            resource: crate::command_guard::GenerationResource::Speech,
-                            value: generation,
-                        },
-                        text,
-                        UserMessageAttachment::None,
-                    ),
-                };
+                let (kind, source, command, fence, message, attachment, capture_generation) =
+                    match input {
+                        ChatInput::Capture {
+                            generation,
+                            content,
+                            message,
+                        } => {
+                            let (kind, command, attachment) = match &content.attachment {
+                                crate::capture::ReadyAttachment::Image { path, .. } => (
+                                    CaptureKind::Image,
+                                    DesktopCommand::CaptureSendImage,
+                                    UserMessageAttachment::Image(path.clone()),
+                                ),
+                                crate::capture::ReadyAttachment::Text(Some(text)) => (
+                                    CaptureKind::Text,
+                                    DesktopCommand::CaptureSendText,
+                                    UserMessageAttachment::Text(text.text.clone()),
+                                ),
+                                crate::capture::ReadyAttachment::Text(None) => {
+                                    return Err("送信できる文章がありません".into())
+                                }
+                            };
+                            (
+                                kind,
+                                CommandSource::IpcCapturePopup,
+                                command,
+                                content.conversation,
+                                message.trim().to_owned(),
+                                attachment,
+                                Some(generation),
+                            )
+                        }
+                        ChatInput::Voice { generation, text } => (
+                            CaptureKind::Voice,
+                            CommandSource::SpeechCallback,
+                            DesktopCommand::SpeechConfirm,
+                            crate::command_guard::GenerationStamp {
+                                resource: crate::command_guard::GenerationResource::Speech,
+                                value: generation,
+                            },
+                            text,
+                            UserMessageAttachment::None,
+                            None,
+                        ),
+                    };
                 let handler_state = state.clone();
                 let (accepted, tutorial_run_id) = state
                     .dispatch_with_fence(source, command, fence, move |context| async move {
@@ -887,6 +901,7 @@ impl UiPort for NativeUiPort {
                 result.events.push(UiEvent::ExternalInputAccepted {
                     id: accepted.clone(),
                     kind,
+                    capture_generation,
                     tutorial_run_id,
                 });
                 result.value = Some(accepted);

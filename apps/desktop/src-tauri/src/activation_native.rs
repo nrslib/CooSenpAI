@@ -174,10 +174,8 @@ impl ActivationPort for NativeActivationPort {
         lease: ActivationLease,
         generation: u64,
         content: Arc<ReadyCapture>,
-    ) -> Result<(), String> {
-        self.popup
-            .prepare_show(generation, content.selection_bounds)
-            .await?;
+    ) -> Result<coosenpai_core::ports::ScreenPoint, String> {
+        let position = self.popup.prepare_show(generation).await?;
         self.make_popup_key(lease, generation).await?;
         crate::capture::window::emit_capture_popup_ready(&self.state.app, generation, &content.id)
             .map_err(|error| error.to_string())?;
@@ -186,7 +184,7 @@ impl ActivationPort for NativeActivationPort {
             "INFO",
             &format!("capture: popup shown generation={generation} key=true webview-focus=true"),
         );
-        Ok(())
+        Ok(position)
     }
 
     async fn reacquire_popup_key(

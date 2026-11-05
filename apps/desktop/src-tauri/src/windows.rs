@@ -134,7 +134,6 @@ pub fn configure(app: &mut App) -> tauri::Result<()> {
         .get_webview_window("capture-popup")
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
     configure_full_screen_space_behavior(&capture)?;
-    position_capture_popup(&capture, None)?;
     capture.on_window_event({
         let state = app
             .try_state::<Arc<DesktopState>>()
@@ -615,26 +614,26 @@ fn create_tray(app: &App) -> tauri::Result<()> {
 
 pub fn position_capture_popup(
     window: &tauri::WebviewWindow,
-    selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
-) -> tauri::Result<()> {
+) -> tauri::Result<coosenpai_core::ports::ScreenPoint> {
     #[cfg(target_os = "macos")]
-    if let Some(selection_bounds) = selection_bounds {
-        if let Some(position) = capture_popup::position_near_selection(window, selection_bounds)? {
-            return window.set_position(position);
-        }
+    {
+        capture_popup::position_near_cursor(window)
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = selection_bounds;
-    let Some(monitor) = window.primary_monitor()? else {
-        return Ok(());
-    };
-    let scale = window.scale_factor()?;
-    let size = monitor.size().to_logical::<f64>(scale);
-    let position = monitor.position().to_logical::<f64>(scale);
-    window.set_position(LogicalPosition::new(
-        position.x + (size.width - 380.0 - 24.0).max(0.0),
-        position.y + 36.0,
-    ))
+    {
+        let monitor = window
+            .primary_monitor()?
+            .ok_or(tauri::Error::WindowNotFound)?;
+        let scale = window.scale_factor()?;
+        let size = monitor.size().to_logical::<f64>(scale);
+        let monitor_position = monitor.position().to_logical::<f64>(scale);
+        let position = coosenpai_core::ports::ScreenPoint {
+            x: monitor_position.x + (size.width - 380.0 - 24.0).max(0.0),
+            y: monitor_position.y + 36.0,
+        };
+        window.set_position(LogicalPosition::new(position.x, position.y))?;
+        Ok(position)
+    }
 }
 
 pub(crate) fn show_model_popup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {

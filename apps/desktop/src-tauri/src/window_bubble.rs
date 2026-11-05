@@ -2,15 +2,16 @@ use coosenpai_core::ports::ScreenPoint;
 use tauri::{LogicalPosition, LogicalSize, Manager};
 
 pub(crate) fn position(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    update_layout(window, "bottom-right", "main")
+    update_layout(window, "bottom-right", "main", None)
 }
 
 pub(crate) fn update_layout(
     window: &tauri::WebviewWindow,
     position: &str,
     display: &str,
+    reply_anchor: Option<ScreenPoint>,
 ) -> tauri::Result<()> {
-    resize(window, 104, position, display)
+    resize(window, 104, position, display, reply_anchor)
 }
 
 pub(crate) fn resize(
@@ -18,12 +19,14 @@ pub(crate) fn resize(
     height: u32,
     position: &str,
     display: &str,
+    reply_anchor: Option<ScreenPoint>,
 ) -> tauri::Result<()> {
     resize_with_port(
         window,
         height,
         position,
         display,
+        reply_anchor,
         crate::platform::bubble_display(),
     )
 }
@@ -33,6 +36,7 @@ fn resize_with_port<R: tauri::Runtime>(
     height: u32,
     position: &str,
     display: &str,
+    reply_anchor: Option<ScreenPoint>,
     display_port: std::sync::Arc<dyn coosenpai_core::ports::BubbleDisplayPort>,
 ) -> tauri::Result<()> {
     let window = window.clone();
@@ -41,7 +45,14 @@ fn resize_with_port<R: tauri::Runtime>(
     let display = display.to_owned();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let task = move || {
-        let result = resize_on_main(&window, height, &position, &display, display_port);
+        let result = resize_on_main(
+            &window,
+            height,
+            &position,
+            &display,
+            reply_anchor,
+            display_port,
+        );
         let _ = sender.send(result);
     };
     if objc2::MainThreadMarker::new().is_some() {
@@ -61,15 +72,26 @@ fn resize_on_main<R: tauri::Runtime>(
     height: u32,
     position: &str,
     display: &str,
+    reply_anchor: Option<ScreenPoint>,
     display_port: std::sync::Arc<dyn coosenpai_core::ports::BubbleDisplayPort>,
 ) -> tauri::Result<()> {
-    let target = resolve_display_target(display, None, display_port.as_ref());
+    let target = reply_anchor.map_or_else(
+        || resolve_display_target(display, None, display_port.as_ref()),
+        |point| DisplayTarget {
+            point: Some(point),
+            uuid: None,
+            warning: None,
+        },
+    );
     let Some(area) = resolve_display_area(&target, display_port.as_ref())? else {
         return Ok(());
     };
     let width = bubble_width(area.width, position);
     let height = bubble_height(area.height, f64::from(height));
-    let origin = bubble_origin(area, width, height, position);
+    let origin = reply_anchor.map_or_else(
+        || bubble_origin(area, width, height, position),
+        |anchor| reply_origin(area, width, height, anchor),
+    );
     let scale = window.scale_factor()?;
     let current_size = window.outer_size()?.to_logical::<f64>(scale);
     let current_origin = window.outer_position()?.to_logical::<f64>(scale);
@@ -275,5 +297,18 @@ fn bubble_origin(monitor: MonitorArea, width: f64, height: f64, position: &str) 
         } else {
             monitor.y + 16.0_f64.min((monitor.height - height) / 2.0)
         },
+    }
+}
+
+fn reply_origin(monitor: MonitorArea, width: f64, height: f64, anchor: ScreenPoint) -> ScreenPoint {
+    ScreenPoint {
+        x: anchor
+            .x
+            .max(monitor.x)
+            .min(monitor.x + monitor.width - width),
+        y: anchor
+            .y
+            .max(monitor.y)
+            .min(monitor.y + monitor.height - height),
     }
 }

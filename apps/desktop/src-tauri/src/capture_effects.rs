@@ -26,6 +26,7 @@ pub(crate) enum CaptureEffect {
         sent: bool,
     },
     Send {
+        generation: u64,
         content: Arc<ReadyCapture>,
         message: String,
     },

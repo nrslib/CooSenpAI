@@ -108,6 +108,10 @@ pub(crate) struct UiModel {
     external_input_ids: std::collections::HashSet<String>,
     external_submissions_pending: usize,
     pending_notifications: std::collections::VecDeque<UiEvent>,
+    capture_popup_positions: std::collections::HashMap<u64, coosenpai_core::ports::ScreenPoint>,
+    external_input_positions: std::collections::HashMap<String, coosenpai_core::ports::ScreenPoint>,
+    bubble_reply_anchors: std::collections::HashMap<String, coosenpai_core::ports::ScreenPoint>,
+    active_bubble_reply: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -472,7 +476,15 @@ impl<P: UiPort> UiRoot<P> {
                     effect: UiEffect::Fail(error),
                     ..
                 } => return Some((pipeline, Err(error))),
-                Pending::Effect { effect, .. } => {
+                Pending::Effect { mut effect, .. } => {
+                    self.apply_bubble_placement(&mut effect);
+                    let clear_bubble_reply_on_hide = matches!(
+                        &effect,
+                        UiEffect::View {
+                            view: PresenterId::Bubble,
+                            command: ViewCommand::Hide,
+                        }
+                    );
                     let avatar_revision = match &effect {
                         UiEffect::AvatarRender(state) => Some(state.revision),
                         _ => None,
@@ -517,6 +529,10 @@ impl<P: UiPort> UiRoot<P> {
                     };
                     match result {
                         Ok(result) => {
+                            if clear_bubble_reply_on_hide {
+                                self.model.bubble_reply_anchors.clear();
+                                self.model.active_bubble_reply = None;
+                            }
                             for event in result.events.into_iter().rev() {
                                 pipeline
                                     .pending
@@ -664,6 +680,46 @@ impl<P: UiPort> UiRoot<P> {
         }
         let value = pipeline.value.take();
         Some((pipeline, Ok(value)))
+    }
+
+    fn apply_bubble_placement(&mut self, effect: &mut UiEffect) {
+        match effect {
+            UiEffect::BubbleRender {
+                snapshot,
+                layout,
+                reply_anchor,
+                ..
+            } => {
+                let previous_active = self.model.active_bubble_reply.clone();
+                self.model
+                    .bubble_reply_anchors
+                    .retain(|id, _| snapshot.records.iter().any(|record| &record.id == id));
+                if previous_active.as_deref() != snapshot.front_id.as_deref() {
+                    if let Some(previous) = previous_active.as_ref() {
+                        self.model.bubble_reply_anchors.remove(previous);
+                    }
+                    self.model.active_bubble_reply = None;
+                }
+                let next_active = snapshot
+                    .front_id
+                    .as_ref()
+                    .cloned()
+                    .filter(|id| self.model.bubble_reply_anchors.contains_key(id));
+                *reply_anchor = next_active
+                    .as_ref()
+                    .and_then(|id| self.model.bubble_reply_anchors.get(id).copied());
+                self.model.active_bubble_reply = next_active.clone();
+                *layout |= previous_active != next_active;
+            }
+            UiEffect::BubbleResize { reply_anchor, .. } => {
+                *reply_anchor = self
+                    .model
+                    .active_bubble_reply
+                    .as_ref()
+                    .and_then(|id| self.model.bubble_reply_anchors.get(id).copied());
+            }
+            _ => {}
+        }
     }
 
     fn sync_observer_display_timer(&mut self) -> Vec<UiEffect> {
@@ -923,18 +979,26 @@ impl<P: UiPort> UiRoot<P> {
                 let mut effects = Vec::new();
                 if let UiEvent::CaptureCompleted(completed) = &event {
                     if let crate::capture::CaptureEvent::Applied(applied) = completed.as_ref() {
-                        if let crate::capture::effects::CaptureOutput::Presented {
-                            view: UiView::CapturePopup,
-                            generation,
-                        } = &applied.completion
-                        {
-                            if applied.result.is_err() {
+                        match &applied.completion {
+                            crate::capture::effects::CaptureOutput::Presented {
+                                view: UiView::CapturePopup,
+                                generation,
+                            } if applied.result.is_err() => {
+                                self.model.capture_popup_positions.remove(generation);
                                 effects.extend(self.activation.transition(
                                     crate::activation_policy::ActivationInput::PopupFailed(
                                         *generation,
                                     ),
                                 ));
                             }
+                            crate::capture::effects::CaptureOutput::Hidden {
+                                generation,
+                                sent: false,
+                                ..
+                            } => {
+                                self.model.capture_popup_positions.remove(generation);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1083,7 +1147,25 @@ impl<P: UiPort> UiRoot<P> {
                 };
                 self.start_capture(kind, source)
             }
-            UiEvent::Activation(input) => self.activation.transition(input),
+            UiEvent::Activation(input) => {
+                let popup_position = match &input {
+                    crate::activation_policy::ActivationInput::PopupShown {
+                        generation,
+                        result: Ok(position),
+                    } if self.activation.is_preparing_popup(*generation) => {
+                        Some((*generation, *position))
+                    }
+                    _ => None,
+                };
+                let effects = self.activation.transition(input);
+                if let Some((generation, position)) = popup_position {
+                    self.model.capture_popup_positions.clear();
+                    self.model
+                        .capture_popup_positions
+                        .insert(generation, position);
+                }
+                effects
+            }
             UiEvent::OtherApplicationActivated => self
                 .activation
                 .transition(crate::activation_policy::ActivationInput::OtherApplicationActivated),
@@ -1151,8 +1233,16 @@ impl<P: UiPort> UiRoot<P> {
             UiEvent::ExternalInputAccepted {
                 id,
                 kind,
+                capture_generation,
                 tutorial_run_id,
             } => {
+                if let Some(position) = capture_generation
+                    .and_then(|generation| self.model.capture_popup_positions.remove(&generation))
+                {
+                    self.model
+                        .external_input_positions
+                        .insert(id.clone(), position);
+                }
                 self.model.external_input_ids.insert(id);
                 let mut effects = vec![UiEffect::Deliver {
                     child: PresenterId::Tutorial,
@@ -1173,6 +1263,9 @@ impl<P: UiPort> UiRoot<P> {
             }
             UiEvent::ExternalInputDelivered(ids) => {
                 self.model.external_input_ids.retain(|id| !ids.contains(id));
+                self.model
+                    .external_input_positions
+                    .retain(|id, _| !ids.contains(id));
                 Vec::new()
             }
             UiEvent::BubbleTypingTick(epoch) => vec![UiEffect::Deliver {
@@ -1243,11 +1336,20 @@ impl<P: UiPort> UiRoot<P> {
                     .caused_by
                     .as_ref()
                     .is_some_and(|id| external_input_ids.contains(id));
-                if !latest_is_external {
+                let reply_anchor = if latest_is_external {
+                    record
+                        .caused_by
+                        .as_ref()
+                        .and_then(|id| self.model.external_input_positions.remove(id))
+                } else {
                     self.model
                         .external_input_ids
                         .retain(|id| !record.caused_by_ids.contains(id));
-                }
+                    self.model
+                        .external_input_positions
+                        .retain(|id, _| !record.caused_by_ids.contains(id));
+                    None
+                };
                 let external_input_ids = if latest_is_external {
                     external_input_ids
                 } else {
@@ -1265,6 +1367,11 @@ impl<P: UiPort> UiRoot<P> {
                         });
                     Vec::new()
                 } else {
+                    if let Some(anchor) = reply_anchor {
+                        self.model
+                            .bubble_reply_anchors
+                            .insert(record.id.clone(), anchor);
+                    }
                     vec![UiEffect::Deliver {
                         child: PresenterId::Bubble,
                         event: UiEvent::NotificationRequested {

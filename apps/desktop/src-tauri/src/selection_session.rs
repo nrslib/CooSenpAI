@@ -214,7 +214,6 @@ pub(crate) enum SelectionData {
     Text {
         attachment: Option<BoundedTextAttachment>,
         permission_required: bool,
-        selection_bounds: Option<coosenpai_core::ports::WindowBounds>,
     },
 }
 
