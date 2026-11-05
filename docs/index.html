@@ -122,14 +122,6 @@
       margin-inline: auto;
     }
 
-    .eyebrow {
-      display: inline-block;
-      color: var(--color-accent-ink);
-      font-size: 12px;
-      font-weight: 500;
-      letter-spacing: .08em;
-    }
-
     .button {
       display: inline-flex;
       min-height: 50px;
@@ -418,45 +410,20 @@
       border-bottom: 1px solid var(--color-line);
     }
 
-    .value-list {
+    .value-body {
       max-width: 920px;
       margin: 0 auto;
-      padding: 0;
-      list-style: none;
+      color: var(--color-muted);
+      font-size: 16px;
+      line-height: 1.95;
     }
 
-    .value-list li {
-      display: grid;
-      grid-template-columns: 44px minmax(0, 1fr);
-      gap: 18px;
-      padding: 24px 0 25px;
-      border-top: 1px solid var(--color-line);
-    }
+    .value-body p + p { margin-top: 12px; }
 
-    .value-list li:last-child { border-bottom: 1px solid var(--color-line); }
-
-    .value-number {
-      padding-top: 6px;
-      color: var(--color-faint);
-      font-size: 11px;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .value-copy strong {
-      display: block;
-      font-size: clamp(21px, 3vw, 31px);
-      font-weight: 500;
-      line-height: 1.5;
-      letter-spacing: -.035em;
-    }
-
-    .value-copy p { margin-top: 7px; color: var(--color-muted); font-size: 14px; }
-    .features { counter-reset: feature; }
 
     .feature-section {
       padding: 116px 0;
       border-bottom: 1px solid var(--color-line);
-      counter-increment: feature;
     }
 
     .feature-layout {
@@ -499,17 +466,6 @@
       letter-spacing: .06em;
     }
 
-    .feature-number {
-      display: block;
-      margin-bottom: 24px;
-      color: var(--color-accent-ink);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-      letter-spacing: .09em;
-    }
-
-    .feature-number::before { content: "0" counter(feature); }
-
     .feature-copy h3 {
       margin-bottom: 20px;
       font-size: clamp(26px, 3.2vw, 36px);
@@ -537,33 +493,6 @@
     .feature-description + .feature-description { margin-top: 8px; }
     .feature-note { margin-top: 15px; color: var(--color-faint); font-size: 12px; }
 
-    .shortcut {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 7px;
-      margin-top: 26px;
-      color: var(--color-faint);
-      font-size: 11px;
-    }
-
-    .shortcut-label { margin-right: 4px; }
-
-    kbd {
-      min-width: 29px;
-      padding: 3px 8px;
-      border: 1px solid var(--color-line-strong);
-      border-radius: var(--radius-control);
-      background: var(--color-surface-step);
-      color: var(--color-text);
-      font-family: var(--font-system);
-      font-size: 12px;
-      font-weight: 500;
-      line-height: 1.5;
-      text-align: center;
-    }
-
-    .download-copy .eyebrow { margin-bottom: 18px; }
 
     .download-section h2 {
       font-size: clamp(34px, 4.5vw, 52px);
@@ -673,14 +602,6 @@
       line-height: 1.8;
     }
 
-    .bubble-context {
-      display: block;
-      margin-bottom: 4px;
-      color: var(--color-faint);
-      font-size: 11px;
-      letter-spacing: .04em;
-    }
-
     .recording-video { display: block; width: 100%; height: auto; object-fit: contain; }
 
     .feature-figure.figure-compact {
@@ -723,8 +644,6 @@
       font-size: 15px;
       line-height: 1.8;
     }
-
-    .scene-list li span { display: block; margin-top: 2px; color: var(--color-faint); font-size: 12px; }
 
     .requirements-section p + p { margin-top: 6px; }
     .requirements-section a { color: var(--color-text); text-underline-offset: 3px; }
@@ -771,32 +690,6 @@
 
 
 
-    .quiet-section {
-      padding: 86px 0;
-      border-bottom: 1px solid var(--color-line);
-    }
-
-    .quiet-section .feature-copy { max-width: 640px; margin: 0 auto; }
-
-    .quiet-list {
-      margin: 0;
-      padding: 0;
-      list-style: none;
-      color: var(--color-muted);
-      font-size: 15px;
-      line-height: 1.95;
-    }
-
-    .value-closing {
-      max-width: 920px;
-      margin: 34px auto 0;
-      font-size: clamp(18px, 2.2vw, 24px);
-      font-weight: 500;
-      letter-spacing: -.03em;
-    }
-
-    .shortcut-text { color: var(--color-muted); font-size: 12px; }
-
     @media (max-width: 840px) {
       .hero { padding-bottom: 86px; }
       .brand { margin-bottom: 58px; }
@@ -824,16 +717,8 @@
         border-radius: var(--radius-surface);
       }
       .recording-bar { padding-inline: 10px; }
-      .recording-title { display: none; }
       .feature-group-heading,
       .value-section { padding: 60px 0; }
-      .value-list li {
-        grid-template-columns: 28px minmax(0, 1fr);
-        gap: 10px;
-        padding: 19px 0 20px;
-      }
-      .value-copy strong { font-size: 21px; }
-      .value-copy p { font-size: 13px; }
       .feature-section { padding: 70px 0; }
       .feature-layout { gap: 34px; }
       .feature-figure { aspect-ratio: 4 / 3; }
@@ -887,18 +772,17 @@
         <div class="hero-copy">
           <h1>アレコレソレが通じるAI</h1>
           <p class="hero-lead">AI に聞くたびチャットを開いてコピペして何をしたか説明する。<br>「これ見て」で話せる相手がほしくて、メニューバーに住む AI を作りました。</p>
-          <div class="hero-bubbles"><div class="hero-bubble"><svg class="coo-mark" viewBox="0 0 100 100" aria-hidden="true"><g class="mark-body"><g transform="rotate(135 50 50)"><path d="M76 19C67 10 55 7 43 9C23 12 9 29 9 50C9 71 23 88 44 91C58 93 70 89 79 80C86 73 84 62 75 60C71 59 67 61 63 65C58 70 52 73 45 72C34 70 27 61 27 50C27 38 34 30 45 28C53 27 59 29 64 35C68 39 72 41 76 40C85 38 86 27 76 19Z"/></g><ellipse cx="20" cy="81" rx="9.5" ry="6"/><ellipse cx="7.5" cy="92" rx="5" ry="3.2"/></g><g class="mark-eye"><circle cx="44" cy="42" r="6.5"/><circle cx="62" cy="42" r="6.5"/></g></svg><p class="bubble"><span class="bubble-context">画面を見て</span>通りましたね！原因のほうから直したのが効いてます。こういう直し方、好きです。</p></div><div class="hero-bubble"><svg class="coo-mark" viewBox="0 0 100 100" aria-hidden="true"><g class="mark-body"><g transform="rotate(135 50 50)"><path d="M76 19C67 10 55 7 43 9C23 12 9 29 9 50C9 71 23 88 44 91C58 93 70 89 79 80C86 73 84 62 75 60C71 59 67 61 63 65C58 70 52 73 45 72C34 70 27 61 27 50C27 38 34 30 45 28C53 27 59 29 64 35C68 39 72 41 76 40C85 38 86 27 76 19Z"/></g><ellipse cx="20" cy="81" rx="9.5" ry="6"/><ellipse cx="7.5" cy="92" rx="5" ry="3.2"/></g><g class="mark-eye"><circle cx="44" cy="42" r="6.5"/><circle cx="62" cy="42" r="6.5"/></g></svg><p class="bubble"><span class="bubble-context">音声を聞いて</span>あ、さっきの『金曜まで』は定例のほうの話ですよ。僕もちょっと身構えました。</p></div></div>
+          <div class="hero-bubbles"><div class="hero-bubble"><svg class="coo-mark" viewBox="0 0 100 100" aria-hidden="true"><g class="mark-body"><g transform="rotate(135 50 50)"><path d="M76 19C67 10 55 7 43 9C23 12 9 29 9 50C9 71 23 88 44 91C58 93 70 89 79 80C86 73 84 62 75 60C71 59 67 61 63 65C58 70 52 73 45 72C34 70 27 61 27 50C27 38 34 30 45 28C53 27 59 29 64 35C68 39 72 41 76 40C85 38 86 27 76 19Z"/></g><ellipse cx="20" cy="81" rx="9.5" ry="6"/><ellipse cx="7.5" cy="92" rx="5" ry="3.2"/></g><g class="mark-eye"><circle cx="44" cy="42" r="6.5"/><circle cx="62" cy="42" r="6.5"/></g></svg><p class="bubble">通りましたね！原因のほうから直したのが効いてます。こういう直し方、好きです。</p></div><div class="hero-bubble"><svg class="coo-mark" viewBox="0 0 100 100" aria-hidden="true"><g class="mark-body"><g transform="rotate(135 50 50)"><path d="M76 19C67 10 55 7 43 9C23 12 9 29 9 50C9 71 23 88 44 91C58 93 70 89 79 80C86 73 84 62 75 60C71 59 67 61 63 65C58 70 52 73 45 72C34 70 27 61 27 50C27 38 34 30 45 28C53 27 59 29 64 35C68 39 72 41 76 40C85 38 86 27 76 19Z"/></g><ellipse cx="20" cy="81" rx="9.5" ry="6"/><ellipse cx="7.5" cy="92" rx="5" ry="3.2"/></g><g class="mark-eye"><circle cx="44" cy="42" r="6.5"/><circle cx="62" cy="42" r="6.5"/></g></svg><p class="bubble">あ、さっきの『金曜まで』は定例のほうの話ですよ。僕もちょっと身構えました。</p></div></div>
           <div class="hero-actions">
             <a class="button" href="https://github.com/nrslib/CooSenpAI/releases/latest">macOS 版をダウンロード（無料）</a>
             <a class="button button-secondary" href="https://github.com/nrslib/CooSenpAI">GitHub</a>
           </div>
-          <p class="hero-fineprint">無料。macOS 13 以降の Apple Silicon Mac。Claude Code か Codex か OpenCode を使っている人向け。</p>
+          <p class="hero-fineprint">macOS 13 以降の Apple Silicon Mac で使えます。Claude Code、Codex、OpenCode のどれかが必要です。</p>
         </div>
 
         <figure class="recording">
           <figcaption class="recording-bar">
             <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="recording-title">CooSenpAIの実際の画面</span>
           </figcaption>
           <div class="recording-media" data-video="hero-loop.mp4">
             <!-- 動画の差し込み口。作業中のデスクトップの上に Coo の吹き出しが出る 30 秒を hero-loop.mp4 に置いたら、video に src を付け、play-button と video の hidden を外し、picture を消す。ボタンで再生を始める（自動再生しない） -->
@@ -928,10 +812,8 @@
                 </picture>
               </figure>
               <div class="feature-copy">
-                <span class="feature-number" aria-hidden="true"></span>
                 <h3 id="feature-text-title">コピペする</h3>
-                <p class="feature-description">文章を選んで ⌥⇧C。開いた小窓で「翻訳して」「返信を考えて」と頼めます。AI のチャットを開いて貼り付け直す手間が省けます。</p>
-                <p class="shortcut"><span class="shortcut-label">キー</span><kbd>⌥</kbd><kbd>⇧</kbd><kbd>C</kbd></p>
+                <p class="feature-description">文章を選んで ⌥⇧C を押すと小窓が開き、「翻訳して」「返信を考えて」と頼めます。AI のチャットに貼り付け直さなくて済みます。</p>
               </div>
             </div>
           </section>
@@ -945,10 +827,8 @@
                 </picture>
               </figure>
               <div class="feature-copy">
-                <span class="feature-number" aria-hidden="true"></span>
                 <h3 id="feature-capture-title">スクショする</h3>
-                <p class="feature-description">⌥⇧4 を押して見せたいところを囲む。開いた小窓で「これどうすればいい？」と聞けます。エラーや図の説明にスクショをそのまま使えます。</p>
-                <p class="shortcut"><span class="shortcut-label">キー</span><kbd>⌥</kbd><kbd>⇧</kbd><kbd>4</kbd></p>
+                <p class="feature-description">⌥⇧4 を押して見せたいところを囲むと小窓が開き、「これどうすればいい？」と聞けます。エラーや図をそのまま見せられます。</p>
               </div>
             </div>
           </section>
@@ -962,11 +842,9 @@
                 </picture>
               </figure>
               <div class="feature-copy">
-                <span class="feature-number" aria-hidden="true"></span>
                 <h3 id="feature-voice-title">音声入力する</h3>
-                <p class="feature-description">⌥Space を押して話し、話し終えたらもう一度押して止める。文字を打つ代わりに声で質問できます。</p>
+                <p class="feature-description">⌥Space を押してから話し、話し終えたらもう一度押します。文字を打たずに声で質問できます。</p>
                 <p class="feature-note">キーを押している間だけ話す方法も選べます。</p>
-                <p class="shortcut"><span class="shortcut-label">キー</span><kbd>⌥</kbd><kbd>Space</kbd></p>
               </div>
             </div>
           </section>
@@ -980,10 +858,8 @@
                 </picture>
               </figure>
               <div class="feature-copy">
-                <span class="feature-number" aria-hidden="true"></span>
                 <h3 id="feature-chat-title">チャットする</h3>
-                <p class="feature-description">じっくり相談したいときはチャットを開いて文字で質問。さっきのスクショやコピペした文章について続けて話せます。</p>
-                <p class="shortcut"><span class="shortcut-label">起動</span><span class="shortcut-text">吹き出しをクリック、または <kbd>⌥</kbd><kbd>⇧</kbd><kbd>V</kbd></span></p>
+                <p class="feature-description">じっくり相談したいときは、吹き出しをクリックするか ⌥⇧V でチャットを開きます。さっきのスクショやコピペした文章について続けて話せます。</p>
               </div>
             </div>
           </section>
@@ -993,7 +869,7 @@
       <section class="feature-group" aria-labelledby="watch-title">
         <div class="feature-group-heading">
           <div class="container">
-            <h2 class="value-heading" id="watch-title">見守ってもらう</h2>
+            <h2 class="value-heading" id="watch-title">見てもらう、聞いてもらう</h2>
           </div>
         </div>
 
@@ -1008,10 +884,8 @@
                 </picture>
               </figure>
               <div class="feature-copy">
-                <span class="feature-number" aria-hidden="true"></span>
                 <h3 id="feature-notice-title">画面を見る</h3>
-                <p class="feature-description">Vision AI を ON にすると選んだアプリの画面を AI が見ます。同じエラーで止まっているときやテストが通ったときなど、気づいたことがあれば吹き出しで声をかけます。</p>
-                <p class="shortcut"><span class="shortcut-label">起動</span><span class="shortcut-text">メニューバーから Vision AI を ON</span></p>
+                <p class="feature-description">メニューバーで Vision AI を ON にすると、選んだアプリの画面を AI が見ます。同じエラーで止まっているときやテストが通ったときに、吹き出しで声をかけてきます。</p>
               </div>
             </div>
           </section>
@@ -1025,24 +899,8 @@
                 </picture>
               </figure>
               <div class="feature-copy">
-                <span class="feature-number" aria-hidden="true"></span>
                 <h3 id="feature-listen-title">音を聞く</h3>
-                <p class="feature-description">Hearing AI を ON にするとスピーカーから流れる音声を文字にします。会議や動画で聞き逃したところも「さっきの締切、いつだっけ？」と聞き返せます。</p>
-                <p class="feature-note">文字起こしは Mac の中で行い、確定したテキストだけを AI に送ります。Hearing AI はいつでも OFF にできます。</p>
-                <p class="shortcut"><span class="shortcut-label">起動</span><span class="shortcut-text">メニューバーから Hearing AI を ON</span></p>
-              </div>
-            </div>
-          </section>
-          <section class="quiet-section" aria-labelledby="quiet-title">
-            <div class="container">
-              <div class="feature-copy">
-                <h3 id="quiet-title">見せるアプリも聞かせる時間も選べます</h3>
-                <ul class="quiet-list">
-                  <li>Vision AI を ON にすると画面を見てもらえます。</li>
-                  <li>画面を見てもらうアプリは設定で選べます。</li>
-                  <li>音を聞いてもらうのは Hearing AI が ON の間だけです。</li>
-                  <li>Vision AI と Hearing AI はそれぞれいつでも OFF にできます。</li>
-                </ul>
+                <p class="feature-description">メニューバーで Hearing AI を ON にすると、スピーカーから流れる音声を文字にします。会議や動画で聞き逃したところも「さっきの締切、いつだっけ？」と聞き返せます。</p>
               </div>
             </div>
           </section>
@@ -1052,30 +910,10 @@
       <section class="value-section" aria-labelledby="value-title">
         <div class="container">
           <h2 class="value-heading" id="value-title">質問より説明のほうが長くなっていませんか</h2>
-          <ol class="value-list">
-            <li>
-              <span class="value-number">01</span>
-              <div class="value-copy">
-                <strong>コピペからそのまま質問</strong>
-                <p>エラー文を選んで ⌥⇧C。「どう直せばいい？」と小窓に書けば質問できます。</p>
-              </div>
-            </li>
-            <li>
-              <span class="value-number">02</span>
-              <div class="value-copy">
-                <strong>作業中の画面で返事が読める</strong>
-                <p>ブラウザの AI チャットと行き来せずにいま開いている画面の上で答えを読めます。</p>
-              </div>
-            </li>
-            <li>
-              <span class="value-number">03</span>
-              <div class="value-copy">
-                <strong>さっきの作業から話を続けられる</strong>
-                <p>見せた画面や聞いてもらった会話について「さっきのやつ」と話を続けられます。何を試したかを毎回説明する手間が減ります。</p>
-              </div>
-            </li>
-          </ol>
-          <p class="value-closing">同じ画面とそれまでのやりとりを知っている。そんな相手と一緒に作業するための AI です。</p>
+          <div class="value-body">
+            <p>エラー文を選んで ⌥⇧C を押せば、「どう直せばいい？」と書くだけで質問できます。答えはいま開いている画面の上に出るので、ブラウザの AI チャットと行き来しなくて済みます。</p>
+            <p>見せた画面や聞いてもらった会話について、「さっきのやつ」で話を続けられます。何を試したかを毎回説明する必要はありません。</p>
+          </div>
         </div>
       </section>
 
@@ -1083,15 +921,15 @@
         <div class="container">
           <h2 class="value-heading" id="scene-title">こんなときに</h2>
           <ul class="scene-list">
-            <li>エラー文をコピペして「どう直せばいい？」<span>⌥⇧C で小窓を開く</span></li>
-            <li>会議で聞き逃した一言を「さっき何て言ってた？」<span>Hearing AI を ON にして聞いてもらう</span></li>
-            <li>書きかけの文章をコピペして「これで伝わる？」<span>書いている途中でも相談できる</span></li>
-            <li>英語の文章をコピペして「日本語にして」<span>読んでいるページからそのまま質問</span></li>
-            <li>同じエラーで困っていたら AI からヒントが来ることも。<span>Vision AI が作業中の画面を見る</span></li>
-            <li>ビルドが通ったら一緒に喜んでもらう。<span>画面を見て気づいたことを話してくれる</span></li>
-            <li>動画の図をスクショして「これどういう意味？」<span>⌥⇧4 で気になるところを囲む</span></li>
-            <li>動画の説明を聞いてもらって「要点をまとめて」<span>Hearing AI にスピーカーの音を聞いてもらう</span></li>
-            <li>長い質問は文字を打つ代わりに声で。<span>⌥Space で音声入力する</span></li>
+            <li>エラー文をコピペして「どう直せばいい？」</li>
+            <li>会議で聞き逃した一言を「さっき何て言ってた？」</li>
+            <li>書きかけの文章をコピペして「これで伝わる？」</li>
+            <li>英語の文章をコピペして「日本語にして」</li>
+            <li>同じエラーで止まっていると、AI からヒントが来る</li>
+            <li>ビルドが通ると、一緒に喜んでくれる</li>
+            <li>動画の図をスクショして「これどういう意味？」</li>
+            <li>動画の説明を聞いてもらって「要点をまとめて」</li>
+            <li>長い質問は、文字を打たずに声で話す</li>
           </ul>
         </div>
       </section>
@@ -1101,7 +939,6 @@
       <div class="container">
         <div class="download-panel">
           <div class="download-copy">
-            <p class="eyebrow">ダウンロード</p>
             <h2 id="download-title">今すぐ使ってみよう</h2>
             <p class="download-description">インストールしたら名前と性格を選び、使っている AI につなぎます。チュートリアルで操作を試したら、まずは気になる文章をコピペして「これ教えて」と聞いてみてください。</p>
             <a class="button" href="https://github.com/nrslib/CooSenpAI/releases/latest">macOS 版をダウンロード（無料）</a>
